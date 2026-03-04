@@ -1,0 +1,74 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/agentos-types",
+    "crates/agentos-audit",
+    "crates/agentos-vault",
+    "crates/agentos-capability",
+    "crates/agentos-bus",
+    "crates/agentos-kernel",
+    "crates/agentos-llm",
+    "crates/agentos-tools",
+    "crates/agentos-sandbox",
+    "crates/agentos-wasm",
+    "crates/agentos-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/agentos/agentos"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Crypto
+hmac = "0.12"
+sha2 = "0.10"
+aes-gcm = "0.10"
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+argon2 = "0.5"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# HTTP client (for Ollama adapter)
+reqwest = { version = "0.12", features = ["json"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# UUIDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+cron = "0.12"
+
+# Misc
+bytes = "1"
+futures = "0.3"
+async-trait = "0.1"
+rpassword = "7"
+libc = "0.2"
+
+# WASM runtime
+wasmtime = { version = "38", features = ["async", "cranelift"] }
+wasmtime-wasi = "38"

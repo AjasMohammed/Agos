@@ -1,0 +1,21 @@
+[manifest]
+name        = "shell-exec"
+version     = "1.0.0"
+description = "Execute shell commands with path-restricted sandboxing (requires explicit permission)"
+author      = "agentos-core"
+
+[capabilities_required]
+permissions = ["process.exec:x", "fs.user_data:rw"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "ShellExecIntent"
+output = "ShellExecResult"
+
+[sandbox]
+network       = false
+fs_write      = true
+max_memory_mb = 256
+max_cpu_ms    = 30000

@@ -1,0 +1,23 @@
+[manifest]
+name        = "file-writer"
+version     = "1.0.0"
+description = "Writes content to files in the data directory"
+author      = "agentos-core"
+
+[capabilities_required]
+permissions = ["fs.user_data:w"]
+
+[capabilities_provided]
+outputs = ["status"]
+
+[intent_schema]
+input  = "FileWriteIntent"
+output = "WriteResult"
+
+[sandbox]
+network       = false
+fs_write      = true
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 5000
+syscalls      = []

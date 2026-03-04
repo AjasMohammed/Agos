@@ -1,0 +1,23 @@
+[manifest]
+name        = "data-parser"
+version     = "1.0.0"
+description = "Parse structured data formats (JSON, CSV, TOML, Markdown) and return structured content"
+author      = "agentos-core"
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "DataParseIntent"
+output = "ParsedData"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 128
+max_cpu_ms    = 10000
+syscalls      = []

@@ -1,0 +1,16 @@
+[package]
+name = "agentos-audit"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agentos-types = { path = "../agentos-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+rusqlite = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"

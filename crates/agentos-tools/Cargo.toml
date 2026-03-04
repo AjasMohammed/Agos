@@ -1,0 +1,22 @@
+[package]
+name = "agentos-tools"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agentos-types = { path = "../agentos-types" }
+agentos-bus = { path = "../agentos-bus" }
+agentos-capability = { path = "../agentos-capability" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+toml = { workspace = true }
+chrono = { workspace = true }
+csv = "1.3.1"
+rusqlite = { workspace = true, features = ["bundled", "vtab"] }
+
+[dev-dependencies]
+tempfile = "3.26.0"

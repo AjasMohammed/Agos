@@ -1,0 +1,23 @@
+[package]
+name = "agentos-vault"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agentos-types = { path = "../agentos-types" }
+agentos-audit = { path = "../agentos-audit" }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+aes-gcm = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+argon2 = { workspace = true }
+thiserror = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"

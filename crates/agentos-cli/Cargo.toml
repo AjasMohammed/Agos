@@ -1,0 +1,30 @@
+[package]
+name = "agentos-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "agentctl"
+path = "src/main.rs"
+
+[dependencies]
+agentos-types = { path = "../agentos-types" }
+agentos-kernel = { path = "../agentos-kernel" }
+agentos-bus = { path = "../agentos-bus" }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+rpassword = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+agentos-audit = { path = "../agentos-audit" }
+agentos-capability = { path = "../agentos-capability" }
+toml = { workspace = true }
+

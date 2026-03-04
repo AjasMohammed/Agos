@@ -1,0 +1,23 @@
+[manifest]
+name        = "memory-write"
+version     = "1.0.0"
+description = "Write new knowledge entries to semantic memory for long-term recall"
+author      = "agentos-core"
+
+[capabilities_required]
+permissions = ["memory.semantic:w"]
+
+[capabilities_provided]
+outputs = ["status"]
+
+[intent_schema]
+input  = "MemoryWriteIntent"
+output = "WriteResult"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 5000
+syscalls      = []

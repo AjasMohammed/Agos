@@ -1,0 +1,21 @@
+[package]
+name = "agentos-sandbox"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agentos-types = { path = "../agentos-types" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+libc = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.4"
+nix = { version = "0.29", features = ["process", "signal"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

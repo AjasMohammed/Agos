@@ -1,0 +1,23 @@
+[manifest]
+name        = "memory-search"
+version     = "1.0.0"
+description = "Search semantic memory for relevant past knowledge by keyword or natural language query"
+author      = "agentos-core"
+
+[capabilities_required]
+permissions = ["memory.semantic:r"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "MemorySearchIntent"
+output = "MemorySearchResult"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 128
+max_cpu_ms    = 10000
+syscalls      = []
