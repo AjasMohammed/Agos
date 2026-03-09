@@ -1,12 +1,12 @@
 mod common;
 
-use std::sync::Arc;
-use std::time::Duration;
-use agentos_kernel::Kernel;
 use agentos_bus::client::BusClient;
 use agentos_bus::message::{KernelCommand, KernelResponse};
+use agentos_kernel::Kernel;
 use agentos_types::secret::SecretScope;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::test]
 async fn test_secrets_full_lifecycle() {
@@ -45,18 +45,24 @@ async fn test_secrets_full_lifecycle() {
     };
 
     // 1. Set a secret
-    let response = client.send_command(KernelCommand::SetSecret {
-        name: "TEST_KEY".into(),
-        value: "super-secret-123".into(),
-        scope: SecretScope::Global,
-    }).await.unwrap();
+    let response = client
+        .send_command(KernelCommand::SetSecret {
+            name: "TEST_KEY".into(),
+            value: "super-secret-123".into(),
+            scope: SecretScope::Global,
+        })
+        .await
+        .unwrap();
     match response {
         KernelResponse::Success { .. } => {}
         resp => panic!("Expected Success, got {:?}", resp),
     }
 
     // 2. List secrets — value should NOT appear
-    let response = client.send_command(KernelCommand::ListSecrets).await.unwrap();
+    let response = client
+        .send_command(KernelCommand::ListSecrets)
+        .await
+        .unwrap();
     match response {
         KernelResponse::SecretList(secrets) => {
             assert_eq!(secrets.len(), 1);
@@ -67,23 +73,32 @@ async fn test_secrets_full_lifecycle() {
     }
 
     // 3. Rotate
-    let response = client.send_command(KernelCommand::RotateSecret {
-        name: "TEST_KEY".into(),
-        new_value: "new-secret-456".into(),
-    }).await.unwrap();
+    let response = client
+        .send_command(KernelCommand::RotateSecret {
+            name: "TEST_KEY".into(),
+            new_value: "new-secret-456".into(),
+        })
+        .await
+        .unwrap();
     match response {
         KernelResponse::Success { .. } => {}
         resp => panic!("Expected Success on RotateSecret, got {:?}", resp),
     }
 
     // 4. Revoke
-    let response = client.send_command(KernelCommand::RevokeSecret {
-        name: "TEST_KEY".into(),
-    }).await.unwrap();
+    let response = client
+        .send_command(KernelCommand::RevokeSecret {
+            name: "TEST_KEY".into(),
+        })
+        .await
+        .unwrap();
     assert!(matches!(response, KernelResponse::Success { .. }));
 
     // 5. List should be empty
-    let response = client.send_command(KernelCommand::ListSecrets).await.unwrap();
+    let response = client
+        .send_command(KernelCommand::ListSecrets)
+        .await
+        .unwrap();
     match response {
         KernelResponse::SecretList(secrets) => assert_eq!(secrets.len(), 0),
         _ => panic!("Wrong response type"),

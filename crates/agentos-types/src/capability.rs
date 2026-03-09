@@ -47,7 +47,9 @@ pub struct PermissionEntry {
 
 impl PermissionSet {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     pub fn entries(&self) -> &[PermissionEntry] {
@@ -57,15 +59,23 @@ impl PermissionSet {
     /// Check if a specific operation on a resource is allowed.
     pub fn check(&self, resource: &str, operation: PermissionOp) -> bool {
         self.entries.iter().any(|e| {
-            e.resource == resource && match operation {
-                PermissionOp::Read => e.read,
-                PermissionOp::Write => e.write,
-                PermissionOp::Execute => e.execute,
-            }
+            e.resource == resource
+                && match operation {
+                    PermissionOp::Read => e.read,
+                    PermissionOp::Write => e.write,
+                    PermissionOp::Execute => e.execute,
+                }
         })
     }
 
-    pub fn grant(&mut self, resource: String, read: bool, write: bool, execute: bool, expires_at: Option<chrono::DateTime<chrono::Utc>>) {
+    pub fn grant(
+        &mut self,
+        resource: String,
+        read: bool,
+        write: bool,
+        execute: bool,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
         // Upsert: if resource exists, update bits; otherwise add new entry
         if let Some(entry) = self.entries.iter_mut().find(|e| e.resource == resource) {
             entry.read |= read;
@@ -77,15 +87,27 @@ impl PermissionSet {
                 _ => None,
             };
         } else {
-            self.entries.push(PermissionEntry { resource, read, write, execute, expires_at });
+            self.entries.push(PermissionEntry {
+                resource,
+                read,
+                write,
+                execute,
+                expires_at,
+            });
         }
     }
 
     pub fn revoke(&mut self, resource: &str, read: bool, write: bool, execute: bool) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.resource == resource) {
-            if read { entry.read = false; }
-            if write { entry.write = false; }
-            if execute { entry.execute = false; }
+            if read {
+                entry.read = false;
+            }
+            if write {
+                entry.write = false;
+            }
+            if execute {
+                entry.execute = false;
+            }
         }
     }
 

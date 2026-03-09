@@ -29,6 +29,9 @@ socket_path = "/tmp/agentos/agentos.sock"     # Unix domain socket for IPC
 [ollama]
 host = "http://localhost:11434"               # Ollama API endpoint
 default_model = "llama3.2"                    # Default model for Ollama agents
+
+[memory]
+model_cache_dir = "models"                    # Embedding model cache dir (relative to tools.data_dir unless absolute)
 ```
 
 ---
@@ -76,6 +79,12 @@ default_model = "llama3.2"                    # Default model for Ollama agents
 | `host`          | string | `http://localhost:11434` | Ollama API endpoint URL              |
 | `default_model` | string | `llama3.2`               | Default model name for Ollama agents |
 
+### `[memory]`
+
+| Key               | Type   | Default  | Description                                                                                                         |
+| ----------------- | ------ | -------- | ------------------------------------------------------------------------------------------------------------------- |
+| `model_cache_dir` | string | `models` | Directory used by embedding models (fastembed). Relative paths resolve under `tools.data_dir`; absolute paths are used as-is. |
+
 ---
 
 ## Custom Configuration
@@ -113,6 +122,9 @@ socket_path = "/var/run/agentos/agentos.sock"
 [ollama]
 host = "http://localhost:11434"
 default_model = "llama3.2"
+
+[memory]
+model_cache_dir = "/opt/agentos/data/models"
 ```
 
 ---

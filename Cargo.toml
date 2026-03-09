@@ -12,6 +12,9 @@ members = [
     "crates/agentos-sandbox",
     "crates/agentos-wasm",
     "crates/agentos-cli",
+    "crates/agentos-hal",
+    "crates/agentos-memory",
+    "crates/agentos-pipeline",
 ]
 
 [workspace.package]
@@ -29,6 +32,7 @@ tempfile = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+serde_yaml = "0.9"
 
 # Logging / tracing
 tracing = "0.1"
@@ -62,6 +66,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 cron = "0.12"
 
+# Regex
+regex = "1"
+
 # Misc
 bytes = "1"
 futures = "0.3"
@@ -72,3 +79,6 @@ libc = "0.2"
 # WASM runtime
 wasmtime = { version = "38", features = ["async", "cranelift"] }
 wasmtime-wasi = "38"
+
+# System info
+sysinfo = "0.33"

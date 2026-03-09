@@ -1,5 +1,5 @@
-use crate::ids::RoleID;
 use crate::capability::PermissionSet;
+use crate::ids::RoleID;
 use serde::{Deserialize, Serialize};
 
 /// A reusable profile that groups permissions.

@@ -1,14 +1,14 @@
+use agentos_bus::client::BusClient;
+use agentos_kernel::Kernel;
 use clap::{Parser, Subcommand};
 use std::path::Path;
 use std::sync::Arc;
-use agentos_bus::client::BusClient;
-use agentos_kernel::Kernel;
 
 mod commands;
 use commands::{
-    agent::AgentCommands, task::TaskCommands, tool::ToolCommands,
-    secret::SecretCommands, perm::PermCommands, audit::AuditCommands,
-    role::RoleCommands, schedule::ScheduleCommands, bg::BgCommands,
+    agent::AgentCommands, audit::AuditCommands, bg::BgCommands, perm::PermCommands,
+    pipeline::PipelineCommands, role::RoleCommands, schedule::ScheduleCommands,
+    secret::SecretCommands, task::TaskCommands, tool::ToolCommands,
 };
 
 #[derive(Parser)]
@@ -89,6 +89,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: BgCommands,
     },
+
+    /// Manage multi-agent pipelines
+    Pipeline {
+        #[command(subcommand)]
+        command: PipelineCommands,
+    },
 }
 
 #[tokio::main]
@@ -138,7 +144,10 @@ async fn cmd_start(config_str: &str, vault_passphrase: Option<String>) -> anyhow
 
     println!("✅ Kernel started");
     println!("   Bus: {}", kernel.config.bus.socket_path);
-    println!("   Tools: {} loaded", kernel.tool_registry.read().await.list_all().len());
+    println!(
+        "   Tools: {} loaded",
+        kernel.tool_registry.read().await.list_all().len()
+    );
     println!();
     println!("AgentOS is running. Use another terminal to run agentctl commands.");
     println!("Press Ctrl+C to shutdown.");
@@ -161,14 +170,28 @@ mod tests {
     #[test]
     fn test_cli_parses_agent_connect() {
         let cli = Cli::try_parse_from([
-            "agentctl", "agent", "connect",
-            "--provider", "openai",
-            "--model", "gpt-4",
-            "--name", "analyst-1",
-        ]).unwrap();
+            "agentctl",
+            "agent",
+            "connect",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-4",
+            "--name",
+            "analyst-1",
+        ])
+        .unwrap();
 
         match cli.command {
-            Commands::Agent { command: AgentCommands::Connect { provider, model, name, base_url: _ } } => {
+            Commands::Agent {
+                command:
+                    AgentCommands::Connect {
+                        provider,
+                        model,
+                        name,
+                        base_url: _,
+                    },
+            } => {
                 assert_eq!(provider, "openai");
                 assert_eq!(model, "gpt-4");
                 assert_eq!(name, "analyst-1");
@@ -180,13 +203,19 @@ mod tests {
     #[test]
     fn test_cli_parses_task_run() {
         let cli = Cli::try_parse_from([
-            "agentctl", "task", "run",
-            "--agent", "analyst",
+            "agentctl",
+            "task",
+            "run",
+            "--agent",
+            "analyst",
             "Summarize the report",
-        ]).unwrap();
+        ])
+        .unwrap();
 
         match cli.command {
-            Commands::Task { command: TaskCommands::Run { agent, prompt } } => {
+            Commands::Task {
+                command: TaskCommands::Run { agent, prompt },
+            } => {
                 assert_eq!(agent, Some("analyst".to_string()));
                 assert_eq!(prompt, "Summarize the report");
             }
@@ -197,12 +226,19 @@ mod tests {
     #[test]
     fn test_cli_parses_secret_set_with_scope() {
         let cli = Cli::try_parse_from([
-            "agentctl", "secret", "set", "SLACK_TOKEN",
-            "--scope", "agent:notifier",
-        ]).unwrap();
+            "agentctl",
+            "secret",
+            "set",
+            "SLACK_TOKEN",
+            "--scope",
+            "agent:notifier",
+        ])
+        .unwrap();
 
         match cli.command {
-            Commands::Secret { command: SecretCommands::Set { name, scope } } => {
+            Commands::Secret {
+                command: SecretCommands::Set { name, scope },
+            } => {
                 assert_eq!(name, "SLACK_TOKEN");
                 assert_eq!(scope, "agent:notifier");
             }
@@ -212,12 +248,18 @@ mod tests {
 
     #[test]
     fn test_cli_parses_perm_grant() {
-        let cli = Cli::try_parse_from([
-            "agentctl", "perm", "grant", "analyst", "fs.user_data:rw",
-        ]).unwrap();
+        let cli = Cli::try_parse_from(["agentctl", "perm", "grant", "analyst", "fs.user_data:rw"])
+            .unwrap();
 
         match cli.command {
-            Commands::Perm { command: PermCommands::Grant { agent, permission, expires: _ } } => {
+            Commands::Perm {
+                command:
+                    PermCommands::Grant {
+                        agent,
+                        permission,
+                        expires: _,
+                    },
+            } => {
                 assert_eq!(agent, "analyst");
                 assert_eq!(permission, "fs.user_data:rw");
             }
@@ -228,16 +270,33 @@ mod tests {
     #[test]
     fn test_cli_parses_schedule_create() {
         let cli = Cli::try_parse_from([
-            "agentctl", "schedule", "create",
-            "--name", "daily-report",
-            "--cron", "0 0 * * * *",
-            "--agent", "analyst",
-            "--task", "Summarize logs",
-            "--permissions", "fs.logs:r"
-        ]).unwrap();
+            "agentctl",
+            "schedule",
+            "create",
+            "--name",
+            "daily-report",
+            "--cron",
+            "0 0 * * * *",
+            "--agent",
+            "analyst",
+            "--task",
+            "Summarize logs",
+            "--permissions",
+            "fs.logs:r",
+        ])
+        .unwrap();
 
         match cli.command {
-            Commands::Schedule { command: ScheduleCommands::Create { name, cron, agent, task, permissions } } => {
+            Commands::Schedule {
+                command:
+                    ScheduleCommands::Create {
+                        name,
+                        cron,
+                        agent,
+                        task,
+                        permissions,
+                    },
+            } => {
                 assert_eq!(name, "daily-report");
                 assert_eq!(cron, "0 0 * * * *");
                 assert_eq!(agent, "analyst");
@@ -250,15 +309,29 @@ mod tests {
     #[test]
     fn test_cli_parses_bg_run() {
         let cli = Cli::try_parse_from([
-            "agentctl", "bg", "run",
-            "--name", "process-data",
-            "--agent", "worker",
-            "--task", "process all files",
-            "--detach"
-        ]).unwrap();
+            "agentctl",
+            "bg",
+            "run",
+            "--name",
+            "process-data",
+            "--agent",
+            "worker",
+            "--task",
+            "process all files",
+            "--detach",
+        ])
+        .unwrap();
 
         match cli.command {
-            Commands::Bg { command: BgCommands::Run { name, agent, task, detach } } => {
+            Commands::Bg {
+                command:
+                    BgCommands::Run {
+                        name,
+                        agent,
+                        task,
+                        detach,
+                    },
+            } => {
                 assert_eq!(name, "process-data");
                 assert_eq!(agent, "worker");
                 assert!(detach);

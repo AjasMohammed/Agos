@@ -1,14 +1,24 @@
 use crate::agent_registry::AgentRegistry;
+use crate::background_pool::BackgroundPool;
 use crate::config::{load_config, KernelConfig};
 use crate::context::ContextManager;
+use crate::schedule_manager::ScheduleManager;
 use crate::scheduler::TaskScheduler;
 use crate::tool_call::parse_tool_call;
 use crate::tool_registry::ToolRegistry;
 use agentos_audit::AuditLog;
 use agentos_bus::*;
-use agentos_capability::CapabilityEngine;
 use agentos_capability::profiles::ProfileManager;
+use agentos_capability::CapabilityEngine;
+use agentos_hal::{
+    drivers::{
+        log_reader::LogReaderDriver, network::NetworkDriver, process::ProcessDriver,
+        system::SystemDriver,
+    },
+    HardwareAbstractionLayer,
+};
 use agentos_llm::{AnthropicCore, CustomCore, GeminiCore, LLMCore, OllamaCore, OpenAICore};
+use agentos_pipeline::{PipelineEngine, PipelineStore};
 use agentos_sandbox::{SandboxConfig, SandboxExecutor};
 use agentos_tools::runner::ToolRunner;
 use agentos_tools::traits::ToolExecutionContext;
@@ -20,8 +30,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use crate::schedule_manager::ScheduleManager;
-use crate::background_pool::BackgroundPool;
 use tokio::sync::RwLock;
 
 pub struct Kernel {
@@ -40,19 +48,18 @@ pub struct Kernel {
     pub active_llms: Arc<RwLock<HashMap<AgentID, Arc<dyn LLMCore>>>>,
     pub message_bus: Arc<crate::agent_message_bus::AgentMessageBus>,
     pub profile_manager: Arc<ProfileManager>,
-    pub episodic_memory: Arc<crate::episodic_memory::EpisodicMemory>,
+    pub episodic_memory: Arc<agentos_memory::EpisodicStore>,
     pub schedule_manager: Arc<ScheduleManager>,
     pub background_pool: Arc<BackgroundPool>,
+    pub hal: Arc<HardwareAbstractionLayer>,
+    pub pipeline_engine: Arc<PipelineEngine>,
     data_dir: PathBuf,
     started_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl Kernel {
     /// Boot the kernel: load config, open subsystems, start bus, begin accepting.
-    pub async fn boot(
-        config_path: &Path,
-        vault_passphrase: &str,
-    ) -> Result<Self, anyhow::Error> {
+    pub async fn boot(config_path: &Path, vault_passphrase: &str) -> Result<Self, anyhow::Error> {
         // 1. Load config
         let config = load_config(config_path)?;
 
@@ -78,7 +85,11 @@ impl Kernel {
         // 3. Open or initialize secrets vault
         let vault_path = Path::new(&config.secrets.vault_path);
         let vault = if SecretsVault::is_initialized(vault_path) {
-            Arc::new(SecretsVault::open(vault_path, vault_passphrase, audit.clone())?)
+            Arc::new(SecretsVault::open(
+                vault_path,
+                vault_passphrase,
+                audit.clone(),
+            )?)
         } else {
             Arc::new(SecretsVault::initialize(
                 vault_path,
@@ -90,6 +101,23 @@ impl Kernel {
         // 4. Initialize capability engine
         let capability_engine = Arc::new(CapabilityEngine::new());
 
+        // 4.5 Initialize HardwareAbstractionLayer
+        let mut hal = HardwareAbstractionLayer::new();
+        hal.register(Box::new(SystemDriver::new()));
+        hal.register(Box::new(ProcessDriver::new()));
+        hal.register(Box::new(NetworkDriver::new()));
+
+        // Register log reader with app logs only - audit log is not exposed to agents
+        let app_logs = HashMap::new();
+        let mut system_logs = HashMap::new();
+        system_logs.insert(
+            "syslog".to_string(),
+            Path::new("/var/log/syslog").to_path_buf(),
+        );
+        hal.register(Box::new(LogReaderDriver::new(app_logs, system_logs)));
+
+        let hal = Arc::new(hal);
+
         // 5. Load tools
         let tool_registry = Arc::new(RwLock::new(ToolRegistry::load_from_dirs(
             Path::new(&config.tools.core_tools_dir),
@@ -99,7 +127,16 @@ impl Kernel {
         // 6. Initialize other subsystems
         let data_dir = PathBuf::from(&config.tools.data_dir);
         std::fs::create_dir_all(&data_dir)?;
-        let mut tool_runner = ToolRunner::new(&data_dir);
+        let model_cache_dir = {
+            let configured = PathBuf::from(&config.memory.model_cache_dir);
+            if configured.is_absolute() {
+                configured
+            } else {
+                data_dir.join(configured)
+            }
+        };
+        std::fs::create_dir_all(&model_cache_dir)?;
+        let mut tool_runner = ToolRunner::new_with_model_cache_dir(&data_dir, &model_cache_dir);
 
         // Register WASM tools from manifests that specify executor = wasm
         let wasm_executor = WasmToolExecutor::new(&data_dir);
@@ -141,7 +178,9 @@ impl Kernel {
         let context_manager = Arc::new(ContextManager::new(
             config.kernel.context_window_max_entries,
         ));
-        let agent_registry = Arc::new(RwLock::new(AgentRegistry::with_persistence(data_dir.clone())));
+        let agent_registry = Arc::new(RwLock::new(AgentRegistry::with_persistence(
+            data_dir.clone(),
+        )));
         let router = Arc::new(crate::router::TaskRouter::new(
             config.routing.strategy.clone(),
             config.routing.rules.clone(),
@@ -149,9 +188,16 @@ impl Kernel {
         let active_llms = Arc::new(RwLock::new(HashMap::new()));
         let message_bus = Arc::new(crate::agent_message_bus::AgentMessageBus::new());
         let profile_manager = Arc::new(ProfileManager::new());
-        let episodic_memory = Arc::new(crate::episodic_memory::EpisodicMemory::open(&data_dir)?);
+        let episodic_memory = Arc::new(agentos_memory::EpisodicStore::open(&data_dir)?);
         let schedule_manager = Arc::new(ScheduleManager::new());
         let background_pool = Arc::new(BackgroundPool::new());
+
+        // 6.5 Initialize pipeline engine
+        let pipeline_store = Arc::new(
+            PipelineStore::open(&data_dir.join("pipelines.db"))
+                .map_err(|e| anyhow::anyhow!("Pipeline store init failed: {}", e))?,
+        );
+        let pipeline_engine = Arc::new(PipelineEngine::new(pipeline_store));
 
         // 7. Start bus server
         let bus = Arc::new(BusServer::bind(Path::new(&config.bus.socket_path)).await?);
@@ -175,24 +221,29 @@ impl Kernel {
             episodic_memory,
             schedule_manager,
             background_pool,
+            hal,
+            pipeline_engine,
             data_dir,
             started_at: chrono::Utc::now(),
         };
 
         // Emit KernelStarted audit event
-        kernel.audit.append(agentos_audit::AuditEntry {
-            timestamp: kernel.started_at,
-            trace_id: TraceID::new(),
-            event_type: agentos_audit::AuditEventType::KernelStarted,
-            agent_id: None,
-            task_id: None,
-            tool_id: None,
-            details: serde_json::json!({
-                "bus_socket": kernel.config.bus.socket_path,
-                "max_concurrent_tasks": kernel.config.kernel.max_concurrent_tasks
-            }),
-            severity: agentos_audit::AuditSeverity::Info,
-        }).ok(); // Ignore if it fails during boot
+        kernel
+            .audit
+            .append(agentos_audit::AuditEntry {
+                timestamp: kernel.started_at,
+                trace_id: TraceID::new(),
+                event_type: agentos_audit::AuditEventType::KernelStarted,
+                agent_id: None,
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({
+                    "bus_socket": kernel.config.bus.socket_path,
+                    "max_concurrent_tasks": kernel.config.kernel.max_concurrent_tasks
+                }),
+                severity: agentos_audit::AuditSeverity::Info,
+            })
+            .ok(); // Ignore if it fails during boot
 
         Ok(kernel)
     }
@@ -287,7 +338,10 @@ impl Kernel {
                 provider,
                 model,
                 base_url,
-            } => self.cmd_connect_agent(name, provider, model, base_url).await,
+            } => {
+                self.cmd_connect_agent(name, provider, model, base_url)
+                    .await
+            }
             KernelCommand::ListAgents => self.cmd_list_agents().await,
             KernelCommand::DisconnectAgent { agent_id } => {
                 self.cmd_disconnect_agent(agent_id).await
@@ -322,65 +376,119 @@ impl Kernel {
             KernelCommand::ShowPermissions { agent_name } => {
                 self.cmd_show_permissions(agent_name).await
             }
-            KernelCommand::CreateRole { role_name, description } => {
-                self.cmd_create_role(role_name, description).await
-            }
+            KernelCommand::CreateRole {
+                role_name,
+                description,
+            } => self.cmd_create_role(role_name, description).await,
             KernelCommand::DeleteRole { role_name } => self.cmd_delete_role(role_name).await,
             KernelCommand::ListRoles => self.cmd_list_roles().await,
-            KernelCommand::RoleGrant { role_name, permission } => {
-                self.cmd_role_grant(role_name, permission).await
-            }
-            KernelCommand::RoleRevoke { role_name, permission } => {
-                self.cmd_role_revoke(role_name, permission).await
-            }
-            KernelCommand::AssignRole { agent_name, role_name } => {
-                self.cmd_assign_role(agent_name, role_name).await
-            }
-            KernelCommand::RemoveRole { agent_name, role_name } => {
-                self.cmd_remove_role(agent_name, role_name).await
-            }
+            KernelCommand::RoleGrant {
+                role_name,
+                permission,
+            } => self.cmd_role_grant(role_name, permission).await,
+            KernelCommand::RoleRevoke {
+                role_name,
+                permission,
+            } => self.cmd_role_revoke(role_name, permission).await,
+            KernelCommand::AssignRole {
+                agent_name,
+                role_name,
+            } => self.cmd_assign_role(agent_name, role_name).await,
+            KernelCommand::RemoveRole {
+                agent_name,
+                role_name,
+            } => self.cmd_remove_role(agent_name, role_name).await,
             KernelCommand::GetStatus => self.cmd_get_status().await,
             KernelCommand::GetAuditLogs { limit } => self.cmd_get_audit_logs(limit).await,
-            KernelCommand::SendAgentMessage { from_name, to_name, content } => {
-                self.cmd_send_agent_message(from_name, to_name, content).await
+            KernelCommand::SendAgentMessage {
+                from_name,
+                to_name,
+                content,
+            } => {
+                self.cmd_send_agent_message(from_name, to_name, content)
+                    .await
             }
             KernelCommand::ListAgentMessages { agent_name, limit } => {
                 self.cmd_list_agent_messages(agent_name, limit).await
             }
-            KernelCommand::CreateAgentGroup { group_name, members } => {
-                self.cmd_create_agent_group(group_name, members).await
-            }
-            KernelCommand::BroadcastToGroup { group_name, content } => {
-                self.cmd_broadcast_to_group(group_name, content).await
-            }
-            KernelCommand::CreatePermProfile { name, description, permissions } => {
-                self.cmd_create_perm_profile(name, description, permissions).await
+            KernelCommand::CreateAgentGroup {
+                group_name,
+                members,
+            } => self.cmd_create_agent_group(group_name, members).await,
+            KernelCommand::BroadcastToGroup {
+                group_name,
+                content,
+            } => self.cmd_broadcast_to_group(group_name, content).await,
+            KernelCommand::CreatePermProfile {
+                name,
+                description,
+                permissions,
+            } => {
+                self.cmd_create_perm_profile(name, description, permissions)
+                    .await
             }
             KernelCommand::DeletePermProfile { name } => self.cmd_delete_perm_profile(name).await,
             KernelCommand::ListPermProfiles => self.cmd_list_perm_profiles().await,
-            KernelCommand::AssignPermProfile { agent_name, profile_name } => {
-                self.cmd_assign_perm_profile(agent_name, profile_name).await
-            }
-            KernelCommand::GrantPermissionTimed { agent_name, permission, expires_secs } => {
-                self.cmd_grant_permission_timed(agent_name, permission, expires_secs).await
+            KernelCommand::AssignPermProfile {
+                agent_name,
+                profile_name,
+            } => self.cmd_assign_perm_profile(agent_name, profile_name).await,
+            KernelCommand::GrantPermissionTimed {
+                agent_name,
+                permission,
+                expires_secs,
+            } => {
+                self.cmd_grant_permission_timed(agent_name, permission, expires_secs)
+                    .await
             }
 
             // agentd
-            KernelCommand::CreateSchedule { name, cron, agent_name, task, permissions } => {
-                self.cmd_create_schedule(name, cron, agent_name, task, permissions).await
+            KernelCommand::CreateSchedule {
+                name,
+                cron,
+                agent_name,
+                task,
+                permissions,
+            } => {
+                self.cmd_create_schedule(name, cron, agent_name, task, permissions)
+                    .await
             }
             KernelCommand::ListSchedules => self.cmd_list_schedules().await,
             KernelCommand::PauseSchedule { name } => self.cmd_pause_schedule(name).await,
             KernelCommand::ResumeSchedule { name } => self.cmd_resume_schedule(name).await,
             KernelCommand::DeleteSchedule { name } => self.cmd_delete_schedule(name).await,
-            KernelCommand::RunBackground { name, agent_name, task, detach } => {
-                self.cmd_run_background(name, agent_name, task, detach).await
+            KernelCommand::RunBackground {
+                name,
+                agent_name,
+                task,
+                detach,
+            } => {
+                self.cmd_run_background(name, agent_name, task, detach)
+                    .await
             }
             KernelCommand::ListBackground => self.cmd_list_background().await,
             KernelCommand::GetBackgroundLogs { name, follow } => {
                 self.cmd_get_background_logs(name, follow).await
             }
             KernelCommand::KillBackground { name } => self.cmd_kill_background(name).await,
+
+            // Pipeline management
+            KernelCommand::InstallPipeline { yaml } => self.cmd_install_pipeline(yaml).await,
+            KernelCommand::RunPipeline {
+                name,
+                input,
+                detach,
+            } => self.cmd_run_pipeline(name, input, detach).await,
+            KernelCommand::PipelineStatus { name: _, run_id } => {
+                self.cmd_pipeline_status(run_id).await
+            }
+            KernelCommand::PipelineList => self.cmd_pipeline_list().await,
+            KernelCommand::PipelineLogs {
+                name: _,
+                run_id,
+                step_id,
+            } => self.cmd_pipeline_logs(run_id, step_id).await,
+            KernelCommand::RemovePipeline { name } => self.cmd_remove_pipeline(name).await,
 
             KernelCommand::Shutdown => {
                 std::process::exit(0);
@@ -407,7 +515,11 @@ impl Kernel {
                 Ok(Arc::new(OllamaCore::new(&host, &model)))
             }
             LLMProvider::OpenAI => {
-                match self.vault.get(&format!("{}_openai_api_key", name)).or_else(|_| self.vault.get("openai_api_key")) {
+                match self
+                    .vault
+                    .get(&format!("{}_openai_api_key", name))
+                    .or_else(|_| self.vault.get("openai_api_key"))
+                {
                     Ok(entry) => {
                         let sec = SecretString::new(entry.as_str().to_string());
                         if let Some(url) = base_url {
@@ -416,29 +528,47 @@ impl Kernel {
                             Ok(Arc::new(OpenAICore::new(sec, model.clone())))
                         }
                     }
-                    _ => Err("Missing 'openai_api_key' in vault. Please store it first.".to_string()),
+                    _ => {
+                        Err("Missing 'openai_api_key' in vault. Please store it first.".to_string())
+                    }
                 }
             }
             LLMProvider::Anthropic => {
-                match self.vault.get(&format!("{}_anthropic_api_key", name)).or_else(|_| self.vault.get("anthropic_api_key")) {
+                match self
+                    .vault
+                    .get(&format!("{}_anthropic_api_key", name))
+                    .or_else(|_| self.vault.get("anthropic_api_key"))
+                {
                     Ok(entry) => {
                         let sec = SecretString::new(entry.as_str().to_string());
                         Ok(Arc::new(AnthropicCore::new(sec, model.clone())))
                     }
-                    _ => Err("Missing 'anthropic_api_key' in vault. Please store it first.".to_string()),
+                    _ => Err(
+                        "Missing 'anthropic_api_key' in vault. Please store it first.".to_string(),
+                    ),
                 }
             }
             LLMProvider::Gemini => {
-                match self.vault.get(&format!("{}_gemini_api_key", name)).or_else(|_| self.vault.get("gemini_api_key")) {
+                match self
+                    .vault
+                    .get(&format!("{}_gemini_api_key", name))
+                    .or_else(|_| self.vault.get("gemini_api_key"))
+                {
                     Ok(entry) => {
                         let sec = SecretString::new(entry.as_str().to_string());
                         Ok(Arc::new(GeminiCore::new(sec, model.clone())))
                     }
-                    _ => Err("Missing 'gemini_api_key' in vault. Please store it first.".to_string()),
+                    _ => {
+                        Err("Missing 'gemini_api_key' in vault. Please store it first.".to_string())
+                    }
                 }
             }
             LLMProvider::Custom(_) => {
-                let sec = match self.vault.get(&format!("{}_custom_api_key", name)).or_else(|_| self.vault.get("custom_api_key")) {
+                let sec = match self
+                    .vault
+                    .get(&format!("{}_custom_api_key", name))
+                    .or_else(|_| self.vault.get("custom_api_key"))
+                {
                     Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
                     _ => None,
                 };
@@ -481,16 +611,18 @@ impl Kernel {
             active.insert(agent_id, llm_adapter);
         }
 
-        self.audit.append(agentos_audit::AuditEntry {
-            timestamp: chrono::Utc::now(),
-            trace_id: TraceID::new(),
-            event_type: agentos_audit::AuditEventType::AgentConnected,
-            agent_id: Some(agent_id),
-            task_id: None,
-            tool_id: None,
-            details: serde_json::json!({ "name": agent_name, "model": agent_model }),
-            severity: agentos_audit::AuditSeverity::Info,
-        }).ok();
+        self.audit
+            .append(agentos_audit::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: agentos_audit::AuditEventType::AgentConnected,
+                agent_id: Some(agent_id),
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({ "name": agent_name, "model": agent_model }),
+                severity: agentos_audit::AuditSeverity::Info,
+            })
+            .ok();
 
         KernelResponse::Success {
             data: Some(serde_json::json!({ "agent_id": agent_id.to_string() })),
@@ -513,16 +645,18 @@ impl Kernel {
         registry.remove(&agent_id);
         drop(registry);
 
-        self.audit.append(agentos_audit::AuditEntry {
-            timestamp: chrono::Utc::now(),
-            trace_id: TraceID::new(),
-            event_type: agentos_audit::AuditEventType::AgentDisconnected,
-            agent_id: Some(agent_id),
-            task_id: None,
-            tool_id: None,
-            details: serde_json::json!({}),
-            severity: agentos_audit::AuditSeverity::Info,
-        }).ok();
+        self.audit
+            .append(agentos_audit::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: agentos_audit::AuditEventType::AgentDisconnected,
+                agent_id: Some(agent_id),
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({}),
+                severity: agentos_audit::AuditSeverity::Info,
+            })
+            .ok();
 
         KernelResponse::Success { data: None }
     }
@@ -634,11 +768,7 @@ impl Kernel {
         }
     }
 
-    async fn cmd_rotate_secret(
-        &self,
-        name: String,
-        new_value: String,
-    ) -> KernelResponse {
+    async fn cmd_rotate_secret(&self, name: String, new_value: String) -> KernelResponse {
         match self.vault.rotate(&name, &new_value) {
             Ok(_) => KernelResponse::Success { data: None },
             Err(e) => KernelResponse::Error {
@@ -717,7 +847,11 @@ impl Kernel {
     }
 
     async fn cmd_cancel_task(&self, task_id: TaskID) -> KernelResponse {
-        match self.scheduler.update_state(&task_id, TaskState::Cancelled).await {
+        match self
+            .scheduler
+            .update_state(&task_id, TaskState::Cancelled)
+            .await
+        {
             Ok(_) => KernelResponse::Success { data: None },
             Err(e) => KernelResponse::Error {
                 message: e.to_string(),
@@ -755,11 +889,7 @@ impl Kernel {
         }
     }
 
-    async fn cmd_grant_permission(
-        &self,
-        agent_name: String,
-        permission: String,
-    ) -> KernelResponse {
+    async fn cmd_grant_permission(&self, agent_name: String, permission: String) -> KernelResponse {
         let registry = self.agent_registry.read().await;
         let agent = match registry.get_by_name(&agent_name) {
             Some(a) => a.clone(),
@@ -776,9 +906,9 @@ impl Kernel {
             None => {
                 return KernelResponse::Error {
                     message: format!(
-                        "Invalid permission '{}'. Expected format: resource:rwx (e.g. fs.user_data:rw)",
-                        permission
-                    ),
+                    "Invalid permission '{}'. Expected format: resource:rwx (e.g. fs.user_data:rw)",
+                    permission
+                ),
                 }
             }
         };
@@ -792,16 +922,18 @@ impl Kernel {
             .update_permissions(&agent.id, perms)
             .ok();
 
-        self.audit.append(agentos_audit::AuditEntry {
-            timestamp: chrono::Utc::now(),
-            trace_id: TraceID::new(),
-            event_type: agentos_audit::AuditEventType::PermissionGranted,
-            agent_id: Some(agent.id),
-            task_id: None,
-            tool_id: None,
-            details: serde_json::json!({ "permission": permission, "agent_name": agent_name }),
-            severity: agentos_audit::AuditSeverity::Info,
-        }).ok();
+        self.audit
+            .append(agentos_audit::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: agentos_audit::AuditEventType::PermissionGranted,
+                agent_id: Some(agent.id),
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({ "permission": permission, "agent_name": agent_name }),
+                severity: agentos_audit::AuditSeverity::Info,
+            })
+            .ok();
 
         KernelResponse::Success { data: None }
     }
@@ -827,9 +959,9 @@ impl Kernel {
             None => {
                 return KernelResponse::Error {
                     message: format!(
-                        "Invalid permission '{}'. Expected format: resource:rwx (e.g. fs.user_data:rw)",
-                        permission
-                    ),
+                    "Invalid permission '{}'. Expected format: resource:rwx (e.g. fs.user_data:rw)",
+                    permission
+                ),
                 }
             }
         };
@@ -843,16 +975,18 @@ impl Kernel {
             .update_permissions(&agent.id, perms)
             .ok();
 
-        self.audit.append(agentos_audit::AuditEntry {
-            timestamp: chrono::Utc::now(),
-            trace_id: TraceID::new(),
-            event_type: agentos_audit::AuditEventType::PermissionRevoked,
-            agent_id: Some(agent.id),
-            task_id: None,
-            tool_id: None,
-            details: serde_json::json!({ "permission": permission, "agent_name": agent_name }),
-            severity: agentos_audit::AuditSeverity::Info,
-        }).ok();
+        self.audit
+            .append(agentos_audit::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: agentos_audit::AuditEventType::PermissionRevoked,
+                agent_id: Some(agent.id),
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({ "permission": permission, "agent_name": agent_name }),
+                severity: agentos_audit::AuditSeverity::Info,
+            })
+            .ok();
 
         KernelResponse::Success { data: None }
     }
@@ -878,25 +1012,36 @@ impl Kernel {
 
     // --- Permission Profiles ---
 
-    async fn cmd_create_perm_profile(&self, name: String, description: String, permissions_strs: Vec<String>) -> KernelResponse {
+    async fn cmd_create_perm_profile(
+        &self,
+        name: String,
+        description: String,
+        permissions_strs: Vec<String>,
+    ) -> KernelResponse {
         let mut perms = PermissionSet::new();
         for p in permissions_strs {
             if let Some((res, r, w, x)) = Self::parse_permission(&p) {
                 perms.grant(res, r, w, x, None);
             } else {
-                return KernelResponse::Error { message: format!("Invalid permission '{}'", p) };
+                return KernelResponse::Error {
+                    message: format!("Invalid permission '{}'", p),
+                };
             }
         }
         match self.profile_manager.create(&name, &description, perms) {
             Ok(_) => KernelResponse::Success { data: None },
-            Err(e) => KernelResponse::Error { message: e.to_string() }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
         }
     }
 
     async fn cmd_delete_perm_profile(&self, name: String) -> KernelResponse {
         match self.profile_manager.delete(&name) {
             Ok(_) => KernelResponse::Success { data: None },
-            Err(e) => KernelResponse::Error { message: e.to_string() }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
         }
     }
 
@@ -905,25 +1050,48 @@ impl Kernel {
         KernelResponse::PermProfileList(profiles)
     }
 
-    async fn cmd_assign_perm_profile(&self, agent_name: String, profile_name: String) -> KernelResponse {
+    async fn cmd_assign_perm_profile(
+        &self,
+        agent_name: String,
+        profile_name: String,
+    ) -> KernelResponse {
         let registry = self.agent_registry.read().await;
         let agent_id = match registry.get_by_name(&agent_name) {
             Some(a) => a.id,
-            None => return KernelResponse::Error { message: format!("Agent '{}' not found", agent_name) }
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Agent '{}' not found", agent_name),
+                }
+            }
         };
         drop(registry);
 
         let profile = match self.profile_manager.get(&profile_name) {
             Some(p) => p,
-            None => return KernelResponse::Error { message: format!("Profile '{}' not found", profile_name) }
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Profile '{}' not found", profile_name),
+                }
+            }
         };
 
-        let mut current_perms = self.capability_engine.get_permissions(&agent_id).unwrap_or_default();
+        let mut current_perms = self
+            .capability_engine
+            .get_permissions(&agent_id)
+            .unwrap_or_default();
         for entry in profile.permissions.entries() {
-            current_perms.grant(entry.resource.clone(), entry.read, entry.write, entry.execute, entry.expires_at);
+            current_perms.grant(
+                entry.resource.clone(),
+                entry.read,
+                entry.write,
+                entry.execute,
+                entry.expires_at,
+            );
         }
 
-        self.capability_engine.update_permissions(&agent_id, current_perms).ok();
+        self.capability_engine
+            .update_permissions(&agent_id, current_perms)
+            .ok();
         KernelResponse::Success { data: None }
     }
 
@@ -946,7 +1114,11 @@ impl Kernel {
 
         let (resource, read, write, execute) = match Self::parse_permission(&permission) {
             Some(p) => p,
-            None => return KernelResponse::Error { message: format!("Invalid permission") }
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Invalid permission"),
+                }
+            }
         };
 
         let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_secs as i64);
@@ -979,21 +1151,25 @@ impl Kernel {
     async fn cmd_create_role(&self, role_name: String, description: String) -> KernelResponse {
         let mut registry = self.agent_registry.write().await;
         if registry.get_role_by_name(&role_name).is_some() {
-            return KernelResponse::Error { message: format!("Role '{}' already exists", role_name) };
+            return KernelResponse::Error {
+                message: format!("Role '{}' already exists", role_name),
+            };
         }
         let role = Role::new(role_name.clone(), description);
         registry.register_role(role);
 
-        self.audit.append(agentos_audit::AuditEntry {
-            timestamp: chrono::Utc::now(),
-            trace_id: TraceID::new(),
-            event_type: agentos_audit::AuditEventType::PermissionGranted, // Using existing type
-            agent_id: None,
-            task_id: None,
-            tool_id: None,
-            details: serde_json::json!({ "action": "create_role", "role_name": role_name }),
-            severity: agentos_audit::AuditSeverity::Info,
-        }).ok();
+        self.audit
+            .append(agentos_audit::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: agentos_audit::AuditEventType::PermissionGranted, // Using existing type
+                agent_id: None,
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({ "action": "create_role", "role_name": role_name }),
+                severity: agentos_audit::AuditSeverity::Info,
+            })
+            .ok();
 
         KernelResponse::Success { data: None }
     }
@@ -1002,7 +1178,11 @@ impl Kernel {
         let mut registry = self.agent_registry.write().await;
         let role_id = match registry.get_role_by_name(&role_name) {
             Some(r) => r.id,
-            None => return KernelResponse::Error { message: format!("Role '{}' not found", role_name) }
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Role '{}' not found", role_name),
+                }
+            }
         };
 
         match registry.unregister_role(&role_id) {
@@ -1018,7 +1198,7 @@ impl Kernel {
                     severity: agentos_audit::AuditSeverity::Info,
                 }).ok();
                 KernelResponse::Success { data: None }
-            },
+            }
             Err(e) => KernelResponse::Error { message: e },
         }
     }
@@ -1033,12 +1213,20 @@ impl Kernel {
         let mut registry = self.agent_registry.write().await;
         let mut perms = match registry.get_role_by_name(&role_name) {
             Some(r) => r.permissions.clone(),
-            None => return KernelResponse::Error { message: format!("Role '{}' not found", role_name) }
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Role '{}' not found", role_name),
+                }
+            }
         };
 
         let (resource, read, write, execute) = match Self::parse_permission(&permission) {
             Some(p) => p,
-            None => return KernelResponse::Error { message: format!("Invalid permission '{}'", permission) }
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Invalid permission '{}'", permission),
+                }
+            }
         };
 
         perms.grant(resource, read, write, execute, None);
@@ -1062,15 +1250,28 @@ impl Kernel {
 
     // --- Agent Communication ---
 
-    async fn cmd_send_agent_message(&self, from_name: String, to_name: String, content: String) -> KernelResponse {
+    async fn cmd_send_agent_message(
+        &self,
+        from_name: String,
+        to_name: String,
+        content: String,
+    ) -> KernelResponse {
         let registry = self.agent_registry.read().await;
         let from_agent = match registry.get_by_name(&from_name) {
             Some(a) => a.clone(),
-            None => return KernelResponse::Error { message: format!("Sender agent '{}' not found", from_name) }
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Sender agent '{}' not found", from_name),
+                }
+            }
         };
         let to_agent = match registry.get_by_name(&to_name) {
             Some(a) => a.clone(),
-            None => return KernelResponse::Error { message: format!("Target agent '{}' not found", to_name) }
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Target agent '{}' not found", to_name),
+                }
+            }
         };
         drop(registry);
 
@@ -1086,7 +1287,9 @@ impl Kernel {
 
         match self.message_bus.send_direct(msg).await {
             Ok(_) => KernelResponse::Success { data: None },
-            Err(e) => KernelResponse::Error { message: e.to_string() }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
         }
     }
 
@@ -1094,22 +1297,35 @@ impl Kernel {
         let registry = self.agent_registry.read().await;
         let agent = match registry.get_by_name(&agent_name) {
             Some(a) => a.clone(),
-            None => return KernelResponse::Error { message: format!("Agent '{}' not found", agent_name) }
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Agent '{}' not found", agent_name),
+                }
+            }
         };
         drop(registry);
 
-        let history = self.message_bus.get_history(&agent.id, limit as usize).await;
+        let history = self
+            .message_bus
+            .get_history(&agent.id, limit as usize)
+            .await;
         KernelResponse::AgentMessageList(history)
     }
 
-    async fn cmd_create_agent_group(&self, group_name: String, members: Vec<String>) -> KernelResponse {
+    async fn cmd_create_agent_group(
+        &self,
+        group_name: String,
+        members: Vec<String>,
+    ) -> KernelResponse {
         let registry = self.agent_registry.read().await;
         let mut member_ids = Vec::new();
         for m in members {
             if let Some(a) = registry.get_by_name(&m) {
                 member_ids.push(a.id);
             } else {
-                return KernelResponse::Error { message: format!("Agent '{}' not found", m) };
+                return KernelResponse::Error {
+                    message: format!("Agent '{}' not found", m),
+                };
             }
         }
         drop(registry);
@@ -1117,7 +1333,11 @@ impl Kernel {
         let group_id = GroupID::new();
         self.message_bus.create_group(group_id, member_ids).await;
 
-        KernelResponse::Success { data: Some(serde_json::json!({ "group_id": group_id.to_string(), "group_name": group_name })) }
+        KernelResponse::Success {
+            data: Some(
+                serde_json::json!({ "group_id": group_id.to_string(), "group_name": group_name }),
+            ),
+        }
     }
 
     async fn cmd_broadcast_to_group(&self, _group_name: String, content: String) -> KernelResponse {
@@ -1132,8 +1352,12 @@ impl Kernel {
         };
 
         match self.message_bus.broadcast(msg).await {
-            Ok(count) => KernelResponse::Success { data: Some(serde_json::json!({ "sent_to": count })) },
-            Err(e) => KernelResponse::Error { message: e.to_string() }
+            Ok(count) => KernelResponse::Success {
+                data: Some(serde_json::json!({ "sent_to": count })),
+            },
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
         }
     }
 
@@ -1148,8 +1372,10 @@ impl Kernel {
         timeout_secs: u64,
     ) -> Result<serde_json::Value, AgentOSError> {
         let registry = self.agent_registry.read().await;
-        let target = registry.get_by_name(target_agent_name)
-            .ok_or_else(|| AgentOSError::AgentNotFound(target_agent_name.to_string()))?.clone();
+        let target = registry
+            .get_by_name(target_agent_name)
+            .ok_or_else(|| AgentOSError::AgentNotFound(target_agent_name.to_string()))?
+            .clone();
 
         let target_permissions = registry.compute_effective_permissions(&target.id);
         drop(registry);
@@ -1194,12 +1420,20 @@ impl Kernel {
         let mut registry = self.agent_registry.write().await;
         let mut perms = match registry.get_role_by_name(&role_name) {
             Some(r) => r.permissions.clone(),
-            None => return KernelResponse::Error { message: format!("Role '{}' not found", role_name) }
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Role '{}' not found", role_name),
+                }
+            }
         };
 
         let (resource, read, write, execute) = match Self::parse_permission(&permission) {
             Some(p) => p,
-            None => return KernelResponse::Error { message: format!("Invalid permission '{}'", permission) }
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Invalid permission '{}'", permission),
+                }
+            }
         };
 
         perms.revoke(&resource, read, write, execute);
@@ -1207,16 +1441,18 @@ impl Kernel {
             return KernelResponse::Error { message: e };
         }
 
-        self.audit.append(agentos_audit::AuditEntry {
-            timestamp: chrono::Utc::now(),
-            trace_id: TraceID::new(),
-            event_type: agentos_audit::AuditEventType::PermissionRevoked,
-            agent_id: None,
-            task_id: None,
-            tool_id: None,
-            details: serde_json::json!({ "role_name": role_name, "permission": permission }),
-            severity: agentos_audit::AuditSeverity::Info,
-        }).ok();
+        self.audit
+            .append(agentos_audit::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: agentos_audit::AuditEventType::PermissionRevoked,
+                agent_id: None,
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({ "role_name": role_name, "permission": permission }),
+                severity: agentos_audit::AuditSeverity::Info,
+            })
+            .ok();
 
         KernelResponse::Success { data: None }
     }
@@ -1225,7 +1461,11 @@ impl Kernel {
         let mut registry = self.agent_registry.write().await;
         let agent_id = match registry.get_by_name(&agent_name) {
             Some(a) => a.id,
-            None => return KernelResponse::Error { message: format!("Agent '{}' not found", agent_name) }
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Agent '{}' not found", agent_name),
+                }
+            }
         };
 
         match registry.assign_role(&agent_id, role_name.clone()) {
@@ -1241,7 +1481,7 @@ impl Kernel {
                     severity: agentos_audit::AuditSeverity::Info,
                 }).ok();
                 KernelResponse::Success { data: None }
-            },
+            }
             Err(e) => KernelResponse::Error { message: e },
         }
     }
@@ -1250,7 +1490,11 @@ impl Kernel {
         let mut registry = self.agent_registry.write().await;
         let agent_id = match registry.get_by_name(&agent_name) {
             Some(a) => a.id,
-            None => return KernelResponse::Error { message: format!("Agent '{}' not found", agent_name) }
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Agent '{}' not found", agent_name),
+                }
+            }
         };
 
         match registry.remove_role(&agent_id, &role_name) {
@@ -1266,7 +1510,7 @@ impl Kernel {
                     severity: agentos_audit::AuditSeverity::Info,
                 }).ok();
                 KernelResponse::Success { data: None }
-            },
+            }
             Err(e) => KernelResponse::Error { message: e },
         }
     }
@@ -1385,15 +1629,27 @@ impl Kernel {
         );
 
         let mut agent_directory = String::from("\n\n[AGENT_DIRECTORY]\nYou are operating inside AgentOS. The following agents are available:\n");
-        let agents = self.agent_registry.read().await.list_all().into_iter().cloned().collect::<Vec<_>>();
+        let agents = self
+            .agent_registry
+            .read()
+            .await
+            .list_all()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
         for opt_agent in agents {
-            if opt_agent.id == task.agent_id { continue; } // Don't list self
+            if opt_agent.id == task.agent_id {
+                continue;
+            } // Don't list self
             let status = match opt_agent.current_task {
                 Some(tid) => format!("Busy ({})", tid),
                 None => "Idle".to_string(),
             };
 
-            let perms = self.capability_engine.get_permissions(&opt_agent.id).unwrap_or_default();
+            let perms = self
+                .capability_engine
+                .get_permissions(&opt_agent.id)
+                .unwrap_or_default();
             let mut perm_strs = Vec::new();
             for e in perms.entries {
                 let r = if e.read { "r" } else { "" };
@@ -1401,7 +1657,11 @@ impl Kernel {
                 let x = if e.execute { "x" } else { "" };
                 perm_strs.push(format!("{}:{}{}{}", e.resource, r, w, x));
             }
-            let perm_str = if perm_strs.is_empty() { "None".to_string() } else { perm_strs.join(", ") };
+            let perm_str = if perm_strs.is_empty() {
+                "None".to_string()
+            } else {
+                perm_strs.join(", ")
+            };
 
             let provider_str = match opt_agent.provider {
                 agentos_types::LLMProvider::Anthropic => "anthropic",
@@ -1413,11 +1673,7 @@ impl Kernel {
 
             agent_directory.push_str(&format!(
                 "\n- {} ({}/{}) — Status: {}\n  Permissions: {}",
-                opt_agent.name,
-                provider_str,
-                opt_agent.model,
-                status,
-                perm_str
+                opt_agent.name, provider_str, opt_agent.model, status, perm_str
             ));
         }
         agent_directory.push_str("\n\nTo message an agent: use the agent-message tool\nTo delegate a subtask: use the task-delegate tool\n[/AGENT_DIRECTORY]");
@@ -1441,14 +1697,17 @@ impl Kernel {
             .await
             .ok();
 
-        self.episodic_memory.record(
-            &task.id,
-            &task.agent_id,
-            crate::episodic_memory::EpisodeType::UserPrompt,
-            &task.original_prompt,
-            None,
-            &TraceID::new(),
-        ).ok();
+        self.episodic_memory
+            .record(
+                &task.id,
+                &task.agent_id,
+                agentos_memory::EpisodeType::UserPrompt,
+                &task.original_prompt,
+                Some("User prompt received"),
+                None,
+                &TraceID::new(),
+            )
+            .ok();
 
         // 3. Agent loop: LLM → parse → tool call → push result → repeat
         let max_iterations = 10;
@@ -1491,14 +1750,20 @@ impl Kernel {
                 .await
                 .ok();
 
-            self.episodic_memory.record(
-                &task.id,
-                &task.agent_id,
-                crate::episodic_memory::EpisodeType::LLMResponse,
-                &inference.text,
-                None,
-                &TraceID::new(),
-            ).ok();
+            self.episodic_memory
+                .record(
+                    &task.id,
+                    &task.agent_id,
+                    agentos_memory::EpisodeType::LLMResponse,
+                    &inference.text,
+                    Some(&format!(
+                        "LLM response ({} tokens)",
+                        inference.tokens_used.total_tokens
+                    )),
+                    None,
+                    &TraceID::new(),
+                )
+                .ok();
 
             // Check for tool call
             match parse_tool_call(&inference.text) {
@@ -1513,25 +1778,30 @@ impl Kernel {
                     // --- Permission enforcement via capability token ---
                     // Validates HMAC signature, token expiry, intent type, and resource permissions
                     let trace_id = TraceID::new();
-                    if let Err(denial_reason) = self.validate_tool_call(task, &tool_call, trace_id) {
+                    if let Err(denial_reason) = self.validate_tool_call(task, &tool_call, trace_id)
+                    {
                         tracing::warn!(
                             "Task {} permission denied for tool {}: {}",
-                            task.id, tool_call.tool_name, denial_reason
+                            task.id,
+                            tool_call.tool_name,
+                            denial_reason
                         );
-                        self.audit.append(agentos_audit::AuditEntry {
-                            timestamp: chrono::Utc::now(),
-                            trace_id,
-                            event_type: agentos_audit::AuditEventType::PermissionDenied,
-                            agent_id: Some(task.agent_id),
-                            task_id: Some(task.id),
-                            tool_id: None,
-                            details: serde_json::json!({
-                                "tool": tool_call.tool_name,
-                                "intent_type": format!("{:?}", tool_call.intent_type),
-                                "reason": denial_reason,
-                            }),
-                            severity: agentos_audit::AuditSeverity::Security,
-                        }).ok();
+                        self.audit
+                            .append(agentos_audit::AuditEntry {
+                                timestamp: chrono::Utc::now(),
+                                trace_id,
+                                event_type: agentos_audit::AuditEventType::PermissionDenied,
+                                agent_id: Some(task.agent_id),
+                                task_id: Some(task.id),
+                                tool_id: None,
+                                details: serde_json::json!({
+                                    "tool": tool_call.tool_name,
+                                    "intent_type": format!("{:?}", tool_call.intent_type),
+                                    "reason": denial_reason,
+                                }),
+                                severity: agentos_audit::AuditSeverity::Security,
+                            })
+                            .ok();
 
                         let error_result = serde_json::json!({
                             "error": format!(
@@ -1546,30 +1816,42 @@ impl Kernel {
                         continue; // Skip tool execution, let LLM see the error
                     }
 
-                    self.audit.append(agentos_audit::AuditEntry {
-                        timestamp: chrono::Utc::now(),
-                        trace_id,
-                        event_type: agentos_audit::AuditEventType::ToolExecutionStarted,
-                        agent_id: Some(task.agent_id),
-                        task_id: Some(task.id),
-                        tool_id: None,
-                        details: serde_json::json!({ "tool": tool_call.tool_name }),
-                        severity: agentos_audit::AuditSeverity::Info,
-                    }).ok();
+                    self.audit
+                        .append(agentos_audit::AuditEntry {
+                            timestamp: chrono::Utc::now(),
+                            trace_id,
+                            event_type: agentos_audit::AuditEventType::ToolExecutionStarted,
+                            agent_id: Some(task.agent_id),
+                            task_id: Some(task.id),
+                            tool_id: None,
+                            details: serde_json::json!({ "tool": tool_call.tool_name }),
+                            severity: agentos_audit::AuditSeverity::Info,
+                        })
+                        .ok();
 
-                    self.episodic_memory.record(
-                        &task.id,
-                        &task.agent_id,
-                        crate::episodic_memory::EpisodeType::ToolCall,
-                        &format!("Tool: {} Payload: {}", tool_call.tool_name, tool_call.payload),
-                        None,
-                        &trace_id,
-                    ).ok();
+                    self.episodic_memory
+                        .record(
+                            &task.id,
+                            &task.agent_id,
+                            agentos_memory::EpisodeType::ToolCall,
+                            &format!(
+                                "Tool: {} Payload: {}",
+                                tool_call.tool_name, tool_call.payload
+                            ),
+                            Some(&format!("Called tool '{}'", tool_call.tool_name)),
+                            None,
+                            &trace_id,
+                        )
+                        .ok();
 
                     let exec_context = ToolExecutionContext {
                         data_dir: self.data_dir.clone(),
                         task_id: task.id,
+                        agent_id: task.agent_id,
                         trace_id,
+                        permissions: task.capability_token.permissions.clone(),
+                        vault: Some(self.vault.clone()),
+                        hal: Some(self.hal.clone()),
                     };
 
                     // V2: Try sandboxed execution first, fall back to in-process
@@ -1577,18 +1859,23 @@ impl Kernel {
                         // Derive sandbox config from tool manifest if available
                         let sandbox_config = {
                             let registry = self.tool_registry.read().await;
-                            registry.get_by_name(&tool_call.tool_name)
+                            registry
+                                .get_by_name(&tool_call.tool_name)
                                 .map(|t| SandboxConfig::from_manifest(&t.manifest.sandbox))
                         };
 
                         if let Some(config) = sandbox_config {
                             let timeout = Duration::from_millis(config.max_cpu_ms.max(5000));
-                            match self.sandbox.spawn(
-                                &tool_call.tool_name,
-                                tool_call.payload.clone(),
-                                &config,
-                                timeout,
-                            ).await {
+                            match self
+                                .sandbox
+                                .spawn(
+                                    &tool_call.tool_name,
+                                    tool_call.payload.clone(),
+                                    &config,
+                                    timeout,
+                                )
+                                .await
+                            {
                                 Ok(sandbox_result) => {
                                     SandboxExecutor::parse_result(&sandbox_result)
                                 }
@@ -1600,7 +1887,11 @@ impl Kernel {
                                     );
                                     // Fallback to in-process execution
                                     self.tool_runner
-                                        .execute(&tool_call.tool_name, tool_call.payload, exec_context)
+                                        .execute(
+                                            &tool_call.tool_name,
+                                            tool_call.payload,
+                                            exec_context,
+                                        )
                                         .await
                                 }
                             }
@@ -1614,30 +1905,36 @@ impl Kernel {
 
                     match tool_result {
                         Ok(result) => {
-                            self.audit.append(agentos_audit::AuditEntry {
-                                timestamp: chrono::Utc::now(),
-                                trace_id,
-                                event_type: agentos_audit::AuditEventType::ToolExecutionCompleted,
-                                agent_id: Some(task.agent_id),
-                                task_id: Some(task.id),
-                                tool_id: None,
-                                details: serde_json::json!({ "tool": tool_call.tool_name }),
-                                severity: agentos_audit::AuditSeverity::Info,
-                            }).ok();
+                            self.audit
+                                .append(agentos_audit::AuditEntry {
+                                    timestamp: chrono::Utc::now(),
+                                    trace_id,
+                                    event_type:
+                                        agentos_audit::AuditEventType::ToolExecutionCompleted,
+                                    agent_id: Some(task.agent_id),
+                                    task_id: Some(task.id),
+                                    tool_id: None,
+                                    details: serde_json::json!({ "tool": tool_call.tool_name }),
+                                    severity: agentos_audit::AuditSeverity::Info,
+                                })
+                                .ok();
 
                             self.context_manager
                                 .push_tool_result(&task.id, &tool_call.tool_name, &result)
                                 .await
                                 .ok();
 
-                            self.episodic_memory.record(
-                                &task.id,
-                                &task.agent_id,
-                                crate::episodic_memory::EpisodeType::ToolResult,
-                                &result.to_string(),
-                                None,
-                                &trace_id,
-                            ).ok();
+                            self.episodic_memory
+                                .record(
+                                    &task.id,
+                                    &task.agent_id,
+                                    agentos_memory::EpisodeType::ToolResult,
+                                    &result.to_string(),
+                                    Some(&format!("Tool '{}' succeeded", tool_call.tool_name)),
+                                    None,
+                                    &trace_id,
+                                )
+                                .ok();
                         }
                         Err(e) => {
                             self.audit.append(agentos_audit::AuditEntry {
@@ -1659,14 +1956,17 @@ impl Kernel {
                                 .await
                                 .ok();
 
-                            self.episodic_memory.record(
-                                &task.id,
-                                &task.agent_id,
-                                crate::episodic_memory::EpisodeType::ToolResult,
-                                &error_result.to_string(),
-                                None,
-                                &trace_id,
-                            ).ok();
+                            self.episodic_memory
+                                .record(
+                                    &task.id,
+                                    &task.agent_id,
+                                    agentos_memory::EpisodeType::ToolResult,
+                                    &error_result.to_string(),
+                                    Some(&format!("Tool '{}' failed: {}", tool_call.tool_name, e)),
+                                    None,
+                                    &trace_id,
+                                )
+                                .ok();
                         }
                     }
                     // Continue loop — LLM will see the tool result next iteration
@@ -1692,12 +1992,18 @@ impl Kernel {
 
         match self.execute_task_sync(task).await {
             Ok(answer) => {
-                tracing::info!("Task {} complete: {}", task.id, &answer[..answer.len().min(100)]);
+                tracing::info!(
+                    "Task {} complete: {}",
+                    task.id,
+                    &answer[..answer.len().min(100)]
+                );
                 self.scheduler
                     .update_state(&task.id, TaskState::Complete)
                     .await
                     .ok();
-                self.background_pool.complete(&task.id, serde_json::json!({ "result": answer })).await;
+                self.background_pool
+                    .complete(&task.id, serde_json::json!({ "result": answer }))
+                    .await;
             }
             Err(e) => {
                 tracing::error!("Task {} failed: {}", task.id, e);
@@ -1720,44 +2026,64 @@ impl Kernel {
             for job in due_jobs {
                 tracing::info!(job_name = %job.name, "Firing scheduled job");
 
-                self.audit.append(agentos_audit::AuditEntry {
-                    timestamp: chrono::Utc::now(),
-                    trace_id: TraceID::new(),
-                    event_type: agentos_audit::AuditEventType::ScheduledJobFired,
-                    agent_id: None,
-                    task_id: None,
-                    tool_id: None,
-                    details: serde_json::json!({ "job_name": job.name }),
-                    severity: agentos_audit::AuditSeverity::Info,
-                }).ok();
+                self.audit
+                    .append(agentos_audit::AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        trace_id: TraceID::new(),
+                        event_type: agentos_audit::AuditEventType::ScheduledJobFired,
+                        agent_id: None,
+                        task_id: None,
+                        tool_id: None,
+                        details: serde_json::json!({ "job_name": job.name }),
+                        severity: agentos_audit::AuditSeverity::Info,
+                    })
+                    .ok();
 
-                let _ = self.create_background_task(job.name.clone(), job.agent_name.clone(), job.task_prompt.clone(), true).await;
+                let _ = self
+                    .create_background_task(
+                        job.name.clone(),
+                        job.agent_name.clone(),
+                        job.task_prompt.clone(),
+                        true,
+                    )
+                    .await;
             }
         }
     }
 
-    async fn create_background_task(&self, name: String, agent_name: String, prompt: String, detached: bool) -> Result<TaskID, AgentOSError> {
+    async fn create_background_task(
+        &self,
+        name: String,
+        agent_name: String,
+        prompt: String,
+        detached: bool,
+    ) -> Result<TaskID, AgentOSError> {
         let registry = self.agent_registry.read().await;
-        let agent = registry.get_by_name(&agent_name)
-            .ok_or_else(|| AgentOSError::AgentNotFound(agent_name.clone()))?.clone();
+        let agent = registry
+            .get_by_name(&agent_name)
+            .ok_or_else(|| AgentOSError::AgentNotFound(agent_name.clone()))?
+            .clone();
 
         let target_permissions = registry.compute_effective_permissions(&agent.id);
         drop(registry);
 
         let task_id = TaskID::new();
-        let capability_token = self.capability_engine.issue_token(
-            task_id,
-            agent.id,
-            std::collections::BTreeSet::new(),
-            std::collections::BTreeSet::from([
-                IntentTypeFlag::Read,
-                IntentTypeFlag::Write,
-                IntentTypeFlag::Execute,
-                IntentTypeFlag::Query,
-            ]),
-            target_permissions,
-            Duration::from_secs(self.config.kernel.default_task_timeout_secs),
-        ).map_err(|e| AgentOSError::VaultError(e.to_string()))?;
+        let capability_token = self
+            .capability_engine
+            .issue_token(
+                task_id,
+                agent.id,
+                std::collections::BTreeSet::new(),
+                std::collections::BTreeSet::from([
+                    IntentTypeFlag::Read,
+                    IntentTypeFlag::Write,
+                    IntentTypeFlag::Execute,
+                    IntentTypeFlag::Query,
+                ]),
+                target_permissions,
+                Duration::from_secs(self.config.kernel.default_task_timeout_secs),
+            )
+            .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
 
         let task = AgentTask {
             id: task_id,
@@ -1773,39 +2099,56 @@ impl Kernel {
             parent_task: None,
         };
 
-        self.background_pool.register(BackgroundTask {
-            id: task_id,
-            name,
-            agent_name,
-            task_prompt: prompt,
-            state: TaskState::Running,
-            started_at: chrono::Utc::now(),
-            completed_at: None,
-            result: None,
-            detached,
-        }).await;
+        self.background_pool
+            .register(BackgroundTask {
+                id: task_id,
+                name,
+                agent_name,
+                task_prompt: prompt,
+                state: TaskState::Queued,
+                started_at: None,
+                completed_at: None,
+                result: None,
+                detached,
+            })
+            .await;
 
         let _ = self.scheduler.enqueue(task).await;
 
         Ok(task_id)
     }
 
-    async fn cmd_create_schedule(&self, name: String, cron: String, agent_name: String, task: String, permissions: Vec<String>) -> KernelResponse {
-        match self.schedule_manager.create_job(name.clone(), cron, agent_name, task, permissions).await {
+    async fn cmd_create_schedule(
+        &self,
+        name: String,
+        cron: String,
+        agent_name: String,
+        task: String,
+        permissions: Vec<String>,
+    ) -> KernelResponse {
+        match self
+            .schedule_manager
+            .create_job(name.clone(), cron, agent_name, task, permissions)
+            .await
+        {
             Ok(id) => {
-                self.audit.append(agentos_audit::AuditEntry {
-                    timestamp: chrono::Utc::now(),
-                    trace_id: TraceID::new(),
-                    event_type: agentos_audit::AuditEventType::ScheduledJobCreated,
-                    agent_id: None,
-                    task_id: None,
-                    tool_id: None,
-                    details: serde_json::json!({ "job_name": name, "schedule_id": id }),
-                    severity: agentos_audit::AuditSeverity::Info,
-                }).ok();
+                self.audit
+                    .append(agentos_audit::AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        trace_id: TraceID::new(),
+                        event_type: agentos_audit::AuditEventType::ScheduledJobCreated,
+                        agent_id: None,
+                        task_id: None,
+                        tool_id: None,
+                        details: serde_json::json!({ "job_name": name, "schedule_id": id }),
+                        severity: agentos_audit::AuditSeverity::Info,
+                    })
+                    .ok();
                 KernelResponse::ScheduleId(id)
+            }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
             },
-            Err(e) => KernelResponse::Error { message: e.to_string() }
         }
     }
 
@@ -1817,22 +2160,28 @@ impl Kernel {
         if let Some(job) = self.schedule_manager.get_by_name(&name).await {
             match self.schedule_manager.pause(&job.id).await {
                 Ok(_) => {
-                    self.audit.append(agentos_audit::AuditEntry {
-                        timestamp: chrono::Utc::now(),
-                        trace_id: TraceID::new(),
-                        event_type: agentos_audit::AuditEventType::ScheduledJobPaused,
-                        agent_id: None,
-                        task_id: None,
-                        tool_id: None,
-                        details: serde_json::json!({ "job_name": name }),
-                        severity: agentos_audit::AuditSeverity::Info,
-                    }).ok();
+                    self.audit
+                        .append(agentos_audit::AuditEntry {
+                            timestamp: chrono::Utc::now(),
+                            trace_id: TraceID::new(),
+                            event_type: agentos_audit::AuditEventType::ScheduledJobPaused,
+                            agent_id: None,
+                            task_id: None,
+                            tool_id: None,
+                            details: serde_json::json!({ "job_name": name }),
+                            severity: agentos_audit::AuditSeverity::Info,
+                        })
+                        .ok();
                     KernelResponse::Success { data: None }
+                }
+                Err(e) => KernelResponse::Error {
+                    message: e.to_string(),
                 },
-                Err(e) => KernelResponse::Error { message: e.to_string() }
             }
         } else {
-            KernelResponse::Error { message: format!("Schedule {} not found", name) }
+            KernelResponse::Error {
+                message: format!("Schedule {} not found", name),
+            }
         }
     }
 
@@ -1840,22 +2189,28 @@ impl Kernel {
         if let Some(job) = self.schedule_manager.get_by_name(&name).await {
             match self.schedule_manager.resume(&job.id).await {
                 Ok(_) => {
-                    self.audit.append(agentos_audit::AuditEntry {
-                        timestamp: chrono::Utc::now(),
-                        trace_id: TraceID::new(),
-                        event_type: agentos_audit::AuditEventType::ScheduledJobResumed,
-                        agent_id: None,
-                        task_id: None,
-                        tool_id: None,
-                        details: serde_json::json!({ "job_name": name }),
-                        severity: agentos_audit::AuditSeverity::Info,
-                    }).ok();
+                    self.audit
+                        .append(agentos_audit::AuditEntry {
+                            timestamp: chrono::Utc::now(),
+                            trace_id: TraceID::new(),
+                            event_type: agentos_audit::AuditEventType::ScheduledJobResumed,
+                            agent_id: None,
+                            task_id: None,
+                            tool_id: None,
+                            details: serde_json::json!({ "job_name": name }),
+                            severity: agentos_audit::AuditSeverity::Info,
+                        })
+                        .ok();
                     KernelResponse::Success { data: None }
+                }
+                Err(e) => KernelResponse::Error {
+                    message: e.to_string(),
                 },
-                Err(e) => KernelResponse::Error { message: e.to_string() }
             }
         } else {
-            KernelResponse::Error { message: format!("Schedule {} not found", name) }
+            KernelResponse::Error {
+                message: format!("Schedule {} not found", name),
+            }
         }
     }
 
@@ -1863,41 +2218,62 @@ impl Kernel {
         if let Some(job) = self.schedule_manager.get_by_name(&name).await {
             match self.schedule_manager.delete(&job.id).await {
                 Ok(_) => {
-                    self.audit.append(agentos_audit::AuditEntry {
-                        timestamp: chrono::Utc::now(),
-                        trace_id: TraceID::new(),
-                        event_type: agentos_audit::AuditEventType::ScheduledJobDeleted,
-                        agent_id: None,
-                        task_id: None,
-                        tool_id: None,
-                        details: serde_json::json!({ "job_name": name }),
-                        severity: agentos_audit::AuditSeverity::Info,
-                    }).ok();
+                    self.audit
+                        .append(agentos_audit::AuditEntry {
+                            timestamp: chrono::Utc::now(),
+                            trace_id: TraceID::new(),
+                            event_type: agentos_audit::AuditEventType::ScheduledJobDeleted,
+                            agent_id: None,
+                            task_id: None,
+                            tool_id: None,
+                            details: serde_json::json!({ "job_name": name }),
+                            severity: agentos_audit::AuditSeverity::Info,
+                        })
+                        .ok();
                     KernelResponse::Success { data: None }
+                }
+                Err(e) => KernelResponse::Error {
+                    message: e.to_string(),
                 },
-                Err(e) => KernelResponse::Error { message: e.to_string() }
             }
         } else {
-            KernelResponse::Error { message: format!("Schedule {} not found", name) }
+            KernelResponse::Error {
+                message: format!("Schedule {} not found", name),
+            }
         }
     }
 
-    async fn cmd_run_background(&self, name: String, agent_name: String, task: String, detach: bool) -> KernelResponse {
-        match self.create_background_task(name.clone(), agent_name, task, detach).await {
+    async fn cmd_run_background(
+        &self,
+        name: String,
+        agent_name: String,
+        task: String,
+        detach: bool,
+    ) -> KernelResponse {
+        match self
+            .create_background_task(name.clone(), agent_name, task, detach)
+            .await
+        {
             Ok(id) => {
-                self.audit.append(agentos_audit::AuditEntry {
-                    timestamp: chrono::Utc::now(),
-                    trace_id: TraceID::new(),
-                    event_type: agentos_audit::AuditEventType::BackgroundTaskStarted,
-                    agent_id: None,
-                    task_id: Some(id),
-                    tool_id: None,
-                    details: serde_json::json!({ "bg_name": name }),
-                    severity: agentos_audit::AuditSeverity::Info,
-                }).ok();
-                KernelResponse::Success { data: Some(serde_json::json!({ "task_id": id.to_string() })) }
+                self.audit
+                    .append(agentos_audit::AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        trace_id: TraceID::new(),
+                        event_type: agentos_audit::AuditEventType::BackgroundTaskStarted,
+                        agent_id: None,
+                        task_id: Some(id),
+                        tool_id: None,
+                        details: serde_json::json!({ "bg_name": name }),
+                        severity: agentos_audit::AuditSeverity::Info,
+                    })
+                    .ok();
+                KernelResponse::Success {
+                    data: Some(serde_json::json!({ "task_id": id.to_string() })),
+                }
+            }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
             },
-            Err(e) => KernelResponse::Error { message: e.to_string() }
         }
     }
 
@@ -1910,52 +2286,291 @@ impl Kernel {
             // Reusing get_task_logs logic
             self.cmd_get_task_logs(task.id).await
         } else {
-            KernelResponse::Error { message: format!("Background task '{}' not found", name) }
+            KernelResponse::Error {
+                message: format!("Background task '{}' not found", name),
+            }
         }
     }
 
     async fn cmd_kill_background(&self, name: String) -> KernelResponse {
         if let Some(task) = self.background_pool.get_by_name(&name).await {
-            match self.scheduler.update_state(&task.id, TaskState::Cancelled).await {
+            match self
+                .scheduler
+                .update_state(&task.id, TaskState::Cancelled)
+                .await
+            {
                 Ok(_) => {
-                    self.background_pool.fail(&task.id, "Killed by user".to_string()).await;
-                    self.audit.append(agentos_audit::AuditEntry {
-                        timestamp: chrono::Utc::now(),
-                        trace_id: TraceID::new(),
-                        event_type: agentos_audit::AuditEventType::BackgroundTaskKilled,
-                        agent_id: None,
-                        task_id: Some(task.id),
-                        tool_id: None,
-                        details: serde_json::json!({ "bg_name": name }),
-                        severity: agentos_audit::AuditSeverity::Info,
-                    }).ok();
+                    self.background_pool
+                        .fail(&task.id, "Killed by user".to_string())
+                        .await;
+                    self.audit
+                        .append(agentos_audit::AuditEntry {
+                            timestamp: chrono::Utc::now(),
+                            trace_id: TraceID::new(),
+                            event_type: agentos_audit::AuditEventType::BackgroundTaskKilled,
+                            agent_id: None,
+                            task_id: Some(task.id),
+                            tool_id: None,
+                            details: serde_json::json!({ "bg_name": name }),
+                            severity: agentos_audit::AuditSeverity::Info,
+                        })
+                        .ok();
                     KernelResponse::Success { data: None }
+                }
+                Err(e) => KernelResponse::Error {
+                    message: e.to_string(),
                 },
-                Err(e) => KernelResponse::Error { message: e.to_string() }
             }
         } else {
-            KernelResponse::Error { message: format!("Background task '{}' not found", name) }
+            KernelResponse::Error {
+                message: format!("Background task '{}' not found", name),
+            }
+        }
+    }
+
+    // --- Pipeline Command Handlers ---
+
+    async fn cmd_install_pipeline(&self, yaml: String) -> KernelResponse {
+        let definition = match agentos_pipeline::PipelineDefinition::from_yaml(&yaml) {
+            Ok(d) => d,
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: format!("Invalid pipeline YAML: {}", e),
+                }
+            }
+        };
+
+        match self.pipeline_engine.store().install_pipeline(
+            &definition.name,
+            &definition.version,
+            &yaml,
+        ) {
+            Ok(()) => {
+                tracing::info!(
+                    pipeline = %definition.name,
+                    version = %definition.version,
+                    "Pipeline installed"
+                );
+                KernelResponse::Success {
+                    data: Some(serde_json::json!({
+                        "name": definition.name,
+                        "version": definition.version,
+                        "steps": definition.steps.len(),
+                    })),
+                }
+            }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+
+    async fn cmd_run_pipeline(&self, name: String, input: String, _detach: bool) -> KernelResponse {
+        // Load the pipeline definition from store
+        let yaml = match self.pipeline_engine.store().get_pipeline_yaml(&name) {
+            Ok(y) => y,
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: e.to_string(),
+                }
+            }
+        };
+
+        let definition = match agentos_pipeline::PipelineDefinition::from_yaml(&yaml) {
+            Ok(d) => d,
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: format!("Failed to parse stored pipeline: {}", e),
+                }
+            }
+        };
+
+        let run_id = agentos_types::RunID::new();
+
+        // Create an executor that bridges to the kernel
+        let executor = KernelPipelineExecutor { kernel: self };
+
+        match self
+            .pipeline_engine
+            .run(&definition, &input, run_id, &executor)
+            .await
+        {
+            Ok(run) => {
+                let run_json = serde_json::to_value(&run).unwrap_or_default();
+                KernelResponse::Success {
+                    data: Some(run_json),
+                }
+            }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+
+    async fn cmd_pipeline_status(&self, run_id: String) -> KernelResponse {
+        let run_id = match uuid::Uuid::parse_str(&run_id) {
+            Ok(u) => agentos_types::RunID::from_uuid(u),
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: format!("Invalid run ID: {}", e),
+                }
+            }
+        };
+
+        match self.pipeline_engine.store().get_run(&run_id) {
+            Ok(run) => {
+                let run_json = serde_json::to_value(&run).unwrap_or_default();
+                KernelResponse::PipelineRunStatus(run_json)
+            }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+
+    async fn cmd_pipeline_list(&self) -> KernelResponse {
+        match self.pipeline_engine.store().list_pipelines() {
+            Ok(list) => {
+                let json_list: Vec<serde_json::Value> = list
+                    .into_iter()
+                    .map(|s| serde_json::to_value(s).unwrap_or_default())
+                    .collect();
+                KernelResponse::PipelineList(json_list)
+            }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+
+    async fn cmd_pipeline_logs(&self, run_id: String, step_id: String) -> KernelResponse {
+        let run_id = match uuid::Uuid::parse_str(&run_id) {
+            Ok(u) => agentos_types::RunID::from_uuid(u),
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: format!("Invalid run ID: {}", e),
+                }
+            }
+        };
+
+        match self
+            .pipeline_engine
+            .store()
+            .get_step_logs(&run_id, &step_id)
+        {
+            Ok(logs) => {
+                let json_logs: Vec<serde_json::Value> = logs
+                    .into_iter()
+                    .map(|l| serde_json::to_value(l).unwrap_or_default())
+                    .collect();
+                KernelResponse::PipelineStepLogs(json_logs)
+            }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+
+    async fn cmd_remove_pipeline(&self, name: String) -> KernelResponse {
+        match self.pipeline_engine.store().remove_pipeline(&name) {
+            Ok(()) => {
+                tracing::info!(pipeline = %name, "Pipeline removed");
+                KernelResponse::Success {
+                    data: Some(serde_json::json!({ "removed": name })),
+                }
+            }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
         }
     }
 
     // --- Bundled Core Tool Manifests ---
 
     const CORE_MANIFESTS: &[(&'static str, &'static str)] = &[
-        ("file-reader.toml", include_str!("../../../tools/core/file-reader.toml")),
-        ("file-writer.toml", include_str!("../../../tools/core/file-writer.toml")),
-        ("memory-search.toml", include_str!("../../../tools/core/memory-search.toml")),
-        ("memory-write.toml", include_str!("../../../tools/core/memory-write.toml")),
-        ("data-parser.toml", include_str!("../../../tools/core/data-parser.toml")),
+        (
+            "file-reader.toml",
+            include_str!("../../../tools/core/file-reader.toml"),
+        ),
+        (
+            "file-writer.toml",
+            include_str!("../../../tools/core/file-writer.toml"),
+        ),
+        (
+            "memory-search.toml",
+            include_str!("../../../tools/core/memory-search.toml"),
+        ),
+        (
+            "memory-write.toml",
+            include_str!("../../../tools/core/memory-write.toml"),
+        ),
+        (
+            "data-parser.toml",
+            include_str!("../../../tools/core/data-parser.toml"),
+        ),
     ];
 
     /// Install bundled core tool manifests into the runtime directory if not already present.
     fn install_core_manifests(core_dir: &Path) -> Result<(), anyhow::Error> {
         for (filename, content) in Self::CORE_MANIFESTS {
             let dest = core_dir.join(filename);
-            if !dest.exists() || std::fs::metadata(&dest).map(|m| m.len() == 0).unwrap_or(false) {
+            if !dest.exists()
+                || std::fs::metadata(&dest)
+                    .map(|m| m.len() == 0)
+                    .unwrap_or(false)
+            {
                 std::fs::write(&dest, content)?;
             }
         }
         Ok(())
+    }
+}
+
+/// Bridges the pipeline engine to kernel subsystems for executing agent tasks and tools.
+struct KernelPipelineExecutor<'a> {
+    kernel: &'a Kernel,
+}
+
+#[async_trait::async_trait]
+impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
+    async fn run_agent_task(&self, agent_name: &str, prompt: &str) -> Result<String, AgentOSError> {
+        let response = self
+            .kernel
+            .cmd_run_task(Some(agent_name.to_string()), prompt.to_string())
+            .await;
+        match response {
+            KernelResponse::Success { data: Some(data) } => Ok(data
+                .get("result")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()),
+            KernelResponse::Error { message } => Err(AgentOSError::KernelError { reason: message }),
+            _ => Err(AgentOSError::KernelError {
+                reason: "Unexpected response from task execution".to_string(),
+            }),
+        }
+    }
+
+    async fn run_tool(
+        &self,
+        tool_name: &str,
+        input: serde_json::Value,
+    ) -> Result<String, AgentOSError> {
+        let context = ToolExecutionContext {
+            data_dir: self.kernel.data_dir.clone(),
+            task_id: TaskID::new(),
+            agent_id: AgentID::new(),
+            trace_id: TraceID::new(),
+            permissions: PermissionSet::new(),
+            vault: Some(self.kernel.vault.clone()),
+            hal: Some(self.kernel.hal.clone()),
+        };
+
+        let result = self
+            .kernel
+            .tool_runner
+            .execute(tool_name, input, context)
+            .await?;
+        Ok(serde_json::to_string(&result).unwrap_or_default())
     }
 }

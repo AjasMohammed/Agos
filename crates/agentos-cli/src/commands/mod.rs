@@ -1,16 +1,17 @@
-use agentos_bus::client::BusClient;
 use crate::Commands;
+use agentos_bus::client::BusClient;
 
 pub mod agent;
-pub mod task;
-pub mod tool;
-pub mod secret;
-pub mod perm;
-pub mod status;
 pub mod audit;
+pub mod bg;
+pub mod perm;
+pub mod pipeline;
 pub mod role;
 pub mod schedule;
-pub mod bg;
+pub mod secret;
+pub mod status;
+pub mod task;
+pub mod tool;
 
 pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow::Result<()> {
     match command {
@@ -24,6 +25,7 @@ pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow
         Commands::Role { command } => role::handle(client, command).await,
         Commands::Schedule { command } => schedule::handle(client, command).await,
         Commands::Bg { command } => bg::handle(client, command).await,
+        Commands::Pipeline { command } => pipeline::handle(client, command).await,
         _ => unreachable!(),
     }
 }

@@ -99,10 +99,11 @@ impl LLMCore for CustomCore {
             });
         }
 
-        let json_resp: serde_json::Value = res.json().await.map_err(|e| AgentOSError::LLMError {
-            provider: "custom".to_string(),
-            reason: format!("Failed to parse JSON response: {}", e),
-        })?;
+        let json_resp: serde_json::Value =
+            res.json().await.map_err(|e| AgentOSError::LLMError {
+                provider: "custom".to_string(),
+                reason: format!("Failed to parse JSON response: {}", e),
+            })?;
 
         let text = json_resp["choices"][0]["message"]["content"]
             .as_str()
@@ -110,7 +111,9 @@ impl LLMCore for CustomCore {
             .to_string();
 
         let prompt_tokens = json_resp["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
-        let completion_tokens = json_resp["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+        let completion_tokens = json_resp["usage"]["completion_tokens"]
+            .as_u64()
+            .unwrap_or(0);
         let total_tokens = json_resp["usage"]["total_tokens"].as_u64().unwrap_or(0);
 
         Ok(InferenceResult {

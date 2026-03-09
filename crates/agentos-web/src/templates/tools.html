@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Tool Manager</h1>
+
+<div x-data="{ showInstall: false }">
+    <div class="grid">
+        <div>
+            <button @click="showInstall = !showInstall" class="outline">Install Tool</button>
+        </div>
+        <div>
+            <select hx-get="/tools" hx-target="#tool-grid" hx-swap="innerHTML" name="filter_type"
+                    hx-include="[name='filter_type']" hx-params="filter_type,partial"
+                    hx-vals='{"partial": "list"}'>
+                <option value="">All Types</option>
+                <option value="inline">Inline</option>
+                <option value="wasm">WASM</option>
+            </select>
+        </div>
+    </div>
+
+    <div x-show="showInstall" x-transition>
+        <article>
+            <form method="post" action="/tools" hx-post="/tools">
+                <label for="manifest_path">Tool Manifest Path (TOML)
+                    <input type="text" id="manifest_path" name="manifest_path" required
+                           placeholder="/path/to/tool.toml">
+                </label>
+                <button type="submit">Install</button>
+            </form>
+        </article>
+    </div>
+</div>
+
+<p>{{ tool_count }} tools installed</p>
+
+<div id="tool-grid" class="grid" hx-get="/tools?partial=list" hx-trigger="every 10s" hx-swap="innerHTML">
+    {% for tool in tools %}
+    <article>
+        <header>
+            <strong>{{ tool.name }}</strong>
+            <span class="badge">{{ tool.executor_type }}</span>
+        </header>
+        <p>{{ tool.description }}</p>
+        <p>v{{ tool.version }} | Status: {{ tool.status }}</p>
+        <p>
+            {% if tool.network %}<kbd>network</kbd>{% endif %}
+            {% if tool.fs_write %}<kbd>fs_write</kbd>{% endif %}
+        </p>
+        <footer>
+            <button class="outline secondary"
+                    hx-delete="/tools/{{ tool.name }}"
+                    hx-confirm="Remove {{ tool.name }}?"
+                    hx-target="closest article"
+                    hx-swap="outerHTML">Remove</button>
+        </footer>
+    </article>
+    {% endfor %}
+</div>
+{% endblock %}

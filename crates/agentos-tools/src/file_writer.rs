@@ -46,7 +46,10 @@ impl AgentTool for FileWriter {
                 AgentOSError::SchemaValidation("file-writer requires 'content' field".into())
             })?;
 
-        let append = payload.get("append").and_then(|v| v.as_bool()).unwrap_or(false);
+        let append = payload
+            .get("append")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // SECURITY: resolve path relative to data_dir only. Prevent path traversal.
         let requested_path = Path::new(path_str);
@@ -61,13 +64,14 @@ impl AgentTool for FileWriter {
         // We can't use canonicalize() because the file may not exist yet, so we
         // normalize lexically and check that the result stays within data_dir.
         let normalized = normalize_path(&resolved);
-        let canonical_data_dir = context
-            .data_dir
-            .canonicalize()
-            .map_err(|e| AgentOSError::ToolExecutionFailed {
-                tool_name: "file-writer".into(),
-                reason: format!("Data directory error: {}", e),
-            })?;
+        let canonical_data_dir =
+            context
+                .data_dir
+                .canonicalize()
+                .map_err(|e| AgentOSError::ToolExecutionFailed {
+                    tool_name: "file-writer".into(),
+                    reason: format!("Data directory error: {}", e),
+                })?;
 
         if !normalized.starts_with(&canonical_data_dir) {
             return Err(AgentOSError::PermissionDenied {
@@ -78,12 +82,12 @@ impl AgentTool for FileWriter {
 
         // Create parent directories if needed (safe now that path is validated)
         if let Some(parent) = normalized.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| AgentOSError::ToolExecutionFailed {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                AgentOSError::ToolExecutionFailed {
                     tool_name: "file-writer".into(),
                     reason: format!("Cannot create directory: {}", e),
-                })?;
+                }
+            })?;
         }
 
         if append {
@@ -97,19 +101,19 @@ impl AgentTool for FileWriter {
                     tool_name: "file-writer".into(),
                     reason: format!("Cannot open for append: {}", e),
                 })?;
-            file.write_all(content.as_bytes())
-                .await
-                .map_err(|e| AgentOSError::ToolExecutionFailed {
+            file.write_all(content.as_bytes()).await.map_err(|e| {
+                AgentOSError::ToolExecutionFailed {
                     tool_name: "file-writer".into(),
                     reason: format!("Write failed: {}", e),
-                })?;
+                }
+            })?;
         } else {
-            tokio::fs::write(&normalized, content)
-                .await
-                .map_err(|e| AgentOSError::ToolExecutionFailed {
+            tokio::fs::write(&normalized, content).await.map_err(|e| {
+                AgentOSError::ToolExecutionFailed {
                     tool_name: "file-writer".into(),
                     reason: format!("Write failed: {}", e),
-                })?;
+                }
+            })?;
         }
 
         Ok(serde_json::json!({

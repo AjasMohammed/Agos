@@ -90,7 +90,8 @@ pub struct AuditEntry {
 
 impl AuditLog {
     pub fn open(path: &Path) -> Result<Self, AgentOSError> {
-        let conn = Connection::open(path).map_err(|e| AgentOSError::VaultError(format!("AuditLog DB open failed: {}", e)))?;
+        let conn = Connection::open(path)
+            .map_err(|e| AgentOSError::VaultError(format!("AuditLog DB open failed: {}", e)))?;
 
         conn.execute_batch(
             "
@@ -112,8 +113,9 @@ impl AuditLog {
             CREATE INDEX IF NOT EXISTS idx_audit_trace_id ON audit_log(trace_id);
             CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_log(event_type);
             CREATE INDEX IF NOT EXISTS idx_audit_agent_id ON audit_log(agent_id);
-            "
-        ).map_err(|e| AgentOSError::VaultError(format!("AuditLog init failed: {}", e)))?;
+            ",
+        )
+        .map_err(|e| AgentOSError::VaultError(format!("AuditLog init failed: {}", e)))?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -123,15 +125,18 @@ impl AuditLog {
     pub fn append(&self, entry: AuditEntry) -> Result<(), AgentOSError> {
         let conn = self.conn.lock().unwrap();
 
-        let details = serde_json::to_string(&entry.details)
-            .map_err(|e| AgentOSError::Serialization(format!("AuditEntry serialize failed: {}", e)))?;
+        let details = serde_json::to_string(&entry.details).map_err(|e| {
+            AgentOSError::Serialization(format!("AuditEntry serialize failed: {}", e))
+        })?;
 
-        let event_type_str = serde_json::to_string(&entry.event_type)
-            .map_err(|e| AgentOSError::Serialization(format!("AuditEventType serialize failed: {}", e)))?;
+        let event_type_str = serde_json::to_string(&entry.event_type).map_err(|e| {
+            AgentOSError::Serialization(format!("AuditEventType serialize failed: {}", e))
+        })?;
         let event_type_str = event_type_str.trim_matches('"');
 
-        let severity_str = serde_json::to_string(&entry.severity)
-            .map_err(|e| AgentOSError::Serialization(format!("AuditSeverity serialize failed: {}", e)))?;
+        let severity_str = serde_json::to_string(&entry.severity).map_err(|e| {
+            AgentOSError::Serialization(format!("AuditSeverity serialize failed: {}", e))
+        })?;
         let severity_str = severity_str.trim_matches('"');
 
         conn.execute(
@@ -168,11 +173,16 @@ impl AuditLog {
         Self::execute_query(&mut stmt, params![trace_id.to_string()])
     }
 
-    pub fn query_by_type(&self, event_type: AuditEventType, limit: u32) -> Result<Vec<AuditEntry>, AgentOSError> {
+    pub fn query_by_type(
+        &self,
+        event_type: AuditEventType,
+        limit: u32,
+    ) -> Result<Vec<AuditEntry>, AgentOSError> {
         let conn = self.conn.lock().unwrap();
 
-        let event_type_str = serde_json::to_string(&event_type)
-            .map_err(|e| AgentOSError::Serialization(format!("AuditEventType serialize failed: {}", e)))?;
+        let event_type_str = serde_json::to_string(&event_type).map_err(|e| {
+            AgentOSError::Serialization(format!("AuditEventType serialize failed: {}", e))
+        })?;
         let event_type_str = event_type_str.trim_matches('"');
 
         let mut stmt = conn.prepare("SELECT timestamp, trace_id, event_type, agent_id, task_id, tool_id, details, severity FROM audit_log WHERE event_type = ?1 ORDER BY id DESC LIMIT ?2")
@@ -181,62 +191,83 @@ impl AuditLog {
         Self::execute_query(&mut stmt, params![event_type_str, limit])
     }
 
-    pub fn query_by_time_range(&self, from: chrono::DateTime<chrono::Utc>, to: chrono::DateTime<chrono::Utc>, limit: u32) -> Result<Vec<AuditEntry>, AgentOSError> {
+    pub fn query_by_time_range(
+        &self,
+        from: chrono::DateTime<chrono::Utc>,
+        to: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<Vec<AuditEntry>, AgentOSError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT timestamp, trace_id, event_type, agent_id, task_id, tool_id, details, severity FROM audit_log WHERE timestamp >= ?1 AND timestamp <= ?2 ORDER BY id DESC LIMIT ?3")
             .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
 
-        Self::execute_query(&mut stmt, params![from.to_rfc3339(), to.to_rfc3339(), limit])
+        Self::execute_query(
+            &mut stmt,
+            params![from.to_rfc3339(), to.to_rfc3339(), limit],
+        )
     }
 
     pub fn count(&self) -> Result<u64, AgentOSError> {
         let conn = self.conn.lock().unwrap();
-        let count: u64 = conn.query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))
+        let count: u64 = conn
+            .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))
             .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
 
         Ok(count)
     }
 
-    fn execute_query<P>(stmt: &mut rusqlite::Statement, params: P) -> Result<Vec<AuditEntry>, AgentOSError>
+    fn execute_query<P>(
+        stmt: &mut rusqlite::Statement,
+        params: P,
+    ) -> Result<Vec<AuditEntry>, AgentOSError>
     where
         P: rusqlite::Params,
     {
-        let rows = stmt.query_map(params, |row| {
-            let timestamp_str: String = row.get(0)?;
-            let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str).unwrap().with_timezone(&chrono::Utc);
+        let rows = stmt
+            .query_map(params, |row| {
+                let timestamp_str: String = row.get(0)?;
+                let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc);
 
-            let trace_id_str: String = row.get(1)?;
-            let trace_id = TraceID::from_uuid(uuid::Uuid::parse_str(&trace_id_str).unwrap());
+                let trace_id_str: String = row.get(1)?;
+                let trace_id = TraceID::from_uuid(uuid::Uuid::parse_str(&trace_id_str).unwrap());
 
-            let event_type_str: String = row.get(2)?;
-            let event_type: AuditEventType = serde_json::from_str(&format!("\"{}\"", event_type_str)).unwrap();
+                let event_type_str: String = row.get(2)?;
+                let event_type: AuditEventType =
+                    serde_json::from_str(&format!("\"{}\"", event_type_str)).unwrap();
 
-            let agent_id_str: Option<String> = row.get(3)?;
-            let agent_id = agent_id_str.map(|s| AgentID::from_uuid(uuid::Uuid::parse_str(&s).unwrap()));
+                let agent_id_str: Option<String> = row.get(3)?;
+                let agent_id =
+                    agent_id_str.map(|s| AgentID::from_uuid(uuid::Uuid::parse_str(&s).unwrap()));
 
-            let task_id_str: Option<String> = row.get(4)?;
-            let task_id = task_id_str.map(|s| TaskID::from_uuid(uuid::Uuid::parse_str(&s).unwrap()));
+                let task_id_str: Option<String> = row.get(4)?;
+                let task_id =
+                    task_id_str.map(|s| TaskID::from_uuid(uuid::Uuid::parse_str(&s).unwrap()));
 
-            let tool_id_str: Option<String> = row.get(5)?;
-            let tool_id = tool_id_str.map(|s| ToolID::from_uuid(uuid::Uuid::parse_str(&s).unwrap()));
+                let tool_id_str: Option<String> = row.get(5)?;
+                let tool_id =
+                    tool_id_str.map(|s| ToolID::from_uuid(uuid::Uuid::parse_str(&s).unwrap()));
 
-            let details_str: String = row.get(6)?;
-            let details: serde_json::Value = serde_json::from_str(&details_str).unwrap();
+                let details_str: String = row.get(6)?;
+                let details: serde_json::Value = serde_json::from_str(&details_str).unwrap();
 
-            let severity_str: String = row.get(7)?;
-            let severity: AuditSeverity = serde_json::from_str(&format!("\"{}\"", severity_str)).unwrap();
+                let severity_str: String = row.get(7)?;
+                let severity: AuditSeverity =
+                    serde_json::from_str(&format!("\"{}\"", severity_str)).unwrap();
 
-            Ok(AuditEntry {
-                timestamp,
-                trace_id,
-                event_type,
-                agent_id,
-                task_id,
-                tool_id,
-                details,
-                severity,
+                Ok(AuditEntry {
+                    timestamp,
+                    trace_id,
+                    event_type,
+                    agent_id,
+                    task_id,
+                    tool_id,
+                    details,
+                    severity,
+                })
             })
-        }).map_err(|e| AgentOSError::VaultError(e.to_string()))?;
+            .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
 
         let mut entries = Vec::new();
         for row_result in rows {
@@ -281,7 +312,11 @@ mod tests {
         let trace = TraceID::new();
 
         // Append 3 entries with same trace_id
-        for event in [AuditEventType::IntentReceived, AuditEventType::ToolExecutionStarted, AuditEventType::IntentCompleted] {
+        for event in [
+            AuditEventType::IntentReceived,
+            AuditEventType::ToolExecutionStarted,
+            AuditEventType::IntentCompleted,
+        ] {
             log.append(AuditEntry {
                 timestamp: chrono::Utc::now(),
                 trace_id: trace,
@@ -291,7 +326,8 @@ mod tests {
                 tool_id: None,
                 details: serde_json::json!({}),
                 severity: AuditSeverity::Info,
-            }).unwrap();
+            })
+            .unwrap();
         }
 
         let results = log.query_by_trace(&trace).unwrap();

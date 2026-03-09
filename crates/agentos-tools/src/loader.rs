@@ -18,12 +18,12 @@ pub fn load_manifest(path: &Path) -> Result<LoadedManifest, AgentOSError> {
         AgentOSError::SchemaValidation(format!("Invalid manifest {:?}: {}", path, e))
     })?;
 
-    let manifest_dir = path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
+    let manifest_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
-    Ok(LoadedManifest { manifest, manifest_dir })
+    Ok(LoadedManifest {
+        manifest,
+        manifest_dir,
+    })
 }
 
 /// Load all manifests from a directory.
@@ -42,7 +42,7 @@ pub fn load_all_manifests(dir: &Path) -> Result<Vec<LoadedManifest>, AgentOSErro
             reason: format!("Error reading directory entry: {}", e),
         })?;
         let path = entry.path();
-        if path.extension().map_or(false, |e| e == "toml") {
+        if path.extension().is_some_and(|e| e == "toml") {
             manifests.push(load_manifest(&path)?);
         }
     }

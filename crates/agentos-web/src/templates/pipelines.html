@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Pipeline Manager</h1>
+
+<div x-data="{ showRun: false, selectedPipeline: '' }">
+    <figure>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Version</th>
+                <th>Description</th>
+                <th>Steps</th>
+                <th>Installed</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for pipeline in pipelines %}
+            <tr>
+                <td><strong>{{ pipeline.name }}</strong></td>
+                <td>{{ pipeline.version }}</td>
+                <td>{{ pipeline.description|default("-", true) }}</td>
+                <td>{{ pipeline.step_count }}</td>
+                <td>{{ pipeline.installed_at }}</td>
+                <td>
+                    <button class="outline small"
+                            @click="showRun = true; selectedPipeline = '{{ pipeline.name }}'">
+                        Run
+                    </button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </figure>
+
+    <dialog :open="showRun" @close="showRun = false">
+        <article>
+            <header>
+                <button aria-label="Close" rel="prev" @click="showRun = false"></button>
+                <h3>Run Pipeline</h3>
+            </header>
+            <form method="post" action="/pipelines/run">
+                <input type="hidden" name="pipeline_name" :value="selectedPipeline">
+                <label for="pipeline-input">Input
+                    <textarea id="pipeline-input" name="input" required rows="4"
+                              placeholder="Pipeline input..."></textarea>
+                </label>
+                <button type="submit">Run</button>
+            </form>
+        </article>
+    </dialog>
+</div>
+{% endblock %}

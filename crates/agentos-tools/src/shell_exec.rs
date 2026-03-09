@@ -12,6 +12,12 @@ impl ShellExec {
     }
 }
 
+impl Default for ShellExec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl AgentTool for ShellExec {
     fn name(&self) -> &str {
@@ -62,26 +68,46 @@ impl AgentTool for ShellExec {
             // and hide sensitive directories by mounting an empty tmpfs over them.
             let mut proc = Command::new("bwrap");
 
-            proc.arg("--ro-bind").arg("/usr").arg("/usr")
-                .arg("--ro-bind").arg("/lib").arg("/lib")
-                .arg("--ro-bind").arg("/lib64").arg("/lib64")
-                .arg("--ro-bind").arg("/bin").arg("/bin")
-                .arg("--ro-bind").arg("/sbin").arg("/sbin")
+            proc.arg("--ro-bind")
+                .arg("/usr")
+                .arg("/usr")
+                .arg("--ro-bind")
+                .arg("/lib")
+                .arg("/lib")
+                .arg("--ro-bind")
+                .arg("/lib64")
+                .arg("/lib64")
+                .arg("--ro-bind")
+                .arg("/bin")
+                .arg("/bin")
+                .arg("--ro-bind")
+                .arg("/sbin")
+                .arg("/sbin")
                 // Bind the data dir as the only writable place
-                .arg("--bind").arg(&data_dir_str).arg(&data_dir_str)
+                .arg("--bind")
+                .arg(&data_dir_str)
+                .arg(&data_dir_str)
                 // Hide sensitive directories
-                .arg("--tmpfs").arg("/root")
-                .arg("--tmpfs").arg("/etc")
-                .arg("--tmpfs").arg("/var")
-                .arg("--tmpfs").arg("/home") // hide other users' homes
+                .arg("--tmpfs")
+                .arg("/root")
+                .arg("--tmpfs")
+                .arg("/etc")
+                .arg("--tmpfs")
+                .arg("/var")
+                .arg("--tmpfs")
+                .arg("/home") // hide other users' homes
                 // Give it a fresh /tmp and /dev
-                .arg("--tmpfs").arg("/tmp")
-                .arg("--dev").arg("/dev")
-                .arg("--proc").arg("/proc")
+                .arg("--tmpfs")
+                .arg("/tmp")
+                .arg("--dev")
+                .arg("/dev")
+                .arg("--proc")
+                .arg("/proc")
                 .arg("--unshare-all")
                 .arg("--share-net") // or omit depending on network requirements for this tool
                 // Change to the data dir
-                .arg("--chdir").arg(&data_dir_str)
+                .arg("--chdir")
+                .arg(&data_dir_str)
                 // Finally, pass the shell and the command
                 .arg("--")
                 .arg("sh")

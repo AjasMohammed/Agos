@@ -51,11 +51,20 @@ pub enum ScheduleCommands {
 
 pub async fn handle(client: &mut BusClient, command: ScheduleCommands) -> anyhow::Result<()> {
     match command {
-        ScheduleCommands::Create { name, cron, agent, task, permissions } => {
+        ScheduleCommands::Create {
+            name,
+            cron,
+            agent,
+            task,
+            permissions,
+        } => {
             let perms = if permissions.is_empty() {
                 Vec::new()
             } else {
-                permissions.split(',').map(|s| s.trim().to_string()).collect()
+                permissions
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect()
             };
 
             let cmd = KernelCommand::CreateSchedule {
@@ -83,12 +92,25 @@ pub async fn handle(client: &mut BusClient, command: ScheduleCommands) -> anyhow
                     return Ok(());
                 }
 
-                println!("{:<20} {:<15} {:<15} {:<10} {:<20} {:<10}", "NAME", "CRON", "AGENT", "STATE", "NEXT RUN", "RUNS");
+                println!(
+                    "{:<20} {:<15} {:<15} {:<10} {:<20} {:<10}",
+                    "NAME", "CRON", "AGENT", "STATE", "NEXT RUN", "RUNS"
+                );
                 for job in jobs {
-                    let next_run = job.next_run_at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_else(|| "N/A".to_string());
+                    let next_run = job
+                        .next_run_at
+                        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|| "N/A".to_string());
                     let state = format!("{:?}", job.state).to_lowercase();
-                    println!("{:<20} {:<15} {:<15} {:<10} {:<20} {:<10}",
-                             job.name, job.cron_expression, job.agent_name, state, next_run, job.run_count);
+                    println!(
+                        "{:<20} {:<15} {:<15} {:<10} {:<20} {:<10}",
+                        job.name,
+                        job.cron_expression,
+                        job.agent_name,
+                        state,
+                        next_run,
+                        job.run_count
+                    );
                 }
             } else if let KernelResponse::Error { message } = response {
                 anyhow::bail!("Failed to list schedules: {}", message);
@@ -97,7 +119,9 @@ pub async fn handle(client: &mut BusClient, command: ScheduleCommands) -> anyhow
             }
         }
         ScheduleCommands::Pause { name } => {
-            let response = client.send_command(KernelCommand::PauseSchedule { name: name.clone() }).await?;
+            let response = client
+                .send_command(KernelCommand::PauseSchedule { name: name.clone() })
+                .await?;
             if let KernelResponse::Success { .. } = response {
                 println!("⏸️  Schedule '{}' paused.", name);
             } else if let KernelResponse::Error { message } = response {
@@ -107,7 +131,9 @@ pub async fn handle(client: &mut BusClient, command: ScheduleCommands) -> anyhow
             }
         }
         ScheduleCommands::Resume { name } => {
-            let response = client.send_command(KernelCommand::ResumeSchedule { name: name.clone() }).await?;
+            let response = client
+                .send_command(KernelCommand::ResumeSchedule { name: name.clone() })
+                .await?;
             if let KernelResponse::Success { .. } = response {
                 println!("▶️  Schedule '{}' resumed.", name);
             } else if let KernelResponse::Error { message } = response {
@@ -117,7 +143,9 @@ pub async fn handle(client: &mut BusClient, command: ScheduleCommands) -> anyhow
             }
         }
         ScheduleCommands::Delete { name } => {
-            let response = client.send_command(KernelCommand::DeleteSchedule { name: name.clone() }).await?;
+            let response = client
+                .send_command(KernelCommand::DeleteSchedule { name: name.clone() })
+                .await?;
             if let KernelResponse::Success { .. } = response {
                 println!("🗑️  Schedule '{}' deleted.", name);
             } else if let KernelResponse::Error { message } = response {

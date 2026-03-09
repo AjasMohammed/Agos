@@ -1,0 +1,22 @@
+[manifest]
+name        = "http-client"
+version     = "1.0.0"
+description = "Make outbound HTTP requests (GET, POST, PUT, DELETE). Credentials injected from the secrets vault."
+author      = "agentos-core"
+
+[capabilities_required]
+permissions = ["network.outbound:x"]
+
+[capabilities_provided]
+outputs = ["http.response"]
+
+[intent_schema]
+input  = "HttpRequest"
+output = "HttpResponse"
+
+[sandbox]
+network       = true
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 15000

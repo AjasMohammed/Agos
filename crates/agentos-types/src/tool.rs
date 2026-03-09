@@ -8,7 +8,7 @@ use std::path::PathBuf;
 pub enum ExecutorType {
     #[default]
     Inline, // built-in Rust implementation (compiled into kernel)
-    Wasm,   // external .wasm module loaded at runtime
+    Wasm, // external .wasm module loaded at runtime
 }
 
 /// Executor configuration for a tool manifest.
@@ -53,18 +53,18 @@ pub struct ToolInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCapabilities {
-    pub permissions: Vec<String>,  // e.g. ["fs.read", "context.write"]
+    pub permissions: Vec<String>, // e.g. ["fs.read", "context.write"]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolOutputs {
-    pub outputs: Vec<String>,  // e.g. ["content.text", "content.structured"]
+    pub outputs: Vec<String>, // e.g. ["content.text", "content.structured"]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSchema {
-    pub input: String,   // e.g. "FileReadIntent"
-    pub output: String,  // e.g. "FileContent"
+    pub input: String,  // e.g. "FileReadIntent"
+    pub output: String, // e.g. "FileContent"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -5,7 +5,7 @@ description = "Search semantic memory for relevant past knowledge by keyword or 
 author      = "agentos-core"
 
 [capabilities_required]
-permissions = ["memory.semantic:r"]
+permissions = ["memory.semantic:r", "memory.episodic:r"]
 
 [capabilities_provided]
 outputs = ["content.text"]

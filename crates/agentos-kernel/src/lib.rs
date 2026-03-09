@@ -1,16 +1,16 @@
+pub mod agent_message_bus;
 pub mod agent_registry;
+pub mod background_pool;
 pub mod config;
 pub mod context;
 pub mod kernel;
+pub mod router;
+pub mod schedule_manager;
 pub mod scheduler;
 pub mod tool_call;
 pub mod tool_registry;
-pub mod router;
-pub mod agent_message_bus;
-pub mod episodic_memory;
-pub mod schedule_manager;
-pub mod background_pool;
 
+pub use agent_message_bus::AgentMessageBus;
 pub use agent_registry::AgentRegistry;
 pub use config::{load_config, KernelConfig};
 pub use context::ContextManager;
@@ -18,4 +18,3 @@ pub use kernel::Kernel;
 pub use scheduler::TaskScheduler;
 pub use tool_call::{parse_tool_call, ParsedToolCall};
 pub use tool_registry::ToolRegistry;
-pub use agent_message_bus::AgentMessageBus;

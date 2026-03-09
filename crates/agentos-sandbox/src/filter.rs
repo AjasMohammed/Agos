@@ -182,7 +182,11 @@ mod tests {
     fn test_build_default_filter_succeeds() {
         let config = SandboxConfig::default();
         let result = build_seccomp_filter(&config);
-        assert!(result.is_ok(), "Default filter should compile: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Default filter should compile: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -192,7 +196,11 @@ mod tests {
             ..Default::default()
         };
         let result = build_seccomp_filter(&config);
-        assert!(result.is_ok(), "Network filter should compile: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Network filter should compile: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -202,7 +210,11 @@ mod tests {
             ..Default::default()
         };
         let result = build_seccomp_filter(&config);
-        assert!(result.is_ok(), "FS-write filter should compile: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "FS-write filter should compile: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -214,7 +226,11 @@ mod tests {
             ..Default::default()
         };
         let result = build_seccomp_filter(&config);
-        assert!(result.is_ok(), "Full-access filter should compile: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Full-access filter should compile: {:?}",
+            result.err()
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
-use agentos_types::{AgentID, AgentMessage, GroupID, AgentOSError};
-use tokio::sync::mpsc;
+use agentos_types::{AgentID, AgentMessage, AgentOSError, GroupID};
 use std::collections::HashMap;
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
 pub struct AgentMessageBus {
@@ -34,13 +34,14 @@ impl AgentMessageBus {
     }
 
     /// Send a direct message to a specific agent.
-    pub async fn send_direct(
-        &self,
-        message: AgentMessage,
-    ) -> Result<(), AgentOSError> {
+    pub async fn send_direct(&self, message: AgentMessage) -> Result<(), AgentOSError> {
         let agent_id = match message.to {
             agentos_types::MessageTarget::Direct(id) => id,
-            _ => return Err(AgentOSError::KernelError { reason: "Invalid target for send_direct".into() }),
+            _ => {
+                return Err(AgentOSError::KernelError {
+                    reason: "Invalid target for send_direct".into(),
+                })
+            }
         };
 
         let inboxes = self.inboxes.read().await;
@@ -54,10 +55,7 @@ impl AgentMessageBus {
     }
 
     /// Broadcast a message to all connected agents (except sender).
-    pub async fn broadcast(
-        &self,
-        message: AgentMessage,
-    ) -> Result<u32, AgentOSError> {
+    pub async fn broadcast(&self, message: AgentMessage) -> Result<u32, AgentOSError> {
         let mut count = 0;
         let inboxes = self.inboxes.read().await;
 
@@ -79,8 +77,11 @@ impl AgentMessageBus {
         message: AgentMessage,
     ) -> Result<u32, AgentOSError> {
         let groups = self.groups.read().await;
-        let members = groups.get(group_id)
-            .ok_or_else(|| AgentOSError::KernelError { reason: format!("Group {} not found", group_id) })?;
+        let members = groups
+            .get(group_id)
+            .ok_or_else(|| AgentOSError::KernelError {
+                reason: format!("Group {} not found", group_id),
+            })?;
 
         let mut count = 0;
         let inboxes = self.inboxes.read().await;
@@ -99,26 +100,22 @@ impl AgentMessageBus {
     }
 
     /// Create a named group of agents.
-    pub async fn create_group(
-        &self,
-        group_id: GroupID,
-        members: Vec<AgentID>,
-    ) {
+    pub async fn create_group(&self, group_id: GroupID, members: Vec<AgentID>) {
         self.groups.write().await.insert(group_id, members);
     }
 
     /// Get recent message history for an agent.
-    pub async fn get_history(
-        &self,
-        agent_id: &AgentID,
-        limit: usize,
-    ) -> Vec<AgentMessage> {
+    pub async fn get_history(&self, agent_id: &AgentID, limit: usize) -> Vec<AgentMessage> {
         let history = self.history.read().await;
-        history.iter()
-            .filter(|m| m.from == *agent_id || match m.to {
-                agentos_types::MessageTarget::Direct(to) => to == *agent_id,
-                agentos_types::MessageTarget::Broadcast => true,
-                _ => false // Can handle groups later if needed
+        history
+            .iter()
+            .filter(|m| {
+                m.from == *agent_id
+                    || match m.to {
+                        agentos_types::MessageTarget::Direct(to) => to == *agent_id,
+                        agentos_types::MessageTarget::Broadcast => true,
+                        _ => false, // Can handle groups later if needed
+                    }
             })
             .rev()
             .take(limit)
@@ -151,7 +148,7 @@ impl Default for AgentMessageBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentos_types::{MessageID, MessageTarget, MessageContent, TraceID};
+    use agentos_types::{MessageContent, MessageID, MessageTarget, TraceID};
 
     #[tokio::test]
     async fn test_direct_message_delivery() {

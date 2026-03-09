@@ -1,7 +1,7 @@
-use clap::Subcommand;
 use agentos_bus::client::BusClient;
 use agentos_bus::message::{KernelCommand, KernelResponse};
 use agentos_types::agent::LLMProvider;
+use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum AgentCommands {
@@ -70,14 +70,21 @@ pub enum AgentGroupCommands {
 
 pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::Result<()> {
     match command {
-        AgentCommands::Connect { provider, model, name, base_url } => {
+        AgentCommands::Connect {
+            provider,
+            model,
+            name,
+            base_url,
+        } => {
             let provider = parse_provider(&provider)?;
-            let response = client.send_command(KernelCommand::ConnectAgent {
-                provider,
-                model,
-                name: name.clone(),
-                base_url,
-            }).await?;
+            let response = client
+                .send_command(KernelCommand::ConnectAgent {
+                    provider,
+                    model,
+                    name: name.clone(),
+                    base_url,
+                })
+                .await?;
 
             match response {
                 KernelResponse::Success { .. } => println!("✅ Agent '{}' connected", name),
@@ -95,7 +102,12 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                         println!("{:<20} {:<15} {}", "NAME", "PROVIDER", "MODEL");
                         println!("{}", "-".repeat(50));
                         for a in agents {
-                            println!("{:<20} {:<15} {}", a.name, format!("{:?}", a.provider), a.model);
+                            println!(
+                                "{:<20} {:<15} {}",
+                                a.name,
+                                format!("{:?}", a.provider),
+                                a.model
+                            );
                         }
                     }
                 }
@@ -115,7 +127,9 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                 anyhow::bail!("Agent '{}' not found", name);
             };
 
-            let response = client.send_command(KernelCommand::DisconnectAgent { agent_id }).await?;
+            let response = client
+                .send_command(KernelCommand::DisconnectAgent { agent_id })
+                .await?;
             match response {
                 KernelResponse::Success { .. } => println!("✅ Agent '{}' disconnected", name),
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
@@ -123,11 +137,13 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
             }
         }
         AgentCommands::Message { to, content } => {
-            let response = client.send_command(KernelCommand::SendAgentMessage {
-                from_name: "CLI".to_string(), // Arbitrary sender for CLI
-                to_name: to.clone(),
-                content,
-            }).await?;
+            let response = client
+                .send_command(KernelCommand::SendAgentMessage {
+                    from_name: "CLI".to_string(), // Arbitrary sender for CLI
+                    to_name: to.clone(),
+                    content,
+                })
+                .await?;
             match response {
                 KernelResponse::Success { .. } => println!("✅ Message sent to '{}'", to),
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
@@ -135,10 +151,12 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
             }
         }
         AgentCommands::Messages { agent, last } => {
-            let response = client.send_command(KernelCommand::ListAgentMessages {
-                agent_name: agent.clone(),
-                limit: last,
-            }).await?;
+            let response = client
+                .send_command(KernelCommand::ListAgentMessages {
+                    agent_name: agent.clone(),
+                    limit: last,
+                })
+                .await?;
             match response {
                 KernelResponse::AgentMessageList(messages) => {
                     if messages.is_empty() {
@@ -149,10 +167,20 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                             let content_str = match m.content {
                                 agentos_types::MessageContent::Text(ref text) => text.clone(),
                                 agentos_types::MessageContent::Structured(ref v) => v.to_string(),
-                                agentos_types::MessageContent::TaskDelegation { ref prompt, .. } => format!("Delegation: {}", prompt),
-                                agentos_types::MessageContent::TaskResult { ref result, .. } => format!("Result: {}", result),
+                                agentos_types::MessageContent::TaskDelegation {
+                                    ref prompt,
+                                    ..
+                                } => format!("Delegation: {}", prompt),
+                                agentos_types::MessageContent::TaskResult {
+                                    ref result, ..
+                                } => format!("Result: {}", result),
                             };
-                            println!("[{}] From: {} -> {}", m.timestamp.format("%H:%M:%S"), m.from, content_str);
+                            println!(
+                                "[{}] From: {} -> {}",
+                                m.timestamp.format("%H:%M:%S"),
+                                m.from,
+                                content_str
+                            );
                         }
                     }
                 }
@@ -160,12 +188,17 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                 _ => eprintln!("❌ Unexpected response"),
             }
         }
-        AgentCommands::Group { command: AgentGroupCommands::Create { name, members } } => {
-            let member_vec: Vec<String> = members.split(',').map(|s| s.trim().to_string()).collect();
-            let response = client.send_command(KernelCommand::CreateAgentGroup {
-                group_name: name.clone(),
-                members: member_vec,
-            }).await?;
+        AgentCommands::Group {
+            command: AgentGroupCommands::Create { name, members },
+        } => {
+            let member_vec: Vec<String> =
+                members.split(',').map(|s| s.trim().to_string()).collect();
+            let response = client
+                .send_command(KernelCommand::CreateAgentGroup {
+                    group_name: name.clone(),
+                    members: member_vec,
+                })
+                .await?;
             match response {
                 KernelResponse::Success { .. } => println!("✅ Group '{}' created", name),
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
@@ -173,14 +206,21 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
             }
         }
         AgentCommands::Broadcast { group, content } => {
-            let response = client.send_command(KernelCommand::BroadcastToGroup {
-                group_name: group.clone(),
-                content,
-            }).await?;
+            let response = client
+                .send_command(KernelCommand::BroadcastToGroup {
+                    group_name: group.clone(),
+                    content,
+                })
+                .await?;
             match response {
                 KernelResponse::Success { data } => {
-                    let sent_to = data.and_then(|d| d.get("sent_to").and_then(|v| v.as_u64())).unwrap_or(0);
-                    println!("✅ Broadcast sent to {} agents in group '{}'", sent_to, group);
+                    let sent_to = data
+                        .and_then(|d| d.get("sent_to").and_then(|v| v.as_u64()))
+                        .unwrap_or(0);
+                    println!(
+                        "✅ Broadcast sent to {} agents in group '{}'",
+                        sent_to, group
+                    );
                 }
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
                 _ => eprintln!("❌ Unexpected response"),

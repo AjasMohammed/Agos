@@ -44,10 +44,7 @@ mod tests {
 
         // Client connects and sends a command
         let mut client = BusClient::connect(&sock_path).await.unwrap();
-        let response = client
-            .send_command(KernelCommand::GetStatus)
-            .await
-            .unwrap();
+        let response = client.send_command(KernelCommand::GetStatus).await.unwrap();
 
         match response {
             KernelResponse::Status(status) => {
@@ -82,7 +79,10 @@ mod tests {
             agent_name: Some("test".into()),
             prompt: large_data.clone(),
         };
-        client.send_message(&BusMessage::Command(cmd)).await.unwrap();
+        client
+            .send_message(&BusMessage::Command(cmd))
+            .await
+            .unwrap();
 
         let response: BusMessage = client.receive_message().await.unwrap();
         // Verify round-trip integrity

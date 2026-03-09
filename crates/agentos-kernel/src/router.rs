@@ -86,7 +86,10 @@ impl TaskRouter {
 
             if matches {
                 // Try preferred agent
-                if let Some(agent) = online_agents.iter().find(|a| a.name == rule.preferred_agent) {
+                if let Some(agent) = online_agents
+                    .iter()
+                    .find(|a| a.name == rule.preferred_agent)
+                {
                     return Ok(agent.id);
                 }
 
@@ -131,7 +134,9 @@ impl TaskRouter {
                 Ok(sorted.last().unwrap().id)
             }
             RoutingStrategy::RoundRobin => {
-                let idx = self.round_robin_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                let idx = self
+                    .round_robin_index
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     % online_agents.len();
                 Ok(online_agents[idx].id)
             }
@@ -165,7 +170,10 @@ mod tests {
         let a1 = dummy_agent("local", LLMProvider::Ollama);
         let a2 = dummy_agent("cloud", LLMProvider::OpenAI);
 
-        let id = router.route("hello", &[a1.clone(), a2.clone()]).await.unwrap();
+        let id = router
+            .route("hello", &[a1.clone(), a2.clone()])
+            .await
+            .unwrap();
         assert_eq!(id, a2.id); // OpenAI is ranked higher than Ollama
     }
 
@@ -188,30 +196,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_routing_rules_preferred() {
-        let rules = vec![
-            RoutingRule {
-                task_pattern: Some(".*code.*".into()),
-                preferred_agent: "coder".into(),
-                fallback_agent: None,
-            }
-        ];
+        let rules = vec![RoutingRule {
+            task_pattern: Some(".*code.*".into()),
+            preferred_agent: "coder".into(),
+            fallback_agent: None,
+        }];
         let router = TaskRouter::new(RoutingStrategy::CostFirst, rules);
         let a1 = dummy_agent("local", LLMProvider::Ollama);
         let a2 = dummy_agent("coder", LLMProvider::Anthropic);
 
-        let id = router.route("write me some rust code", &[a1.clone(), a2.clone()]).await.unwrap();
+        let id = router
+            .route("write me some rust code", &[a1.clone(), a2.clone()])
+            .await
+            .unwrap();
         assert_eq!(id, a2.id); // Even though CostFirst prefers local, rule matches first
     }
 
     #[tokio::test]
     async fn test_routing_rules_fallback() {
-        let rules = vec![
-            RoutingRule {
-                task_pattern: Some(".*code.*".into()),
-                preferred_agent: "coder".into(), // Offline
-                fallback_agent: Some("local".into()),
-            }
-        ];
+        let rules = vec![RoutingRule {
+            task_pattern: Some(".*code.*".into()),
+            preferred_agent: "coder".into(), // Offline
+            fallback_agent: Some("local".into()),
+        }];
         let router = TaskRouter::new(RoutingStrategy::CostFirst, rules);
 
         // Coder is offline
@@ -220,7 +227,10 @@ mod tests {
 
         let a_local = dummy_agent("local", LLMProvider::Ollama);
 
-        let id = router.route("write code", &[a_local.clone(), a_coder.clone()]).await.unwrap();
+        let id = router
+            .route("write code", &[a_local.clone(), a_coder.clone()])
+            .await
+            .unwrap();
         assert_eq!(id, a_local.id); // Falls back to local agent
     }
 }

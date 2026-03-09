@@ -1,0 +1,4 @@
+interface:
+  display_name: "Obsidian Markdown"
+  short_description: "Edit Obsidian notes with links, tags, and frontmatter"
+  default_prompt: "Use $obsidian-markdown to create and refactor Obsidian .md notes while preserving wikilinks, YAML frontmatter, and vault conventions."

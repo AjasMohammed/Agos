@@ -65,12 +65,12 @@ impl AgentTool for FileReader {
         }
 
         // Read the file
-        let content = tokio::fs::read_to_string(&canonical)
-            .await
-            .map_err(|e| AgentOSError::ToolExecutionFailed {
+        let content = tokio::fs::read_to_string(&canonical).await.map_err(|e| {
+            AgentOSError::ToolExecutionFailed {
                 tool_name: "file-reader".into(),
                 reason: format!("Cannot read {}: {}", path_str, e),
-            })?;
+            }
+        })?;
 
         let metadata = tokio::fs::metadata(&canonical).await.ok();
         let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);

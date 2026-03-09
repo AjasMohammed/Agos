@@ -16,9 +16,9 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use wasmtime::{Engine, Linker, Module, Store};
 use wasmtime_wasi::{
+    p1::WasiP1Ctx,
     p2::pipe::{MemoryInputPipe, MemoryOutputPipe},
     WasiCtxBuilder,
-    p1::WasiP1Ctx,
 };
 
 // ── RAII guard: deletes the output file when dropped ──────────────────────────
@@ -184,10 +184,7 @@ impl AgentTool for WasmTool {
                 let stderr_content = String::from_utf8_lossy(&stderr_clone.contents()).into_owned();
                 return Err(AgentOSError::ToolExecutionFailed {
                     tool_name: self.name.clone(),
-                    reason: format!(
-                        "WASM execution failed: {}. Stderr: {}",
-                        e, stderr_content
-                    ),
+                    reason: format!("WASM execution failed: {}. Stderr: {}", e, stderr_content),
                 });
             }
         }

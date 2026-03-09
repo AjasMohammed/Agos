@@ -4,9 +4,10 @@ use agentos_types::{AgentOSError, PermissionEntry};
 pub fn parse_permission_str(s: &str) -> Result<PermissionEntry, AgentOSError> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 2 {
-        return Err(AgentOSError::SchemaValidation(
-            format!("Invalid permission format '{}', expected 'resource:rwx'", s)
-        ));
+        return Err(AgentOSError::SchemaValidation(format!(
+            "Invalid permission format '{}', expected 'resource:rwx'",
+            s
+        )));
     }
 
     let resource = parts[0].to_string();
@@ -17,11 +18,17 @@ pub fn parse_permission_str(s: &str) -> Result<PermissionEntry, AgentOSError> {
 
     if !read && !write && !execute {
         return Err(AgentOSError::SchemaValidation(
-            format!("Permission bits must contain at least one of r, w, x")
+            "Permission bits must contain at least one of r, w, x".to_string(),
         ));
     }
 
-    Ok(PermissionEntry { resource, read, write, execute, expires_at: None })
+    Ok(PermissionEntry {
+        resource,
+        read,
+        write,
+        execute,
+        expires_at: None,
+    })
 }
 
 #[cfg(test)]

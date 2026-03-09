@@ -1,5 +1,5 @@
-use crate::ids::*;
 use crate::capability::CapabilityToken;
+use crate::ids::*;
 use serde::{Deserialize, Serialize};
 
 /// The core envelope for all communication in AgentOS.
@@ -33,7 +33,7 @@ pub enum IntentType {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum IntentTarget {
     Tool(ToolID),
-    Kernel,  // internal kernel operations (memory mgmt, etc.)
+    Kernel, // internal kernel operations (memory mgmt, etc.)
 }
 
 /// The payload of an intent — validated, schema-checked data.

@@ -20,3 +20,6 @@ socket_path = "/tmp/agentos/agentos.sock"
 [ollama]
 host = "http://localhost:11434"
 default_model = "llama3.2"
+
+[memory]
+model_cache_dir = "models"

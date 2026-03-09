@@ -1,7 +1,7 @@
-use clap::Subcommand;
 use agentos_bus::client::BusClient;
 use agentos_bus::message::{KernelCommand, KernelResponse};
 use agentos_types::SecretScope;
+use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum SecretCommands {
@@ -39,11 +39,13 @@ pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::
 
             let scope = parse_scope(&scope)?;
 
-            let response = client.send_command(KernelCommand::SetSecret {
-                name: name.clone(),
-                value,
-                scope,
-            }).await?;
+            let response = client
+                .send_command(KernelCommand::SetSecret {
+                    name: name.clone(),
+                    value,
+                    scope,
+                })
+                .await?;
 
             match response {
                 KernelResponse::Success { .. } => println!("✅ Secret '{}' stored securely", name),
@@ -63,7 +65,8 @@ pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::
                         println!("{}", "-".repeat(65));
                         for s in secrets {
                             let scope_str = format!("{:?}", s.scope);
-                            let last_used = s.last_used_at
+                            let last_used = s
+                                .last_used_at
                                 .map(|t: chrono::DateTime<chrono::Utc>| t.to_string())
                                 .unwrap_or_else(|| "never".into());
                             println!("{:<25} {:<20} {}", s.name, scope_str, last_used);
@@ -76,7 +79,9 @@ pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::
         }
 
         SecretCommands::Revoke { name } => {
-            let response = client.send_command(KernelCommand::RevokeSecret { name: name.clone() }).await?;
+            let response = client
+                .send_command(KernelCommand::RevokeSecret { name: name.clone() })
+                .await?;
             match response {
                 KernelResponse::Success { .. } => println!("✅ Secret '{}' revoked", name),
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
@@ -92,10 +97,12 @@ pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::
                 anyhow::bail!("Secret value cannot be empty");
             }
 
-            let response = client.send_command(KernelCommand::RotateSecret {
-                name: name.clone(),
-                new_value,
-            }).await?;
+            let response = client
+                .send_command(KernelCommand::RotateSecret {
+                    name: name.clone(),
+                    new_value,
+                })
+                .await?;
 
             match response {
                 KernelResponse::Success { .. } => println!("✅ Secret '{}' rotated", name),
@@ -116,6 +123,9 @@ fn parse_scope(s: &str) -> anyhow::Result<SecretScope> {
         s if s.starts_with("tool:") => {
             Ok(SecretScope::Global) // simplified for Phase 1
         }
-        _ => anyhow::bail!("Invalid scope: '{}'. Use 'global', 'agent:<name>', or 'tool:<name>'", s),
+        _ => anyhow::bail!(
+            "Invalid scope: '{}'. Use 'global', 'agent:<name>', or 'tool:<name>'",
+            s
+        ),
     }
 }

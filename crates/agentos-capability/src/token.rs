@@ -7,8 +7,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// Compute the HMAC-SHA256 signature for a token.
 /// Signs over: task_id | agent_id | allowed_tools | allowed_intents | permissions | issued_at | expires_at
 pub fn compute_signature(signing_key: &[u8; 32], token: &CapabilityToken) -> Vec<u8> {
-    let mut mac = HmacSha256::new_from_slice(signing_key)
-        .expect("HMAC can take any size key");
+    let mut mac = HmacSha256::new_from_slice(signing_key).expect("HMAC can take any size key");
 
     // Create a canonical byte representation to sign
     mac.update(token.task_id.as_uuid().as_bytes());

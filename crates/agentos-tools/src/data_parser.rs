@@ -80,7 +80,10 @@ impl AgentTool for DataParser {
                     let mut row = serde_json::Map::new();
                     for (i, field) in record.iter().enumerate() {
                         if let Some(header) = headers.get(i) {
-                            row.insert(header.clone(), serde_json::Value::String(field.to_string()));
+                            row.insert(
+                                header.clone(),
+                                serde_json::Value::String(field.to_string()),
+                            );
                         }
                     }
                     rows.push(serde_json::Value::Object(row));

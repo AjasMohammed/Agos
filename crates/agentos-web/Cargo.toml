@@ -1,0 +1,30 @@
+[package]
+name = "agentos-web"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agentos-kernel = { path = "../agentos-kernel" }
+agentos-types = { path = "../agentos-types" }
+agentos-audit = { path = "../agentos-audit" }
+agentos-vault = { path = "../agentos-vault" }
+agentos-pipeline = { path = "../agentos-pipeline" }
+
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "fs", "compression-gzip"] }
+minijinja = { version = "2", features = ["loader"] }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+hyper = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

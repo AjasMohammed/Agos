@@ -72,7 +72,12 @@ impl LLMCore for GeminiCore {
             "contents": contents,
         });
 
-        if let Some(sys) = context.as_entries().iter().find(|e| e.role == ContextRole::System).map(|e| e.content.as_str()) {
+        if let Some(sys) = context
+            .as_entries()
+            .iter()
+            .find(|e| e.role == ContextRole::System)
+            .map(|e| e.content.as_str())
+        {
             body["systemInstruction"] = json!({
                 "parts": [{"text": sys}]
             });
@@ -98,10 +103,11 @@ impl LLMCore for GeminiCore {
             });
         }
 
-        let json_resp: serde_json::Value = res.json().await.map_err(|e| AgentOSError::LLMError {
-            provider: "gemini".to_string(),
-            reason: format!("Failed to parse JSON response: {}", e),
-        })?;
+        let json_resp: serde_json::Value =
+            res.json().await.map_err(|e| AgentOSError::LLMError {
+                provider: "gemini".to_string(),
+                reason: format!("Failed to parse JSON response: {}", e),
+            })?;
 
         let mut text = String::new();
         if let Some(candidates) = json_resp["candidates"].as_array() {
@@ -116,9 +122,15 @@ impl LLMCore for GeminiCore {
             }
         }
 
-        let prompt_tokens = json_resp["usageMetadata"]["promptTokenCount"].as_u64().unwrap_or(0);
-        let completion_tokens = json_resp["usageMetadata"]["candidatesTokenCount"].as_u64().unwrap_or(0);
-        let total_tokens = json_resp["usageMetadata"]["totalTokenCount"].as_u64().unwrap_or(prompt_tokens + completion_tokens);
+        let prompt_tokens = json_resp["usageMetadata"]["promptTokenCount"]
+            .as_u64()
+            .unwrap_or(0);
+        let completion_tokens = json_resp["usageMetadata"]["candidatesTokenCount"]
+            .as_u64()
+            .unwrap_or(0);
+        let total_tokens = json_resp["usageMetadata"]["totalTokenCount"]
+            .as_u64()
+            .unwrap_or(prompt_tokens + completion_tokens);
 
         Ok(InferenceResult {
             text,

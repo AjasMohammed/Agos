@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="grid">
+    <article>
+        <header>Kernel Status</header>
+        <p>Uptime: {{ uptime_secs }}s</p>
+        <p>Background tasks: {{ bg_running }}</p>
+    </article>
+    <article>
+        <header>Agents</header>
+        <p><strong>{{ agent_count }}</strong> connected</p>
+        <a href="/agents" role="button" class="outline">Manage</a>
+    </article>
+    <article>
+        <header>Tasks</header>
+        <p><strong>{{ active_task_count }}</strong> active / {{ total_task_count }} total</p>
+        <a href="/tasks" role="button" class="outline">View</a>
+    </article>
+    <article>
+        <header>Tools</header>
+        <p><strong>{{ tool_count }}</strong> installed</p>
+        <a href="/tools" role="button" class="outline">Manage</a>
+    </article>
+</div>
+
+<h2>Recent Audit Events</h2>
+<figure>
+<table>
+    <thead>
+        <tr>
+            <th>Timestamp</th>
+            <th>Event</th>
+            <th>Severity</th>
+            <th>Agent</th>
+        </tr>
+    </thead>
+    <tbody hx-get="/audit?partial=list&limit=10" hx-trigger="every 5s" hx-swap="innerHTML">
+        {% for entry in recent_audit %}
+        <tr>
+            <td>{{ entry.timestamp }}</td>
+            <td>{{ entry.event_type }}</td>
+            <td>{{ entry.severity }}</td>
+            <td>{{ entry.agent_id|default("-", true) }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</figure>
+{% endblock %}

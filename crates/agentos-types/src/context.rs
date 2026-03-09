@@ -48,9 +48,15 @@ impl ContextWindow {
     /// Push a new entry. If at capacity, evict the oldest non-system entry.
     pub fn push(&mut self, entry: ContextEntry) {
         if self.entries.len() >= self.max_entries {
-            // Find the first non-System entry and remove it
-            if let Some(idx) = self.entries.iter().position(|e| e.role != ContextRole::System) {
+            // Evict oldest non-System entry; if all are System, evict the oldest entry
+            if let Some(idx) = self
+                .entries
+                .iter()
+                .position(|e| e.role != ContextRole::System)
+            {
                 self.entries.remove(idx);
+            } else {
+                self.entries.remove(0);
             }
         }
         self.entries.push(entry);
@@ -101,7 +107,7 @@ mod tests {
         });
         assert_eq!(ctx.entries.len(), 3);
         assert_eq!(ctx.entries[0].content, "You are an agent."); // system preserved
-        assert_eq!(ctx.entries[1].content, "Hi!");               // second non-system kept
-        assert_eq!(ctx.entries[2].content, "Next message");      // newest pushed
+        assert_eq!(ctx.entries[1].content, "Hi!"); // second non-system kept
+        assert_eq!(ctx.entries[2].content, "Next message"); // newest pushed
     }
 }

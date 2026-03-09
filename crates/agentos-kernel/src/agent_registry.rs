@@ -1,7 +1,7 @@
 use agentos_types::*;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 pub struct AgentRegistry {
     agents: HashMap<AgentID, AgentProfile>,
@@ -40,8 +40,13 @@ impl AgentRegistry {
 
     fn ensure_base_role(&mut self) {
         if self.role_name_index.get("base").is_none() {
-            let mut base_role = Role::new("base".to_string(), "Default role with minimal permissions".to_string());
-            base_role.permissions.grant("fs.user_data".to_string(), true, true, false, None);
+            let mut base_role = Role::new(
+                "base".to_string(),
+                "Default role with minimal permissions".to_string(),
+            );
+            base_role
+                .permissions
+                .grant("fs.user_data".to_string(), true, true, false, None);
             self.register_role(base_role);
         }
     }
@@ -86,7 +91,11 @@ impl AgentRegistry {
         Ok(())
     }
 
-    pub fn update_role_permissions(&mut self, role_name: &str, new_perms: PermissionSet) -> Result<(), String> {
+    pub fn update_role_permissions(
+        &mut self,
+        role_name: &str,
+        new_perms: PermissionSet,
+    ) -> Result<(), String> {
         if let Some(id) = self.role_name_index.get(role_name).copied() {
             if let Some(role) = self.roles.get_mut(&id) {
                 role.permissions = new_perms;
@@ -110,9 +119,7 @@ impl AgentRegistry {
     }
 
     pub fn get_by_name(&self, name: &str) -> Option<&AgentProfile> {
-        self.name_index
-            .get(name)
-            .and_then(|id| self.agents.get(id))
+        self.name_index.get(name).and_then(|id| self.agents.get(id))
     }
 
     pub fn list_all(&self) -> Vec<&AgentProfile> {
@@ -165,13 +172,25 @@ impl AgentRegistry {
         if let Some(agent) = self.agents.get(agent_id) {
             // First, apply direct agent permissions
             for entry in agent.permissions.entries() {
-                effective.grant(entry.resource.clone(), entry.read, entry.write, entry.execute, entry.expires_at);
+                effective.grant(
+                    entry.resource.clone(),
+                    entry.read,
+                    entry.write,
+                    entry.execute,
+                    entry.expires_at,
+                );
             }
             // Next, merge in all role permissions
             for role_name in &agent.roles {
                 if let Some(role) = self.get_role_by_name(role_name) {
                     for entry in role.permissions.entries() {
-                        effective.grant(entry.resource.clone(), entry.read, entry.write, entry.execute, entry.expires_at);
+                        effective.grant(
+                            entry.resource.clone(),
+                            entry.read,
+                            entry.write,
+                            entry.execute,
+                            entry.expires_at,
+                        );
                     }
                 }
             }
@@ -248,7 +267,9 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_active: chrono::Utc::now(),
         };
-        agent.permissions.grant("custom".to_string(), true, false, false, None);
+        agent
+            .permissions
+            .grant("custom".to_string(), true, false, false, None);
 
         let agent_id = registry.register(agent);
         let perms = registry.compute_effective_permissions(&agent_id);

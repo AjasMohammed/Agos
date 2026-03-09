@@ -167,9 +167,15 @@ pub enum KernelCommand {
         permissions: Vec<String>,
     },
     ListSchedules,
-    PauseSchedule { name: String },
-    ResumeSchedule { name: String },
-    DeleteSchedule { name: String },
+    PauseSchedule {
+        name: String,
+    },
+    ResumeSchedule {
+        name: String,
+    },
+    DeleteSchedule {
+        name: String,
+    },
 
     // Background (agentd)
     RunBackground {
@@ -183,7 +189,32 @@ pub enum KernelCommand {
         name: String,
         follow: bool,
     },
-    KillBackground { name: String },
+    KillBackground {
+        name: String,
+    },
+
+    // Pipeline management
+    InstallPipeline {
+        yaml: String,
+    },
+    RunPipeline {
+        name: String,
+        input: String,
+        detach: bool,
+    },
+    PipelineStatus {
+        name: String,
+        run_id: String,
+    },
+    PipelineList,
+    PipelineLogs {
+        name: String,
+        run_id: String,
+        step_id: String,
+    },
+    RemovePipeline {
+        name: String,
+    },
 }
 
 /// Responses from kernel to CLI.
@@ -208,6 +239,11 @@ pub enum KernelResponse {
     ScheduleId(agentos_types::ScheduleID),
     BackgroundPoolList(Vec<agentos_types::schedule::BackgroundTask>),
     BackgroundLogs(Vec<String>),
+
+    // Pipeline
+    PipelineList(Vec<serde_json::Value>),
+    PipelineRunStatus(serde_json::Value),
+    PipelineStepLogs(Vec<serde_json::Value>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

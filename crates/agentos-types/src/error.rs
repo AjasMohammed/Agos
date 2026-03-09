@@ -1,5 +1,5 @@
-use thiserror::Error;
 use crate::ids::*;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AgentOSError {
@@ -59,6 +59,10 @@ pub enum AgentOSError {
     // IPC errors
     #[error("Intent bus error: {0}")]
     BusError(String),
+
+    // HAL errors
+    #[error("HAL error: {0}")]
+    HalError(String),
 
     // Sandbox errors
     #[error("Sandbox spawn failed: {reason}")]

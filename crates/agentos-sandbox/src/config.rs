@@ -162,9 +162,22 @@ impl SandboxConfig {
         // Always allow read-only fs operations — tools need to at least
         // read from their data_dir even if fs_write is false.
         let read_only_fs = [
-            "openat", "stat", "newfstatat", "access", "faccessat", "faccessat2",
-            "getcwd", "readlink", "readlinkat", "lseek", "dup", "dup2", "dup3",
-            "fcntl", "ioctl", "getdents64",
+            "openat",
+            "stat",
+            "newfstatat",
+            "access",
+            "faccessat",
+            "faccessat2",
+            "getcwd",
+            "readlink",
+            "readlinkat",
+            "lseek",
+            "dup",
+            "dup2",
+            "dup3",
+            "fcntl",
+            "ioctl",
+            "getdents64",
         ];
         for s in read_only_fs {
             let s = s.to_string();
@@ -184,7 +197,7 @@ impl Default for SandboxConfig {
             allow_fs_write: false,
             allow_gpu: false,
             max_memory_bytes: 64 * 1024 * 1024, // 64 MiB
-            max_cpu_ms: 5000,                    // 5 seconds
+            max_cpu_ms: 5000,                   // 5 seconds
             allowed_syscalls: Vec::new(),
         }
     }

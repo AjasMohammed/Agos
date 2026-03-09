@@ -9,6 +9,8 @@ pub struct KernelConfig {
     pub bus: BusSettings,
     pub ollama: OllamaSettings,
     #[serde(default)]
+    pub memory: MemorySettings,
+    #[serde(default)]
     pub routing: RoutingConfig,
 }
 
@@ -53,6 +55,24 @@ pub struct BusSettings {
 pub struct OllamaSettings {
     pub host: String,
     pub default_model: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MemorySettings {
+    #[serde(default = "default_model_cache_dir")]
+    pub model_cache_dir: String,
+}
+
+impl Default for MemorySettings {
+    fn default() -> Self {
+        Self {
+            model_cache_dir: default_model_cache_dir(),
+        }
+    }
+}
+
+fn default_model_cache_dir() -> String {
+    "models".to_string()
 }
 
 /// Load kernel configuration from a TOML file.

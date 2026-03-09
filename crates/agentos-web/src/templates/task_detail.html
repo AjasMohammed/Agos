@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Task {{ task_id[:8] }}</h1>
+
+<div class="grid">
+    <article>
+        <header>Details</header>
+        <dl>
+            <dt>Status</dt>
+            <dd><span class="badge badge-{{ state|lower }}">{{ state }}</span></dd>
+            <dt>Agent</dt>
+            <dd>{{ agent_id[:8] }}</dd>
+            <dt>Priority</dt>
+            <dd>{{ priority }}</dd>
+            <dt>Created</dt>
+            <dd>{{ created_at }}</dd>
+        </dl>
+    </article>
+    <article>
+        <header>Original Prompt</header>
+        <pre>{{ prompt }}</pre>
+    </article>
+</div>
+
+<h2>Context Window</h2>
+<div x-data="{ expanded: {} }">
+    {% for msg in history %}
+    <details>
+        <summary><strong>{{ msg.role }}</strong></summary>
+        <pre>{{ msg.content }}</pre>
+    </details>
+    {% endfor %}
+</div>
+
+<h2>Live Log Stream</h2>
+<div id="log-stream"
+     hx-ext="sse"
+     sse-connect="/tasks/{{ task_id }}/logs/stream"
+     sse-swap="message"
+     hx-swap="beforeend">
+</div>
+{% endblock %}

@@ -5,7 +5,7 @@ description = "Write new knowledge entries to semantic memory for long-term reca
 author      = "agentos-core"
 
 [capabilities_required]
-permissions = ["memory.semantic:w"]
+permissions = ["memory.semantic:w", "memory.episodic:w"]
 
 [capabilities_provided]
 outputs = ["status"]

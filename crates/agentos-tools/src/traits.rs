@@ -27,5 +27,9 @@ pub trait AgentTool: Send + Sync {
 pub struct ToolExecutionContext {
     pub data_dir: PathBuf, // /opt/agentos/data — where tools read/write files
     pub task_id: TaskID,
+    pub agent_id: AgentID,
     pub trace_id: TraceID,
+    pub permissions: PermissionSet,
+    pub vault: Option<std::sync::Arc<agentos_vault::SecretsVault>>,
+    pub hal: Option<std::sync::Arc<agentos_hal::HardwareAbstractionLayer>>,
 }

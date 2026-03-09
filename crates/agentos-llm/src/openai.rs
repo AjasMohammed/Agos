@@ -84,7 +84,10 @@ impl LLMCore for OpenAICore {
         let req = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key.expose_secret()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.api_key.expose_secret()),
+            )
             .header("Content-Type", "application/json")
             .json(&body);
 
@@ -102,10 +105,11 @@ impl LLMCore for OpenAICore {
             });
         }
 
-        let json_resp: serde_json::Value = res.json().await.map_err(|e| AgentOSError::LLMError {
-            provider: "openai".to_string(),
-            reason: format!("Failed to parse JSON response: {}", e),
-        })?;
+        let json_resp: serde_json::Value =
+            res.json().await.map_err(|e| AgentOSError::LLMError {
+                provider: "openai".to_string(),
+                reason: format!("Failed to parse JSON response: {}", e),
+            })?;
 
         let text = json_resp["choices"][0]["message"]["content"]
             .as_str()
@@ -139,7 +143,10 @@ impl LLMCore for OpenAICore {
         match self
             .client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key.expose_secret()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.api_key.expose_secret()),
+            )
             .send()
             .await
         {

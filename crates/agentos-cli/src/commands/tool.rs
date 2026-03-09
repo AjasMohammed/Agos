@@ -1,6 +1,6 @@
-use clap::Subcommand;
 use agentos_bus::client::BusClient;
 use agentos_bus::message::{KernelCommand, KernelResponse};
+use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum ToolCommands {
@@ -35,7 +35,10 @@ pub async fn handle(client: &mut BusClient, command: ToolCommands) -> anyhow::Re
                             } else {
                                 t.manifest.description.clone()
                             };
-                            println!("{:<20} {:<15} {}", t.manifest.name, t.manifest.version, description);
+                            println!(
+                                "{:<20} {:<15} {}",
+                                t.manifest.name, t.manifest.version, description
+                            );
                         }
                     }
                 }
@@ -44,7 +47,11 @@ pub async fn handle(client: &mut BusClient, command: ToolCommands) -> anyhow::Re
             }
         }
         ToolCommands::Install { path } => {
-            let response = client.send_command(KernelCommand::InstallTool { manifest_path: path.clone() }).await?;
+            let response = client
+                .send_command(KernelCommand::InstallTool {
+                    manifest_path: path.clone(),
+                })
+                .await?;
             match response {
                 KernelResponse::Success { .. } => println!("✅ Tool from {} installed", path),
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
@@ -52,7 +59,11 @@ pub async fn handle(client: &mut BusClient, command: ToolCommands) -> anyhow::Re
             }
         }
         ToolCommands::Remove { name } => {
-            let response = client.send_command(KernelCommand::RemoveTool { tool_name: name.clone() }).await?;
+            let response = client
+                .send_command(KernelCommand::RemoveTool {
+                    tool_name: name.clone(),
+                })
+                .await?;
             match response {
                 KernelResponse::Success { .. } => println!("✅ Tool '{}' removed", name),
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),

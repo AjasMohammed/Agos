@@ -28,9 +28,8 @@ impl BusServer {
             })?;
         }
 
-        let listener = UnixListener::bind(socket_path).map_err(|e| {
-            AgentOSError::BusError(format!("Failed to bind to Unix socket: {}", e))
-        })?;
+        let listener = UnixListener::bind(socket_path)
+            .map_err(|e| AgentOSError::BusError(format!("Failed to bind to Unix socket: {}", e)))?;
 
         tracing::info!("Intent Bus listening on {:?}", socket_path);
 
@@ -42,11 +41,10 @@ impl BusServer {
 
     /// Accept a single connection. Returns a BusConnection for reading/writing messages.
     pub async fn accept(&self) -> Result<BusConnection, AgentOSError> {
-        let (stream, _addr) = self
-            .listener
-            .accept()
-            .await
-            .map_err(|e| AgentOSError::BusError(format!("Failed to accept connection: {}", e)))?;
+        let (stream, _addr) =
+            self.listener.accept().await.map_err(|e| {
+                AgentOSError::BusError(format!("Failed to accept connection: {}", e))
+            })?;
         Ok(BusConnection { stream })
     }
 }

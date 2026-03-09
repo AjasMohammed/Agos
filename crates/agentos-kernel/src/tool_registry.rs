@@ -1,5 +1,5 @@
-use agentos_types::*;
 use agentos_tools::loader::{load_all_manifests, LoadedManifest};
+use agentos_types::*;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -52,9 +52,7 @@ impl ToolRegistry {
     }
 
     pub fn get_by_name(&self, name: &str) -> Option<&RegisteredTool> {
-        self.name_index
-            .get(name)
-            .and_then(|id| self.tools.get(id))
+        self.name_index.get(name).and_then(|id| self.tools.get(id))
     }
 
     pub fn get_by_id(&self, id: &ToolID) -> Option<&RegisteredTool> {

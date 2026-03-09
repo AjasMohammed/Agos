@@ -1,5 +1,5 @@
-use crate::ids::*;
 use crate::capability::CapabilityToken;
+use crate::ids::*;
 use crate::intent::IntentMessage;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -24,7 +24,7 @@ pub struct AgentTask {
 pub enum TaskState {
     Queued,
     Running,
-    Waiting,    // waiting on a tool or sub-agent
+    Waiting, // waiting on a tool or sub-agent
     Complete,
     Failed,
     Cancelled,
@@ -36,7 +36,7 @@ pub struct TaskSummary {
     pub id: TaskID,
     pub state: TaskState,
     pub agent_id: AgentID,
-    pub prompt_preview: String,   // first 100 chars of prompt
+    pub prompt_preview: String, // first 100 chars of prompt
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub tool_calls: u32,
     pub tokens_used: u64,

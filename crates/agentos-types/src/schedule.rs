@@ -8,7 +8,7 @@ pub struct ScheduledJob {
     pub cron_expression: String,
     pub agent_name: String,
     pub task_prompt: String,
-    pub permissions: Vec<String>,       // permissions scoped to this job
+    pub permissions: Vec<String>, // permissions scoped to this job
     pub state: ScheduleState,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_run_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -16,7 +16,7 @@ pub struct ScheduledJob {
     pub run_count: u64,
     pub max_retries: u32,
     pub retry_count: u32,
-    pub output_destination: Option<String>,  // file path for results
+    pub output_destination: Option<String>, // file path for results
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,8 +33,8 @@ pub struct BackgroundTask {
     pub agent_name: String,
     pub task_prompt: String,
     pub state: TaskState,
-    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
     pub result: Option<serde_json::Value>,
-    pub detached: bool,                 // if true, runs independently
+    pub detached: bool, // if true, runs independently
 }

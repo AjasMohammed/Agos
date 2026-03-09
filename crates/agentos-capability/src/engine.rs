@@ -38,7 +38,11 @@ impl CapabilityEngine {
     }
 
     /// Update an agent's permission set (grant/revoke).
-    pub fn update_permissions(&self, agent_id: &AgentID, permissions: PermissionSet) -> Result<(), AgentOSError> {
+    pub fn update_permissions(
+        &self,
+        agent_id: &AgentID,
+        permissions: PermissionSet,
+    ) -> Result<(), AgentOSError> {
         let mut map = self.agent_permissions.write().unwrap();
         map.insert(*agent_id, permissions);
         Ok(())
@@ -68,7 +72,10 @@ impl CapabilityEngine {
         ttl: Duration,
     ) -> Result<CapabilityToken, AgentOSError> {
         let issued_at = chrono::Utc::now();
-        let expires_at = issued_at + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::seconds(0));
+        let expires_at = issued_at
+            + chrono::Duration::from_std(ttl).map_err(|_| AgentOSError::KernelError {
+                reason: format!("TTL duration {:?} out of range for chrono", ttl),
+            })?;
 
         let mut token = CapabilityToken {
             task_id,
@@ -142,7 +149,12 @@ impl CapabilityEngine {
             }
 
             // Check if the individual permission has expired
-            if let Some(entry) = token.permissions.entries.iter().find(|e| e.resource == *resource) {
+            if let Some(entry) = token
+                .permissions
+                .entries
+                .iter()
+                .find(|e| e.resource == *resource)
+            {
                 if let Some(expires_at) = entry.expires_at {
                     if chrono::Utc::now() > expires_at {
                         return Err(AgentOSError::PermissionDenied {
@@ -166,8 +178,8 @@ impl CapabilityEngine {
         type HmacSha256 = Hmac<Sha256>;
 
         // Recompute the HMAC and use verify_slice for constant-time comparison
-        let mut mac = HmacSha256::new_from_slice(&self.signing_key)
-            .expect("HMAC can take any size key");
+        let mut mac =
+            HmacSha256::new_from_slice(&self.signing_key).expect("HMAC can take any size key");
 
         // Replicate the same signing process from compute_signature
         mac.update(token.task_id.as_uuid().as_bytes());
@@ -215,14 +227,16 @@ mod tests {
         let agent_id = AgentID::new();
         engine.register_agent(agent_id, PermissionSet::new());
 
-        let token = engine.issue_token(
-            TaskID::new(),
-            agent_id,
-            BTreeSet::new(),
-            BTreeSet::from([IntentTypeFlag::Read]),
-            PermissionSet::new(),
-            Duration::from_secs(300),
-        ).unwrap();
+        let token = engine
+            .issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                PermissionSet::new(),
+                Duration::from_secs(300),
+            )
+            .unwrap();
 
         assert!(engine.verify_signature(&token));
     }
@@ -233,14 +247,16 @@ mod tests {
         let agent_id = AgentID::new();
         engine.register_agent(agent_id, PermissionSet::new());
 
-        let mut token = engine.issue_token(
-            TaskID::new(),
-            agent_id,
-            BTreeSet::new(),
-            BTreeSet::from([IntentTypeFlag::Read]),
-            PermissionSet::new(),
-            Duration::from_secs(300),
-        ).unwrap();
+        let mut token = engine
+            .issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                PermissionSet::new(),
+                Duration::from_secs(300),
+            )
+            .unwrap();
 
         // Tamper with the token
         token.allowed_intents.insert(IntentTypeFlag::Write);
@@ -255,14 +271,16 @@ mod tests {
         let agent_id = AgentID::new();
         engine.register_agent(agent_id, PermissionSet::new());
 
-        let token = engine.issue_token(
-            TaskID::new(),
-            agent_id,
-            BTreeSet::new(),
-            BTreeSet::from([IntentTypeFlag::Read]),
-            PermissionSet::new(),
-            Duration::from_secs(0),  // expires immediately
-        ).unwrap();
+        let token = engine
+            .issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                PermissionSet::new(),
+                Duration::from_secs(0), // expires immediately
+            )
+            .unwrap();
 
         std::thread::sleep(Duration::from_millis(10));
 
@@ -295,14 +313,16 @@ mod tests {
         let agent_id = AgentID::new();
         engine.register_agent(agent_id, perms.clone());
 
-        let token = engine.issue_token(
-            TaskID::new(),
-            agent_id,
-            BTreeSet::new(),
-            BTreeSet::from([IntentTypeFlag::Read]),
-            perms.clone(),
-            Duration::from_secs(300),
-        ).unwrap();
+        let token = engine
+            .issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                perms.clone(),
+                Duration::from_secs(300),
+            )
+            .unwrap();
 
         let intent = IntentMessage {
             id: MessageID::new(),
@@ -321,10 +341,16 @@ mod tests {
         };
 
         // Missing network.outbound Execute permission
-        let result = engine.validate_intent(&token, &intent, &[("network.outbound".to_string(), PermissionOp::Execute)]);
+        let result = engine.validate_intent(
+            &token,
+            &intent,
+            &[("network.outbound".to_string(), PermissionOp::Execute)],
+        );
 
         match result {
-            Err(AgentOSError::PermissionDenied { resource, .. }) => assert_eq!(resource, "network.outbound"),
+            Err(AgentOSError::PermissionDenied { resource, .. }) => {
+                assert_eq!(resource, "network.outbound")
+            }
             _ => panic!("Expected permission denied error"),
         }
     }

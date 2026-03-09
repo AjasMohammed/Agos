@@ -15,9 +15,15 @@ pub struct SecretsVault {
 const VAULT_SENTINEL: &str = "AGENTOS_VAULT_OK";
 
 impl SecretsVault {
-    pub fn initialize(path: &Path, passphrase: &str, audit: Arc<AuditLog>) -> Result<Self, AgentOSError> {
+    pub fn initialize(
+        path: &Path,
+        passphrase: &str,
+        audit: Arc<AuditLog>,
+    ) -> Result<Self, AgentOSError> {
         if Self::is_initialized(path) {
-            return Err(AgentOSError::VaultError("Vault is already initialized".to_string()));
+            return Err(AgentOSError::VaultError(
+                "Vault is already initialized".to_string(),
+            ));
         }
 
         let conn = Connection::open(path)
@@ -79,7 +85,9 @@ impl SecretsVault {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|_| AgentOSError::VaultError("Vault not initialized or corrupt salt".to_string()))?;
+            .map_err(|_| {
+                AgentOSError::VaultError("Vault not initialized or corrupt salt".to_string())
+            })?;
 
         let mut salt = [0u8; 32];
         salt.copy_from_slice(&salt_vec);
@@ -121,11 +129,13 @@ impl SecretsVault {
         let id = SecretID::new();
         let created_at = chrono::Utc::now().to_rfc3339();
 
-        let owner_json = serde_json::to_string(&owner)
-            .map_err(|e| AgentOSError::Serialization(format!("Failed to serialize owner: {}", e)))?;
+        let owner_json = serde_json::to_string(&owner).map_err(|e| {
+            AgentOSError::Serialization(format!("Failed to serialize owner: {}", e))
+        })?;
 
-        let scope_json = serde_json::to_string(&scope)
-            .map_err(|e| AgentOSError::Serialization(format!("Failed to serialize scope: {}", e)))?;
+        let scope_json = serde_json::to_string(&scope).map_err(|e| {
+            AgentOSError::Serialization(format!("Failed to serialize scope: {}", e))
+        })?;
 
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -195,8 +205,9 @@ impl SecretsVault {
         });
 
         let decrypted = decrypt(&self.master_key, &encrypted_value)?;
-        let value_string = String::from_utf8(decrypted)
-            .map_err(|_| AgentOSError::VaultError("Decrypted secret was not valid UTF-8".to_string()))?;
+        let value_string = String::from_utf8(decrypted).map_err(|_| {
+            AgentOSError::VaultError("Decrypted secret was not valid UTF-8".to_string())
+        })?;
 
         Ok(ZeroizingString::new(value_string))
     }
@@ -212,7 +223,8 @@ impl SecretsVault {
                 let name: String = row.get(0)?;
 
                 let scope_json: String = row.get(1)?;
-                let scope: SecretScope = serde_json::from_str(&scope_json).unwrap_or(SecretScope::Global);
+                let scope: SecretScope =
+                    serde_json::from_str(&scope_json).unwrap_or(SecretScope::Global);
 
                 let created_str: String = row.get(2)?;
                 let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
@@ -357,7 +369,14 @@ mod tests {
 
         let vault = SecretsVault::initialize(&path, "test-passphrase-123", audit.clone()).unwrap();
 
-        vault.set("OPENAI_KEY", "sk-test-12345", SecretOwner::Kernel, SecretScope::Global).unwrap();
+        vault
+            .set(
+                "OPENAI_KEY",
+                "sk-test-12345",
+                SecretOwner::Kernel,
+                SecretScope::Global,
+            )
+            .unwrap();
 
         let retrieved = vault.get("OPENAI_KEY").unwrap();
         assert_eq!(retrieved.as_str(), "sk-test-12345");
@@ -382,8 +401,12 @@ mod tests {
         let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
 
         let vault = SecretsVault::initialize(&path, "pass", audit).unwrap();
-        vault.set("KEY1", "secret1", SecretOwner::Kernel, SecretScope::Global).unwrap();
-        vault.set("KEY2", "secret2", SecretOwner::Kernel, SecretScope::Global).unwrap();
+        vault
+            .set("KEY1", "secret1", SecretOwner::Kernel, SecretScope::Global)
+            .unwrap();
+        vault
+            .set("KEY2", "secret2", SecretOwner::Kernel, SecretScope::Global)
+            .unwrap();
 
         let list = vault.list().unwrap();
         assert_eq!(list.len(), 2);
@@ -397,7 +420,9 @@ mod tests {
         let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
 
         let vault = SecretsVault::initialize(&path, "pass", audit).unwrap();
-        vault.set("KEY1", "secret1", SecretOwner::Kernel, SecretScope::Global).unwrap();
+        vault
+            .set("KEY1", "secret1", SecretOwner::Kernel, SecretScope::Global)
+            .unwrap();
         vault.revoke("KEY1").unwrap();
 
         let result = vault.get("KEY1");
@@ -411,7 +436,14 @@ mod tests {
         let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
 
         let vault = SecretsVault::initialize(&path, "pass", audit).unwrap();
-        vault.set("KEY1", "old-value", SecretOwner::Kernel, SecretScope::Global).unwrap();
+        vault
+            .set(
+                "KEY1",
+                "old-value",
+                SecretOwner::Kernel,
+                SecretScope::Global,
+            )
+            .unwrap();
         vault.rotate("KEY1", "new-value").unwrap();
 
         let retrieved = vault.get("KEY1").unwrap();

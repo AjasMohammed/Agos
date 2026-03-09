@@ -63,7 +63,12 @@ impl LLMCore for AnthropicCore {
         let url = "https://api.anthropic.com/v1/messages";
 
         let messages = self.format_messages(context);
-        let system_prompt = context.as_entries().iter().find(|e| e.role == ContextRole::System).map(|e| e.content.as_str()).unwrap_or("");
+        let system_prompt = context
+            .as_entries()
+            .iter()
+            .find(|e| e.role == ContextRole::System)
+            .map(|e| e.content.as_str())
+            .unwrap_or("");
 
         let body = json!({
             "model": self.model,
@@ -94,10 +99,11 @@ impl LLMCore for AnthropicCore {
             });
         }
 
-        let json_resp: serde_json::Value = res.json().await.map_err(|e| AgentOSError::LLMError {
-            provider: "anthropic".to_string(),
-            reason: format!("Failed to parse JSON response: {}", e),
-        })?;
+        let json_resp: serde_json::Value =
+            res.json().await.map_err(|e| AgentOSError::LLMError {
+                provider: "anthropic".to_string(),
+                reason: format!("Failed to parse JSON response: {}", e),
+            })?;
 
         // Extract content blocks
         let mut text = String::new();

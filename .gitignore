@@ -24,6 +24,9 @@ target/
 *.socket
 /tools/user/
 
+# Model cache (fastembed downloads)
+.fastembed_cache/
+
 # IDE / Editor
 .idea/
 .vscode/

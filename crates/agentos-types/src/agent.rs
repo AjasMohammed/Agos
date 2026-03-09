@@ -1,5 +1,5 @@
-use crate::ids::*;
 use crate::capability::PermissionSet;
+use crate::ids::*;
 use serde::{Deserialize, Serialize};
 
 /// Profile of a connected LLM agent.

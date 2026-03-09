@@ -11,8 +11,12 @@ agentos-capability = { path = "../agentos-capability" }
 agentos-bus = { path = "../agentos-bus" }
 agentos-llm = { path = "../agentos-llm" }
 agentos-tools = { path = "../agentos-tools" }
+agentos-hal = { path = "../agentos-hal" }
 agentos-sandbox = { path = "../agentos-sandbox" }
 agentos-wasm = { path = "../agentos-wasm" }
+agentos-memory = { path = "../agentos-memory" }
+agentos-pipeline = { path = "../agentos-pipeline" }
+async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

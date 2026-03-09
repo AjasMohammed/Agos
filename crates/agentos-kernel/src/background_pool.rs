@@ -52,6 +52,11 @@ impl BackgroundPool {
     }
 
     pub async fn get_by_name(&self, name: &str) -> Option<BackgroundTask> {
-        self.tasks.read().await.values().find(|t| t.name == name).cloned()
+        self.tasks
+            .read()
+            .await
+            .values()
+            .find(|t| t.name == name)
+            .cloned()
     }
 }

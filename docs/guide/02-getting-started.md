@@ -84,6 +84,9 @@ socket_path = "/tmp/agentos/agentos.sock"
 [ollama]
 host = "http://localhost:11434"
 default_model = "llama3.2"
+
+[memory]
+model_cache_dir = "models"
 ```
 
 You can customize these paths for your environment. For production use, change `/tmp/agentos/` to a persistent directory like `/opt/agentos/`.

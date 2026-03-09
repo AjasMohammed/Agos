@@ -1,16 +1,17 @@
 use crate::traits::{AgentTool, ToolExecutionContext};
+use agentos_memory::{EpisodicStore, SemanticStore};
 use agentos_types::*;
 use async_trait::async_trait;
-use rusqlite::Connection;
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub struct MemoryWrite {
-    data_dir: PathBuf,
+    semantic: Arc<SemanticStore>,
+    episodic: Arc<EpisodicStore>,
 }
 
 impl MemoryWrite {
-    pub fn new(data_dir: &Path) -> Self {
-        Self { data_dir: data_dir.to_path_buf() }
+    pub fn new(semantic: Arc<SemanticStore>, episodic: Arc<EpisodicStore>) -> Self {
+        Self { semantic, episodic }
     }
 }
 
@@ -21,13 +22,16 @@ impl AgentTool for MemoryWrite {
     }
 
     fn required_permissions(&self) -> Vec<(String, PermissionOp)> {
-        vec![("memory.semantic".to_string(), PermissionOp::Write)]
+        // Scope-aware checks are enforced inside execute():
+        // - semantic -> memory.semantic:w
+        // - episodic -> memory.episodic:w
+        vec![]
     }
 
     async fn execute(
         &self,
         payload: serde_json::Value,
-        _context: ToolExecutionContext,
+        context: ToolExecutionContext,
     ) -> Result<serde_json::Value, AgentOSError> {
         let content = payload
             .get("content")
@@ -36,58 +40,92 @@ impl AgentTool for MemoryWrite {
                 AgentOSError::SchemaValidation("memory-write requires 'content' field".into())
             })?;
 
-        let source = payload
-            .get("source")
+        let scope = payload
+            .get("scope")
             .and_then(|v| v.as_str())
-            .unwrap_or("agent");
+            .unwrap_or("semantic");
 
-        let tags = payload.get("tags").and_then(|v| v.as_str()).unwrap_or("");
-        let scope = payload.get("scope").and_then(|v| v.as_str()).unwrap_or("semantic").to_string();
-
-        let data_dir = self.data_dir.clone();
-        let content = content.to_string();
-        let source = source.to_string();
-        let tags = tags.to_string();
-        let now = chrono::Utc::now().to_rfc3339();
-
-        // Grab task and trace IDs for episodic DB
-        let task_id_str = _context.task_id.as_uuid().to_string();
-        let trace_id_str = _context.trace_id.as_uuid().to_string();
-
-        tokio::task::spawn_blocking(move || {
-            let db_name = match scope.as_str() {
-                "episodic" => "episodic_memory.db",
-                _ => "semantic_memory.db",
-            };
-            let db_path = data_dir.join(db_name);
-
-            let conn = Connection::open(&db_path).map_err(|e| {
-                AgentOSError::ToolExecutionFailed { tool_name: "memory-write".into(), reason: format!("Failed to open memory db for write: {}", e) }
-            })?;
-
-            if scope == "episodic" {
-                conn.execute(
-                    "INSERT INTO episodes (task_id, agent_id, entry_type, content, metadata, timestamp, trace_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    rusqlite::params![&task_id_str, "00000000-0000-0000-0000-000000000000", "tool_write", &content, "{}", &now, &trace_id_str],
-                ).map_err(|e| AgentOSError::ToolExecutionFailed { tool_name: "memory-write".into(), reason: format!("Insert failed: {}", e) })?;
-            } else {
-                conn.execute(
-                    "INSERT INTO memory (content, source, tags, created_at) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![&content, &source, &tags, &now],
-                ).map_err(|e| AgentOSError::ToolExecutionFailed { tool_name: "memory-write".into(), reason: format!("Insert failed: {}", e) })?;
+        if scope == "episodic" {
+            if !context
+                .permissions
+                .check("memory.episodic", PermissionOp::Write)
+            {
+                return Err(AgentOSError::PermissionDenied {
+                    resource: "memory.episodic".to_string(),
+                    operation: format!("{:?}", PermissionOp::Write),
+                });
             }
-            Ok::<_, AgentOSError>(())
-        })
-        .await
-        .map_err(|e| AgentOSError::ToolExecutionFailed {
-            tool_name: "memory-write".into(),
-            reason: format!("Task join error: {}", e),
-        })??;
 
-        Ok(serde_json::json!({
-            "success": true,
-            "message": "Memory entry stored successfully",
-        }))
+            let summary = payload.get("summary").and_then(|v| v.as_str());
+            self.episodic
+                .record(
+                    &context.task_id,
+                    &context.agent_id,
+                    agentos_memory::EpisodeType::SystemEvent,
+                    content,
+                    summary,
+                    None,
+                    &context.trace_id,
+                )
+                .map_err(|e| AgentOSError::ToolExecutionFailed {
+                    tool_name: "memory-write".into(),
+                    reason: format!("Episodic write failed: {}", e),
+                })?;
+
+            Ok(serde_json::json!({
+                "success": true,
+                "scope": "episodic",
+                "message": "Episodic memory entry stored",
+            }))
+        } else {
+            if !context
+                .permissions
+                .check("memory.semantic", PermissionOp::Write)
+            {
+                return Err(AgentOSError::PermissionDenied {
+                    resource: "memory.semantic".to_string(),
+                    operation: format!("{:?}", PermissionOp::Write),
+                });
+            }
+
+            // Auto-generate key from first few words if not provided
+            let auto_key: String = content
+                .split_whitespace()
+                .take(6)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let key = payload
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&auto_key);
+
+            let tags: Vec<&str> = match payload.get("tags") {
+                Some(serde_json::Value::Array(values)) => {
+                    values.iter().filter_map(|v| v.as_str()).collect()
+                }
+                Some(serde_json::Value::String(s)) => s
+                    .split(',')
+                    .map(|t| t.trim())
+                    .filter(|t| !t.is_empty())
+                    .collect(),
+                _ => Vec::new(),
+            };
+
+            let id = self
+                .semantic
+                .write(key, content, Some(&context.agent_id), &tags)
+                .await
+                .map_err(|e| AgentOSError::ToolExecutionFailed {
+                    tool_name: "memory-write".into(),
+                    reason: format!("Semantic write failed: {}", e),
+                })?;
+
+            Ok(serde_json::json!({
+                "success": true,
+                "scope": "semantic",
+                "id": id,
+                "message": "Semantic memory entry stored with embedding",
+            }))
+        }
     }
 }
