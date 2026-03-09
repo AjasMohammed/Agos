@@ -27,6 +27,12 @@ pub struct KernelSettings {
     pub max_concurrent_tasks: usize,
     pub default_task_timeout_secs: u64,
     pub context_window_max_entries: usize,
+    #[serde(default = "default_health_port")]
+    pub health_port: u16,
+}
+
+fn default_health_port() -> u16 {
+    9091
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -49,6 +55,20 @@ pub struct ToolsSettings {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BusSettings {
     pub socket_path: String,
+    /// Optional TLS configuration for TCP transport.
+    /// When present, the kernel also listens on a TCP port with TLS encryption.
+    #[serde(default)]
+    pub tls: Option<TlsSettings>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TlsSettings {
+    /// TCP address to bind (e.g. "0.0.0.0:9443")
+    pub bind_addr: String,
+    /// Path to PEM-encoded TLS certificate chain
+    pub cert_path: String,
+    /// Path to PEM-encoded TLS private key
+    pub key_path: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

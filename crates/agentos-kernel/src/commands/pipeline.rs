@@ -1,0 +1,381 @@
+use crate::agent_registry::AgentRegistry;
+use crate::context::ContextManager;
+use crate::kernel::Kernel;
+use crate::tool_registry::ToolRegistry;
+use agentos_bus::KernelResponse;
+use agentos_hal::HardwareAbstractionLayer;
+use agentos_llm::LLMCore;
+use agentos_tools::runner::ToolRunner;
+use agentos_tools::traits::ToolExecutionContext;
+use agentos_types::*;
+use agentos_vault::SecretsVault;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+impl Kernel {
+    pub(crate) async fn cmd_install_pipeline(&self, yaml: String) -> KernelResponse {
+        let definition = match agentos_pipeline::PipelineDefinition::from_yaml(&yaml) {
+            Ok(d) => d,
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: format!("Invalid pipeline YAML: {}", e),
+                }
+            }
+        };
+
+        match self.pipeline_engine.store().install_pipeline(
+            &definition.name,
+            &definition.version,
+            &yaml,
+        ) {
+            Ok(()) => {
+                tracing::info!(
+                    pipeline = %definition.name,
+                    version = %definition.version,
+                    "Pipeline installed"
+                );
+                KernelResponse::Success {
+                    data: Some(serde_json::json!({
+                        "name": definition.name,
+                        "version": definition.version,
+                        "steps": definition.steps.len(),
+                    })),
+                }
+            }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+
+    pub(crate) async fn cmd_run_pipeline(
+        &self,
+        name: String,
+        input: String,
+        detach: bool,
+    ) -> KernelResponse {
+        let yaml = match self.pipeline_engine.store().get_pipeline_yaml(&name) {
+            Ok(y) => y,
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: e.to_string(),
+                }
+            }
+        };
+
+        let definition = match agentos_pipeline::PipelineDefinition::from_yaml(&yaml) {
+            Ok(d) => d,
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: format!("Failed to parse stored pipeline: {}", e),
+                }
+            }
+        };
+
+        let run_id = agentos_types::RunID::new();
+
+        if detach {
+            let executor = OwnedPipelineExecutor {
+                agent_registry: self.agent_registry.clone(),
+                active_llms: self.active_llms.clone(),
+                tool_runner: self.tool_runner.clone(),
+                tool_registry: self.tool_registry.clone(),
+                vault: self.vault.clone(),
+                hal: self.hal.clone(),
+                data_dir: self.data_dir.clone(),
+                context_manager: self.context_manager.clone(),
+            };
+
+            let engine = self.pipeline_engine.clone();
+            let bg_pool = self.background_pool.clone();
+            let task_id = TaskID::new();
+            let pipeline_name = name.clone();
+            let input_clone = input.clone();
+
+            let bg_task = BackgroundTask {
+                id: task_id,
+                name: format!("pipeline:{}", pipeline_name),
+                agent_name: "pipeline-engine".to_string(),
+                task_prompt: format!(
+                    "Run pipeline '{}' with input: {}",
+                    pipeline_name, input_clone
+                ),
+                state: TaskState::Running,
+                started_at: Some(chrono::Utc::now()),
+                completed_at: None,
+                result: None,
+                detached: true,
+            };
+            bg_pool.register(bg_task).await;
+
+            tokio::spawn(async move {
+                match engine
+                    .run(&definition, &input_clone, run_id, &executor)
+                    .await
+                {
+                    Ok(run) => {
+                        let run_json = serde_json::to_value(&run).unwrap_or_default();
+                        bg_pool.complete(&task_id, run_json).await;
+                    }
+                    Err(e) => {
+                        bg_pool.fail(&task_id, e.to_string()).await;
+                    }
+                }
+            });
+
+            KernelResponse::Success {
+                data: Some(serde_json::json!({
+                    "id": run_id.to_string(),
+                    "status": "running",
+                    "detached": true,
+                    "background_task_id": task_id.to_string(),
+                })),
+            }
+        } else {
+            let executor = KernelPipelineExecutor { kernel: self };
+
+            match self
+                .pipeline_engine
+                .run(&definition, &input, run_id, &executor)
+                .await
+            {
+                Ok(run) => {
+                    let run_json = serde_json::to_value(&run).unwrap_or_default();
+                    KernelResponse::Success {
+                        data: Some(run_json),
+                    }
+                }
+                Err(e) => KernelResponse::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+    }
+
+    pub(crate) async fn cmd_pipeline_status(&self, run_id: String) -> KernelResponse {
+        let run_id = match uuid::Uuid::parse_str(&run_id) {
+            Ok(u) => agentos_types::RunID::from_uuid(u),
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: format!("Invalid run ID: {}", e),
+                }
+            }
+        };
+
+        match self.pipeline_engine.store().get_run(&run_id) {
+            Ok(run) => {
+                let run_json = serde_json::to_value(&run).unwrap_or_default();
+                KernelResponse::PipelineRunStatus(run_json)
+            }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+
+    pub(crate) async fn cmd_pipeline_list(&self) -> KernelResponse {
+        match self.pipeline_engine.store().list_pipelines() {
+            Ok(list) => {
+                let json_list: Vec<serde_json::Value> = list
+                    .into_iter()
+                    .map(|s| serde_json::to_value(s).unwrap_or_default())
+                    .collect();
+                KernelResponse::PipelineList(json_list)
+            }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+
+    pub(crate) async fn cmd_pipeline_logs(
+        &self,
+        run_id: String,
+        step_id: String,
+    ) -> KernelResponse {
+        let run_id = match uuid::Uuid::parse_str(&run_id) {
+            Ok(u) => agentos_types::RunID::from_uuid(u),
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: format!("Invalid run ID: {}", e),
+                }
+            }
+        };
+
+        match self
+            .pipeline_engine
+            .store()
+            .get_step_logs(&run_id, &step_id)
+        {
+            Ok(logs) => {
+                let json_logs: Vec<serde_json::Value> = logs
+                    .into_iter()
+                    .map(|l| serde_json::to_value(l).unwrap_or_default())
+                    .collect();
+                KernelResponse::PipelineStepLogs(json_logs)
+            }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+
+    pub(crate) async fn cmd_remove_pipeline(&self, name: String) -> KernelResponse {
+        match self.pipeline_engine.store().remove_pipeline(&name) {
+            Ok(()) => {
+                tracing::info!(pipeline = %name, "Pipeline removed");
+                KernelResponse::Success {
+                    data: Some(serde_json::json!({ "removed": name })),
+                }
+            }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+}
+
+/// Bridges the pipeline engine to kernel subsystems for executing agent tasks and tools.
+/// Uses borrowed kernel reference — suitable for synchronous (non-detach) pipeline runs.
+pub(crate) struct KernelPipelineExecutor<'a> {
+    pub(crate) kernel: &'a Kernel,
+}
+
+#[async_trait::async_trait]
+impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
+    async fn run_agent_task(&self, agent_name: &str, prompt: &str) -> Result<String, AgentOSError> {
+        let response = self
+            .kernel
+            .cmd_run_task(Some(agent_name.to_string()), prompt.to_string())
+            .await;
+        match response {
+            KernelResponse::Success { data: Some(data) } => Ok(data
+                .get("result")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()),
+            KernelResponse::Error { message } => Err(AgentOSError::KernelError { reason: message }),
+            _ => Err(AgentOSError::KernelError {
+                reason: "Unexpected response from task execution".to_string(),
+            }),
+        }
+    }
+
+    async fn run_tool(
+        &self,
+        tool_name: &str,
+        input: serde_json::Value,
+    ) -> Result<String, AgentOSError> {
+        let context = ToolExecutionContext {
+            data_dir: self.kernel.data_dir.clone(),
+            task_id: TaskID::new(),
+            agent_id: AgentID::new(),
+            trace_id: TraceID::new(),
+            permissions: PermissionSet::new(),
+            vault: Some(self.kernel.vault.clone()),
+            hal: Some(self.kernel.hal.clone()),
+        };
+
+        let result = self
+            .kernel
+            .tool_runner
+            .execute(tool_name, input, context)
+            .await?;
+        Ok(serde_json::to_string(&result).unwrap_or_default())
+    }
+}
+
+/// Owned pipeline executor that can be moved into a spawned task for detach mode.
+/// Holds Arc references to kernel subsystems instead of borrowing from Kernel.
+pub(crate) struct OwnedPipelineExecutor {
+    pub(crate) agent_registry: Arc<RwLock<AgentRegistry>>,
+    pub(crate) active_llms: Arc<RwLock<HashMap<AgentID, Arc<dyn LLMCore>>>>,
+    pub(crate) tool_runner: Arc<ToolRunner>,
+    pub(crate) tool_registry: Arc<RwLock<ToolRegistry>>,
+    pub(crate) vault: Arc<SecretsVault>,
+    pub(crate) hal: Arc<HardwareAbstractionLayer>,
+    pub(crate) data_dir: PathBuf,
+    pub(crate) context_manager: Arc<ContextManager>,
+}
+
+#[async_trait::async_trait]
+impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
+    async fn run_agent_task(&self, agent_name: &str, prompt: &str) -> Result<String, AgentOSError> {
+        let registry = self.agent_registry.read().await;
+        let agent = registry
+            .get_by_name(agent_name)
+            .ok_or_else(|| AgentOSError::AgentNotFound(agent_name.to_string()))?
+            .clone();
+        drop(registry);
+
+        let llm = {
+            let active = self.active_llms.read().await;
+            active.get(&agent.id).cloned()
+        }
+        .ok_or_else(|| AgentOSError::KernelError {
+            reason: format!("LLM adapter for agent {} not connected", agent.name),
+        })?;
+
+        let tools_desc = self.tool_registry.read().await.tools_for_prompt();
+        let system_prompt = format!(
+            "You are an AI agent operating inside AgentOS.\n\
+             Available tools:\n{}\n\
+             To use a tool, respond with a JSON block:\n\
+             ```json\n{{\"tool\": \"tool-name\", \"intent_type\": \"read|write\", \"payload\": {{...}}}}\n```\n\
+             When done, provide your final answer as plain text without any tool call blocks.",
+            tools_desc
+        );
+
+        let task_id = TaskID::new();
+        self.context_manager
+            .create_context(task_id, &system_prompt)
+            .await;
+        self.context_manager
+            .push_entry(
+                &task_id,
+                ContextEntry {
+                    role: ContextRole::User,
+                    content: prompt.to_string(),
+                    timestamp: chrono::Utc::now(),
+                    metadata: None,
+                },
+            )
+            .await
+            .ok();
+
+        let context = self
+            .context_manager
+            .get_context(&task_id)
+            .await
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("Context error: {}", e),
+            })?;
+
+        let inference = llm.infer(&context).await?;
+
+        self.context_manager.remove_context(&task_id).await;
+
+        Ok(inference.text)
+    }
+
+    async fn run_tool(
+        &self,
+        tool_name: &str,
+        input: serde_json::Value,
+    ) -> Result<String, AgentOSError> {
+        let context = ToolExecutionContext {
+            data_dir: self.data_dir.clone(),
+            task_id: TaskID::new(),
+            agent_id: AgentID::new(),
+            trace_id: TraceID::new(),
+            permissions: PermissionSet::new(),
+            vault: Some(self.vault.clone()),
+            hal: Some(self.hal.clone()),
+        };
+
+        let result = self.tool_runner.execute(tool_name, input, context).await?;
+        Ok(serde_json::to_string(&result).unwrap_or_default())
+    }
+}

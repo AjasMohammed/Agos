@@ -58,17 +58,24 @@ impl ContextManager {
     }
 
     /// Push a tool result into context with sanitization wrappers.
+    ///
+    /// Tool outputs are treated as untrusted data: delimiter-like sequences are
+    /// escaped to prevent prompt injection, and the result is wrapped in typed
+    /// delimiters so the LLM can distinguish tool output from system instructions.
     pub async fn push_tool_result(
         &self,
         task_id: &TaskID,
         tool_name: &str,
         result: &serde_json::Value,
     ) -> Result<(), AgentOSError> {
-        let content = format!(
-            "[Tool Result: {}]\n{}",
-            tool_name,
-            serde_json::to_string_pretty(result).unwrap_or_default()
+        use agentos_tools::sanitize;
+
+        let sanitized = sanitize::sanitize_tool_output(tool_name, result);
+        let content = sanitize::truncate_if_needed(
+            &sanitized,
+            sanitize::DEFAULT_MAX_OUTPUT_CHARS,
         );
+
         self.push_entry(
             task_id,
             ContextEntry {

@@ -36,6 +36,11 @@ pub struct ToolManifest {
     pub capabilities_required: ToolCapabilities,
     pub capabilities_provided: ToolOutputs,
     pub intent_schema: ToolSchema,
+    /// Optional JSON Schema for validating the tool's input payload.
+    /// When present, `SemanticPayload.data` is validated against this schema
+    /// before the tool is executed.
+    #[serde(default)]
+    pub input_schema: Option<serde_json::Value>,
     pub sandbox: ToolSandbox,
     /// Which execution backend should run this tool. Defaults to Inline.
     #[serde(default)]

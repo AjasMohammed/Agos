@@ -13,5 +13,13 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 
+# Optional TLS support for TCP transport
+tokio-rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
+
+[features]
+default = []
+tls = ["tokio-rustls", "rustls-pemfile"]
+
 [dev-dependencies]
 tempfile = "3.10"

@@ -9,6 +9,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             max_concurrent_tasks: 4,
             default_task_timeout_secs: 60,
             context_window_max_entries: 100,
+            health_port: 0, // 0 = disabled in tests
         },
         routing: Default::default(),
         secrets: SecretsSettings {
@@ -44,6 +45,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
                 .join("agentos.sock")
                 .to_string_lossy()
                 .to_string(),
+            tls: None,
         },
         ollama: OllamaSettings {
             host: "http://localhost:11434".to_string(),

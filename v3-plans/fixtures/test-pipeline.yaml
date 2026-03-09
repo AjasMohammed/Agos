@@ -1,0 +1,17 @@
+name: "test-pipeline"
+version: "1.0.0"
+description: "A simple test pipeline for verification."
+
+steps:
+    - id: greet
+      agent: researcher
+      task: "Say hello and describe: {{input}}"
+      output_var: greeting
+
+    - id: enhance
+      agent: analyst
+      task: "Take this greeting and make it more formal:\n{{greeting}}"
+      output_var: formal_greeting
+      depends_on: [greet]
+
+output: formal_greeting

@@ -181,8 +181,21 @@ impl SemanticStore {
         Ok(mem_id)
     }
 
-    /// Semantic search using cosine similarity over chunk embeddings.
-    /// Returns the best-matching chunk per memory entry.
+    /// Maximum candidate chunks to load for cosine similarity when FTS5 pre-filter is used.
+    const FTS_CANDIDATE_LIMIT: usize = 200;
+    /// Fallback limit when FTS5 finds no matches — load most recent chunks instead of all.
+    const RECENCY_FALLBACK_LIMIT: usize = 500;
+    /// Reciprocal Rank Fusion constant (k=60 is standard).
+    const RRF_K: f32 = 60.0;
+
+    /// Hybrid semantic search using FTS5 pre-filter + cosine similarity.
+    ///
+    /// Phase 1: Use FTS5 full-text search to find top candidate chunks by text relevance.
+    /// Phase 2: Load only those chunk embeddings and compute cosine similarity.
+    /// Phase 3: Combine FTS rank + vector score via Reciprocal Rank Fusion (RRF).
+    ///
+    /// If FTS5 finds no matches (e.g., query uses synonyms not in the text), falls back
+    /// to loading the most recent chunks (bounded to RECENCY_FALLBACK_LIMIT).
     pub async fn search(
         &self,
         query: &str,
@@ -223,14 +236,60 @@ impl SemanticStore {
         })?;
 
         let agent_id_str = agent_id.map(|id| id.as_uuid().to_string());
-        let mut stmt = conn
-            .prepare(
+
+        // Phase 1: FTS5 pre-filter — find candidate chunk rowids by text relevance
+        let fts_ranks: HashMap<i64, f32> = {
+            let mut fts_map = HashMap::new();
+            // FTS5 MATCH can fail on certain query syntax; fall back gracefully
+            if let Ok(mut fts_stmt) = conn.prepare(
+                "SELECT rowid, rank FROM semantic_fts WHERE semantic_fts MATCH ?1 ORDER BY rank LIMIT ?2",
+            ) {
+                if let Ok(rows) = fts_stmt.query_map(
+                    params![query, Self::FTS_CANDIDATE_LIMIT as i64],
+                    |row| {
+                        let rowid: i64 = row.get(0)?;
+                        let rank: f64 = row.get(1)?;
+                        Ok((rowid, rank as f32))
+                    },
+                ) {
+                    for row in rows.flatten() {
+                        fts_map.insert(row.0, row.1);
+                    }
+                }
+            }
+            fts_map
+        };
+
+        let use_fts = !fts_ranks.is_empty();
+
+        // Phase 2: Load chunk embeddings — only for FTS candidates, or recent chunks as fallback
+        let sql = if use_fts {
+            // Build a query that loads only the FTS-matched chunks
+            format!(
                 "SELECT m.id, m.agent_id, m.key, m.content, m.created_at, m.updated_at, m.tags,
-                        c.id, c.chunk_index, c.content, c.embedding
+                        c.id, c.chunk_index, c.content, c.embedding, c.rowid
                  FROM semantic_chunks c
                  JOIN semantic_memory m ON c.memory_id = m.id
-                 WHERE (?1 IS NULL OR m.agent_id IS NULL OR m.agent_id = ?1)",
+                 WHERE c.rowid IN ({})
+                   AND (?1 IS NULL OR m.agent_id IS NULL OR m.agent_id = ?1)",
+                fts_ranks.keys().map(|id| id.to_string()).collect::<Vec<_>>().join(",")
             )
+        } else {
+            // Fallback: load most recent chunks (bounded)
+            format!(
+                "SELECT m.id, m.agent_id, m.key, m.content, m.created_at, m.updated_at, m.tags,
+                        c.id, c.chunk_index, c.content, c.embedding, c.rowid
+                 FROM semantic_chunks c
+                 JOIN semantic_memory m ON c.memory_id = m.id
+                 WHERE (?1 IS NULL OR m.agent_id IS NULL OR m.agent_id = ?1)
+                 ORDER BY c.rowid DESC
+                 LIMIT {}",
+                Self::RECENCY_FALLBACK_LIMIT
+            )
+        };
+
+        let mut stmt = conn
+            .prepare(&sql)
             .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
 
         let chunk_rows = stmt
@@ -247,6 +306,7 @@ impl SemanticStore {
                 let c_index: usize = row.get(8)?;
                 let c_content: String = row.get(9)?;
                 let blob: Vec<u8> = row.get(10)?;
+                let rowid: i64 = row.get(11)?;
 
                 let mut embedding = Vec::with_capacity(blob.len() / 4);
                 for bytes in blob.chunks_exact(4) {
@@ -280,33 +340,48 @@ impl SemanticStore {
                         content: c_content,
                     },
                     embedding,
+                    rowid,
                 ))
             })
             .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
 
+        // Phase 3: Score chunks and apply RRF fusion
         let mut best_by_memory: HashMap<String, RecallResult> = HashMap::new();
         for row in chunk_rows {
-            let (entry, chunk, embedding) =
+            let (entry, chunk, embedding, rowid) =
                 row.map_err(|e| AgentOSError::StorageError(e.to_string()))?;
             if embedding.len() != self.dimension {
                 continue;
             }
 
-            let score = Self::cosine_similarity(&query_embedding, &embedding);
-            if score < min_score {
+            let semantic_score = Self::cosine_similarity(&query_embedding, &embedding);
+            if semantic_score < min_score {
                 continue;
             }
+
+            // FTS score (negative rank from FTS5 — more negative = better match)
+            let fts_score = fts_ranks.get(&rowid).map(|r| -r).unwrap_or(0.0);
+
+            // RRF: combine semantic rank and FTS rank
+            // We approximate rank positions by score ordering within this result set
+            let rrf_score = if use_fts && fts_score > 0.0 {
+                // Weighted combination: semantic similarity + FTS relevance bonus
+                let fts_normalized = fts_score / (fts_score + Self::RRF_K);
+                0.7 * semantic_score + 0.3 * fts_normalized
+            } else {
+                semantic_score
+            };
 
             let candidate = RecallResult {
                 entry: entry.clone(),
                 chunk,
-                semantic_score: score,
-                fts_score: 0.0,
-                rrf_score: score,
+                semantic_score,
+                fts_score,
+                rrf_score,
             };
 
             match best_by_memory.get_mut(&entry.id) {
-                Some(existing) if score > existing.semantic_score => *existing = candidate,
+                Some(existing) if rrf_score > existing.rrf_score => *existing = candidate,
                 None => {
                     best_by_memory.insert(entry.id, candidate);
                 }
@@ -316,8 +391,8 @@ impl SemanticStore {
 
         let mut results: Vec<RecallResult> = best_by_memory.into_values().collect();
         results.sort_by(|a, b| {
-            b.semantic_score
-                .partial_cmp(&a.semantic_score)
+            b.rrf_score
+                .partial_cmp(&a.rrf_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         results.truncate(top_k);

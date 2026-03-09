@@ -79,6 +79,10 @@ impl ToolRunner {
     }
 
     /// Execute a tool by name. Returns the JSON result.
+    ///
+    /// Defense-in-depth: verifies permissions even if the kernel already checked,
+    /// so that any code path that bypasses the kernel's pre-check (e.g. pipeline
+    /// step execution, background tasks) is still gated.
     pub async fn execute(
         &self,
         tool_name: &str,
@@ -89,6 +93,24 @@ impl ToolRunner {
             .tools
             .get(tool_name)
             .ok_or_else(|| AgentOSError::ToolNotFound(tool_name.to_string()))?;
+
+        // Defense-in-depth: verify permissions at the tool layer
+        let required = tool.required_permissions();
+        for (resource, op) in &required {
+            if !context.permissions.check(resource, *op) {
+                tracing::warn!(
+                    tool = tool_name,
+                    resource = resource.as_str(),
+                    operation = ?op,
+                    agent = %context.agent_id,
+                    "Tool runner permission denied (defense-in-depth)"
+                );
+                return Err(AgentOSError::PermissionDenied {
+                    resource: resource.clone(),
+                    operation: format!("{:?}", op),
+                });
+            }
+        }
 
         tracing::info!(tool = tool_name, task_id = %context.task_id, "Executing tool");
 

@@ -1,12 +1,20 @@
 pub mod agent_message_bus;
 pub mod agent_registry;
 pub mod background_pool;
+pub mod commands;
 pub mod config;
 pub mod context;
+pub mod core_manifests;
+pub mod health;
 pub mod kernel;
+pub mod metrics;
+pub mod rate_limit;
 pub mod router;
+pub mod run_loop;
+pub mod schema_registry;
 pub mod schedule_manager;
 pub mod scheduler;
+pub mod task_executor;
 pub mod tool_call;
 pub mod tool_registry;
 

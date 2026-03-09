@@ -1,0 +1,184 @@
+use crate::kernel::Kernel;
+use agentos_bus::KernelResponse;
+use agentos_types::*;
+use std::collections::BTreeSet;
+use std::time::Duration;
+
+impl Kernel {
+    pub(crate) async fn cmd_run_task(
+        &self,
+        agent_name: Option<String>,
+        prompt: String,
+    ) -> KernelResponse {
+        let registry = self.agent_registry.read().await;
+        let agent_id = match agent_name {
+            Some(name) => match registry.get_by_name(&name) {
+                Some(a) => a.id,
+                None => {
+                    return KernelResponse::Error {
+                        message: format!("Agent '{}' not found", name),
+                    }
+                }
+            },
+            None => {
+                let agents: Vec<AgentProfile> = registry.list_all().into_iter().cloned().collect();
+                match self.router.route(&prompt, &agents).await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        return KernelResponse::Error {
+                            message: format!("Failed to route task: {}", e),
+                        }
+                    }
+                }
+            }
+        };
+
+        let agent = registry.get_by_id(&agent_id).unwrap().clone();
+        let effective_permissions = registry.compute_effective_permissions(&agent_id);
+        drop(registry);
+
+        let task_id = TaskID::new();
+        let capability_token = match self.capability_engine.issue_token(
+            task_id,
+            agent.id,
+            BTreeSet::new(),
+            BTreeSet::from([
+                IntentTypeFlag::Read,
+                IntentTypeFlag::Write,
+                IntentTypeFlag::Execute,
+                IntentTypeFlag::Query,
+            ]),
+            effective_permissions,
+            Duration::from_secs(self.config.kernel.default_task_timeout_secs),
+        ) {
+            Ok(token) => token,
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: format!("Failed to issue capability token: {}", e),
+                };
+            }
+        };
+
+        let task = AgentTask {
+            id: task_id,
+            state: TaskState::Queued,
+            agent_id: agent.id,
+            capability_token,
+            assigned_llm: Some(agent.id),
+            priority: 5,
+            created_at: chrono::Utc::now(),
+            timeout: Duration::from_secs(self.config.kernel.default_task_timeout_secs),
+            original_prompt: prompt,
+            history: Vec::new(),
+            parent_task: None,
+        };
+
+        // Execute task synchronously so the CLI gets the result
+        let result = self.execute_task_sync(&task).await;
+        match result {
+            Ok(answer) => KernelResponse::Success {
+                data: Some(serde_json::json!({
+                    "task_id": task.id.to_string(),
+                    "result": answer,
+                })),
+            },
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+
+    pub(crate) async fn cmd_list_tasks(&self) -> KernelResponse {
+        let tasks = self.scheduler.list_tasks().await;
+        KernelResponse::TaskList(tasks)
+    }
+
+    pub(crate) async fn cmd_get_task_logs(&self, task_id: TaskID) -> KernelResponse {
+        match self.scheduler.get_task(&task_id).await {
+            Some(task) => {
+                let logs: Vec<String> = task
+                    .history
+                    .iter()
+                    .map(|entry| {
+                        format!(
+                            "[{}] {:?} -> {:?}: {}",
+                            entry.timestamp.format("%H:%M:%S"),
+                            entry.intent_type,
+                            entry.target,
+                            entry.payload.schema
+                        )
+                    })
+                    .collect();
+                KernelResponse::TaskLogs(logs)
+            }
+            None => KernelResponse::Error {
+                message: format!("Task '{}' not found", task_id),
+            },
+        }
+    }
+
+    pub(crate) async fn cmd_cancel_task(&self, task_id: TaskID) -> KernelResponse {
+        match self
+            .scheduler
+            .update_state(&task_id, TaskState::Cancelled)
+            .await
+        {
+            Ok(_) => KernelResponse::Success { data: None },
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+
+    pub(crate) async fn handle_task_delegation(
+        &self,
+        parent_task: &AgentTask,
+        target_agent_name: &str,
+        prompt: &str,
+        priority: u8,
+        timeout_secs: u64,
+    ) -> Result<serde_json::Value, AgentOSError> {
+        let registry = self.agent_registry.read().await;
+        let target = registry
+            .get_by_name(target_agent_name)
+            .ok_or_else(|| AgentOSError::AgentNotFound(target_agent_name.to_string()))?
+            .clone();
+
+        let target_permissions = registry.compute_effective_permissions(&target.id);
+        drop(registry);
+
+        let child_permissions = parent_task.capability_token.permissions.clone();
+        let effective_permissions = child_permissions.intersect(&target_permissions);
+
+        let child_token = self.capability_engine.issue_token(
+            TaskID::new(),
+            target.id,
+            parent_task.capability_token.allowed_tools.clone(),
+            parent_task.capability_token.allowed_intents.clone(),
+            effective_permissions,
+            Duration::from_secs(timeout_secs),
+        )?;
+
+        let child_task = AgentTask {
+            id: child_token.task_id,
+            state: TaskState::Queued,
+            agent_id: target.id,
+            capability_token: child_token,
+            assigned_llm: None,
+            priority,
+            created_at: chrono::Utc::now(),
+            timeout: Duration::from_secs(timeout_secs),
+            original_prompt: prompt.to_string(),
+            history: Vec::new(),
+            parent_task: Some(parent_task.id),
+        };
+
+        let _ = self.scheduler.enqueue(child_task.clone()).await;
+
+        Ok(serde_json::json!({
+            "delegated_to": target_agent_name,
+            "child_task_id": child_task.id.to_string(),
+            "status": "queued",
+        }))
+    }
+}

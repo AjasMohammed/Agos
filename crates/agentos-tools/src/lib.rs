@@ -11,6 +11,7 @@ pub mod memory_write;
 pub mod network_monitor;
 pub mod process_manager;
 pub mod runner;
+pub mod sanitize;
 pub mod shell_exec;
 pub mod sys_monitor;
 pub mod task_delegate;

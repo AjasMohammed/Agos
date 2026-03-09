@@ -381,4 +381,156 @@ mod tests {
         let (store, _dir) = test_store();
         assert!(store.remove_pipeline("nope").is_err());
     }
+
+    #[test]
+    fn test_install_replaces_existing() {
+        let (store, _dir) = test_store();
+        store
+            .install_pipeline("pipe", "1.0.0", "name: pipe\nversion: \"1.0.0\"\nsteps: []")
+            .unwrap();
+        store
+            .install_pipeline("pipe", "2.0.0", "name: pipe\nversion: \"2.0.0\"\nsteps: []")
+            .unwrap();
+        let list = store.list_pipelines().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].version, "2.0.0");
+    }
+
+    #[test]
+    fn test_get_pipeline_yaml() {
+        let (store, _dir) = test_store();
+        let yaml = "name: pipe\nversion: \"1.0.0\"\nsteps: []";
+        store.install_pipeline("pipe", "1.0.0", yaml).unwrap();
+        let retrieved = store.get_pipeline_yaml("pipe").unwrap();
+        assert_eq!(retrieved, yaml);
+    }
+
+    #[test]
+    fn test_get_nonexistent_pipeline_fails() {
+        let (store, _dir) = test_store();
+        assert!(store.get_pipeline_yaml("nope").is_err());
+    }
+
+    #[test]
+    fn test_create_and_get_run() {
+        let (store, _dir) = test_store();
+        // Need a pipeline first for FK
+        store
+            .install_pipeline("pipe", "1.0.0", "name: pipe\nversion: \"1.0.0\"\nsteps: []")
+            .unwrap();
+
+        let run_id = RunID::new();
+        let run = PipelineRun {
+            id: run_id,
+            pipeline_name: "pipe".to_string(),
+            input: "test input".to_string(),
+            status: PipelineRunStatus::Running,
+            step_results: HashMap::new(),
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            error: None,
+        };
+
+        store.create_run(&run).unwrap();
+        let retrieved = store.get_run(&run_id).unwrap();
+        assert_eq!(retrieved.pipeline_name, "pipe");
+        assert_eq!(retrieved.input, "test input");
+        assert_eq!(retrieved.status, PipelineRunStatus::Running);
+    }
+
+    #[test]
+    fn test_update_run() {
+        let (store, _dir) = test_store();
+        store
+            .install_pipeline("pipe", "1.0.0", "name: pipe\nversion: \"1.0.0\"\nsteps: []")
+            .unwrap();
+
+        let run_id = RunID::new();
+        let mut run = PipelineRun {
+            id: run_id,
+            pipeline_name: "pipe".to_string(),
+            input: "test".to_string(),
+            status: PipelineRunStatus::Running,
+            step_results: HashMap::new(),
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            error: None,
+        };
+        store.create_run(&run).unwrap();
+
+        run.status = PipelineRunStatus::Complete;
+        run.output = Some("final output".to_string());
+        run.completed_at = Some(chrono::Utc::now());
+        store.update_run(&run).unwrap();
+
+        let retrieved = store.get_run(&run_id).unwrap();
+        assert_eq!(retrieved.status, PipelineRunStatus::Complete);
+        assert_eq!(retrieved.output.as_deref(), Some("final output"));
+        assert!(retrieved.completed_at.is_some());
+    }
+
+    #[test]
+    fn test_record_and_get_step_logs() {
+        let (store, _dir) = test_store();
+        store
+            .install_pipeline("pipe", "1.0.0", "name: pipe\nversion: \"1.0.0\"\nsteps: []")
+            .unwrap();
+
+        let run_id = RunID::new();
+        let run = PipelineRun {
+            id: run_id,
+            pipeline_name: "pipe".to_string(),
+            input: "test".to_string(),
+            status: PipelineRunStatus::Running,
+            step_results: HashMap::new(),
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            error: None,
+        };
+        store.create_run(&run).unwrap();
+
+        // Record a failed attempt
+        let failed_step = StepResult {
+            step_id: "step1".to_string(),
+            status: StepStatus::Failed,
+            output: None,
+            error: Some("transient error".to_string()),
+            started_at: Some(chrono::Utc::now()),
+            completed_at: Some(chrono::Utc::now()),
+            attempt: 1,
+            duration_ms: Some(100),
+        };
+        store.record_step_execution(&run_id, &failed_step).unwrap();
+
+        // Record a successful retry
+        let success_step = StepResult {
+            step_id: "step1".to_string(),
+            status: StepStatus::Complete,
+            output: Some("success output".to_string()),
+            error: None,
+            started_at: Some(chrono::Utc::now()),
+            completed_at: Some(chrono::Utc::now()),
+            attempt: 2,
+            duration_ms: Some(200),
+        };
+        store.record_step_execution(&run_id, &success_step).unwrap();
+
+        let logs = store.get_step_logs(&run_id, "step1").unwrap();
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].attempt, 1);
+        assert_eq!(logs[0].status, StepStatus::Failed);
+        assert_eq!(logs[1].attempt, 2);
+        assert_eq!(logs[1].status, StepStatus::Complete);
+        assert_eq!(logs[1].output.as_deref(), Some("success output"));
+    }
+
+    #[test]
+    fn test_get_nonexistent_run_fails() {
+        let (store, _dir) = test_store();
+        let fake_id = RunID::new();
+        assert!(store.get_run(&fake_id).is_err());
+    }
 }

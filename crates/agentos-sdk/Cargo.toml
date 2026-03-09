@@ -1,0 +1,14 @@
+[package]
+name = "agentos-sdk"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agentos-sdk-macros = { path = "../agentos-sdk-macros" }
+agentos-types = { path = "../agentos-types" }
+agentos-tools = { path = "../agentos-tools" }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -33,6 +33,25 @@ pub struct PipelineStep {
     /// Max retries — engine re-runs the step up to N times on failure.
     #[serde(default)]
     pub retry_on_failure: Option<u32>,
+    /// What to do when this step fails (after all retries exhausted). Default: Fail (stop pipeline).
+    #[serde(default)]
+    pub on_failure: OnFailure,
+    /// Default value to use when on_failure is UseDefault.
+    #[serde(default)]
+    pub default_value: Option<String>,
+}
+
+/// Per-step failure handling strategy.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum OnFailure {
+    /// Stop the entire pipeline (default).
+    #[default]
+    Fail,
+    /// Mark step as skipped and continue.
+    Skip,
+    /// Use `default_value` as the step's output and continue.
+    UseDefault,
 }
 
 /// Exactly one of agent or tool must be specified per step.

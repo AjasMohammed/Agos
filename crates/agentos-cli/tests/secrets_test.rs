@@ -65,8 +65,10 @@ async fn test_secrets_full_lifecycle() {
         .unwrap();
     match response {
         KernelResponse::SecretList(secrets) => {
-            assert_eq!(secrets.len(), 1);
-            assert_eq!(secrets[0].name, "TEST_KEY");
+            // Filter out internal keys (e.g. __internal_hmac_signing_key)
+            let user_secrets: Vec<_> = secrets.iter().filter(|s| !s.name.starts_with("__internal_")).collect();
+            assert_eq!(user_secrets.len(), 1);
+            assert_eq!(user_secrets[0].name, "TEST_KEY");
             // No value field exists on SecretMetadata — this is by design
         }
         _ => panic!("Wrong response type"),
@@ -100,7 +102,10 @@ async fn test_secrets_full_lifecycle() {
         .await
         .unwrap();
     match response {
-        KernelResponse::SecretList(secrets) => assert_eq!(secrets.len(), 0),
+        KernelResponse::SecretList(secrets) => {
+            let user_secrets: Vec<_> = secrets.iter().filter(|s| !s.name.starts_with("__internal_")).collect();
+            assert_eq!(user_secrets.len(), 0);
+        }
         _ => panic!("Wrong response type"),
     }
 }

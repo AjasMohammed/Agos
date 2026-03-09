@@ -138,7 +138,9 @@ impl LLMCore for OpenAICore {
         &self.capabilities
     }
 
-    async fn health_check(&self) -> bool {
+    async fn health_check(&self) -> crate::types::HealthStatus {
+        use crate::types::HealthStatus;
+        let start = std::time::Instant::now();
         let url = format!("{}/models", self.base_url);
         match self
             .client
@@ -150,8 +152,22 @@ impl LLMCore for OpenAICore {
             .send()
             .await
         {
-            Ok(res) => res.status().is_success(),
-            Err(_) => false,
+            Ok(res) if res.status().is_success() => {
+                let latency = start.elapsed();
+                if latency > std::time::Duration::from_secs(2) {
+                    HealthStatus::Degraded {
+                        reason: format!("High latency: {}ms", latency.as_millis()),
+                    }
+                } else {
+                    HealthStatus::Healthy
+                }
+            }
+            Ok(res) => HealthStatus::Unhealthy {
+                reason: format!("HTTP {}", res.status()),
+            },
+            Err(e) => HealthStatus::Unhealthy {
+                reason: format!("Connection failed: {e}"),
+            },
         }
     }
 

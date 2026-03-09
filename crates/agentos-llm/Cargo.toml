@@ -13,4 +13,5 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
 secrecy = "0.8"

@@ -15,6 +15,8 @@ members = [
     "crates/agentos-hal",
     "crates/agentos-memory",
     "crates/agentos-pipeline",
+    "crates/agentos-sdk-macros",
+    "crates/agentos-sdk",
 ]
 
 [workspace.package]
@@ -43,6 +45,7 @@ hmac = "0.12"
 sha2 = "0.10"
 aes-gcm = "0.10"
 rand = "0.8"
+hex = "0.4"
 zeroize = { version = "1", features = ["derive"] }
 argon2 = "0.5"
 
@@ -53,7 +56,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 
 # HTTP client (for Ollama adapter)
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 
 # Error handling
 thiserror = "2"
@@ -69,6 +72,13 @@ cron = "0.12"
 # Regex
 regex = "1"
 
+# Web
+axum = "0.8"
+
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
 # Misc
 bytes = "1"
 futures = "0.3"
@@ -79,6 +89,13 @@ libc = "0.2"
 # WASM runtime
 wasmtime = { version = "38", features = ["async", "cranelift"] }
 wasmtime-wasi = "38"
+
+# JSON Schema validation
+jsonschema = "0.28"
+
+# TLS
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
 
 # System info
 sysinfo = "0.33"

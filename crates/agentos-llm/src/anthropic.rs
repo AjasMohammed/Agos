@@ -135,9 +135,9 @@ impl LLMCore for AnthropicCore {
         &self.capabilities
     }
 
-    async fn health_check(&self) -> bool {
-        // Anthropic doesn't have a reliable simple models endpoint without auth/payload,
-        // so we attempt a minimal completion.
+    async fn health_check(&self) -> crate::types::HealthStatus {
+        use crate::types::HealthStatus;
+        let start = std::time::Instant::now();
         let url = "https://api.anthropic.com/v1/messages";
         let body = json!({
             "model": self.model,
@@ -156,8 +156,22 @@ impl LLMCore for AnthropicCore {
             .send()
             .await
         {
-            Ok(res) => res.status().is_success(),
-            Err(_) => false,
+            Ok(res) if res.status().is_success() => {
+                let latency = start.elapsed();
+                if latency > std::time::Duration::from_secs(3) {
+                    HealthStatus::Degraded {
+                        reason: format!("High latency: {}ms", latency.as_millis()),
+                    }
+                } else {
+                    HealthStatus::Healthy
+                }
+            }
+            Ok(res) => HealthStatus::Unhealthy {
+                reason: format!("HTTP {}", res.status()),
+            },
+            Err(e) => HealthStatus::Unhealthy {
+                reason: format!("Connection failed: {e}"),
+            },
         }
     }
 

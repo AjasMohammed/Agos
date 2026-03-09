@@ -1,10 +1,11 @@
 use agentos_types::AgentOSError;
 use serde::{de::DeserializeOwned, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Read a single length-prefixed JSON message from a stream.
-pub async fn read_message<T: DeserializeOwned>(stream: &mut UnixStream) -> Result<T, AgentOSError> {
+/// Read a single length-prefixed JSON message from any async stream.
+pub async fn read_message<T: DeserializeOwned>(
+    stream: &mut (impl AsyncRead + Unpin),
+) -> Result<T, AgentOSError> {
     // Read 4-byte length prefix (big-endian u32)
     let mut len_buf = [0u8; 4];
     stream
@@ -31,9 +32,9 @@ pub async fn read_message<T: DeserializeOwned>(stream: &mut UnixStream) -> Resul
     serde_json::from_slice(&buf).map_err(|e| AgentOSError::Serialization(e.to_string()))
 }
 
-/// Write a single length-prefixed JSON message to a stream.
+/// Write a single length-prefixed JSON message to any async stream.
 pub async fn write_message<T: Serialize>(
-    stream: &mut UnixStream,
+    stream: &mut (impl AsyncWrite + Unpin),
     msg: &T,
 ) -> Result<(), AgentOSError> {
     let json = serde_json::to_vec(msg).map_err(|e| AgentOSError::Serialization(e.to_string()))?;

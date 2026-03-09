@@ -1,0 +1,38 @@
+name: "research-and-report"
+version: "1.0.0"
+description: "Research a topic, analyse findings, write an executive summary."
+
+permissions:
+    - "network.outbound:x"
+    - "fs.user_data:rw"
+    - "memory.semantic:rw"
+
+steps:
+    - id: research
+      agent: researcher
+      task: "Search the web and gather information about: {{input}}"
+      output_var: raw_research
+      timeout_minutes: 10
+
+    - id: analyse
+      agent: analyst
+      task: "Analyse this research and extract the 5 most important findings:\n{{raw_research}}"
+      output_var: analysis
+      depends_on: [research]
+      timeout_minutes: 5
+
+    - id: summarise
+      agent: summarizer
+      task: "Write a concise executive summary (max 500 words) based on:\n{{analysis}}"
+      output_var: final_report
+      depends_on: [analyse]
+      timeout_minutes: 3
+
+    - id: save
+      tool: file-writer
+      input:
+          path: "/output/reports/report-{{run_id}}.md"
+          content: "{{final_report}}"
+      depends_on: [summarise]
+
+output: final_report

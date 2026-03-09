@@ -18,11 +18,12 @@ pub use agent_message::{AgentMessage, MessageContent, MessageTarget};
 pub use capability::{
     CapabilityToken, IntentTypeFlag, PermissionEntry, PermissionOp, PermissionSet,
 };
-pub use context::{ContextEntry, ContextMetadata, ContextRole, ContextWindow};
+pub use context::{ContextEntry, ContextMetadata, ContextRole, ContextWindow, OverflowStrategy};
 pub use error::AgentOSError;
 pub use ids::*;
 pub use intent::{
-    IntentMessage, IntentResult, IntentResultStatus, IntentTarget, IntentType, SemanticPayload,
+    HardwareResource, IntentMessage, IntentResult, IntentResultStatus, IntentTarget, IntentType,
+    SemanticPayload,
 };
 pub use role::Role;
 pub use secret::{SecretEntry, SecretMetadata, SecretOwner, SecretScope};

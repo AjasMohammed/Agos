@@ -30,6 +30,10 @@ secrecy = "0.8"
 rusqlite = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
 cron = { workspace = true }
+axum = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+jsonschema = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.10"

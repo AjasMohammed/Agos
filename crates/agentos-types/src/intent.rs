@@ -33,11 +33,24 @@ pub enum IntentType {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum IntentTarget {
     Tool(ToolID),
-    Kernel, // internal kernel operations (memory mgmt, etc.)
+    Kernel,                          // internal kernel operations (memory mgmt, etc.)
+    Agent(AgentID),                  // direct agent-to-agent messaging
+    Hardware(HardwareResource),      // HAL-mediated hardware access
+    Broadcast,                       // all agents in a group
 }
 
-/// The payload of an intent — validated, schema-checked data.
-/// In Phase 1, this is a JSON value. In Phase 2+, this becomes schema-validated.
+/// Hardware resource categories accessible via the HAL.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HardwareResource {
+    System,
+    Process,
+    Network,
+    LogReader,
+}
+
+/// The payload of an intent — schema-validated data.
+/// When a tool provides an `input_schema` in its manifest, the kernel's
+/// `SchemaRegistry` validates `data` against it before execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticPayload {
     /// The intent schema name (e.g. "FileReadIntent", "MemorySearchIntent")

@@ -3,10 +3,16 @@ pub mod message;
 pub mod server;
 pub mod transport;
 
+#[cfg(feature = "tls")]
+pub mod tls_server;
+
 pub use client::BusClient;
 pub use message::*;
 pub use server::{BusConnection, BusServer};
 pub use transport::{read_message, write_message};
+
+#[cfg(feature = "tls")]
+pub use tls_server::{TlsBusClient, TlsBusConnection, TlsBusServer};
 
 #[cfg(test)]
 mod tests {

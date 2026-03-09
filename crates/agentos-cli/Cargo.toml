@@ -26,5 +26,6 @@ chrono = { workspace = true }
 tempfile = { workspace = true }
 agentos-audit = { path = "../agentos-audit" }
 agentos-capability = { path = "../agentos-capability" }
+agentos-llm = { path = "../agentos-llm" }
 toml = { workspace = true }
 

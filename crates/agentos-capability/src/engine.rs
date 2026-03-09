@@ -5,8 +5,11 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::RwLock;
 use std::time::Duration;
 
+/// Internal vault key name for the persisted HMAC signing key.
+const SIGNING_KEY_NAME: &str = "__internal_hmac_signing_key";
+
 pub struct CapabilityEngine {
-    /// The kernel's secret signing key (256-bit, randomly generated at kernel start).
+    /// The kernel's secret signing key (256-bit).
     signing_key: [u8; 32],
     /// Per-agent permission sets. Key is AgentID.
     agent_permissions: RwLock<HashMap<AgentID, PermissionSet>>,
@@ -29,6 +32,49 @@ impl CapabilityEngine {
             signing_key,
             agent_permissions: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Boot the capability engine: load existing signing key from the vault,
+    /// or generate a new one and persist it. This ensures tokens survive restarts.
+    pub fn boot(vault: &agentos_vault::SecretsVault) -> Self {
+        match vault.get(SIGNING_KEY_NAME) {
+            Ok(entry) => {
+                let key_str = entry.as_str();
+                // Stored as hex string
+                if let Ok(key_bytes) = hex::decode(key_str) {
+                    if key_bytes.len() == 32 {
+                        let mut key = [0u8; 32];
+                        key.copy_from_slice(&key_bytes);
+                        tracing::info!("Loaded existing HMAC signing key from vault");
+                        return Self::with_key(key);
+                    }
+                }
+                tracing::warn!("Corrupt signing key in vault, generating new one");
+                Self::generate_and_persist(vault)
+            }
+            Err(_) => {
+                tracing::info!("No existing signing key found, generating new one");
+                Self::generate_and_persist(vault)
+            }
+        }
+    }
+
+    /// Generate a new signing key and persist it in the vault.
+    fn generate_and_persist(vault: &agentos_vault::SecretsVault) -> Self {
+        let mut key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        let key_hex = hex::encode(key);
+
+        if let Err(e) = vault.set(
+            SIGNING_KEY_NAME,
+            &key_hex,
+            agentos_types::SecretOwner::Kernel,
+            agentos_types::SecretScope::Global,
+        ) {
+            tracing::error!(error = %e, "Failed to persist signing key to vault");
+        }
+
+        Self::with_key(key)
     }
 
     /// Register an agent with an initial permission set.
