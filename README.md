@@ -82,6 +82,19 @@ cargo run --bin agentos-cli -- perm grant analyst fs.user_data:rw
 cargo run --bin agentos-cli -- task run --agent analyst "Hello, AgentOS!"
 ```
 
+### Production Quick Start
+
+```bash
+# Use the production profile with persistent paths
+cargo run --bin agentos-cli -- --config config/production.toml start
+```
+
+- Configure non-localhost endpoints in `config/production.toml`
+- Optional runtime endpoint overrides:
+  - `AGENTOS_OLLAMA_HOST`
+  - `AGENTOS_LLM_URL`
+  - `AGENTOS_OPENAI_BASE_URL`
+
 ### Run Tests
 
 ```bash

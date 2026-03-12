@@ -25,9 +25,7 @@ pub trait LLMCore: Send + Sync {
                 Ok(())
             }
             Err(e) => {
-                let _ = tx
-                    .send(InferenceEvent::Error(e.to_string()))
-                    .await;
+                let _ = tx.send(InferenceEvent::Error(e.to_string())).await;
                 Err(e)
             }
         }

@@ -12,8 +12,7 @@ use agentos_capability::CapabilityEngine;
 use agentos_hal::{
     drivers::{
         gpu::GpuDriver, log_reader::LogReaderDriver, network::NetworkDriver,
-        process::ProcessDriver, sensor::SensorDriver, storage::StorageDriver,
-        system::SystemDriver,
+        process::ProcessDriver, sensor::SensorDriver, storage::StorageDriver, system::SystemDriver,
     },
     HardwareAbstractionLayer,
 };
@@ -28,6 +27,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 pub struct Kernel {
     pub config: KernelConfig,
@@ -36,6 +36,7 @@ pub struct Kernel {
     pub capability_engine: Arc<CapabilityEngine>,
     pub scheduler: Arc<TaskScheduler>,
     pub context_manager: Arc<ContextManager>,
+    pub context_compiler: Arc<crate::context_compiler::ContextCompiler>,
     pub tool_registry: Arc<RwLock<ToolRegistry>>,
     pub agent_registry: Arc<RwLock<AgentRegistry>>,
     pub bus: Arc<BusServer>,
@@ -46,13 +47,38 @@ pub struct Kernel {
     pub message_bus: Arc<crate::agent_message_bus::AgentMessageBus>,
     pub profile_manager: Arc<ProfileManager>,
     pub episodic_memory: Arc<agentos_memory::EpisodicStore>,
+    pub semantic_memory: Arc<agentos_memory::SemanticStore>,
+    pub procedural_memory: Arc<agentos_memory::ProceduralStore>,
+    pub retrieval_gate: Arc<crate::retrieval_gate::RetrievalGate>,
+    pub retrieval_executor: Arc<crate::retrieval_gate::RetrievalExecutor>,
+    pub memory_extraction: Arc<crate::memory_extraction::MemoryExtractionEngine>,
+    pub consolidation_engine: Arc<crate::consolidation::ConsolidationEngine>,
+    pub memory_blocks: Arc<crate::memory_blocks::MemoryBlockStore>,
     pub schedule_manager: Arc<ScheduleManager>,
     pub background_pool: Arc<BackgroundPool>,
     pub hal: Arc<HardwareAbstractionLayer>,
     pub schema_registry: Arc<crate::schema_registry::SchemaRegistry>,
     pub pipeline_engine: Arc<PipelineEngine>,
+    pub intent_validator: Arc<crate::intent_validator::IntentValidator>,
+    pub escalation_manager: Arc<crate::escalation::EscalationManager>,
+    pub cost_tracker: Arc<crate::cost_tracker::CostTracker>,
+    pub risk_classifier: Arc<crate::risk_classifier::RiskClassifier>,
+    pub identity_manager: Arc<crate::identity::IdentityManager>,
+    pub injection_scanner: Arc<crate::injection_scanner::InjectionScanner>,
+    pub resource_arbiter: Arc<crate::resource_arbiter::ResourceArbiter>,
+    pub snapshot_manager: Arc<crate::snapshot::SnapshotManager>,
+    pub event_bus: Arc<crate::event_bus::EventBus>,
+    pub(crate) event_sender: tokio::sync::mpsc::UnboundedSender<agentos_types::EventMessage>,
+    /// Receiver for event channel — taken by the run loop's EventDispatcher task.
+    pub(crate) event_receiver: Arc<
+        tokio::sync::Mutex<
+            Option<tokio::sync::mpsc::UnboundedReceiver<agentos_types::EventMessage>>,
+        >,
+    >,
     pub(crate) data_dir: PathBuf,
     pub(crate) started_at: chrono::DateTime<chrono::Utc>,
+    /// Token used to signal graceful shutdown to all kernel loops.
+    pub cancellation_token: CancellationToken,
 }
 
 impl Kernel {
@@ -68,6 +94,13 @@ impl Kernel {
     pub async fn boot(config_path: &Path, vault_passphrase: &str) -> Result<Self, anyhow::Error> {
         // 1. Load config
         let config = load_config(config_path)?;
+        tracing::info!(
+            config_path = %config_path.display(),
+            ollama_host = %config.ollama.host,
+            custom_llm_url = ?config.llm.custom_base_url,
+            openai_base_url = ?config.llm.openai_base_url,
+            "Kernel configuration loaded"
+        );
 
         // Ensure directories exist
         if let Some(parent) = Path::new(&config.audit.log_path).parent() {
@@ -127,10 +160,35 @@ impl Kernel {
 
         let hal = Arc::new(hal);
 
-        // 5. Load tools
-        let tool_registry = Arc::new(RwLock::new(ToolRegistry::load_from_dirs(
+        // 5. Load tools (with optional CRL enforcement)
+        let crl = if let Some(ref crl_path) = config.tools.crl_path {
+            let crl_file = Path::new(crl_path);
+            if crl_file.exists() {
+                match agentos_tools::signing::RevocationList::load_from_file(crl_file) {
+                    Ok(loaded) => {
+                        tracing::info!(
+                            path = %crl_path,
+                            revoked = loaded.revoked_pubkeys.len(),
+                            "Loaded certificate revocation list"
+                        );
+                        loaded
+                    }
+                    Err(e) => {
+                        tracing::warn!(path = %crl_path, error = %e, "Failed to load CRL, proceeding without it");
+                        agentos_tools::signing::RevocationList::new()
+                    }
+                }
+            } else {
+                tracing::warn!(path = %crl_path, "CRL path configured but file not found");
+                agentos_tools::signing::RevocationList::new()
+            }
+        } else {
+            agentos_tools::signing::RevocationList::new()
+        };
+        let tool_registry = Arc::new(RwLock::new(ToolRegistry::load_from_dirs_with_crl(
             Path::new(&config.tools.core_tools_dir),
             Path::new(&config.tools.user_tools_dir),
+            crl,
         )?));
 
         // 5.5 Build schema registry from tool manifests
@@ -200,8 +258,17 @@ impl Kernel {
         let tool_runner = Arc::new(tool_runner);
         let sandbox = Arc::new(SandboxExecutor::new(data_dir.clone()));
         let scheduler = Arc::new(TaskScheduler::new(config.kernel.max_concurrent_tasks));
-        let context_manager = Arc::new(ContextManager::new(
+        let context_manager = Arc::new(ContextManager::with_token_budget(
             config.kernel.context_window_max_entries,
+            config.kernel.context_window_token_budget,
+        ));
+        let mut context_budget = config.context_budget.clone();
+        if let Err(e) = context_budget.validate() {
+            tracing::warn!("Invalid context budget config: {} — using defaults", e);
+            context_budget = TokenBudget::default();
+        }
+        let context_compiler = Arc::new(crate::context_compiler::ContextCompiler::new(
+            context_budget,
         ));
         let agent_registry = Arc::new(RwLock::new(AgentRegistry::with_persistence(
             data_dir.clone(),
@@ -214,6 +281,34 @@ impl Kernel {
         let message_bus = Arc::new(crate::agent_message_bus::AgentMessageBus::new());
         let profile_manager = Arc::new(ProfileManager::new());
         let episodic_memory = Arc::new(agentos_memory::EpisodicStore::open(&data_dir)?);
+        let semantic_memory = Arc::new(agentos_memory::SemanticStore::open_with_cache_dir(
+            &data_dir,
+            &model_cache_dir,
+        )?);
+        let procedural_memory = Arc::new(agentos_memory::ProceduralStore::open_with_cache_dir(
+            &data_dir,
+            &model_cache_dir,
+        )?);
+        let retrieval_gate = Arc::new(crate::retrieval_gate::RetrievalGate::new(5));
+        let retrieval_executor = Arc::new(crate::retrieval_gate::RetrievalExecutor::new(
+            semantic_memory.clone(),
+            episodic_memory.clone(),
+            procedural_memory.clone(),
+            tool_registry.clone(),
+        ));
+        let mut extraction_registry = crate::memory_extraction::ExtractionRegistry::new();
+        extraction_registry.register_defaults();
+        let memory_extraction = Arc::new(crate::memory_extraction::MemoryExtractionEngine::new(
+            extraction_registry,
+            semantic_memory.clone(),
+            config.memory.extraction.clone(),
+        ));
+        let consolidation_engine = Arc::new(crate::consolidation::ConsolidationEngine::new(
+            episodic_memory.clone(),
+            procedural_memory.clone(),
+            config.memory.consolidation.clone(),
+        ));
+        let memory_blocks = Arc::new(crate::memory_blocks::MemoryBlockStore::open(&data_dir)?);
         let schedule_manager = Arc::new(ScheduleManager::new());
         let background_pool = Arc::new(BackgroundPool::new());
 
@@ -227,6 +322,16 @@ impl Kernel {
         // 7. Start bus server
         let bus = Arc::new(BusServer::bind(Path::new(&config.bus.socket_path)).await?);
 
+        let identity_manager = Arc::new(crate::identity::IdentityManager::new(vault.clone()));
+
+        let snapshot_manager = Arc::new(crate::snapshot::SnapshotManager::new(
+            data_dir.join("snapshots"),
+            72, // hours
+        ));
+
+        let event_bus = Arc::new(crate::event_bus::EventBus::new());
+        let (event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+
         let kernel = Kernel {
             config,
             audit,
@@ -234,6 +339,7 @@ impl Kernel {
             capability_engine,
             scheduler,
             context_manager,
+            context_compiler,
             tool_registry,
             agent_registry,
             bus,
@@ -244,13 +350,32 @@ impl Kernel {
             message_bus,
             profile_manager,
             episodic_memory,
+            semantic_memory,
+            procedural_memory,
+            retrieval_gate,
+            retrieval_executor,
+            memory_extraction,
+            consolidation_engine,
+            memory_blocks,
             schedule_manager,
             background_pool,
             hal,
             schema_registry,
             pipeline_engine,
+            intent_validator: Arc::new(crate::intent_validator::IntentValidator::new()),
+            escalation_manager: Arc::new(crate::escalation::EscalationManager::new()),
+            cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
+            risk_classifier: Arc::new(crate::risk_classifier::RiskClassifier::new()),
+            identity_manager,
+            injection_scanner: Arc::new(crate::injection_scanner::InjectionScanner::new()),
+            resource_arbiter: Arc::new(crate::resource_arbiter::ResourceArbiter::new()),
+            snapshot_manager,
+            event_bus,
+            event_sender,
+            event_receiver: Arc::new(tokio::sync::Mutex::new(Some(event_receiver))),
             data_dir,
             started_at: chrono::Utc::now(),
+            cancellation_token: CancellationToken::new(),
         };
 
         // Emit KernelStarted audit event
@@ -266,8 +391,15 @@ impl Kernel {
                 "max_concurrent_tasks": kernel.config.kernel.max_concurrent_tasks
             }),
             severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
         });
 
         Ok(kernel)
+    }
+
+    /// Signal all kernel loops to stop gracefully.
+    pub fn shutdown(&self) {
+        self.cancellation_token.cancel();
     }
 }

@@ -151,7 +151,7 @@ impl AgentTool for HttpClientTool {
             }
         }
 
-        // 4. Resolve and Inject Secret Headers
+        // 4. Resolve and Inject Secret Headers (via ProxyVault — zero-exposure, Spec §3)
         if let Some(secret_headers) = payload.get("secret_headers").and_then(|v| v.as_object()) {
             let vault = context
                 .vault
@@ -160,6 +160,7 @@ impl AgentTool for HttpClientTool {
                     reason: "Context does not have vault access, cannot inject secret_headers"
                         .into(),
                 })?;
+            let agent_id = context.agent_id;
 
             for (k, v) in secret_headers {
                 if let Some(v_str) = v.as_str() {
@@ -167,7 +168,6 @@ impl AgentTool for HttpClientTool {
                     let mut final_header_val = v_str.to_string();
 
                     // Simple variable substitution syntax: replace $VAR_NAME with actual vault string
-                    // Note: This naive regex-less approach replaces based on finding $
                     if let Some(dollar_idx) = v_str.find('$') {
                         // Extract words starting with $
                         let parts: Vec<&str> = v_str[dollar_idx..]
@@ -176,7 +176,7 @@ impl AgentTool for HttpClientTool {
                         for part in parts {
                             if part.starts_with('$') && part.len() > 1 {
                                 let secret_name = &part[1..]; // Strip '$'
-                                let secret_val = vault.get(secret_name).map_err(|e| {
+                                let secret_val = vault.get(secret_name, agent_id).map_err(|e| {
                                     AgentOSError::ToolExecutionFailed {
                                         tool_name: "http-client".into(),
                                         reason: format!(
@@ -191,14 +191,13 @@ impl AgentTool for HttpClientTool {
                             }
                         }
                     } else {
-                        // If no '$' found, treat the whole string as the secret name if it's the only thing
-                        let secret_val =
-                            vault
-                                .get(v_str)
-                                .map_err(|e| AgentOSError::ToolExecutionFailed {
-                                    tool_name: "http-client".into(),
-                                    reason: format!("Failed to resolve secret '{}': {}", v_str, e),
-                                })?;
+                        // If no '$' found, treat the whole string as the secret name
+                        let secret_val = vault.get(v_str, agent_id).map_err(|e| {
+                            AgentOSError::ToolExecutionFailed {
+                                tool_name: "http-client".into(),
+                                reason: format!("Failed to resolve secret '{}': {}", v_str, e),
+                            }
+                        })?;
                         final_header_val = secret_val.as_str().to_string();
                     }
 

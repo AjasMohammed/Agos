@@ -83,10 +83,7 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                     if tasks.is_empty() {
                         println!("No tasks.");
                     } else {
-                        println!(
-                            "{:<38} {:<10} {:<15} {}",
-                            "TASK ID", "STATE", "AGENT", "PROMPT"
-                        );
+                        println!("{:<38} {:<10} {:<15} PROMPT", "TASK ID", "STATE", "AGENT");
                         println!("{}", "-".repeat(90));
                         for t in tasks {
                             println!(

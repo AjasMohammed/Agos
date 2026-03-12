@@ -2,6 +2,23 @@ use crate::ids::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Trust tier assigned to a tool manifest.
+///
+/// Determines the signature policy enforced by the kernel at load time:
+/// - `Core`      — shipped with AgentOS, distribution-trusted (no runtime sig check).
+/// - `Verified`  — community tool reviewed and co-signed by maintainers; author sig required.
+/// - `Community` — author-signed only; user must opt-in to install.
+/// - `Blocked`   — revoked; kernel hard-rejects even if locally installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TrustTier {
+    Core,
+    Verified,
+    #[default]
+    Community,
+    Blocked,
+}
+
 /// How the tool's logic is executed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -53,7 +70,20 @@ pub struct ToolInfo {
     pub version: String,
     pub description: String,
     pub author: String,
+    #[serde(default)]
     pub checksum: Option<String>,
+    /// Ed25519 public key of the tool author (hex-encoded, 64 chars).
+    /// Required for `Verified` and `Community` trust tiers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_pubkey: Option<String>,
+    /// Ed25519 signature over the canonical signing payload (hex-encoded, 128 chars).
+    /// Required for `Verified` and `Community` trust tiers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// Trust tier that controls how the kernel verifies this manifest.
+    /// Defaults to `Community` if omitted.
+    #[serde(default)]
+    pub trust_tier: TrustTier,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

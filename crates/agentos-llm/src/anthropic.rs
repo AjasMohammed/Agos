@@ -33,7 +33,7 @@ impl AnthropicCore {
     fn format_messages(&self, context: &ContextWindow) -> Vec<serde_json::Value> {
         let mut messages = Vec::new();
 
-        for entry in context.as_entries() {
+        for entry in context.active_entries() {
             let role = match entry.role {
                 ContextRole::User => "user",
                 ContextRole::Assistant => "assistant",
@@ -63,8 +63,8 @@ impl LLMCore for AnthropicCore {
         let url = "https://api.anthropic.com/v1/messages";
 
         let messages = self.format_messages(context);
-        let system_prompt = context
-            .as_entries()
+        let active = context.active_entries();
+        let system_prompt = active
             .iter()
             .find(|e| e.role == ContextRole::System)
             .map(|e| e.content.as_str())
@@ -128,6 +128,7 @@ impl LLMCore for AnthropicCore {
             },
             model: self.model.clone(),
             duration_ms: start_time.elapsed().as_millis() as u64,
+            uncertainty: None,
         })
     }
 
@@ -196,12 +197,22 @@ mod tests {
             content: "System rules here.".to_string(),
             metadata: None,
             timestamp: chrono::Utc::now(),
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::History,
         });
         ctx.push(ContextEntry {
             role: ContextRole::User,
             content: "Hello".to_string(),
             metadata: None,
             timestamp: chrono::Utc::now(),
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::History,
         });
 
         let adapter = AnthropicCore::new(SecretString::new("fake".into()), "claude".into());

@@ -28,12 +28,8 @@ impl SchemaRegistry {
             None => return Ok(()), // No schema registered — allow through
         };
 
-        let validator = jsonschema::validator_for(schema).map_err(|e| {
-            format!(
-                "Invalid JSON Schema for '{}': {}",
-                schema_name, e
-            )
-        })?;
+        let validator = jsonschema::validator_for(schema)
+            .map_err(|e| format!("Invalid JSON Schema for '{}': {}", schema_name, e))?;
 
         let errors: Vec<String> = validator
             .iter_errors(payload)
@@ -54,6 +50,12 @@ impl SchemaRegistry {
     /// Check if a schema is registered for the given name.
     pub fn has_schema(&self, name: &str) -> bool {
         self.schemas.contains_key(name)
+    }
+}
+
+impl Default for SchemaRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

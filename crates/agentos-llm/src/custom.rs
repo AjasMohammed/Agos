@@ -37,7 +37,7 @@ impl CustomCore {
     fn format_messages(&self, context: &ContextWindow) -> Vec<serde_json::Value> {
         let mut messages = Vec::new();
 
-        for entry in context.as_entries() {
+        for entry in context.active_entries() {
             let role = match entry.role {
                 ContextRole::User => "user",
                 ContextRole::Assistant => "assistant",
@@ -125,6 +125,7 @@ impl LLMCore for CustomCore {
             },
             model: self.model.clone(),
             duration_ms: start_time.elapsed().as_millis() as u64,
+            uncertainty: None,
         })
     }
 

@@ -1,6 +1,6 @@
 use crate::kernel::Kernel;
 use agentos_bus::KernelResponse;
-use agentos_llm::{AnthropicCore, CustomCore, GeminiCore, OllamaCore, OpenAICore, LLMCore};
+use agentos_llm::{AnthropicCore, CustomCore, GeminiCore, LLMCore, OllamaCore, OpenAICore};
 use agentos_types::*;
 use secrecy::SecretString;
 use std::sync::Arc;
@@ -19,7 +19,9 @@ impl Kernel {
         // Instantiate LLMCore based on provider
         let core: Result<Arc<dyn LLMCore>, String> = match &provider {
             LLMProvider::Ollama => {
-                let host = base_url.unwrap_or_else(|| self.config.ollama.host.clone());
+                let host = base_url
+                    .or_else(|| std::env::var("AGENTOS_OLLAMA_HOST").ok())
+                    .unwrap_or_else(|| self.config.ollama.host.clone());
                 Ok(Arc::new(OllamaCore::new(&host, &model)))
             }
             LLMProvider::OpenAI => {
@@ -30,7 +32,10 @@ impl Kernel {
                 {
                     Ok(entry) => {
                         let sec = SecretString::new(entry.as_str().to_string());
-                        if let Some(url) = base_url {
+                        let resolved_base_url = base_url
+                            .or_else(|| std::env::var("AGENTOS_OPENAI_BASE_URL").ok())
+                            .or_else(|| self.config.llm.openai_base_url.clone());
+                        if let Some(url) = resolved_base_url {
                             Ok(Arc::new(OpenAICore::with_base_url(sec, model.clone(), url)))
                         } else {
                             Ok(Arc::new(OpenAICore::new(sec, model.clone())))
@@ -80,7 +85,17 @@ impl Kernel {
                     Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
                     _ => None,
                 };
-                let url = base_url.unwrap_or_else(|| "http://localhost:8000/v1".to_string());
+                let url = match base_url
+                    .or_else(|| std::env::var("AGENTOS_LLM_URL").ok())
+                    .or_else(|| self.config.llm.custom_base_url.clone())
+                {
+                    Some(url) => url,
+                    None => {
+                        return KernelResponse::Error {
+                            message: "Missing custom LLM endpoint. Provide --base-url, set AGENTOS_LLM_URL, or configure llm.custom_base_url in config.".to_string(),
+                        };
+                    }
+                };
                 Ok(Arc::new(CustomCore::new(sec, model.clone(), url)))
             }
         };
@@ -91,6 +106,23 @@ impl Kernel {
                 return KernelResponse::Error { message: e };
             }
         };
+
+        // Generate cryptographic identity for the agent
+        let public_key_hex = match self.identity_manager.generate_identity(&agent_id) {
+            Ok(pk) => {
+                tracing::info!(agent_id = %agent_id, "Generated Ed25519 identity for agent");
+                Some(pk)
+            }
+            Err(e) => {
+                tracing::warn!(agent_id = %agent_id, error = %e, "Failed to generate agent identity");
+                None
+            }
+        };
+
+        // Register public key with message bus for signature verification
+        if let Some(ref pk) = public_key_hex {
+            self.message_bus.register_pubkey(agent_id, pk.clone()).await;
+        }
 
         let profile = AgentProfile {
             id: agent_id,
@@ -104,6 +136,7 @@ impl Kernel {
             description: String::new(),
             created_at: now,
             last_active: now,
+            public_key_hex,
         };
 
         let agent_name = profile.name.clone();
@@ -119,16 +152,37 @@ impl Kernel {
             active.insert(agent_id, llm_adapter);
         }
 
+        // Register agent with cost tracker (default budget)
+        self.cost_tracker
+            .register_agent(agent_id, agent_name.clone(), AgentBudget::default())
+            .await;
+
         self.audit_log(agentos_audit::AuditEntry {
-                timestamp: chrono::Utc::now(),
-                trace_id: TraceID::new(),
-                event_type: agentos_audit::AuditEventType::AgentConnected,
-                agent_id: Some(agent_id),
-                task_id: None,
-                tool_id: None,
-                details: serde_json::json!({ "name": agent_name, "model": agent_model }),
-                severity: agentos_audit::AuditSeverity::Info,
-            });
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: agentos_audit::AuditEventType::AgentConnected,
+            agent_id: Some(agent_id),
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({ "name": agent_name, "model": agent_model }),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
+
+        // Emit AgentAdded event
+        self.emit_event(
+            EventType::AgentAdded,
+            EventSource::AgentLifecycle,
+            EventSeverity::Info,
+            serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "agent_name": agent_name,
+                "model": agent_model,
+            }),
+            0,
+        )
+        .await;
 
         KernelResponse::Success {
             data: Some(serde_json::json!({ "agent_id": agent_id.to_string() })),
@@ -151,16 +205,32 @@ impl Kernel {
         registry.remove(&agent_id);
         drop(registry);
 
+        self.cost_tracker.unregister_agent(&agent_id).await;
+
         self.audit_log(agentos_audit::AuditEntry {
-                timestamp: chrono::Utc::now(),
-                trace_id: TraceID::new(),
-                event_type: agentos_audit::AuditEventType::AgentDisconnected,
-                agent_id: Some(agent_id),
-                task_id: None,
-                tool_id: None,
-                details: serde_json::json!({}),
-                severity: agentos_audit::AuditSeverity::Info,
-            });
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: agentos_audit::AuditEventType::AgentDisconnected,
+            agent_id: Some(agent_id),
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({}),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
+
+        // Emit AgentRemoved event
+        self.emit_event(
+            EventType::AgentRemoved,
+            EventSource::AgentLifecycle,
+            EventSeverity::Info,
+            serde_json::json!({
+                "agent_id": agent_id.to_string(),
+            }),
+            0,
+        )
+        .await;
 
         KernelResponse::Success { data: None }
     }
@@ -190,15 +260,32 @@ impl Kernel {
         };
         drop(registry);
 
-        let msg = AgentMessage {
+        let now = chrono::Utc::now();
+        let mut msg = AgentMessage {
             id: MessageID::new(),
             from: from_agent.id,
             to: agentos_types::MessageTarget::Direct(to_agent.id),
             content: agentos_types::MessageContent::Text(content),
             reply_to: None,
-            timestamp: chrono::Utc::now(),
+            timestamp: now,
             trace_id: TraceID::new(),
+            signature: None,
+            ttl_seconds: 60,
+            expires_at: Some(now + chrono::Duration::seconds(60)),
         };
+
+        // Sign the message with the sender's Ed25519 identity
+        match self
+            .identity_manager
+            .sign_message(&from_agent.id, &msg.signing_payload())
+        {
+            Ok(sig) => msg.signature = Some(sig),
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: format!("Failed to sign message from '{}': {}", from_name, e),
+                };
+            }
+        }
 
         match self.message_bus.send_direct(msg).await {
             Ok(_) => KernelResponse::Success { data: None },
@@ -261,18 +348,47 @@ impl Kernel {
 
     pub(crate) async fn cmd_broadcast_to_group(
         &self,
+        from_name: String,
         _group_name: String,
         content: String,
     ) -> KernelResponse {
-        let msg = AgentMessage {
+        let registry = self.agent_registry.read().await;
+        let from_agent = match registry.get_by_name(&from_name) {
+            Some(a) => a.clone(),
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Sender agent '{}' not found", from_name),
+                };
+            }
+        };
+        drop(registry);
+
+        let now = chrono::Utc::now();
+        let mut msg = AgentMessage {
             id: MessageID::new(),
-            from: AgentID::new(),
+            from: from_agent.id,
             to: agentos_types::MessageTarget::Broadcast,
             content: agentos_types::MessageContent::Text(content),
             reply_to: None,
-            timestamp: chrono::Utc::now(),
+            timestamp: now,
             trace_id: TraceID::new(),
+            signature: None,
+            ttl_seconds: 60,
+            expires_at: Some(now + chrono::Duration::seconds(60)),
         };
+
+        // Sign the message with the sender's Ed25519 identity
+        match self
+            .identity_manager
+            .sign_message(&from_agent.id, &msg.signing_payload())
+        {
+            Ok(sig) => msg.signature = Some(sig),
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: format!("Failed to sign broadcast from '{}': {}", from_name, e),
+                };
+            }
+        }
 
         match self.message_bus.broadcast(msg).await {
             Ok(count) => KernelResponse::Success {

@@ -220,7 +220,7 @@ impl PipelineStore {
                 let error: Option<String> = row.get(8)?;
 
                 let id = RunID::from_uuid(uuid::Uuid::parse_str(&id_str).unwrap_or_default());
-                let status = PipelineRunStatus::from_str(&status_str);
+                let status = PipelineRunStatus::parse_or_failed(&status_str);
                 let step_results: HashMap<String, StepResult> =
                     serde_json::from_str(&step_results_json).unwrap_or_default();
                 let started_at = chrono::DateTime::parse_from_rfc3339(&started_at_str)
@@ -316,7 +316,7 @@ impl PipelineStore {
 
                 Ok(StepResult {
                     step_id,
-                    status: StepStatus::from_str(&status_str),
+                    status: StepStatus::parse_or_failed(&status_str),
                     output,
                     error,
                     started_at,

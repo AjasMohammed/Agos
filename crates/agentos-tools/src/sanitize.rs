@@ -1,16 +1,16 @@
-/// Tool output sanitization module.
-///
-/// Wraps tool outputs in typed delimiters that the LLM can distinguish from system
-/// instructions, and escapes any delimiter-like sequences in raw output to prevent
-/// prompt injection.
+//! Tool output sanitization module.
+//!
+//! Wraps tool outputs in typed delimiters that the LLM can distinguish from system
+//! instructions, and escapes any delimiter-like sequences in raw output to prevent
+//! prompt injection.
 
 /// Default maximum characters for tool output before truncation.
 pub const DEFAULT_MAX_OUTPUT_CHARS: usize = 50_000;
 
 /// Wraps tool output in typed delimiters and escapes injection-prone sequences.
 pub fn sanitize_tool_output(tool_name: &str, raw_output: &serde_json::Value) -> String {
-    let serialized = serde_json::to_string_pretty(raw_output)
-        .unwrap_or_else(|_| format!("{:?}", raw_output));
+    let serialized =
+        serde_json::to_string_pretty(raw_output).unwrap_or_else(|_| format!("{:?}", raw_output));
 
     // Escape any existing delimiter-like patterns in the output to prevent injection
     let escaped = serialized
@@ -21,10 +21,7 @@ pub fn sanitize_tool_output(tool_name: &str, raw_output: &serde_json::Value) -> 
         .replace("[/AGENT_DIRECTORY", "[/ESCAPED_AGENT_DIRECTORY")
         .replace("[CONTEXT SUMMARY", "[ESCAPED_CONTEXT_SUMMARY");
 
-    format!(
-        "[TOOL_RESULT: {}]\n{}\n[/TOOL_RESULT]",
-        tool_name, escaped
-    )
+    format!("[TOOL_RESULT: {}]\n{}\n[/TOOL_RESULT]", tool_name, escaped)
 }
 
 /// Truncates output if it exceeds the maximum character budget.

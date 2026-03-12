@@ -51,6 +51,8 @@ impl Kernel {
             original_prompt: prompt.clone(),
             history: Vec::new(),
             parent_task: None,
+            reasoning_hints: None,
+            trigger_source: None,
         };
 
         self.background_pool
@@ -85,15 +87,17 @@ impl Kernel {
         {
             Ok(id) => {
                 self.audit_log(agentos_audit::AuditEntry {
-                        timestamp: chrono::Utc::now(),
-                        trace_id: TraceID::new(),
-                        event_type: agentos_audit::AuditEventType::BackgroundTaskStarted,
-                        agent_id: None,
-                        task_id: Some(id),
-                        tool_id: None,
-                        details: serde_json::json!({ "bg_name": name }),
-                        severity: agentos_audit::AuditSeverity::Info,
-                    });
+                    timestamp: chrono::Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::BackgroundTaskStarted,
+                    agent_id: None,
+                    task_id: Some(id),
+                    tool_id: None,
+                    details: serde_json::json!({ "bg_name": name }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
                 KernelResponse::Success {
                     data: Some(serde_json::json!({ "task_id": id.to_string() })),
                 }
@@ -134,15 +138,17 @@ impl Kernel {
                         .fail(&task.id, "Killed by user".to_string())
                         .await;
                     self.audit_log(agentos_audit::AuditEntry {
-                            timestamp: chrono::Utc::now(),
-                            trace_id: TraceID::new(),
-                            event_type: agentos_audit::AuditEventType::BackgroundTaskKilled,
-                            agent_id: None,
-                            task_id: Some(task.id),
-                            tool_id: None,
-                            details: serde_json::json!({ "bg_name": name }),
-                            severity: agentos_audit::AuditSeverity::Info,
-                        });
+                        timestamp: chrono::Utc::now(),
+                        trace_id: TraceID::new(),
+                        event_type: agentos_audit::AuditEventType::BackgroundTaskKilled,
+                        agent_id: None,
+                        task_id: Some(task.id),
+                        tool_id: None,
+                        details: serde_json::json!({ "bg_name": name }),
+                        severity: agentos_audit::AuditSeverity::Info,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
                     KernelResponse::Success { data: None }
                 }
                 Err(e) => KernelResponse::Error {

@@ -2,6 +2,7 @@ pub mod agent;
 pub mod capability;
 pub mod context;
 pub mod error;
+pub mod event;
 pub mod ids;
 pub mod intent;
 pub mod role;
@@ -18,14 +19,27 @@ pub use agent_message::{AgentMessage, MessageContent, MessageTarget};
 pub use capability::{
     CapabilityToken, IntentTypeFlag, PermissionEntry, PermissionOp, PermissionSet,
 };
-pub use context::{ContextEntry, ContextMetadata, ContextRole, ContextWindow, OverflowStrategy};
+pub use context::{
+    ContextCategory, ContextEntry, ContextMetadata, ContextPartition, ContextRole, ContextWindow,
+    OverflowStrategy, TokenBudget,
+};
 pub use error::AgentOSError;
+pub use event::{
+    EventCategory, EventMessage, EventSeverity, EventSource, EventSubscription, EventType,
+    EventTypeFilter, SubscriptionPriority, ThrottlePolicy,
+};
 pub use ids::*;
 pub use intent::{
-    HardwareResource, IntentMessage, IntentResult, IntentResultStatus, IntentTarget, IntentType,
-    SemanticPayload,
+    ActionRiskLevel, HardwareResource, IntentCoherenceResult, IntentMessage, IntentResult,
+    IntentResultStatus, IntentTarget, IntentType, SemanticPayload,
 };
 pub use role::Role;
 pub use secret::{SecretEntry, SecretMetadata, SecretOwner, SecretScope};
-pub use task::{AgentTask, TaskState, TaskSummary};
-pub use tool::{ExecutorType, RegisteredTool, ToolExecutor, ToolManifest, ToolSandbox, ToolStatus};
+pub use task::TriggerSource;
+pub use task::{
+    AgentBudget, AgentTask, BudgetAction, ComplexityLevel, CostSnapshot, ModelDowngradeTier,
+    PreemptionLevel, TaskReasoningHints, TaskState, TaskSummary,
+};
+pub use tool::{
+    ExecutorType, RegisteredTool, ToolExecutor, ToolManifest, ToolSandbox, ToolStatus, TrustTier,
+};

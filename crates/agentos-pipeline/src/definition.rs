@@ -13,6 +13,12 @@ pub struct PipelineDefinition {
     /// Which output_var is the final result of the pipeline.
     #[serde(default)]
     pub output: Option<String>,
+    /// Maximum total cost in USD for the entire pipeline run.
+    #[serde(default)]
+    pub max_cost_usd: Option<f64>,
+    /// Maximum wall-clock time in minutes for the entire pipeline run.
+    #[serde(default)]
+    pub max_wall_time_minutes: Option<u64>,
 }
 
 /// A step is either an agent task or a direct tool invocation — never both.

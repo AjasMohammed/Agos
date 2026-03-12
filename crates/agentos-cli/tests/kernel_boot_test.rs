@@ -27,6 +27,7 @@ name = "tool-{}"
 version = "1.0"
 description = "Dummy tool {}"
 author = "Test"
+trust_tier = "core"
 
 [capabilities_required]
 permissions = []

@@ -60,3 +60,9 @@ impl BackgroundPool {
             .cloned()
     }
 }
+
+impl Default for BackgroundPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}

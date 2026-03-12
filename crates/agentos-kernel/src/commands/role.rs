@@ -18,15 +18,17 @@ impl Kernel {
         registry.register_role(role);
 
         self.audit_log(agentos_audit::AuditEntry {
-                timestamp: chrono::Utc::now(),
-                trace_id: TraceID::new(),
-                event_type: agentos_audit::AuditEventType::PermissionGranted,
-                agent_id: None,
-                task_id: None,
-                tool_id: None,
-                details: serde_json::json!({ "action": "create_role", "role_name": role_name }),
-                severity: agentos_audit::AuditSeverity::Info,
-            });
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: agentos_audit::AuditEventType::PermissionGranted,
+            agent_id: None,
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({ "action": "create_role", "role_name": role_name }),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
 
         KernelResponse::Success { data: None }
     }
@@ -53,6 +55,8 @@ impl Kernel {
                     tool_id: None,
                     details: serde_json::json!({ "action": "delete_role", "role_name": role_name }),
                     severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
                 });
                 KernelResponse::Success { data: None }
             }
@@ -104,6 +108,8 @@ impl Kernel {
             tool_id: None,
             details: serde_json::json!({ "action": "role_grant", "role_name": role_name, "permission": permission }),
             severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
         });
 
         KernelResponse::Success { data: None }
@@ -139,15 +145,17 @@ impl Kernel {
         }
 
         self.audit_log(agentos_audit::AuditEntry {
-                timestamp: chrono::Utc::now(),
-                trace_id: TraceID::new(),
-                event_type: agentos_audit::AuditEventType::PermissionRevoked,
-                agent_id: None,
-                task_id: None,
-                tool_id: None,
-                details: serde_json::json!({ "role_name": role_name, "permission": permission }),
-                severity: agentos_audit::AuditSeverity::Info,
-            });
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: agentos_audit::AuditEventType::PermissionRevoked,
+            agent_id: None,
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({ "role_name": role_name, "permission": permission }),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
 
         KernelResponse::Success { data: None }
     }
@@ -178,6 +186,8 @@ impl Kernel {
                     tool_id: None,
                     details: serde_json::json!({ "action": "assign_role", "role_name": role_name, "agent_name": agent_name }),
                     severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
                 });
                 KernelResponse::Success { data: None }
             }
@@ -211,6 +221,8 @@ impl Kernel {
                     tool_id: None,
                     details: serde_json::json!({ "action": "remove_role", "role_name": role_name, "agent_name": agent_name }),
                     severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
                 });
                 KernelResponse::Success { data: None }
             }

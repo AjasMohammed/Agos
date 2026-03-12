@@ -24,6 +24,8 @@ rusqlite = { workspace = true, features = ["bundled", "vtab"] }
 agentos-vault = { version = "0.1.0", path = "../agentos-vault" }
 base64 = "0.22.1"
 agentos-memory = { path = "../agentos-memory" }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 agentos-audit = { path = "../agentos-audit" }

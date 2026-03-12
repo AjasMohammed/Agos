@@ -108,7 +108,7 @@ pub async fn handle(client: &mut BusClient, command: RoleCommands) -> anyhow::Re
             if roles.is_empty() {
                 println!("No roles found.");
             } else {
-                println!("{:<20} {:<30} {}", "NAME", "DESCRIPTION", "PERMISSIONS");
+                println!("{:<20} {:<30} PERMISSIONS", "NAME", "DESCRIPTION");
                 println!("{}", "-".repeat(80));
                 for r in roles {
                     let perms = r

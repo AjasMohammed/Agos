@@ -42,7 +42,7 @@ impl OpenAICore {
     fn format_messages(&self, context: &ContextWindow) -> Vec<serde_json::Value> {
         let mut messages = Vec::new();
 
-        for entry in context.as_entries() {
+        for entry in context.active_entries() {
             let role = match entry.role {
                 ContextRole::User => "user",
                 ContextRole::Assistant => "assistant",
@@ -131,6 +131,7 @@ impl LLMCore for OpenAICore {
             },
             model: self.model.clone(),
             duration_ms: start_time.elapsed().as_millis() as u64,
+            uncertainty: None,
         })
     }
 
@@ -192,18 +193,33 @@ mod tests {
             content: "You are a helpful assistant.".to_string(),
             metadata: None,
             timestamp: chrono::Utc::now(),
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::History,
         });
         ctx.push(ContextEntry {
             role: ContextRole::User,
             content: "Hello".to_string(),
             metadata: None,
             timestamp: chrono::Utc::now(),
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::History,
         });
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
             content: "status: ok".to_string(),
             metadata: None,
             timestamp: chrono::Utc::now(),
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::History,
         });
 
         let adapter = OpenAICore::new(SecretString::new("fake".into()), "gpt-4".into());

@@ -135,6 +135,12 @@ impl ScheduleManager {
     }
 }
 
+impl Default for ScheduleManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

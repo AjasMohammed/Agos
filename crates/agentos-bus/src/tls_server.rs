@@ -24,11 +24,7 @@ pub struct TlsBusServer {
 
 impl TlsBusServer {
     /// Bind a TLS server on the given address using the provided cert and key files.
-    pub async fn bind(
-        addr: &str,
-        cert_path: &Path,
-        key_path: &Path,
-    ) -> Result<Self, AgentOSError> {
+    pub async fn bind(addr: &str, cert_path: &Path, key_path: &Path) -> Result<Self, AgentOSError> {
         let certs = load_certs(cert_path)?;
         let key = load_private_key(key_path)?;
 
@@ -75,9 +71,7 @@ impl TlsBusServer {
             .map_err(|e| AgentOSError::BusError(format!("TLS handshake failed: {}", e)))?;
 
         tracing::debug!("TLS connection accepted from {}", peer_addr);
-        Ok(TlsBusConnection {
-            stream: tls_stream,
-        })
+        Ok(TlsBusConnection { stream: tls_stream })
     }
 }
 
@@ -136,9 +130,7 @@ impl TlsBusClient {
             .await
             .map_err(|e| AgentOSError::BusError(format!("TLS connect failed: {}", e)))?;
 
-        Ok(Self {
-            stream: tls_stream,
-        })
+        Ok(Self { stream: tls_stream })
     }
 
     pub async fn send_message(&mut self, msg: &BusMessage) -> Result<(), AgentOSError> {

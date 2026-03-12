@@ -11,6 +11,12 @@ impl SysMonitorTool {
     }
 }
 
+impl Default for SysMonitorTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl AgentTool for SysMonitorTool {
     fn name(&self) -> &str {

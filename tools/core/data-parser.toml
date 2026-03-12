@@ -3,6 +3,7 @@ name        = "data-parser"
 version     = "1.0.0"
 description = "Parse structured data formats (JSON, CSV, TOML, Markdown) and return structured content"
 author      = "agentos-core"
+trust_tier  = "core"
 
 [capabilities_required]
 permissions = []

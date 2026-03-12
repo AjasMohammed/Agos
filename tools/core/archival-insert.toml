@@ -1,0 +1,24 @@
+[manifest]
+name        = "archival-insert"
+version     = "1.0.0"
+description = "Insert long-term archival memory into semantic storage"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["memory.semantic:w"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "ArchivalInsertIntent"
+output = "ArchivalInsertResult"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 128
+max_cpu_ms    = 10000
+syscalls      = []

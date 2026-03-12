@@ -14,4 +14,7 @@ pub use mock::MockLLMCore;
 pub use ollama::OllamaCore;
 pub use openai::OpenAICore;
 pub use traits::LLMCore;
-pub use types::{HealthStatus, InferenceEvent, InferenceResult, ModelCapabilities, TokenUsage};
+pub use types::{
+    calculate_inference_cost, default_pricing_table, parse_uncertainty, HealthStatus,
+    InferenceCost, InferenceEvent, InferenceResult, ModelCapabilities, ModelPricing, TokenUsage,
+};

@@ -3,17 +3,17 @@ use agentos_tools::traits::{AgentTool, ToolExecutionContext};
 use agentos_types::{
     AgentID, AgentOSError, PermissionSet, SecretOwner, SecretScope, TaskID, TraceID,
 };
-use agentos_vault::SecretsVault;
+use agentos_vault::{ProxyVault, SecretsVault};
 use serial_test::serial;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
-use wiremock::matchers::{body_json_string, header, method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // Helper to construct context with optional vault
-fn make_context(data_dir: &Path, vault: Option<Arc<SecretsVault>>) -> ToolExecutionContext {
+fn make_context(data_dir: &Path, vault: Option<Arc<ProxyVault>>) -> ToolExecutionContext {
     ToolExecutionContext {
         data_dir: data_dir.to_path_buf(),
         task_id: TaskID::new(),
@@ -25,11 +25,9 @@ fn make_context(data_dir: &Path, vault: Option<Arc<SecretsVault>>) -> ToolExecut
     }
 }
 
-// Helper to init a temporary vault with a secret
-fn setup_temp_vault(dir: &TempDir, secret_name: &str, secret_value: &str) -> Arc<SecretsVault> {
+// Helper to init a temporary vault with a secret, returning a ProxyVault wrapper
+fn setup_temp_vault(dir: &TempDir, secret_name: &str, secret_value: &str) -> Arc<ProxyVault> {
     let db_path = dir.path().join("vault.db");
-    // We would need a dummy audit log here, but `SecretsVault::initialize` requires it.
-    // For testing, let's create a minimal audit log
     let audit_db = dir.path().join("audit.db");
     let audit = Arc::new(agentos_audit::AuditLog::open(&audit_db).unwrap());
 
@@ -42,7 +40,7 @@ fn setup_temp_vault(dir: &TempDir, secret_name: &str, secret_value: &str) -> Arc
             SecretScope::Global,
         )
         .unwrap();
-    Arc::new(vault)
+    Arc::new(ProxyVault::new(Arc::new(vault)))
 }
 
 #[tokio::test]

@@ -34,6 +34,13 @@ macro_rules! define_id {
                 Self::new()
             }
         }
+
+        impl std::str::FromStr for $name {
+            type Err = uuid::Error;
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                Ok(Self(s.parse::<Uuid>()?))
+            }
+        }
     };
 }
 
@@ -48,3 +55,5 @@ define_id!(RoleID);
 define_id!(GroupID);
 define_id!(ScheduleID);
 define_id!(RunID);
+define_id!(EventID);
+define_id!(SubscriptionID);

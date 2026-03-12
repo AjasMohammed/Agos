@@ -34,7 +34,7 @@ impl GeminiCore {
         let mut contents = Vec::new();
 
         // Gemini uses 'user' and 'model' roles.
-        for entry in context.as_entries() {
+        for entry in context.active_entries() {
             let role = match entry.role {
                 ContextRole::User => "user",
                 ContextRole::Assistant => "model",
@@ -72,8 +72,8 @@ impl LLMCore for GeminiCore {
             "contents": contents,
         });
 
-        if let Some(sys) = context
-            .as_entries()
+        let active = context.active_entries();
+        if let Some(sys) = active
             .iter()
             .find(|e| e.role == ContextRole::System)
             .map(|e| e.content.as_str())
@@ -141,6 +141,7 @@ impl LLMCore for GeminiCore {
             },
             model: self.model.clone(),
             duration_ms: start_time.elapsed().as_millis() as u64,
+            uncertainty: None,
         })
     }
 
@@ -194,21 +195,36 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         ctx.push(ContextEntry {
             role: ContextRole::System,
-            content: "System rules here.".to_string(),
-            metadata: None,
+            content: "System".to_string(),
             timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: true,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
         });
         ctx.push(ContextEntry {
             role: ContextRole::User,
-            content: "Hello".to_string(),
-            metadata: None,
+            content: "User".to_string(),
             timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
         });
         ctx.push(ContextEntry {
             role: ContextRole::Assistant,
-            content: "Hi".to_string(),
-            metadata: None,
+            content: "Assistant".to_string(),
             timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
         });
 
         let adapter = GeminiCore::new(SecretString::new("fake".into()), "gemini".into());
@@ -216,8 +232,8 @@ mod tests {
 
         assert_eq!(contents.len(), 2);
         assert_eq!(contents[0]["role"], "user");
-        assert_eq!(contents[0]["parts"][0]["text"], "Hello");
+        assert_eq!(contents[0]["parts"][0]["text"], "User");
         assert_eq!(contents[1]["role"], "model");
-        assert_eq!(contents[1]["parts"][0]["text"], "Hi");
+        assert_eq!(contents[1]["parts"][0]["text"], "Assistant");
     }
 }

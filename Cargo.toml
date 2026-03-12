@@ -48,6 +48,7 @@ rand = "0.8"
 hex = "0.4"
 zeroize = { version = "1", features = ["derive"] }
 argon2 = "0.5"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 # Database
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -83,6 +84,7 @@ metrics-exporter-prometheus = "0.16"
 bytes = "1"
 futures = "0.3"
 async-trait = "0.1"
+tokio-util = "0.7"
 rpassword = "7"
 libc = "0.2"
 

@@ -3,6 +3,7 @@ name        = "shell-exec"
 version     = "1.0.0"
 description = "Execute shell commands with path-restricted sandboxing (requires explicit permission)"
 author      = "agentos-core"
+trust_tier  = "core"
 
 [capabilities_required]
 permissions = ["process.exec:x", "fs.user_data:rw"]

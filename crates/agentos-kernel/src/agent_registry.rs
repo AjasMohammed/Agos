@@ -1,7 +1,7 @@
 use agentos_types::*;
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub struct AgentRegistry {
     agents: HashMap<AgentID, AgentProfile>,
@@ -39,7 +39,7 @@ impl AgentRegistry {
     }
 
     fn ensure_base_role(&mut self) {
-        if self.role_name_index.get("base").is_none() {
+        if !self.role_name_index.contains_key("base") {
             let mut base_role = Role::new(
                 "base".to_string(),
                 "Default role with minimal permissions".to_string(),
@@ -248,8 +248,6 @@ impl AgentRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentos_types::*;
-    use std::time::Duration;
 
     #[test]
     fn test_compute_effective_permissions() {
@@ -266,6 +264,7 @@ mod tests {
             description: "".to_string(),
             created_at: chrono::Utc::now(),
             last_active: chrono::Utc::now(),
+            public_key_hex: None,
         };
         agent
             .permissions

@@ -1,0 +1,24 @@
+[manifest]
+name        = "archival-search"
+version     = "1.0.0"
+description = "Search long-term archival memory from semantic storage"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["memory.semantic:r"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "ArchivalSearchIntent"
+output = "ArchivalSearchResult"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 128
+max_cpu_ms    = 10000
+syscalls      = []

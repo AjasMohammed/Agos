@@ -20,16 +20,16 @@ struct ReadyResponse {
 }
 
 async fn healthz(State(kernel): State<Arc<Kernel>>) -> Json<HealthResponse> {
-    let uptime = (chrono::Utc::now() - kernel.started_at).num_seconds().max(0) as u64;
+    let uptime = (chrono::Utc::now() - kernel.started_at)
+        .num_seconds()
+        .max(0) as u64;
     Json(HealthResponse {
         status: "ok",
         uptime_seconds: uptime,
     })
 }
 
-async fn readyz(
-    State(kernel): State<Arc<Kernel>>,
-) -> (StatusCode, Json<ReadyResponse>) {
+async fn readyz(State(kernel): State<Arc<Kernel>>) -> (StatusCode, Json<ReadyResponse>) {
     let agents = kernel.agent_registry.read().await.list_all().len();
     let tasks = kernel.scheduler.list_tasks().await.len();
 
@@ -56,9 +56,7 @@ async fn readyz(
     )
 }
 
-async fn metrics_handler(
-    State(handle): State<PrometheusHandle>,
-) -> impl IntoResponse {
+async fn metrics_handler(State(handle): State<PrometheusHandle>) -> impl IntoResponse {
     handle.render()
 }
 
@@ -77,11 +75,15 @@ pub fn health_router(kernel: Arc<Kernel>, prom_handle: PrometheusHandle) -> Rout
 
 /// Install the Prometheus metrics recorder. Must be called once before any metrics are recorded.
 /// Returns a handle that can render the metrics as text for the /metrics endpoint.
-pub fn install_prometheus_recorder() -> PrometheusHandle {
+pub fn install_prometheus_recorder() -> Option<PrometheusHandle> {
     let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
-    builder
-        .install_recorder()
-        .expect("failed to install Prometheus metrics recorder")
+    match builder.install_recorder() {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to install Prometheus metrics recorder (may already be installed)");
+            None
+        }
+    }
 }
 
 /// Start the health HTTP server. Returns the actual bound address (useful when port is 0).

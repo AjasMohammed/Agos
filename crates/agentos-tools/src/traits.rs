@@ -30,6 +30,6 @@ pub struct ToolExecutionContext {
     pub agent_id: AgentID,
     pub trace_id: TraceID,
     pub permissions: PermissionSet,
-    pub vault: Option<std::sync::Arc<agentos_vault::SecretsVault>>,
+    pub vault: Option<std::sync::Arc<agentos_vault::ProxyVault>>,
     pub hal: Option<std::sync::Arc<agentos_hal::HardwareAbstractionLayer>>,
 }

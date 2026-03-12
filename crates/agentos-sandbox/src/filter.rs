@@ -126,7 +126,7 @@ pub fn build_seccomp_filter(config: &SandboxConfig) -> Result<BpfProgram, AgentO
         match syscall_number(name) {
             Some(nr) => {
                 // Empty rule vec = allow unconditionally (no argument checks)
-                rules.entry(nr).or_insert_with(Vec::new);
+                rules.entry(nr).or_default();
             }
             None => {
                 tracing::warn!(

@@ -11,6 +11,12 @@ impl LogReaderTool {
     }
 }
 
+impl Default for LogReaderTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl AgentTool for LogReaderTool {
     fn name(&self) -> &str {

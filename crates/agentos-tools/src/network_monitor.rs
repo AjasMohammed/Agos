@@ -11,6 +11,12 @@ impl NetworkMonitorTool {
     }
 }
 
+impl Default for NetworkMonitorTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl AgentTool for NetworkMonitorTool {
     fn name(&self) -> &str {

@@ -1,0 +1,458 @@
+use crate::kernel_action::EscalationReason;
+use agentos_types::*;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use tokio::sync::RwLock;
+
+/// What should happen automatically when an escalation expires without human resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AutoAction {
+    /// Default: deny the action (existing behavior).
+    Deny,
+    /// Soft-approval: approve the action automatically if no human intervenes.
+    Approve,
+}
+
+/// Default escalation timeout in seconds (5 minutes per Spec §12).
+const DEFAULT_ESCALATION_TIMEOUT_SECS: i64 = 300;
+
+/// A pending escalation awaiting human review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingEscalation {
+    pub id: u64,
+    pub task_id: TaskID,
+    pub agent_id: AgentID,
+    pub reason: EscalationReason,
+    pub context_summary: String,
+    pub decision_point: String,
+    pub options: Vec<String>,
+    pub urgency: String,
+    pub blocking: bool,
+    pub trace_id: TraceID,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Escalation expires and auto-denies after this time (Spec §12).
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// What happens automatically on expiry: Deny (default) or Approve (soft-approval).
+    #[serde(default = "default_auto_action")]
+    pub auto_action: AutoAction,
+    pub resolved: bool,
+    pub resolution: Option<String>,
+    pub resolved_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+fn default_auto_action() -> AutoAction {
+    AutoAction::Deny
+}
+
+/// Manages escalation requests from agents to human operators.
+///
+/// Stores pending escalations in memory (backed by audit log for persistence).
+/// Provides list/resolve operations for the CLI (`agentctl escalation list/resolve`).
+///
+/// Escalations auto-deny after `DEFAULT_ESCALATION_TIMEOUT_SECS` (5 minutes)
+/// if not resolved by a human operator (Spec §12: "Auto-action on expiry: deny").
+pub struct EscalationManager {
+    escalations: RwLock<Vec<PendingEscalation>>,
+    next_id: RwLock<u64>,
+    /// Configurable timeout in seconds. Defaults to 300 (5 minutes).
+    timeout_secs: i64,
+    /// Optional webhook URL: receives HTTP POST on escalation creation.
+    notify_url: RwLock<Option<String>>,
+}
+
+impl EscalationManager {
+    pub fn new() -> Self {
+        Self {
+            escalations: RwLock::new(Vec::new()),
+            next_id: RwLock::new(1),
+            timeout_secs: DEFAULT_ESCALATION_TIMEOUT_SECS,
+            notify_url: RwLock::new(None),
+        }
+    }
+
+    /// Set a webhook URL that receives HTTP POST notifications on escalation creation.
+    pub async fn set_notify_url(&self, url: Option<String>) {
+        *self.notify_url.write().await = url;
+    }
+
+    /// Create a new escalation entry.
+    ///
+    /// If `auto_action` is `Some(AutoAction::Approve)`, the escalation becomes a
+    /// "soft-approval" — it auto-approves on expiry instead of auto-denying.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_escalation(
+        &self,
+        task_id: TaskID,
+        agent_id: AgentID,
+        reason: EscalationReason,
+        context_summary: String,
+        decision_point: String,
+        options: Vec<String>,
+        urgency: String,
+        blocking: bool,
+        trace_id: TraceID,
+        auto_action: Option<AutoAction>,
+    ) -> u64 {
+        let mut next_id = self.next_id.write().await;
+        let id = *next_id;
+        *next_id += 1;
+
+        let now = chrono::Utc::now();
+        let expires_at = now + chrono::Duration::seconds(self.timeout_secs);
+        let urgency_clone = urgency.clone();
+
+        let escalation = PendingEscalation {
+            id,
+            task_id,
+            agent_id,
+            reason,
+            context_summary,
+            decision_point,
+            options,
+            urgency,
+            blocking,
+            trace_id,
+            created_at: now,
+            expires_at,
+            auto_action: auto_action.unwrap_or(AutoAction::Deny),
+            resolved: false,
+            resolution: None,
+            resolved_at: None,
+        };
+
+        self.escalations.write().await.push(escalation);
+        tracing::info!(
+            escalation_id = id,
+            task_id = %task_id,
+            expires_at = %expires_at.to_rfc3339(),
+            "New escalation created"
+        );
+
+        // Fire-and-forget webhook notification if configured
+        if let Some(url) = self.notify_url.read().await.clone() {
+            let payload = serde_json::json!({
+                "escalation_id": id,
+                "task_id": task_id.to_string(),
+                "agent_id": agent_id.to_string(),
+                "urgency": urgency_clone,
+                "blocking": blocking,
+                "expires_at": expires_at.to_rfc3339(),
+            });
+            tokio::spawn(async move {
+                let client = reqwest::Client::new();
+                if let Err(e) = client.post(&url).json(&payload).send().await {
+                    tracing::warn!(
+                        escalation_id = id,
+                        error = %e,
+                        "Failed to send escalation webhook notification"
+                    );
+                }
+            });
+        }
+
+        id
+    }
+
+    /// List all pending (unresolved) escalations.
+    pub async fn list_pending(&self) -> Vec<PendingEscalation> {
+        self.escalations
+            .read()
+            .await
+            .iter()
+            .filter(|e| !e.resolved)
+            .cloned()
+            .collect()
+    }
+
+    /// List all escalations (including resolved).
+    pub async fn list_all(&self) -> Vec<PendingEscalation> {
+        self.escalations.read().await.clone()
+    }
+
+    /// Get a specific escalation by ID.
+    pub async fn get(&self, id: u64) -> Option<PendingEscalation> {
+        self.escalations
+            .read()
+            .await
+            .iter()
+            .find(|e| e.id == id)
+            .cloned()
+    }
+
+    /// Resolve an escalation with a human decision.
+    /// Returns the task_id and whether it was blocking (so the caller can resume the task).
+    pub async fn resolve(&self, id: u64, resolution: String) -> Option<(TaskID, bool)> {
+        let mut escalations = self.escalations.write().await;
+        if let Some(esc) = escalations.iter_mut().find(|e| e.id == id && !e.resolved) {
+            esc.resolved = true;
+            esc.resolution = Some(resolution);
+            esc.resolved_at = Some(chrono::Utc::now());
+            let task_id = esc.task_id;
+            let blocking = esc.blocking;
+            tracing::info!(
+                escalation_id = id,
+                task_id = %task_id,
+                "Escalation resolved"
+            );
+            Some((task_id, blocking))
+        } else {
+            None
+        }
+    }
+
+    /// Get escalations for a specific task.
+    pub async fn for_task(&self, task_id: &TaskID) -> Vec<PendingEscalation> {
+        self.escalations
+            .read()
+            .await
+            .iter()
+            .filter(|e| e.task_id == *task_id)
+            .cloned()
+            .collect()
+    }
+
+    /// Count pending escalations by urgency level.
+    pub async fn pending_counts(&self) -> HashMap<String, usize> {
+        let escalations = self.escalations.read().await;
+        let mut counts = HashMap::new();
+        for esc in escalations.iter().filter(|e| !e.resolved) {
+            *counts.entry(esc.urgency.clone()).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    /// Sweep expired escalations. Respects the `auto_action` field:
+    /// - `AutoAction::Deny` → auto-deny (original behavior)
+    /// - `AutoAction::Approve` → soft-approval (auto-approve on expiry)
+    ///
+    /// Returns `(id, task_id, blocking, approved)` for each expired escalation.
+    pub async fn sweep_expired(&self) -> Vec<(u64, TaskID, bool)> {
+        let now = chrono::Utc::now();
+        let mut escalations = self.escalations.write().await;
+        let mut expired = Vec::new();
+
+        for esc in escalations.iter_mut() {
+            if !esc.resolved && now >= esc.expires_at {
+                esc.resolved = true;
+                esc.resolved_at = Some(now);
+
+                match esc.auto_action {
+                    AutoAction::Approve => {
+                        esc.resolution =
+                            Some("Auto-approved: soft-approval window expired".to_string());
+                        tracing::info!(
+                            escalation_id = esc.id,
+                            task_id = %esc.task_id,
+                            "Escalation auto-approved (soft-approval)"
+                        );
+                    }
+                    AutoAction::Deny => {
+                        esc.resolution = Some("Auto-denied: escalation expired".to_string());
+                        tracing::warn!(
+                            escalation_id = esc.id,
+                            task_id = %esc.task_id,
+                            "Escalation auto-denied due to expiry"
+                        );
+                    }
+                }
+
+                expired.push((esc.id, esc.task_id, esc.blocking));
+            }
+        }
+
+        expired
+    }
+
+    /// Create a soft-approval escalation with a 30-second auto-approve window.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_soft_approval(
+        &self,
+        task_id: TaskID,
+        agent_id: AgentID,
+        reason: EscalationReason,
+        context_summary: String,
+        decision_point: String,
+        options: Vec<String>,
+        trace_id: TraceID,
+    ) -> u64 {
+        let mut next_id = self.next_id.write().await;
+        let id = *next_id;
+        *next_id += 1;
+
+        let now = chrono::Utc::now();
+        let expires_at = now + chrono::Duration::seconds(30); // 30s soft-approval window
+
+        let escalation = PendingEscalation {
+            id,
+            task_id,
+            agent_id,
+            reason,
+            context_summary,
+            decision_point,
+            options,
+            urgency: "normal".to_string(),
+            blocking: false, // soft-approvals are non-blocking
+            trace_id,
+            created_at: now,
+            expires_at,
+            auto_action: AutoAction::Approve,
+            resolved: false,
+            resolution: None,
+            resolved_at: None,
+        };
+
+        self.escalations.write().await.push(escalation);
+        tracing::info!(
+            escalation_id = id,
+            task_id = %task_id,
+            expires_at = %expires_at.to_rfc3339(),
+            "Soft-approval escalation created (auto-approves in 30s)"
+        );
+
+        id
+    }
+}
+
+impl Default for EscalationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_create_and_list_escalation() {
+        let manager = EscalationManager::new();
+        let task_id = TaskID::new();
+        let agent_id = AgentID::new();
+
+        let id = manager
+            .create_escalation(
+                task_id,
+                agent_id,
+                EscalationReason::Uncertainty,
+                "Agent unsure about file deletion".to_string(),
+                "Should I delete /data/old_reports?".to_string(),
+                vec!["Yes, delete".to_string(), "No, keep".to_string()],
+                "normal".to_string(),
+                true,
+                TraceID::new(),
+                None,
+            )
+            .await;
+
+        assert_eq!(id, 1);
+        let pending = manager.list_pending().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].task_id, task_id);
+        assert!(pending[0].blocking);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_escalation() {
+        let manager = EscalationManager::new();
+        let task_id = TaskID::new();
+
+        let id = manager
+            .create_escalation(
+                task_id,
+                AgentID::new(),
+                EscalationReason::AuthorizationRequired,
+                "summary".to_string(),
+                "decision".to_string(),
+                vec![],
+                "high".to_string(),
+                true,
+                TraceID::new(),
+                None,
+            )
+            .await;
+
+        let result = manager.resolve(id, "Approved by admin".to_string()).await;
+        assert!(result.is_some());
+        let (resolved_task_id, blocking) = result.unwrap();
+        assert_eq!(resolved_task_id, task_id);
+        assert!(blocking);
+
+        // Should no longer appear in pending
+        assert!(manager.list_pending().await.is_empty());
+        // But should still be in all
+        assert_eq!(manager.list_all().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_nonexistent_returns_none() {
+        let manager = EscalationManager::new();
+        assert!(manager.resolve(999, "nope".to_string()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_pending_counts() {
+        let manager = EscalationManager::new();
+
+        for urgency in &["normal", "normal", "high", "critical"] {
+            manager
+                .create_escalation(
+                    TaskID::new(),
+                    AgentID::new(),
+                    EscalationReason::Uncertainty,
+                    "s".to_string(),
+                    "d".to_string(),
+                    vec![],
+                    urgency.to_string(),
+                    false,
+                    TraceID::new(),
+                    None,
+                )
+                .await;
+        }
+
+        let counts = manager.pending_counts().await;
+        assert_eq!(counts.get("normal"), Some(&2));
+        assert_eq!(counts.get("high"), Some(&1));
+        assert_eq!(counts.get("critical"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn test_sweep_expired_auto_denies() {
+        let manager = EscalationManager {
+            escalations: RwLock::new(Vec::new()),
+            next_id: RwLock::new(1),
+            timeout_secs: 0, // expire immediately
+            notify_url: RwLock::new(None),
+        };
+
+        let task_id = TaskID::new();
+        manager
+            .create_escalation(
+                task_id,
+                AgentID::new(),
+                EscalationReason::AuthorizationRequired,
+                "test".to_string(),
+                "test".to_string(),
+                vec![],
+                "high".to_string(),
+                true,
+                TraceID::new(),
+                None,
+            )
+            .await;
+
+        // Sweep should auto-deny the expired escalation
+        let expired = manager.sweep_expired().await;
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].0, 1); // id
+        assert_eq!(expired[0].1, task_id);
+        assert!(expired[0].2); // blocking
+
+        // Should no longer appear in pending
+        assert!(manager.list_pending().await.is_empty());
+
+        // Resolution should indicate auto-deny
+        let all = manager.list_all().await;
+        assert!(all[0].resolution.as_ref().unwrap().contains("Auto-denied"));
+    }
+}

@@ -1,0 +1,24 @@
+[manifest]
+name        = "memory-block-write"
+version     = "1.0.0"
+description = "Write or update an agent-scoped labeled memory block"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["memory.blocks:w"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "MemoryBlockWriteIntent"
+output = "MemoryBlockWriteResult"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 5000
+syscalls      = []

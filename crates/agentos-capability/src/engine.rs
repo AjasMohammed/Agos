@@ -79,7 +79,13 @@ impl CapabilityEngine {
 
     /// Register an agent with an initial permission set.
     pub fn register_agent(&self, agent_id: AgentID, permissions: PermissionSet) {
-        let mut map = self.agent_permissions.write().unwrap();
+        let mut map = self.agent_permissions.write().unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                "Recovered from poisoned lock in capability engine write path"
+            );
+            error.into_inner()
+        });
         map.insert(agent_id, permissions);
     }
 
@@ -89,14 +95,40 @@ impl CapabilityEngine {
         agent_id: &AgentID,
         permissions: PermissionSet,
     ) -> Result<(), AgentOSError> {
-        let mut map = self.agent_permissions.write().unwrap();
+        let mut map = self.agent_permissions.write().unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                "Recovered from poisoned lock in capability engine write path"
+            );
+            error.into_inner()
+        });
         map.insert(*agent_id, permissions);
         Ok(())
     }
 
+    /// Revoke an agent's permissions entirely, removing them from the permission map.
+    /// This effectively invalidates any tokens issued for the agent since they reference
+    /// permissions that no longer exist.
+    pub fn revoke_agent(&self, agent_id: &AgentID) {
+        let mut map = self.agent_permissions.write().unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                "Recovered from poisoned lock in capability engine write path"
+            );
+            error.into_inner()
+        });
+        map.remove(agent_id);
+    }
+
     /// Get an agent's current permissions.
     pub fn get_permissions(&self, agent_id: &AgentID) -> Result<PermissionSet, AgentOSError> {
-        let map = self.agent_permissions.read().unwrap();
+        let map = self.agent_permissions.read().unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                "Recovered from poisoned lock in capability engine read path"
+            );
+            error.into_inner()
+        });
         map.get(agent_id)
             .cloned()
             .ok_or_else(|| AgentOSError::PermissionDenied {
@@ -176,6 +208,9 @@ impl CapabilityEngine {
             IntentType::Query => IntentTypeFlag::Query,
             IntentType::Observe => IntentTypeFlag::Observe,
             IntentType::Delegate => IntentTypeFlag::Delegate,
+            IntentType::Message => IntentTypeFlag::Message,
+            IntentType::Broadcast => IntentTypeFlag::Broadcast,
+            IntentType::Escalate => IntentTypeFlag::Escalate,
         };
 
         if !token.allowed_intents.contains(&intent_flag) {
@@ -245,6 +280,31 @@ impl CapabilityEngine {
 
         mac.verify_slice(&token.signature).is_ok()
     }
+
+    /// Sign arbitrary bytes using the kernel's HMAC-SHA256 signing key.
+    /// Used by the EventBus to sign `EventMessage` signatures.
+    pub fn sign_data(&self, data: &[u8]) -> Vec<u8> {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mut mac =
+            HmacSha256::new_from_slice(&self.signing_key).expect("HMAC can take any size key");
+        mac.update(data);
+        mac.finalize().into_bytes().to_vec()
+    }
+
+    /// Verify an HMAC-SHA256 signature over arbitrary data.
+    pub fn verify_data_signature(&self, data: &[u8], signature: &[u8]) -> bool {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mut mac =
+            HmacSha256::new_from_slice(&self.signing_key).expect("HMAC can take any size key");
+        mac.update(data);
+        mac.verify_slice(signature).is_ok()
+    }
 }
 
 impl Default for CapabilityEngine {
@@ -256,16 +316,6 @@ impl Default for CapabilityEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn make_engine() -> CapabilityEngine {
-        let engine = CapabilityEngine::new();
-        let mut perms = PermissionSet::new();
-        perms.grant("fs.user_data".into(), true, false, false, None);
-        perms.grant("memory.semantic".into(), true, true, false, None);
-        let agent_id = AgentID::new();
-        engine.register_agent(agent_id, perms);
-        engine
-    }
 
     #[test]
     fn test_issue_and_verify_token() {

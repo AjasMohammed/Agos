@@ -49,19 +49,15 @@ impl GpuDriver {
                 };
 
                 // Try to read VRAM from /sys/class/drm/cardN/device/mem_info_vram_total (AMD)
-                let vram_total = std::fs::read_to_string(
-                    device_path.join("mem_info_vram_total"),
-                )
-                .ok()
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .map(|bytes| bytes / 1_048_576); // Convert to MB
+                let vram_total = std::fs::read_to_string(device_path.join("mem_info_vram_total"))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .map(|bytes| bytes / 1_048_576); // Convert to MB
 
-                let vram_used = std::fs::read_to_string(
-                    device_path.join("mem_info_vram_used"),
-                )
-                .ok()
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .map(|bytes| bytes / 1_048_576);
+                let vram_used = std::fs::read_to_string(device_path.join("mem_info_vram_used"))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .map(|bytes| bytes / 1_048_576);
 
                 let mut gpu = json!({
                     "name": name,

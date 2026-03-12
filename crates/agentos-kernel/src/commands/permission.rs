@@ -57,15 +57,31 @@ impl Kernel {
             .ok();
 
         self.audit_log(agentos_audit::AuditEntry {
-                timestamp: chrono::Utc::now(),
-                trace_id: TraceID::new(),
-                event_type: agentos_audit::AuditEventType::PermissionGranted,
-                agent_id: Some(agent.id),
-                task_id: None,
-                tool_id: None,
-                details: serde_json::json!({ "permission": permission, "agent_name": agent_name }),
-                severity: agentos_audit::AuditSeverity::Info,
-            });
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: agentos_audit::AuditEventType::PermissionGranted,
+            agent_id: Some(agent.id),
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({ "permission": permission, "agent_name": agent_name }),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
+
+        // Emit AgentPermissionGranted event
+        self.emit_event(
+            EventType::AgentPermissionGranted,
+            EventSource::AgentLifecycle,
+            EventSeverity::Info,
+            serde_json::json!({
+                "agent_id": agent.id.to_string(),
+                "agent_name": agent_name,
+                "permission": permission,
+            }),
+            0,
+        )
+        .await;
 
         KernelResponse::Success { data: None }
     }
@@ -108,15 +124,31 @@ impl Kernel {
             .ok();
 
         self.audit_log(agentos_audit::AuditEntry {
-                timestamp: chrono::Utc::now(),
-                trace_id: TraceID::new(),
-                event_type: agentos_audit::AuditEventType::PermissionRevoked,
-                agent_id: Some(agent.id),
-                task_id: None,
-                tool_id: None,
-                details: serde_json::json!({ "permission": permission, "agent_name": agent_name }),
-                severity: agentos_audit::AuditSeverity::Info,
-            });
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: agentos_audit::AuditEventType::PermissionRevoked,
+            agent_id: Some(agent.id),
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({ "permission": permission, "agent_name": agent_name }),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
+
+        // Emit AgentPermissionRevoked event
+        self.emit_event(
+            EventType::AgentPermissionRevoked,
+            EventSource::AgentLifecycle,
+            EventSeverity::Warning,
+            serde_json::json!({
+                "agent_id": agent.id.to_string(),
+                "agent_name": agent_name,
+                "permission": permission,
+            }),
+            0,
+        )
+        .await;
 
         KernelResponse::Success { data: None }
     }
@@ -244,7 +276,7 @@ impl Kernel {
             Some(p) => p,
             None => {
                 return KernelResponse::Error {
-                    message: format!("Invalid permission"),
+                    message: "Invalid permission".to_string(),
                 }
             }
         };
@@ -269,6 +301,8 @@ impl Kernel {
             tool_id: None,
             details: serde_json::json!({ "permission": permission, "expires_at": expires_at.to_rfc3339() }),
             severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
         });
 
         KernelResponse::Success { data: None }

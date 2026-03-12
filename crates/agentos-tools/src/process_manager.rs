@@ -11,6 +11,12 @@ impl ProcessManagerTool {
     }
 }
 
+impl Default for ProcessManagerTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl AgentTool for ProcessManagerTool {
     fn name(&self) -> &str {

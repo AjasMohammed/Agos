@@ -27,7 +27,7 @@ impl EpisodeType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "intent" => Some(EpisodeType::Intent),
             "tool_call" => Some(EpisodeType::ToolCall),
@@ -38,6 +38,14 @@ impl EpisodeType {
             "system_event" => Some(EpisodeType::SystemEvent),
             _ => None,
         }
+    }
+}
+
+impl std::str::FromStr for EpisodeType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| format!("Unknown episode type: {s}"))
     }
 }
 
@@ -92,4 +100,63 @@ pub struct RecallResult {
     pub semantic_score: f32, // Cosine similarity
     pub fts_score: f32,      // BM25 or raw rank
     pub rrf_score: f32,      // Fused rank score
+}
+
+/// A single step in a stored procedure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcedureStep {
+    /// Execution order (0-indexed).
+    pub order: usize,
+    /// Human-readable action description.
+    pub action: String,
+    /// Tool name to invoke for this step (if applicable).
+    pub tool: Option<String>,
+    /// What success looks like for this step.
+    pub expected_outcome: Option<String>,
+}
+
+/// A stored procedure representing a learned skill or SOP.
+///
+/// Procedures are distilled from repeated episodic patterns (Phase 7 consolidation)
+/// or created explicitly by agents (Phase 8 memory self-management).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Procedure {
+    /// UUID primary key.
+    pub id: String,
+    /// Short descriptive name, e.g. "deploy-to-production".
+    pub name: String,
+    /// What this procedure accomplishes.
+    pub description: String,
+    /// Conditions that must hold before execution.
+    pub preconditions: Vec<String>,
+    /// Ordered steps.
+    pub steps: Vec<ProcedureStep>,
+    /// Expected outcomes after successful execution.
+    pub postconditions: Vec<String>,
+    /// Times this procedure led to a successful outcome.
+    pub success_count: u32,
+    /// Times this procedure led to a failure.
+    pub failure_count: u32,
+    /// Episodic entry IDs this procedure was distilled from.
+    pub source_episodes: Vec<String>,
+    /// Owning agent (None = globally available).
+    pub agent_id: Option<AgentID>,
+    /// Free-form tags for categorization.
+    pub tags: Vec<String>,
+    /// When this procedure was first created.
+    pub created_at: DateTime<Utc>,
+    /// When this procedure was last modified.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Result of a hybrid procedural search with score breakdown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcedureSearchResult {
+    pub procedure: Procedure,
+    /// Cosine similarity between query embedding and procedure embedding.
+    pub semantic_score: f32,
+    /// BM25 / FTS5 rank score (negated — higher is better).
+    pub fts_score: f32,
+    /// Reciprocal Rank Fusion score (70% semantic + 30% FTS).
+    pub rrf_score: f32,
 }

@@ -89,7 +89,7 @@ impl SandboxExecutor {
 
         // 3. Set resource limits and seccomp via pre-exec hook (unsafe because pre_exec)
         let max_memory = config.max_memory_bytes;
-        let max_cpu_secs = (config.max_cpu_ms + 999) / 1000; // round up to full seconds
+        let max_cpu_secs = config.max_cpu_ms.div_ceil(1000); // round up to full seconds
 
         #[cfg(target_os = "linux")]
         let bpf_filter = {
@@ -132,10 +132,7 @@ impl SandboxExecutor {
 
                     if let Some(ref bpf) = bpf_for_closure {
                         seccompiler::apply_filter(bpf).map_err(|e| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                format!("seccomp apply failed: {:?}", e),
-                            )
+                            std::io::Error::other(format!("seccomp apply failed: {:?}", e))
                         })?;
                     }
                 }

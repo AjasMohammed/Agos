@@ -7,9 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-async fn setup_kernel_and_client(
-    temp_dir: &tempfile::TempDir,
-) -> (Arc<Kernel>, BusClient) {
+async fn setup_kernel_and_client(temp_dir: &tempfile::TempDir) -> (Arc<Kernel>, BusClient) {
     let config = common::create_test_config(temp_dir);
     let config_path = temp_dir.path().join("config.toml");
     std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
@@ -76,7 +74,10 @@ async fn test_pipeline_install_list_remove() {
 
     match &response {
         KernelResponse::Success { data: Some(data) } => {
-            assert_eq!(data.get("name").and_then(|v| v.as_str()), Some("integration-test-pipeline"));
+            assert_eq!(
+                data.get("name").and_then(|v| v.as_str()),
+                Some("integration-test-pipeline")
+            );
             assert_eq!(data.get("version").and_then(|v| v.as_str()), Some("1.0.0"));
             assert_eq!(data.get("steps").and_then(|v| v.as_u64()), Some(2));
         }

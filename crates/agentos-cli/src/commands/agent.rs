@@ -29,6 +29,9 @@ pub enum AgentCommands {
     },
     /// Send a message to an agent
     Message {
+        /// Sender agent name
+        #[arg(long)]
+        from: String,
         /// Target agent name
         to: String,
         /// Message content
@@ -49,6 +52,9 @@ pub enum AgentCommands {
     },
     /// Broadcast a message to a group
     Broadcast {
+        /// Sender agent name
+        #[arg(long)]
+        from: String,
         /// Target group name
         group: String,
         /// Message content
@@ -99,7 +105,7 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                     if agents.is_empty() {
                         println!("No connected agents.");
                     } else {
-                        println!("{:<20} {:<15} {}", "NAME", "PROVIDER", "MODEL");
+                        println!("{:<20} {:<15} MODEL", "NAME", "PROVIDER");
                         println!("{}", "-".repeat(50));
                         for a in agents {
                             println!(
@@ -136,10 +142,10 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                 _ => eprintln!("❌ Unexpected response"),
             }
         }
-        AgentCommands::Message { to, content } => {
+        AgentCommands::Message { from, to, content } => {
             let response = client
                 .send_command(KernelCommand::SendAgentMessage {
-                    from_name: "CLI".to_string(), // Arbitrary sender for CLI
+                    from_name: from,
                     to_name: to.clone(),
                     content,
                 })
@@ -205,9 +211,14 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                 _ => eprintln!("❌ Unexpected response"),
             }
         }
-        AgentCommands::Broadcast { group, content } => {
+        AgentCommands::Broadcast {
+            from,
+            group,
+            content,
+        } => {
             let response = client
                 .send_command(KernelCommand::BroadcastToGroup {
+                    from_name: from,
                     group_name: group.clone(),
                     content,
                 })

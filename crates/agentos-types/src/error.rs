@@ -36,6 +36,12 @@ pub enum AgentOSError {
     #[error("Tool execution failed: {tool_name}: {reason}")]
     ToolExecutionFailed { tool_name: String, reason: String },
 
+    #[error("Tool '{name}' is blocked and cannot be loaded")]
+    ToolBlocked { name: String },
+
+    #[error("Tool '{name}' has an invalid manifest signature: {reason}")]
+    ToolSignatureInvalid { name: String, reason: String },
+
     #[error("Schema validation failed: {0}")]
     SchemaValidation(String),
 
@@ -77,6 +83,16 @@ pub enum AgentOSError {
     // Serialization
     #[error("Serialization error: {0}")]
     Serialization(String),
+
+    // Event system
+    #[error("Event subscription not found: {0}")]
+    EventSubscriptionNotFound(String),
+
+    #[error("Event loop detected at depth {depth} for event type {event_type}")]
+    EventLoopDetected { event_type: String, depth: u32 },
+
+    #[error("Event delivery failed: {0}")]
+    EventDeliveryFailed(String),
 
     // IO
     #[error("IO error: {0}")]

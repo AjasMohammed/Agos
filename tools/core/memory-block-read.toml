@@ -1,0 +1,24 @@
+[manifest]
+name        = "memory-block-read"
+version     = "1.0.0"
+description = "Read an agent-scoped labeled memory block"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["memory.blocks:r"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "MemoryBlockReadIntent"
+output = "MemoryBlockReadResult"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 3000
+syscalls      = []

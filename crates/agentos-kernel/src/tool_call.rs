@@ -27,6 +27,9 @@ pub fn parse_tool_call(text: &str) -> Option<ParsedToolCall> {
                         "query" => IntentType::Query,
                         "observe" => IntentType::Observe,
                         "delegate" => IntentType::Delegate,
+                        "message" => IntentType::Message,
+                        "broadcast" => IntentType::Broadcast,
+                        "escalate" => IntentType::Escalate,
                         _ => return None,
                     };
 

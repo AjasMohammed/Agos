@@ -35,7 +35,13 @@ impl ProfileManager {
         description: &str,
         permissions: PermissionSet,
     ) -> Result<(), AgentOSError> {
-        let mut profiles = self.profiles.write().unwrap();
+        let mut profiles = self.profiles.write().unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                "Recovered from poisoned lock in profile manager write path"
+            );
+            error.into_inner()
+        });
         if profiles.contains_key(name) {
             return Err(AgentOSError::SchemaValidation(format!(
                 "Profile '{}' already exists",
@@ -56,7 +62,13 @@ impl ProfileManager {
 
     /// Delete a profile.
     pub fn delete(&self, name: &str) -> Result<(), AgentOSError> {
-        let mut profiles = self.profiles.write().unwrap();
+        let mut profiles = self.profiles.write().unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                "Recovered from poisoned lock in profile manager write path"
+            );
+            error.into_inner()
+        });
         if profiles.remove(name).is_some() {
             Ok(())
         } else {
@@ -69,13 +81,25 @@ impl ProfileManager {
 
     /// Get a profile by name.
     pub fn get(&self, name: &str) -> Option<PermissionProfile> {
-        let profiles = self.profiles.read().unwrap();
+        let profiles = self.profiles.read().unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                "Recovered from poisoned lock in profile manager read path"
+            );
+            error.into_inner()
+        });
         profiles.get(name).cloned()
     }
 
     /// List all profiles.
     pub fn list_all(&self) -> Vec<PermissionProfile> {
-        let profiles = self.profiles.read().unwrap();
+        let profiles = self.profiles.read().unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                "Recovered from poisoned lock in profile manager read path"
+            );
+            error.into_inner()
+        });
         profiles.values().cloned().collect()
     }
 }

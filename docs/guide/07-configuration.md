@@ -1,157 +1,163 @@
 # Configuration
 
-AgentOS is configured via a single TOML file. The default configuration is at `config/default.toml`.
+AgentOS supports two profiles out of the box:
 
----
+- `config/default.toml` for local development (includes `/tmp` defaults)
+- `config/production.toml` for deployment (persistent paths + explicit LLM endpoints)
 
-## Configuration File
-
-```toml
-[kernel]
-max_concurrent_tasks = 4              # Max tasks running simultaneously
-default_task_timeout_secs = 60        # Timeout for each task (seconds)
-context_window_max_entries = 100      # Max entries per task's context window
-
-[secrets]
-vault_path = "/tmp/agentos/vault/secrets.db"  # Path to encrypted vault DB
-
-[audit]
-log_path = "/tmp/agentos/data/audit.db"       # Path to audit log DB
-
-[tools]
-core_tools_dir = "/tmp/agentos/tools/core"    # Built-in tool manifests
-user_tools_dir = "/tmp/agentos/tools/user"    # User-installed tool manifests
-data_dir = "/tmp/agentos/data"                # Working data directory for tools
-
-[bus]
-socket_path = "/tmp/agentos/agentos.sock"     # Unix domain socket for IPC
-
-[ollama]
-host = "http://localhost:11434"               # Ollama API endpoint
-default_model = "llama3.2"                    # Default model for Ollama agents
-
-[memory]
-model_cache_dir = "models"                    # Embedding model cache dir (relative to tools.data_dir unless absolute)
-```
-
----
-
-## Section Reference
-
-### `[kernel]`
-
-| Key                          | Type    | Default | Description                                                                                  |
-| ---------------------------- | ------- | ------- | -------------------------------------------------------------------------------------------- |
-| `max_concurrent_tasks`       | integer | `4`     | Maximum number of tasks the scheduler will run simultaneously. Increase for more parallelism |
-| `default_task_timeout_secs`  | integer | `60`    | Default timeout in seconds for each task. Tasks exceeding this are cancelled                 |
-| `context_window_max_entries` | integer | `100`   | Maximum entries in a task's context window before old entries are evicted                    |
-
-### `[secrets]`
-
-| Key          | Type   | Default                         | Description                                                                                            |
-| ------------ | ------ | ------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `vault_path` | string | `/tmp/agentos/vault/secrets.db` | Path to the encrypted SQLite vault database. The file and parent directories are created automatically |
-
-### `[audit]`
-
-| Key        | Type   | Default                      | Description                                       |
-| ---------- | ------ | ---------------------------- | ------------------------------------------------- |
-| `log_path` | string | `/tmp/agentos/data/audit.db` | Path to the append-only audit log SQLite database |
-
-### `[tools]`
-
-| Key              | Type   | Default                   | Description                                                               |
-| ---------------- | ------ | ------------------------- | ------------------------------------------------------------------------- |
-| `core_tools_dir` | string | `/tmp/agentos/tools/core` | Directory containing built-in tool TOML manifests                         |
-| `user_tools_dir` | string | `/tmp/agentos/tools/user` | Directory for user-installed tool manifests                               |
-| `data_dir`       | string | `/tmp/agentos/data`       | Working data directory. Tools read/write files relative to this directory |
-
-### `[bus]`
-
-| Key           | Type   | Default                     | Description                                  |
-| ------------- | ------ | --------------------------- | -------------------------------------------- |
-| `socket_path` | string | `/tmp/agentos/agentos.sock` | Unix domain socket path for CLI ↔ Kernel IPC |
-
-### `[ollama]`
-
-| Key             | Type   | Default                  | Description                          |
-| --------------- | ------ | ------------------------ | ------------------------------------ |
-| `host`          | string | `http://localhost:11434` | Ollama API endpoint URL              |
-| `default_model` | string | `llama3.2`               | Default model name for Ollama agents |
-
-### `[memory]`
-
-| Key               | Type   | Default  | Description                                                                                                         |
-| ----------------- | ------ | -------- | ------------------------------------------------------------------------------------------------------------------- |
-| `model_cache_dir` | string | `models` | Directory used by embedding models (fastembed). Relative paths resolve under `tools.data_dir`; absolute paths are used as-is. |
-
----
-
-## Custom Configuration
-
-You can specify a custom config file with the `--config` flag:
+Use a custom profile with:
 
 ```bash
-agentctl --config /path/to/my-config.toml start
+agentctl --config /path/to/config.toml start
 ```
 
-### Production Example
+---
 
-For production deployments, use persistent paths:
+## Default Configuration (Development)
+
+`config/default.toml` intentionally uses development-friendly defaults. The kernel logs a startup warning when runtime paths point under `/tmp` or `/var/tmp`.
 
 ```toml
 [kernel]
-max_concurrent_tasks = 8
-default_task_timeout_secs = 120
-context_window_max_entries = 200
+max_concurrent_tasks = 4
+default_task_timeout_secs = 60
+context_window_max_entries = 100
+context_window_token_budget = 8000
 
 [secrets]
-vault_path = "/opt/agentos/vault/secrets.db"
+vault_path = "/tmp/agentos/vault/secrets.db"
 
 [audit]
-log_path = "/opt/agentos/data/audit.db"
+log_path = "/tmp/agentos/data/audit.db"
 
 [tools]
-core_tools_dir = "/opt/agentos/tools/core"
-user_tools_dir = "/opt/agentos/tools/user"
-data_dir = "/opt/agentos/data"
+core_tools_dir = "/tmp/agentos/tools/core"
+user_tools_dir = "/tmp/agentos/tools/user"
+data_dir = "/tmp/agentos/data"
 
 [bus]
-socket_path = "/var/run/agentos/agentos.sock"
+socket_path = "/tmp/agentos/agentos.sock"
 
 [ollama]
 host = "http://localhost:11434"
 default_model = "llama3.2"
 
+[llm]
+openai_base_url = "https://api.openai.com/v1"
+anthropic_base_url = "https://api.anthropic.com/v1"
+gemini_base_url = "https://generativelanguage.googleapis.com/v1beta"
+
 [memory]
-model_cache_dir = "/opt/agentos/data/models"
+model_cache_dir = "models"
 ```
+
+---
+
+## Production Baseline
+
+Use `config/production.toml` for first deployment:
+
+```toml
+[secrets]
+vault_path = "/var/lib/agentos/vault/secrets.db"
+
+[audit]
+log_path = "/var/lib/agentos/data/audit.db"
+
+[tools]
+core_tools_dir = "/var/lib/agentos/tools/core"
+user_tools_dir = "/var/lib/agentos/tools/user"
+data_dir = "/var/lib/agentos/data"
+
+[bus]
+socket_path = "/run/agentos/agentos.sock"
+
+[ollama]
+host = "http://ollama.service.consul:11434"
+default_model = "llama3.2"
+
+[llm]
+custom_base_url = "https://llm-gateway.internal/v1"
+openai_base_url = "https://api.openai.com/v1"
+anthropic_base_url = "https://api.anthropic.com/v1"
+gemini_base_url = "https://generativelanguage.googleapis.com/v1beta"
+
+[memory]
+model_cache_dir = "/var/lib/agentos/data/models"
+```
+
+---
+
+## LLM Endpoint Resolution
+
+For agent connect flows, endpoint precedence is:
+
+1. CLI `--base-url`
+2. Environment variable override
+3. Config file value
+4. Provider default (only where supported)
+
+Provider behavior:
+
+- **Ollama:** `--base-url` -> `AGENTOS_OLLAMA_HOST` -> `[ollama].host`
+- **Custom provider:** `--base-url` -> `AGENTOS_LLM_URL` -> `[llm].custom_base_url` (required; no localhost fallback)
+- **OpenAI:** `--base-url` -> `AGENTOS_OPENAI_BASE_URL` -> `[llm].openai_base_url` -> official OpenAI endpoint
+
+`anthropic_base_url` and `gemini_base_url` are recorded in config for deployment documentation parity.
 
 ---
 
 ## Environment Variables
 
-AgentOS does **not** use environment variables for configuration by design (security principle: secrets should never live in env vars). All configuration is loaded from the TOML file, and all secrets are stored in the encrypted vault.
+Environment variables are supported only for non-secret endpoint overrides:
+
+- `AGENTOS_OLLAMA_HOST`
+- `AGENTOS_LLM_URL`
+- `AGENTOS_OPENAI_BASE_URL`
+- `RUST_LOG`
+
+Secrets (API keys, tokens, credentials) must stay in the encrypted vault.
+
+---
+
+## Migration Checklist (Old Paths -> Production Layout)
+
+1. Stop AgentOS services.
+2. Create runtime directories:
+   - `/var/lib/agentos/vault`
+   - `/var/lib/agentos/data`
+   - `/var/lib/agentos/tools/core`
+   - `/var/lib/agentos/tools/user`
+   - `/run/agentos`
+3. Copy existing state from `/tmp/agentos` if preserving local data:
+   - `/tmp/agentos/vault/secrets.db` -> `/var/lib/agentos/vault/secrets.db`
+   - `/tmp/agentos/data/audit.db` -> `/var/lib/agentos/data/audit.db`
+   - `/tmp/agentos/tools/*` -> `/var/lib/agentos/tools/*`
+4. Ensure service user ownership and permissions for `/var/lib/agentos` and `/run/agentos`.
+5. Start with production profile:
+
+```bash
+agentctl --config config/production.toml start
+```
+
+6. Verify:
+
+```bash
+agentctl --config config/production.toml status
+grep -n "localhost" config/production.toml
+```
 
 ---
 
 ## Logging
 
-AgentOS uses the `tracing` crate for structured logging. By default, logging is configured at `INFO` level:
+AgentOS uses `tracing` for structured logs.
 
-```
-agentos=info
-```
+- Startup logs include configured LLM endpoint values (non-secret).
+- Startup warnings are emitted when runtime paths are under temporary directories.
 
-To enable debug logging, set the `RUST_LOG` environment variable:
+Enable debug logs:
 
 ```bash
-RUST_LOG=agentos=debug cargo run --bin agentos-cli -- start
+RUST_LOG=agentos=debug cargo run --bin agentos-cli -- start --config config/production.toml
 ```
-
-Log levels:
-
-- `error` — Failures and critical issues
-- `warn` — Recoverable problems
-- `info` — Business events (task started, agent connected, tool executed)
-- `debug` — Internal kernel details (for development only)

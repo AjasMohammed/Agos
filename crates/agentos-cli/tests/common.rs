@@ -1,6 +1,6 @@
 use agentos_kernel::config::{
-    AuditSettings, BusSettings, KernelConfig, KernelSettings, MemorySettings, OllamaSettings,
-    SecretsSettings, ToolsSettings,
+    AuditSettings, BusSettings, KernelConfig, KernelSettings, LlmSettings, MemorySettings,
+    OllamaSettings, SecretsSettings, ToolsSettings,
 };
 
 pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
@@ -9,6 +9,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             max_concurrent_tasks: 4,
             default_task_timeout_secs: 60,
             context_window_max_entries: 100,
+            context_window_token_budget: 0,
             health_port: 0, // 0 = disabled in tests
         },
         routing: Default::default(),
@@ -38,6 +39,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
                 .to_string_lossy()
                 .to_string(),
             data_dir: temp_dir.path().join("data").to_string_lossy().to_string(),
+            crl_path: None,
         },
         bus: BusSettings {
             socket_path: temp_dir
@@ -51,8 +53,10 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             host: "http://localhost:11434".to_string(),
             default_model: "llama3.2".to_string(),
         },
+        llm: LlmSettings::default(),
         memory: MemorySettings {
             model_cache_dir: "models".to_string(),
         },
+        context_budget: Default::default(),
     }
 }

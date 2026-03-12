@@ -34,6 +34,11 @@ axum = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 jsonschema = { workspace = true }
+tokio-util = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.10"

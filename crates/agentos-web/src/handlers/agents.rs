@@ -80,6 +80,7 @@ pub async fn connect(
         description: form.description.unwrap_or_default(),
         created_at: chrono::Utc::now(),
         last_active: chrono::Utc::now(),
+        public_key_hex: None,
     };
 
     state.kernel.agent_registry.write().await.register(profile);

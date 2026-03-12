@@ -57,6 +57,7 @@ impl LLMCore for MockLLMCore {
             },
             model: "mock-model".to_string(),
             duration_ms: 1,
+            uncertainty: None,
         })
     }
 

@@ -23,13 +23,18 @@ impl Kernel {
                 }
             }
         };
-        match toml::from_str::<ToolManifest>(&content) {
-            Ok(manifest) => {
-                self.tool_registry.write().await.register(manifest);
-                KernelResponse::Success { data: None }
+        let manifest = match toml::from_str::<ToolManifest>(&content) {
+            Ok(m) => m,
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: format!("Invalid manifest: {}", e),
+                }
             }
+        };
+        match self.tool_registry.write().await.register(manifest) {
+            Ok(_) => KernelResponse::Success { data: None },
             Err(e) => KernelResponse::Error {
-                message: format!("Invalid manifest: {}", e),
+                message: e.to_string(),
             },
         }
     }

@@ -18,15 +18,17 @@ impl Kernel {
         {
             Ok(id) => {
                 self.audit_log(agentos_audit::AuditEntry {
-                        timestamp: chrono::Utc::now(),
-                        trace_id: TraceID::new(),
-                        event_type: agentos_audit::AuditEventType::ScheduledJobCreated,
-                        agent_id: None,
-                        task_id: None,
-                        tool_id: None,
-                        details: serde_json::json!({ "job_name": name, "schedule_id": id }),
-                        severity: agentos_audit::AuditSeverity::Info,
-                    });
+                    timestamp: chrono::Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::ScheduledJobCreated,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({ "job_name": name, "schedule_id": id }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
                 KernelResponse::ScheduleId(id)
             }
             Err(e) => KernelResponse::Error {
@@ -44,15 +46,17 @@ impl Kernel {
             match self.schedule_manager.pause(&job.id).await {
                 Ok(_) => {
                     self.audit_log(agentos_audit::AuditEntry {
-                            timestamp: chrono::Utc::now(),
-                            trace_id: TraceID::new(),
-                            event_type: agentos_audit::AuditEventType::ScheduledJobPaused,
-                            agent_id: None,
-                            task_id: None,
-                            tool_id: None,
-                            details: serde_json::json!({ "job_name": name }),
-                            severity: agentos_audit::AuditSeverity::Info,
-                        });
+                        timestamp: chrono::Utc::now(),
+                        trace_id: TraceID::new(),
+                        event_type: agentos_audit::AuditEventType::ScheduledJobPaused,
+                        agent_id: None,
+                        task_id: None,
+                        tool_id: None,
+                        details: serde_json::json!({ "job_name": name }),
+                        severity: agentos_audit::AuditSeverity::Info,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
                     KernelResponse::Success { data: None }
                 }
                 Err(e) => KernelResponse::Error {
@@ -71,15 +75,17 @@ impl Kernel {
             match self.schedule_manager.resume(&job.id).await {
                 Ok(_) => {
                     self.audit_log(agentos_audit::AuditEntry {
-                            timestamp: chrono::Utc::now(),
-                            trace_id: TraceID::new(),
-                            event_type: agentos_audit::AuditEventType::ScheduledJobResumed,
-                            agent_id: None,
-                            task_id: None,
-                            tool_id: None,
-                            details: serde_json::json!({ "job_name": name }),
-                            severity: agentos_audit::AuditSeverity::Info,
-                        });
+                        timestamp: chrono::Utc::now(),
+                        trace_id: TraceID::new(),
+                        event_type: agentos_audit::AuditEventType::ScheduledJobResumed,
+                        agent_id: None,
+                        task_id: None,
+                        tool_id: None,
+                        details: serde_json::json!({ "job_name": name }),
+                        severity: agentos_audit::AuditSeverity::Info,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
                     KernelResponse::Success { data: None }
                 }
                 Err(e) => KernelResponse::Error {
@@ -98,15 +104,17 @@ impl Kernel {
             match self.schedule_manager.delete(&job.id).await {
                 Ok(_) => {
                     self.audit_log(agentos_audit::AuditEntry {
-                            timestamp: chrono::Utc::now(),
-                            trace_id: TraceID::new(),
-                            event_type: agentos_audit::AuditEventType::ScheduledJobDeleted,
-                            agent_id: None,
-                            task_id: None,
-                            tool_id: None,
-                            details: serde_json::json!({ "job_name": name }),
-                            severity: agentos_audit::AuditSeverity::Info,
-                        });
+                        timestamp: chrono::Utc::now(),
+                        trace_id: TraceID::new(),
+                        event_type: agentos_audit::AuditEventType::ScheduledJobDeleted,
+                        agent_id: None,
+                        task_id: None,
+                        tool_id: None,
+                        details: serde_json::json!({ "job_name": name }),
+                        severity: agentos_audit::AuditSeverity::Info,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
                     KernelResponse::Success { data: None }
                 }
                 Err(e) => KernelResponse::Error {

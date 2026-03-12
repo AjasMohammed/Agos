@@ -3,6 +3,7 @@ name        = "memory-write"
 version     = "1.0.0"
 description = "Write new knowledge entries to semantic memory for long-term recall"
 author      = "agentos-core"
+trust_tier  = "core"
 
 [capabilities_required]
 permissions = ["memory.semantic:w", "memory.episodic:w"]

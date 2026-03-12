@@ -96,8 +96,8 @@ pub async fn handle(client: &mut BusClient, command: PipelineCommands) -> anyhow
                     }
 
                     println!(
-                        "{:<25} {:<10} {:<8} {}",
-                        "NAME", "VERSION", "STEPS", "DESCRIPTION"
+                        "{:<25} {:<10} {:<8} DESCRIPTION",
+                        "NAME", "VERSION", "STEPS"
                     );
                     for item in list {
                         let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("?");

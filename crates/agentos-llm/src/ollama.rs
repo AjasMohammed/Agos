@@ -62,7 +62,7 @@ impl LLMCore for OllamaCore {
 
         // Convert ContextWindow to Ollama chat messages format
         let messages: Vec<OllamaChatMessage> = context
-            .as_entries()
+            .active_entries()
             .iter()
             .map(|entry| OllamaChatMessage {
                 role: match entry.role {
@@ -119,6 +119,7 @@ impl LLMCore for OllamaCore {
             },
             model: self.model.clone(),
             duration_ms,
+            uncertainty: None,
         })
     }
 
@@ -162,7 +163,7 @@ impl LLMCore for OllamaCore {
         let start = std::time::Instant::now();
 
         let messages: Vec<OllamaChatMessage> = context
-            .as_entries()
+            .active_entries()
             .iter()
             .map(|entry| OllamaChatMessage {
                 role: match entry.role {
@@ -223,9 +224,7 @@ impl LLMCore for OllamaCore {
                 if let Ok(resp) = serde_json::from_slice::<OllamaChatResponse>(line) {
                     if !resp.message.content.is_empty() {
                         full_text.push_str(&resp.message.content);
-                        let _ = tx
-                            .send(InferenceEvent::Token(resp.message.content))
-                            .await;
+                        let _ = tx.send(InferenceEvent::Token(resp.message.content)).await;
                     }
                     if resp.done {
                         prompt_tokens = resp.prompt_eval_count.unwrap_or(0);
@@ -244,6 +243,7 @@ impl LLMCore for OllamaCore {
             },
             model: self.model.clone(),
             duration_ms: start.elapsed().as_millis() as u64,
+            uncertainty: None,
         };
         let _ = tx.send(InferenceEvent::Done(result)).await;
         Ok(())
@@ -270,12 +270,22 @@ mod tests {
             content: "You are a helpful assistant.".into(),
             timestamp: chrono::Utc::now(),
             metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::History,
         });
         ctx.push(ContextEntry {
             role: ContextRole::User,
             content: "Hello!".into(),
             timestamp: chrono::Utc::now(),
             metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::History,
         });
 
         let entries = ctx.as_entries();
@@ -289,7 +299,10 @@ mod tests {
     async fn test_ollama_health_check() {
         let ollama = OllamaCore::new("http://localhost:11434", "llama3.2");
         let status = ollama.health_check().await;
-        assert!(status.is_healthy(), "Ollama should be running on localhost:11434");
+        assert!(
+            status.is_healthy(),
+            "Ollama should be running on localhost:11434"
+        );
     }
 
     #[tokio::test]
@@ -303,6 +316,11 @@ mod tests {
             content: "Say 'hello' and nothing else.".into(),
             timestamp: chrono::Utc::now(),
             metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::History,
         });
 
         let result = ollama.infer(&ctx).await.unwrap();

@@ -38,13 +38,27 @@ impl std::fmt::Display for PipelineRunStatus {
 }
 
 impl PipelineRunStatus {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_or_failed(s: &str) -> Self {
         match s {
             "running" => Self::Running,
             "complete" => Self::Complete,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
             _ => Self::Failed,
+        }
+    }
+}
+
+impl std::str::FromStr for PipelineRunStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "running" => Ok(Self::Running),
+            "complete" => Ok(Self::Complete),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(format!("Unknown pipeline run status: {s}")),
         }
     }
 }
@@ -85,7 +99,7 @@ impl std::fmt::Display for StepStatus {
 }
 
 impl StepStatus {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_or_failed(s: &str) -> Self {
         match s {
             "pending" => Self::Pending,
             "running" => Self::Running,
@@ -93,6 +107,21 @@ impl StepStatus {
             "failed" => Self::Failed,
             "skipped" => Self::Skipped,
             _ => Self::Failed,
+        }
+    }
+}
+
+impl std::str::FromStr for StepStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "running" => Ok(Self::Running),
+            "complete" => Ok(Self::Complete),
+            "failed" => Ok(Self::Failed),
+            "skipped" => Ok(Self::Skipped),
+            _ => Err(format!("Unknown step status: {s}")),
         }
     }
 }

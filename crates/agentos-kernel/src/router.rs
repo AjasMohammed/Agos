@@ -3,10 +3,11 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 /// Strategy to use when routing a task to an LLM agent without a preferred agent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum RoutingStrategy {
     /// Pick the most capable model (e.g. highest context window).
+    #[default]
     CapabilityFirst,
     /// Pick the cheapest model (not yet measurable easily, defaults to capability).
     CostFirst,
@@ -14,12 +15,6 @@ pub enum RoutingStrategy {
     LatencyFirst,
     /// Distribute round-robin.
     RoundRobin,
-}
-
-impl Default for RoutingStrategy {
-    fn default() -> Self {
-        Self::CapabilityFirst
-    }
 }
 
 /// A parsed matching rule based on the prompt description
@@ -161,6 +156,7 @@ mod tests {
             description: "".into(),
             created_at: chrono::Utc::now(),
             last_active: chrono::Utc::now(),
+            public_key_hex: None,
         }
     }
 

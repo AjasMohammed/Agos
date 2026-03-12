@@ -1,7 +1,13 @@
 pub mod agent;
+pub mod audit;
 pub mod background;
+pub mod cost;
+pub mod escalation;
+pub mod event;
+pub mod identity;
 pub mod permission;
 pub mod pipeline;
+pub mod resource;
 pub mod role;
 pub mod schedule;
 pub mod secret;

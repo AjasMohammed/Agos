@@ -1,4 +1,5 @@
 use agentos_tools::loader::{load_all_manifests, LoadedManifest};
+use agentos_tools::signing::{verify_manifest_with_crl, RevocationList};
 use agentos_types::*;
 use std::collections::HashMap;
 use std::path::Path;
@@ -8,6 +9,8 @@ pub struct ToolRegistry {
     name_index: HashMap<String, ToolID>,
     /// Keeps LoadedManifest (with manifest_dir) so WASM tools can resolve wasm_path at boot.
     pub loaded: Vec<LoadedManifest>,
+    /// Certificate revocation list — tools signed by revoked keys are rejected.
+    crl: RevocationList,
 }
 
 impl ToolRegistry {
@@ -16,12 +19,32 @@ impl ToolRegistry {
             tools: HashMap::new(),
             name_index: HashMap::new(),
             loaded: Vec::new(),
+            crl: RevocationList::new(),
+        }
+    }
+
+    /// Create a new registry with a pre-loaded CRL.
+    pub fn with_crl(crl: RevocationList) -> Self {
+        Self {
+            tools: HashMap::new(),
+            name_index: HashMap::new(),
+            loaded: Vec::new(),
+            crl,
         }
     }
 
     /// Load all tool manifests from the core and user tool directories.
     pub fn load_from_dirs(core_dir: &Path, user_dir: &Path) -> Result<Self, AgentOSError> {
-        let mut registry = Self::new();
+        Self::load_from_dirs_with_crl(core_dir, user_dir, RevocationList::new())
+    }
+
+    /// Load all tool manifests with CRL enforcement.
+    pub fn load_from_dirs_with_crl(
+        core_dir: &Path,
+        user_dir: &Path,
+        crl: RevocationList,
+    ) -> Result<Self, AgentOSError> {
+        let mut registry = Self::with_crl(crl);
 
         for dir in [core_dir, user_dir] {
             if !dir.exists() {
@@ -29,7 +52,7 @@ impl ToolRegistry {
             }
             let manifests = load_all_manifests(dir)?;
             for loaded in manifests {
-                registry.register(loaded.manifest.clone());
+                registry.register(loaded.manifest.clone())?;
                 registry.loaded.push(loaded);
             }
         }
@@ -37,8 +60,13 @@ impl ToolRegistry {
         Ok(registry)
     }
 
-    /// Register a single tool from its manifest.
-    pub fn register(&mut self, manifest: ToolManifest) -> ToolID {
+    /// Register a single tool from its manifest, enforcing trust tier and CRL policy.
+    ///
+    /// Returns an error if the manifest is `Blocked`, the author key is revoked,
+    /// or if a `Community`/`Verified` manifest has a missing or invalid Ed25519 signature.
+    pub fn register(&mut self, manifest: ToolManifest) -> Result<ToolID, AgentOSError> {
+        verify_manifest_with_crl(&manifest, &self.crl)?;
+
         let tool_id = ToolID::new();
         let name = manifest.manifest.name.clone();
         let tool = RegisteredTool {
@@ -48,7 +76,7 @@ impl ToolRegistry {
         };
         self.name_index.insert(name, tool_id);
         self.tools.insert(tool_id, tool);
-        tool_id
+        Ok(tool_id)
     }
 
     pub fn get_by_name(&self, name: &str) -> Option<&RegisteredTool> {

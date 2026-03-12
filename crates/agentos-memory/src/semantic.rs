@@ -272,7 +272,11 @@ impl SemanticStore {
                  JOIN semantic_memory m ON c.memory_id = m.id
                  WHERE c.rowid IN ({})
                    AND (?1 IS NULL OR m.agent_id IS NULL OR m.agent_id = ?1)",
-                fts_ranks.keys().map(|id| id.to_string()).collect::<Vec<_>>().join(",")
+                fts_ranks
+                    .keys()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             )
         } else {
             // Fallback: load most recent chunks (bounded)
@@ -487,6 +491,147 @@ impl SemanticStore {
             .map_err(|e| AgentOSError::StorageError(format!("Failed to commit delete: {}", e)))?;
 
         Ok(())
+    }
+
+    /// Delete memory entries older than `max_age` and return the number deleted.
+    ///
+    /// This is the archival sweep for Tier 3 persistent memory (Spec §11).
+    /// Entries whose `updated_at` timestamp is older than `max_age` ago are removed.
+    pub fn sweep_old_entries(&self, max_age: std::time::Duration) -> Result<usize, AgentOSError> {
+        let chrono_age = chrono::Duration::from_std(max_age)
+            .map_err(|e| AgentOSError::StorageError(format!("Invalid max_age duration: {}", e)))?;
+        let cutoff = (Utc::now() - chrono_age).to_rfc3339();
+
+        let conn = self.conn.lock().map_err(|_| {
+            AgentOSError::StorageError("Failed to lock semantic db for sweep".to_string())
+        })?;
+
+        // Delete chunks first (FK cascade should handle this, but be explicit)
+        conn.execute(
+            "DELETE FROM semantic_chunks WHERE memory_id IN (SELECT id FROM semantic_memory WHERE updated_at < ?1)",
+            params![cutoff],
+        )
+        .map_err(|e| AgentOSError::StorageError(format!("Failed to sweep old chunks: {}", e)))?;
+
+        let deleted = conn
+            .execute(
+                "DELETE FROM semantic_memory WHERE updated_at < ?1",
+                params![cutoff],
+            )
+            .map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to sweep old entries: {}", e))
+            })?;
+
+        Ok(deleted)
+    }
+
+    /// Export all memory entries as newline-delimited JSON (JSONL) to the given writer.
+    ///
+    /// Each line is a JSON object with fields: id, agent_id, key, content, created_at,
+    /// updated_at, tags. This enables Tier 3 archival export (Spec §11).
+    pub fn export_jsonl<W: std::io::Write>(&self, writer: &mut W) -> Result<usize, AgentOSError> {
+        let conn = self.conn.lock().map_err(|_| {
+            AgentOSError::StorageError("Failed to lock semantic db for export".to_string())
+        })?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, agent_id, key, content, created_at, updated_at, tags
+                 FROM semantic_memory ORDER BY created_at ASC",
+            )
+            .map_err(|e| AgentOSError::StorageError(format!("Export prepare error: {}", e)))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let agent_id: Option<String> = row.get(1)?;
+                let key: String = row.get(2)?;
+                let content: String = row.get(3)?;
+                let created_at: String = row.get(4)?;
+                let updated_at: String = row.get(5)?;
+                let tags: Option<String> = row.get(6)?;
+                Ok(serde_json::json!({
+                    "id": id,
+                    "agent_id": agent_id,
+                    "key": key,
+                    "content": content,
+                    "created_at": created_at,
+                    "updated_at": updated_at,
+                    "tags": tags,
+                }))
+            })
+            .map_err(|e| AgentOSError::StorageError(format!("Export query error: {}", e)))?;
+
+        let mut count = 0;
+        for row in rows {
+            let value =
+                row.map_err(|e| AgentOSError::StorageError(format!("Export row error: {}", e)))?;
+            serde_json::to_writer(&mut *writer, &value).map_err(|e| {
+                AgentOSError::StorageError(format!("Export serialization error: {}", e))
+            })?;
+            writeln!(writer)
+                .map_err(|e| AgentOSError::StorageError(format!("Export write error: {}", e)))?;
+            count += 1;
+        }
+
+        Ok(count)
+    }
+
+    /// Import memory entries from newline-delimited JSON (JSONL).
+    ///
+    /// Each line must be a JSON object with fields: key, content, and optionally
+    /// agent_id, tags. The `id`, `created_at`, and `updated_at` fields from the
+    /// JSONL are used if present; otherwise new values are generated.
+    ///
+    /// Returns the number of entries imported.
+    pub async fn import_jsonl<R: std::io::BufRead>(
+        &self,
+        reader: R,
+    ) -> Result<usize, AgentOSError> {
+        let mut count = 0;
+        for line in reader.lines() {
+            let line = line.map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to read JSONL line: {}", e))
+            })?;
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            let obj: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+                AgentOSError::StorageError(format!("Invalid JSON on line {}: {}", count + 1, e))
+            })?;
+
+            let key = obj["key"].as_str().ok_or_else(|| {
+                AgentOSError::StorageError(format!("Missing 'key' field on line {}", count + 1))
+            })?;
+            let content = obj["content"].as_str().ok_or_else(|| {
+                AgentOSError::StorageError(format!("Missing 'content' field on line {}", count + 1))
+            })?;
+
+            let agent_id = obj["agent_id"]
+                .as_str()
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .map(AgentID::from_uuid);
+
+            let tags: Vec<String> = obj["tags"]
+                .as_str()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .or_else(|| {
+                    obj["tags"].as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                })
+                .unwrap_or_default();
+
+            let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+            self.write(key, content, agent_id.as_ref(), &tag_refs)
+                .await?;
+            count += 1;
+        }
+        Ok(count)
     }
 
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {

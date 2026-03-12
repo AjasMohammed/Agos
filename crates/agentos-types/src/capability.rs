@@ -26,12 +26,26 @@ pub enum IntentTypeFlag {
     Query,
     Observe,
     Delegate,
+    Message,
+    Broadcast,
+    Escalate,
 }
 
 /// A set of resource permissions in rwx format.
+///
+/// Supports both exact matches and path-prefix matching:
+/// - `"fs.user_data"` matches exactly `"fs.user_data"`
+/// - `"fs:/home/user/"` matches `"fs:/home/user/docs/file.txt"` (prefix)
+///
+/// Deny entries take precedence over grants (Spec §2: deny lists like `~/.ssh/`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PermissionSet {
     pub entries: Vec<PermissionEntry>,
+    /// Deny entries — checked before grants, take absolute precedence.
+    /// Supports exact and prefix matching (e.g. `"fs:~/.ssh/"` blocks all
+    /// paths under `~/.ssh/`).
+    #[serde(default)]
+    pub deny_entries: Vec<String>,
 }
 
 /// A single permission entry: resource + rwx bits.
@@ -45,10 +59,41 @@ pub struct PermissionEntry {
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Well-known private/reserved IP ranges that agents must never connect to
+/// (Spec §2: `deny_private_ranges: true` prevents SSRF to 192.168.x.x, 10.x.x.x, etc.).
+const PRIVATE_NETWORK_PREFIXES: &[&str] = &[
+    "10.",
+    "172.16.",
+    "172.17.",
+    "172.18.",
+    "172.19.",
+    "172.20.",
+    "172.21.",
+    "172.22.",
+    "172.23.",
+    "172.24.",
+    "172.25.",
+    "172.26.",
+    "172.27.",
+    "172.28.",
+    "172.29.",
+    "172.30.",
+    "172.31.",
+    "192.168.",
+    "127.",
+    "169.254.",
+    "0.",
+    "fd",    // IPv6 ULA
+    "fe80:", // IPv6 link-local
+    "::1",   // IPv6 loopback
+    "localhost",
+];
+
 impl PermissionSet {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            deny_entries: Vec::new(),
         }
     }
 
@@ -56,10 +101,59 @@ impl PermissionSet {
         &self.entries
     }
 
+    /// Add a deny rule. Deny entries take precedence over any grant.
+    pub fn deny(&mut self, resource_pattern: String) {
+        if !self.deny_entries.contains(&resource_pattern) {
+            self.deny_entries.push(resource_pattern);
+        }
+    }
+
+    /// Check if a resource is explicitly denied.
+    pub fn is_denied(&self, resource: &str) -> bool {
+        // Check explicit deny list
+        for pattern in &self.deny_entries {
+            if resource == pattern || resource.starts_with(pattern) {
+                return true;
+            }
+        }
+
+        // SSRF protection: block private network ranges for network resources
+        if resource.starts_with("net:") || resource.starts_with("network:") {
+            let target = resource
+                .strip_prefix("net:")
+                .or_else(|| resource.strip_prefix("network:"))
+                .unwrap_or("");
+            // Strip protocol prefix if present (e.g. "https://10.0.0.1/...")
+            let host = target
+                .strip_prefix("https://")
+                .or_else(|| target.strip_prefix("http://"))
+                .unwrap_or(target);
+            for prefix in PRIVATE_NETWORK_PREFIXES {
+                if host.starts_with(prefix) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
     /// Check if a specific operation on a resource is allowed.
+    ///
+    /// Uses path-prefix matching: a grant on `"fs:/home/user/"` allows
+    /// operations on `"fs:/home/user/docs/file.txt"`.
+    /// Deny entries are checked first and take absolute precedence.
     pub fn check(&self, resource: &str, operation: PermissionOp) -> bool {
+        // Deny entries take precedence
+        if self.is_denied(resource) {
+            return false;
+        }
+
         self.entries.iter().any(|e| {
-            e.resource == resource
+            // Exact match or prefix match (grant on "fs:/home/" covers "fs:/home/user/x.txt")
+            let resource_matches = e.resource == resource || resource.starts_with(&e.resource);
+
+            resource_matches
                 && match operation {
                     PermissionOp::Read => e.read,
                     PermissionOp::Write => e.write,
@@ -162,5 +256,62 @@ mod tests {
         assert!(perms.check("network.outbound", PermissionOp::Execute));
         assert!(!perms.check("network.outbound", PermissionOp::Read));
         assert!(!perms.check("nonexistent.resource", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_path_prefix_matching() {
+        let mut perms = PermissionSet::new();
+        perms.grant("fs:/home/user/".into(), true, true, false, None);
+
+        // Prefix match: /home/user/docs/file.txt is under /home/user/
+        assert!(perms.check("fs:/home/user/docs/file.txt", PermissionOp::Read));
+        assert!(perms.check("fs:/home/user/docs/file.txt", PermissionOp::Write));
+        // Does not match other paths
+        assert!(!perms.check("fs:/etc/passwd", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_deny_overrides_grant() {
+        let mut perms = PermissionSet::new();
+        perms.grant("fs:/home/user/".into(), true, true, false, None);
+        perms.deny("fs:/home/user/.ssh/".into());
+
+        // Grant covers /home/user/docs
+        assert!(perms.check("fs:/home/user/docs/report.md", PermissionOp::Read));
+        // Deny overrides for .ssh
+        assert!(!perms.check("fs:/home/user/.ssh/id_rsa", PermissionOp::Read));
+        assert!(!perms.check("fs:/home/user/.ssh/", PermissionOp::Write));
+    }
+
+    #[test]
+    fn test_ssrf_protection_blocks_private_ranges() {
+        let mut perms = PermissionSet::new();
+        perms.grant("net:".into(), true, false, true, None);
+
+        // Public addresses should be allowed
+        assert!(perms.check(
+            "net:https://api.anthropic.com/v1/messages",
+            PermissionOp::Read
+        ));
+        // Private ranges should be blocked (SSRF protection)
+        assert!(!perms.check("net:https://192.168.1.1/admin", PermissionOp::Read));
+        assert!(!perms.check("net:http://10.0.0.1/internal", PermissionOp::Read));
+        assert!(!perms.check("net:http://127.0.0.1:8080/", PermissionOp::Execute));
+        assert!(!perms.check("net:http://169.254.169.254/metadata", PermissionOp::Read));
+        assert!(!perms.check("net:localhost:3000", PermissionOp::Read));
+        assert!(!perms.check("network:http://172.16.0.1/", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_deny_list_serialization() {
+        let mut perms = PermissionSet::new();
+        perms.grant("fs:/tmp/".into(), true, true, false, None);
+        perms.deny("fs:/etc/".into());
+        perms.deny("fs:~/.env".into());
+
+        assert_eq!(perms.deny_entries.len(), 2);
+        assert!(perms.is_denied("fs:/etc/passwd"));
+        assert!(perms.is_denied("fs:~/.env"));
+        assert!(!perms.is_denied("fs:/tmp/data.txt"));
     }
 }

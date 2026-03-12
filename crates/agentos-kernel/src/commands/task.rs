@@ -59,6 +59,7 @@ impl Kernel {
             }
         };
 
+        let reasoning_hints = Some(infer_reasoning_hints(&prompt));
         let task = AgentTask {
             id: task_id,
             state: TaskState::Queued,
@@ -71,15 +72,17 @@ impl Kernel {
             original_prompt: prompt,
             history: Vec::new(),
             parent_task: None,
+            reasoning_hints,
+            trigger_source: None,
         };
 
         // Execute task synchronously so the CLI gets the result
         let result = self.execute_task_sync(&task).await;
         match result {
-            Ok(answer) => KernelResponse::Success {
+            Ok(task_result) => KernelResponse::Success {
                 data: Some(serde_json::json!({
                     "task_id": task.id.to_string(),
-                    "result": answer,
+                    "result": task_result.answer,
                 })),
             },
             Err(e) => KernelResponse::Error {
@@ -171,14 +174,64 @@ impl Kernel {
             original_prompt: prompt.to_string(),
             history: Vec::new(),
             parent_task: Some(parent_task.id),
+            reasoning_hints: Some(infer_reasoning_hints(prompt)),
+            trigger_source: None,
         };
 
+        // Check for circular dependencies before enqueuing
+        if let Err(reason) = self
+            .scheduler
+            .check_delegation_safe(parent_task.id, child_task.id)
+            .await
+        {
+            return Err(AgentOSError::PermissionDenied {
+                resource: "task_delegation".to_string(),
+                operation: reason,
+            });
+        }
+
         let _ = self.scheduler.enqueue(child_task.clone()).await;
+
+        // Register the dependency: parent waits on child
+        self.scheduler
+            .add_dependency(parent_task.id, child_task.id)
+            .await;
 
         Ok(serde_json::json!({
             "delegated_to": target_agent_name,
             "child_task_id": child_task.id.to_string(),
             "status": "queued",
         }))
+    }
+}
+
+/// Infer reasoning hints from a prompt's characteristics.
+fn infer_reasoning_hints(prompt: &str) -> TaskReasoningHints {
+    let word_count = prompt.split_whitespace().count();
+
+    let complexity = if word_count > 200 {
+        ComplexityLevel::High
+    } else if word_count > 50 {
+        ComplexityLevel::Medium
+    } else {
+        ComplexityLevel::Low
+    };
+
+    let preemption = match complexity {
+        ComplexityLevel::High => PreemptionLevel::High,
+        ComplexityLevel::Medium => PreemptionLevel::Normal,
+        ComplexityLevel::Low => PreemptionLevel::Low,
+    };
+
+    let preferred_turns = match complexity {
+        ComplexityLevel::High => Some(10),
+        ComplexityLevel::Medium => Some(5),
+        ComplexityLevel::Low => Some(3),
+    };
+
+    TaskReasoningHints {
+        estimated_complexity: complexity,
+        preferred_turns,
+        preemption_sensitivity: preemption,
     }
 }

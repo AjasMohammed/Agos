@@ -97,7 +97,7 @@ impl ToolAttrs {
 
 /// Convert a kebab-case or snake_case name to PascalCase for the struct name.
 fn to_pascal_case(s: &str) -> String {
-    s.split(|c: char| c == '-' || c == '_')
+    s.split(['-', '_'])
         .map(|word| {
             let mut chars = word.chars();
             match chars.next() {

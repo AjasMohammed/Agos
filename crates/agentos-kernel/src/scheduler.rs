@@ -1,6 +1,6 @@
 use agentos_types::*;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use tokio::sync::{Mutex, RwLock};
 
 pub struct TaskScheduler {
@@ -8,8 +8,8 @@ pub struct TaskScheduler {
     queue: Mutex<BinaryHeap<PrioritizedTask>>,
     /// All tasks by ID (active + completed).
     tasks: RwLock<HashMap<TaskID, AgentTask>>,
-    #[allow(dead_code)]
-    max_concurrent: usize,
+    /// Dependency graph for deadlock prevention.
+    dependency_graph: RwLock<TaskDependencyGraph>,
 }
 
 #[derive(Eq, PartialEq)]
@@ -34,12 +34,65 @@ impl PartialOrd for PrioritizedTask {
     }
 }
 
+/// Directed graph tracking task delegation dependencies.
+/// Edge (A, B) means "task A is waiting on task B to complete".
+struct TaskDependencyGraph {
+    /// edges: (waiting_task, depended_on_task)
+    edges: Vec<(TaskID, TaskID)>,
+}
+
+impl TaskDependencyGraph {
+    fn new() -> Self {
+        Self { edges: Vec::new() }
+    }
+
+    /// Returns true if adding an edge from `from` → `to` would create a cycle.
+    /// Uses DFS from `to` — if we can reach `from`, adding the edge creates a cycle.
+    fn would_create_cycle(&self, from: TaskID, to: TaskID) -> bool {
+        if from == to {
+            return true;
+        }
+        let mut visited = HashSet::new();
+        let mut stack = vec![to];
+        while let Some(node) = stack.pop() {
+            if node == from {
+                return true;
+            }
+            if visited.insert(node) {
+                for &(waiter, dep) in &self.edges {
+                    if waiter == node {
+                        stack.push(dep);
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn add_edge(&mut self, from: TaskID, to: TaskID) {
+        self.edges.push((from, to));
+    }
+
+    fn remove_edges_for(&mut self, task_id: TaskID) {
+        self.edges
+            .retain(|&(from, to)| from != task_id && to != task_id);
+    }
+
+    fn dependents_of(&self, task_id: TaskID) -> Vec<TaskID> {
+        self.edges
+            .iter()
+            .filter(|&&(_, dep)| dep == task_id)
+            .map(|&(waiter, _)| waiter)
+            .collect()
+    }
+}
+
 impl TaskScheduler {
-    pub fn new(max_concurrent: usize) -> Self {
+    pub fn new(_max_concurrent: usize) -> Self {
         Self {
             queue: Mutex::new(BinaryHeap::new()),
             tasks: RwLock::new(HashMap::new()),
-            max_concurrent,
+            dependency_graph: RwLock::new(TaskDependencyGraph::new()),
         }
     }
 
@@ -130,13 +183,61 @@ impl TaskScheduler {
                     .signed_duration_since(task.created_at)
                     .to_std()
                     .unwrap_or_default();
-                if elapsed > task.timeout {
+                // Apply timeout multiplier based on preemption sensitivity
+                let effective_timeout = match task
+                    .reasoning_hints
+                    .as_ref()
+                    .map(|h| h.preemption_sensitivity)
+                {
+                    Some(PreemptionLevel::High) => task.timeout * 3,
+                    Some(PreemptionLevel::Normal) => task.timeout * 2,
+                    _ => task.timeout,
+                };
+
+                if elapsed > effective_timeout {
                     task.state = TaskState::Failed;
                     timed_out.push(task.id);
                 }
             }
         }
         timed_out
+    }
+
+    // --- Dependency Graph Methods ---
+
+    /// Check if adding a dependency (parent waits on child) would create a cycle.
+    /// Returns Ok(()) if safe, Err with reason if it would deadlock.
+    pub async fn check_delegation_safe(
+        &self,
+        parent_task_id: TaskID,
+        child_task_id: TaskID,
+    ) -> Result<(), String> {
+        let graph = self.dependency_graph.read().await;
+        if graph.would_create_cycle(parent_task_id, child_task_id) {
+            Err(format!(
+                "DeadlockPrevented: circular dependency between task {} and task {}",
+                parent_task_id, child_task_id
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Register a delegation dependency: parent waits on child.
+    pub async fn add_dependency(&self, parent_task_id: TaskID, child_task_id: TaskID) {
+        self.dependency_graph
+            .write()
+            .await
+            .add_edge(parent_task_id, child_task_id);
+    }
+
+    /// Called when a task completes — removes all edges and wakes waiting parents.
+    /// Returns the list of parent tasks that were waiting on this task.
+    pub async fn complete_dependency(&self, completed_task_id: TaskID) -> Vec<TaskID> {
+        let mut graph = self.dependency_graph.write().await;
+        let waiters = graph.dependents_of(completed_task_id);
+        graph.remove_edges_for(completed_task_id);
+        waiters
     }
 }
 
@@ -168,6 +269,8 @@ mod tests {
             original_prompt: prompt.to_string(),
             history: Vec::new(),
             parent_task: None,
+            reasoning_hints: None,
+            trigger_source: None,
         }
     }
 
@@ -187,5 +290,73 @@ mod tests {
 
         let second = scheduler.dequeue().await.unwrap();
         assert_eq!(second.priority, 1);
+    }
+
+    #[tokio::test]
+    async fn test_cycle_detection_simple() {
+        let graph = TaskDependencyGraph::new();
+        let a = TaskID::new();
+        // Self-loop
+        assert!(graph.would_create_cycle(a, a));
+    }
+
+    #[tokio::test]
+    async fn test_cycle_detection_chain() {
+        let mut graph = TaskDependencyGraph::new();
+        let a = TaskID::new();
+        let b = TaskID::new();
+        let c = TaskID::new();
+
+        // A waits on B, B waits on C
+        graph.add_edge(a, b);
+        graph.add_edge(b, c);
+
+        // Adding C waits on A would create cycle
+        assert!(graph.would_create_cycle(c, a));
+        // Adding C waits on D would not create cycle
+        let d = TaskID::new();
+        assert!(!graph.would_create_cycle(c, d));
+    }
+
+    #[tokio::test]
+    async fn test_delegation_safe_check() {
+        let scheduler = TaskScheduler::new(10);
+        let parent = make_task(5, "parent");
+        let child = make_task(5, "child");
+        let parent_id = parent.id;
+        let child_id = child.id;
+
+        scheduler.enqueue(parent).await;
+        scheduler.enqueue(child).await;
+
+        // First delegation is safe
+        assert!(scheduler
+            .check_delegation_safe(parent_id, child_id)
+            .await
+            .is_ok());
+        scheduler.add_dependency(parent_id, child_id).await;
+
+        // Reverse delegation would deadlock
+        assert!(scheduler
+            .check_delegation_safe(child_id, parent_id)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_complete_dependency_wakes_parents() {
+        let scheduler = TaskScheduler::new(10);
+        let parent = make_task(5, "parent");
+        let child = make_task(5, "child");
+        let parent_id = parent.id;
+        let child_id = child.id;
+
+        scheduler.enqueue(parent).await;
+        scheduler.enqueue(child).await;
+        scheduler.add_dependency(parent_id, child_id).await;
+
+        let waiters = scheduler.complete_dependency(child_id).await;
+        assert_eq!(waiters.len(), 1);
+        assert_eq!(waiters[0], parent_id);
     }
 }

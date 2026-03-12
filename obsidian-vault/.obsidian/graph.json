@@ -1,65 +1,22 @@
 {
-  "collapse-filter": false,
+  "collapse-filter": true,
   "search": "",
-  "showTags": true,
-  "showAttachments": false,
+  "showTags": false,
+  "showAttachments": true,
   "hideUnresolved": false,
   "showOrphans": true,
-  "collapse-color-groups": false,
-  "colorGroups": [
-    {
-      "query": "tag:#architecture",
-      "color": {
-        "a": 1,
-        "rgb": 5431295
-      }
-    },
-    {
-      "query": "tag:#guide",
-      "color": {
-        "a": 1,
-        "rgb": 3066993
-      }
-    },
-    {
-      "query": "tag:#reference",
-      "color": {
-        "a": 1,
-        "rgb": 15844367
-      }
-    },
-    {
-      "query": "tag:#flow",
-      "color": {
-        "a": 1,
-        "rgb": 15105570
-      }
-    },
-    {
-      "query": "tag:#security",
-      "color": {
-        "a": 1,
-        "rgb": 15158332
-      }
-    },
-    {
-      "query": "tag:#roadmap",
-      "color": {
-        "a": 1,
-        "rgb": 10181046
-      }
-    }
-  ],
-  "collapse-display": false,
-  "showArrow": true,
+  "collapse-color-groups": true,
+  "colorGroups": [],
+  "collapse-display": true,
+  "showArrow": false,
   "textFadeMultiplier": 0,
   "nodeSizeMultiplier": 1,
   "lineSizeMultiplier": 1,
   "collapse-forces": true,
-  "centerStrength": 0.5,
+  "centerStrength": 0.518713248970312,
   "repelStrength": 10,
   "linkStrength": 1,
   "linkDistance": 250,
-  "scale": 1,
+  "scale": 1.2447835969261234,
   "close": false
 }

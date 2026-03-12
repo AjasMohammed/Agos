@@ -11,6 +11,7 @@ enum TaskKind {
     Executor,
     TimeoutChecker,
     Scheduler,
+    EventDispatcher,
 }
 
 impl std::fmt::Display for TaskKind {
@@ -20,6 +21,7 @@ impl std::fmt::Display for TaskKind {
             TaskKind::Executor => write!(f, "TaskExecutor"),
             TaskKind::TimeoutChecker => write!(f, "TimeoutChecker"),
             TaskKind::Scheduler => write!(f, "AgentdScheduler"),
+            TaskKind::EventDispatcher => write!(f, "EventDispatcher"),
         }
     }
 }
@@ -34,21 +36,26 @@ impl Kernel {
     fn spawn_task(join_set: &mut JoinSet<TaskKind>, kind: TaskKind, kernel: Arc<Kernel>) {
         match kind {
             TaskKind::Acceptor => {
+                let token = kernel.cancellation_token.clone();
                 join_set.spawn(async move {
                     loop {
-                        match kernel.bus.accept().await {
-                            Ok(conn) => {
-                                let kernel = kernel.clone();
-                                tokio::spawn(async move {
-                                    kernel.handle_connection(conn).await;
-                                });
-                            }
-                            Err(e) => {
-                                tracing::error!("Bus accept error: {}", e);
+                        tokio::select! {
+                            _ = token.cancelled() => break,
+                            result = kernel.bus.accept() => {
+                                match result {
+                                    Ok(conn) => {
+                                        let kernel = kernel.clone();
+                                        tokio::spawn(async move {
+                                            kernel.handle_connection(conn).await;
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Bus accept error: {}", e);
+                                    }
+                                }
                             }
                         }
                     }
-                    #[allow(unreachable_code)]
                     TaskKind::Acceptor
                 });
             }
@@ -59,12 +66,53 @@ impl Kernel {
                 });
             }
             TaskKind::TimeoutChecker => {
+                let token = kernel.cancellation_token.clone();
                 join_set.spawn(async move {
+                    let mut tick: u64 = 0;
                     loop {
-                        tokio::time::sleep(Duration::from_secs(10)).await;
-                        kernel.scheduler.check_timeouts().await;
+                        tokio::select! {
+                            _ = token.cancelled() => break,
+                            _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                                kernel.scheduler.check_timeouts().await;
+
+                                // Sweep expired resource locks (Spec §8)
+                                kernel.resource_arbiter.sweep_expired().await;
+
+                                // Sweep expired vault proxy tokens (Spec §3)
+                                kernel.vault.sweep_expired_proxy_tokens();
+
+                                // Sweep expired escalations — auto-deny (Spec §12)
+                                let expired_escalations = kernel.escalation_manager.sweep_expired().await;
+                                for (esc_id, task_id, blocking) in &expired_escalations {
+                                    kernel.audit_log(agentos_audit::AuditEntry {
+                                        timestamp: chrono::Utc::now(),
+                                        trace_id: agentos_types::TraceID::new(),
+                                        event_type: agentos_audit::AuditEventType::ActionForbidden,
+                                        agent_id: None,
+                                        task_id: Some(*task_id),
+                                        tool_id: None,
+                                        details: serde_json::json!({
+                                            "escalation_id": esc_id,
+                                            "auto_action": "deny",
+                                            "reason": "escalation_expired",
+                                            "blocking": blocking,
+                                        }),
+                                        severity: agentos_audit::AuditSeverity::Warn,
+                                        reversible: false,
+                                        rollback_ref: None,
+                                    });
+                                }
+
+                                // Sweep expired snapshots every ~10 minutes (60 ticks × 10s)
+                                tick += 1;
+                                if tick.is_multiple_of(60) {
+                                    kernel.sweep_expired_snapshots(
+                                        Duration::from_secs(72 * 3600), // 72h (Spec §5)
+                                    );
+                                }
+                            }
+                        }
                     }
-                    #[allow(unreachable_code)]
                     TaskKind::TimeoutChecker
                 });
             }
@@ -74,12 +122,42 @@ impl Kernel {
                     TaskKind::Scheduler
                 });
             }
+            TaskKind::EventDispatcher => {
+                let token = kernel.cancellation_token.clone();
+                join_set.spawn(async move {
+                    // Take ownership of the event receiver (only the first spawn succeeds)
+                    let receiver = {
+                        let mut guard = kernel.event_receiver.lock().await;
+                        guard.take()
+                    };
+                    if let Some(mut rx) = receiver {
+                        loop {
+                            tokio::select! {
+                                _ = token.cancelled() => break,
+                                event = rx.recv() => {
+                                    match event {
+                                        Some(event) => kernel.process_event(event).await,
+                                        None => {
+                                            tracing::warn!("Event channel closed");
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        tracing::warn!("EventDispatcher: receiver already taken, idling");
+                        token.cancelled().await;
+                    }
+                    TaskKind::EventDispatcher
+                });
+            }
         }
     }
 
     /// The main supervised run loop.
     ///
-    /// Spawns 4 core tasks (acceptor, executor, timeout checker, scheduler) and
+    /// Spawns 5 core tasks (acceptor, executor, timeout checker, scheduler, event dispatcher) and
     /// monitors them via a JoinSet. If any task panics or exits unexpectedly, it is
     /// restarted automatically. If a task exceeds MAX_RESTARTS within
     /// RESTART_WINDOW_SECS, the kernel logs a degraded status and shuts down so the
@@ -91,12 +169,13 @@ impl Kernel {
         let mut restart_counts: std::collections::HashMap<String, (u32, std::time::Instant)> =
             std::collections::HashMap::new();
 
-        // Spawn all 4 core tasks
+        // Spawn all 5 core tasks
         let all_kinds = [
             TaskKind::Acceptor,
             TaskKind::Executor,
             TaskKind::TimeoutChecker,
             TaskKind::Scheduler,
+            TaskKind::EventDispatcher,
         ];
 
         for kind in &all_kinds {
@@ -104,33 +183,44 @@ impl Kernel {
         }
 
         // Install Prometheus metrics recorder and start health/readiness/metrics HTTP server
-        let prom_handle = crate::health::install_prometheus_recorder();
-        if let Err(e) = crate::health::start_health_server(self.clone(), prom_handle).await {
-            tracing::warn!(error = %e, "Failed to start health server, continuing without it");
+        if let Some(prom_handle) = crate::health::install_prometheus_recorder() {
+            if let Err(e) = crate::health::start_health_server(self.clone(), prom_handle).await {
+                tracing::warn!(error = %e, "Failed to start health server, continuing without it");
+            }
         }
 
         tracing::info!("Kernel supervisor started with {} tasks", all_kinds.len());
 
         loop {
-            match join_set.join_next().await {
+            let next = tokio::select! {
+                _ = self.cancellation_token.cancelled() => {
+                    tracing::info!("Kernel shutdown requested, stopping supervisor");
+                    join_set.abort_all();
+                    break;
+                }
+                next = join_set.join_next() => next,
+            };
+            match next {
                 Some(Ok(kind)) => {
                     // Task completed normally — unexpected for long-running loops
                     tracing::warn!(task = %kind, "Kernel task exited unexpectedly, restarting");
 
                     self.audit_log(agentos_audit::AuditEntry {
-                            timestamp: chrono::Utc::now(),
-                            trace_id: agentos_types::TraceID::new(),
-                            event_type: agentos_audit::AuditEventType::KernelStarted, // reusing as restart signal
-                            agent_id: None,
-                            task_id: None,
-                            tool_id: None,
-                            details: serde_json::json!({
-                                "event": "task_restart",
-                                "task": kind.to_string(),
-                                "reason": "normal_exit",
-                            }),
-                            severity: agentos_audit::AuditSeverity::Warn,
-                        });
+                        timestamp: chrono::Utc::now(),
+                        trace_id: agentos_types::TraceID::new(),
+                        event_type: agentos_audit::AuditEventType::KernelStarted, // reusing as restart signal
+                        agent_id: None,
+                        task_id: None,
+                        tool_id: None,
+                        details: serde_json::json!({
+                            "event": "task_restart",
+                            "task": kind.to_string(),
+                            "reason": "normal_exit",
+                        }),
+                        severity: agentos_audit::AuditSeverity::Warn,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
 
                     if self.check_restart_budget(&mut restart_counts, &kind.to_string()) {
                         Self::spawn_task(&mut join_set, kind, self.clone());
@@ -151,19 +241,21 @@ impl Kernel {
                     };
 
                     self.audit_log(agentos_audit::AuditEntry {
-                            timestamp: chrono::Utc::now(),
-                            trace_id: agentos_types::TraceID::new(),
-                            event_type: agentos_audit::AuditEventType::KernelStarted,
-                            agent_id: None,
-                            task_id: None,
-                            tool_id: None,
-                            details: serde_json::json!({
-                                "event": "task_panic",
-                                "task": task_name,
-                                "error": format!("{:?}", join_error),
-                            }),
-                            severity: agentos_audit::AuditSeverity::Error,
-                        });
+                        timestamp: chrono::Utc::now(),
+                        trace_id: agentos_types::TraceID::new(),
+                        event_type: agentos_audit::AuditEventType::KernelStarted,
+                        agent_id: None,
+                        task_id: None,
+                        tool_id: None,
+                        details: serde_json::json!({
+                            "event": "task_panic",
+                            "task": task_name,
+                            "error": format!("{:?}", join_error),
+                        }),
+                        severity: agentos_audit::AuditSeverity::Error,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
 
                     if self.check_restart_budget(&mut restart_counts, &task_name) {
                         // Re-spawn all task types (since we lost track of which one failed)
@@ -200,9 +292,7 @@ impl Kernel {
         task_name: &str,
     ) -> bool {
         let now = std::time::Instant::now();
-        let entry = counts
-            .entry(task_name.to_string())
-            .or_insert((0, now));
+        let entry = counts.entry(task_name.to_string()).or_insert((0, now));
 
         // Reset counter if outside the window
         if now.duration_since(entry.1) > Duration::from_secs(RESTART_WINDOW_SECS) {
@@ -224,7 +314,11 @@ impl Kernel {
         let mut rate_limiter = crate::rate_limit::RateLimiter::new(50);
 
         loop {
-            match conn.read().await {
+            let read_result = tokio::select! {
+                _ = self.cancellation_token.cancelled() => break,
+                result = conn.read() => result,
+            };
+            match read_result {
                 Ok(BusMessage::Command(cmd)) => {
                     // Check rate limit before processing
                     if let Err(wait) = rate_limiter.check() {
@@ -234,10 +328,7 @@ impl Kernel {
                             "Connection rate limited"
                         );
                         let response = agentos_bus::KernelResponse::Error {
-                            message: format!(
-                                "Rate limited. Retry after {} ms",
-                                wait.as_millis()
-                            ),
+                            message: format!("Rate limited. Retry after {} ms", wait.as_millis()),
                         };
                         if conn
                             .write(&BusMessage::CommandResponse(response))
@@ -286,9 +377,12 @@ impl Kernel {
                 agent_name, prompt, ..
             } => self.cmd_run_task(agent_name, prompt).await,
             KernelCommand::ListTasks => self.cmd_list_tasks().await,
-            KernelCommand::SetSecret { name, value, scope } => {
-                self.cmd_set_secret(name, value, scope).await
-            }
+            KernelCommand::SetSecret {
+                name,
+                value,
+                scope,
+                scope_raw,
+            } => self.cmd_set_secret(name, value, scope, scope_raw).await,
             KernelCommand::ListSecrets => self.cmd_list_secrets().await,
             KernelCommand::RotateSecret { name, new_value } => {
                 self.cmd_rotate_secret(name, new_value).await
@@ -336,6 +430,16 @@ impl Kernel {
             } => self.cmd_remove_role(agent_name, role_name).await,
             KernelCommand::GetStatus => self.cmd_get_status().await,
             KernelCommand::GetAuditLogs { limit } => self.cmd_get_audit_logs(limit).await,
+            KernelCommand::VerifyAuditChain { from_seq } => {
+                match self.audit.verify_chain(from_seq) {
+                    Ok(verification) => agentos_bus::KernelResponse::Success {
+                        data: Some(serde_json::to_value(verification).unwrap_or_default()),
+                    },
+                    Err(e) => agentos_bus::KernelResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
             KernelCommand::SendAgentMessage {
                 from_name,
                 to_name,
@@ -352,9 +456,13 @@ impl Kernel {
                 members,
             } => self.cmd_create_agent_group(group_name, members).await,
             KernelCommand::BroadcastToGroup {
+                from_name,
                 group_name,
                 content,
-            } => self.cmd_broadcast_to_group(group_name, content).await,
+            } => {
+                self.cmd_broadcast_to_group(from_name, group_name, content)
+                    .await
+            }
             KernelCommand::CreatePermProfile {
                 name,
                 description,
@@ -408,6 +516,20 @@ impl Kernel {
             }
             KernelCommand::KillBackground { name } => self.cmd_kill_background(name).await,
 
+            // Cost management
+            KernelCommand::GetCostReport { agent_name } => {
+                self.cmd_get_cost_report(agent_name).await
+            }
+
+            // Escalation management
+            KernelCommand::ListEscalations { pending_only } => {
+                self.cmd_list_escalations(pending_only).await
+            }
+            KernelCommand::GetEscalation { id } => self.cmd_get_escalation(id).await,
+            KernelCommand::ResolveEscalation { id, decision } => {
+                self.cmd_resolve_escalation(id, decision).await
+            }
+
             // Pipeline management
             KernelCommand::InstallPipeline { yaml } => self.cmd_install_pipeline(yaml).await,
             KernelCommand::RunPipeline {
@@ -426,6 +548,76 @@ impl Kernel {
             } => self.cmd_pipeline_logs(run_id, step_id).await,
             KernelCommand::RemovePipeline { name } => self.cmd_remove_pipeline(name).await,
 
+            // Resource arbitration
+            KernelCommand::ListResourceLocks => {
+                let data = self.cmd_resource_list().await;
+                let locks = data
+                    .get("locks")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                agentos_bus::KernelResponse::ResourceLockList(locks)
+            }
+            KernelCommand::ReleaseResourceLock {
+                resource_id,
+                agent_name,
+            } => {
+                let data = self.cmd_resource_release(&resource_id, &agent_name).await;
+                agentos_bus::KernelResponse::Success { data: Some(data) }
+            }
+            KernelCommand::ReleaseAllResourceLocks { agent_name } => {
+                let data = self.cmd_resource_release_all(&agent_name).await;
+                agentos_bus::KernelResponse::Success { data: Some(data) }
+            }
+
+            KernelCommand::ListSnapshots { task_id } => self.cmd_list_snapshots(task_id).await,
+            KernelCommand::RollbackTask {
+                task_id,
+                snapshot_ref,
+            } => self.cmd_rollback_task(task_id, snapshot_ref).await,
+
+            // Event system
+            KernelCommand::EventSubscribe {
+                agent_name,
+                event_filter,
+                throttle,
+                priority,
+            } => {
+                self.cmd_event_subscribe(agent_name, event_filter, throttle, priority)
+                    .await
+            }
+            KernelCommand::EventUnsubscribe { subscription_id } => {
+                self.cmd_event_unsubscribe(subscription_id).await
+            }
+            KernelCommand::EventListSubscriptions { agent_name } => {
+                self.cmd_event_list_subscriptions(agent_name).await
+            }
+            KernelCommand::EventGetSubscription { subscription_id } => {
+                self.cmd_event_get_subscription(subscription_id).await
+            }
+            KernelCommand::EventEnableSubscription { subscription_id } => {
+                self.cmd_event_enable_subscription(subscription_id).await
+            }
+            KernelCommand::EventDisableSubscription { subscription_id } => {
+                self.cmd_event_disable_subscription(subscription_id).await
+            }
+            KernelCommand::EventHistory { last } => self.cmd_event_history(last).await,
+
+            // Vault lockdown
+            KernelCommand::VaultLockdown => self.cmd_vault_lockdown().await,
+
+            // Identity management
+            KernelCommand::IdentityShow { agent_name } => self.cmd_identity_show(agent_name).await,
+            KernelCommand::IdentityRevoke { agent_name } => {
+                self.cmd_identity_revoke(agent_name).await
+            }
+
+            // Audit export
+            KernelCommand::ExportAuditChain { limit } => self.cmd_export_audit_chain(limit).await,
+
+            // Resource contention
+            KernelCommand::ResourceContention => self.cmd_resource_contention().await,
+
             KernelCommand::Shutdown => {
                 std::process::exit(0);
             }
@@ -435,22 +627,27 @@ impl Kernel {
     /// The agentd scheduler loop — checks for due scheduled jobs and fires them.
     pub(crate) async fn agentd_loop(&self) {
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::select! {
+                _ = self.cancellation_token.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
 
             let due_jobs = self.schedule_manager.check_due_jobs().await;
             for job in due_jobs {
                 tracing::info!(job_name = %job.name, "Firing scheduled job");
 
                 self.audit_log(agentos_audit::AuditEntry {
-                        timestamp: chrono::Utc::now(),
-                        trace_id: agentos_types::TraceID::new(),
-                        event_type: agentos_audit::AuditEventType::ScheduledJobFired,
-                        agent_id: None,
-                        task_id: None,
-                        tool_id: None,
-                        details: serde_json::json!({ "job_name": job.name }),
-                        severity: agentos_audit::AuditSeverity::Info,
-                    });
+                    timestamp: chrono::Utc::now(),
+                    trace_id: agentos_types::TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::ScheduledJobFired,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({ "job_name": job.name }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
 
                 let _ = self
                     .create_background_task(

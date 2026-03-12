@@ -25,6 +25,8 @@ pub enum SecretCommands {
         /// Secret name
         name: String,
     },
+    /// Emergency vault lockdown: revoke all proxy tokens and block new issuance
+    Lockdown,
 }
 
 pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::Result<()> {
@@ -37,13 +39,14 @@ pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::
                 anyhow::bail!("Secret value cannot be empty");
             }
 
-            let scope = parse_scope(&scope)?;
+            let parsed_scope = parse_scope(&scope)?;
 
             let response = client
                 .send_command(KernelCommand::SetSecret {
                     name: name.clone(),
                     value,
-                    scope,
+                    scope: parsed_scope,
+                    scope_raw: Some(scope),
                 })
                 .await?;
 
@@ -61,7 +64,7 @@ pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::
                     if secrets.is_empty() {
                         println!("No secrets stored.");
                     } else {
-                        println!("{:<25} {:<20} {}", "NAME", "SCOPE", "LAST USED");
+                        println!("{:<25} {:<20} LAST USED", "NAME", "SCOPE");
                         println!("{}", "-".repeat(65));
                         for s in secrets {
                             let scope_str = format!("{:?}", s.scope);
@@ -86,6 +89,22 @@ pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::
                 KernelResponse::Success { .. } => println!("✅ Secret '{}' revoked", name),
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
                 _ => eprintln!("❌ Unexpected response"),
+            }
+        }
+
+        SecretCommands::Lockdown => {
+            let response = client.send_command(KernelCommand::VaultLockdown).await?;
+            match response {
+                KernelResponse::Success { data } => {
+                    let msg = data
+                        .as_ref()
+                        .and_then(|d| d.get("message"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Vault locked down");
+                    println!("{}", msg);
+                }
+                KernelResponse::Error { message } => eprintln!("Error: {}", message),
+                _ => eprintln!("Unexpected response"),
             }
         }
 

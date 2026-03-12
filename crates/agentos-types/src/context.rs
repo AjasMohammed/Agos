@@ -13,6 +13,8 @@ pub enum OverflowStrategy {
     Summarize,
     /// Keep system prompt + most recent N entries, drop everything in between.
     SlidingWindow,
+    /// Evict lowest-importance, non-pinned, least-referenced entries first.
+    SemanticEviction,
 }
 
 /// A rolling context window for an agent task.
@@ -24,6 +26,10 @@ pub struct ContextWindow {
     pub max_entries: usize,
     #[serde(default)]
     pub overflow_strategy: OverflowStrategy,
+    /// Set by the kernel when the estimated token count hits 95% of the budget.
+    /// The caller should take a checkpoint and flush old entries to Tier 2 memory.
+    #[serde(default)]
+    pub needs_checkpoint: bool,
 }
 
 /// A single entry in the context window.
@@ -33,6 +39,136 @@ pub struct ContextEntry {
     pub content: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub metadata: Option<ContextMetadata>,
+    /// Importance score from 0.0 (evictable) to 1.0 (critical). Defaults to 0.5.
+    #[serde(default = "default_importance")]
+    pub importance: f32,
+    /// If true, this entry is never evicted (system prompts, safety rules).
+    #[serde(default)]
+    pub pinned: bool,
+    /// Incremented when the agent references this entry in subsequent turns.
+    #[serde(default)]
+    pub reference_count: u32,
+    /// Which partition this entry belongs to. Only `Active` entries are sent to the LLM.
+    #[serde(default)]
+    pub partition: ContextPartition,
+    /// Semantic category for budget allocation. Defaults to `History`
+    /// for backward compatibility with existing push-based entries.
+    #[serde(default)]
+    pub category: ContextCategory,
+}
+
+fn default_importance() -> f32 {
+    0.5
+}
+
+/// Context partitions allow agents to maintain a scratchpad that isn't sent to the LLM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ContextPartition {
+    /// Normal context — included in LLM prompts.
+    #[default]
+    Active,
+    /// Scratchpad — excluded from LLM prompts, used for agent working memory.
+    Scratchpad,
+}
+
+/// Semantic category of a context entry, used by `ContextCompiler`
+/// to allocate token budgets and enforce position ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextCategory {
+    /// System prompt, agent identity, standing safety instructions.
+    System,
+    /// Tool descriptions (from `ToolRegistry::tools_for_prompt()`).
+    Tools,
+    /// Retrieved memories: episodic recall, semantic search results, RAG content.
+    Knowledge,
+    /// Conversation history: prior user/assistant/tool-result turns.
+    #[default]
+    History,
+    /// Current task description and user prompt.
+    Task,
+}
+
+/// Per-category token budget for context compilation.
+///
+/// Percentages are of *usable* tokens (total minus output reserve).
+/// They must sum to <= 1.0. Any remainder is slack for rounding.
+///
+/// Design decision: system 15%, tools 18%, knowledge 30%, history 25%, task 12%.
+/// These sum to 100% of usable tokens; the reserve is taken from total first.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenBudget {
+    /// Total context window size in tokens (from LLM's `ModelCapabilities`).
+    pub total_tokens: usize,
+    /// Fraction reserved for output generation (not allocated to any input category).
+    /// Default: 0.25 (25% of total reserved for the model's response).
+    pub reserve_pct: f32,
+    /// Fraction of usable tokens for system prompt + identity + safety rules.
+    pub system_pct: f32,
+    /// Fraction of usable tokens for tool descriptions.
+    pub tools_pct: f32,
+    /// Fraction of usable tokens for retrieved knowledge (episodic, semantic, RAG).
+    pub knowledge_pct: f32,
+    /// Fraction of usable tokens for conversation history.
+    pub history_pct: f32,
+    /// Fraction of usable tokens for current task/user prompt.
+    pub task_pct: f32,
+}
+
+impl TokenBudget {
+    /// Tokens available for input categories (after reserving output space).
+    pub fn usable_tokens(&self) -> usize {
+        ((1.0 - self.reserve_pct) * self.total_tokens as f32) as usize
+    }
+
+    /// Token allowance for a specific category.
+    pub fn tokens_for(&self, category: ContextCategory) -> usize {
+        let usable = self.usable_tokens() as f32;
+        let pct = match category {
+            ContextCategory::System => self.system_pct,
+            ContextCategory::Tools => self.tools_pct,
+            ContextCategory::Knowledge => self.knowledge_pct,
+            ContextCategory::History => self.history_pct,
+            ContextCategory::Task => self.task_pct,
+        };
+        (usable * pct) as usize
+    }
+
+    /// Validate that category percentages do not exceed 1.0.
+    pub fn validate(&self) -> Result<(), String> {
+        let sum = self.system_pct
+            + self.tools_pct
+            + self.knowledge_pct
+            + self.history_pct
+            + self.task_pct;
+        if sum > 1.05 {
+            return Err(format!(
+                "Category percentages sum to {:.2}, exceeding 1.0",
+                sum
+            ));
+        }
+        if self.reserve_pct < 0.0 || self.reserve_pct > 0.5 {
+            return Err(format!(
+                "Reserve percentage {:.2} out of range [0.0, 0.5]",
+                self.reserve_pct
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Default for TokenBudget {
+    fn default() -> Self {
+        Self {
+            total_tokens: 128_000,
+            reserve_pct: 0.25,
+            system_pct: 0.15,
+            tools_pct: 0.18,
+            knowledge_pct: 0.30,
+            history_pct: 0.25,
+            task_pct: 0.12,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +195,7 @@ impl ContextWindow {
             entries: Vec::new(),
             max_entries,
             overflow_strategy: OverflowStrategy::default(),
+            needs_checkpoint: false,
         }
     }
 
@@ -69,6 +206,63 @@ impl ContextWindow {
             entries: Vec::new(),
             max_entries,
             overflow_strategy: strategy,
+            needs_checkpoint: false,
+        }
+    }
+
+    /// Compress the oldest non-system, non-pinned entries into a summary.
+    /// Removes up to `count` entries and replaces them with a single summary entry.
+    pub fn compress_oldest(&mut self, count: usize) {
+        let mut summarized_parts = Vec::new();
+        let mut removed = 0;
+        let mut i = 0;
+        while removed < count && i < self.entries.len() {
+            let e = &self.entries[i];
+            if e.role != ContextRole::System && !e.pinned {
+                let label = match e.role {
+                    ContextRole::User => "User",
+                    ContextRole::Assistant => "Assistant",
+                    ContextRole::ToolResult => "ToolResult",
+                    ContextRole::System => unreachable!(),
+                };
+                let snippet = if e.content.len() > 150 {
+                    format!("{}...", &e.content[..150])
+                } else {
+                    e.content.clone()
+                };
+                summarized_parts.push(format!("[{label}]: {snippet}"));
+                self.entries.remove(i);
+                removed += 1;
+            } else {
+                i += 1;
+            }
+        }
+
+        if !summarized_parts.is_empty() {
+            let insert_pos = self
+                .entries
+                .iter()
+                .position(|e| e.role != ContextRole::System)
+                .unwrap_or(self.entries.len());
+
+            self.entries.insert(
+                insert_pos,
+                ContextEntry {
+                    role: ContextRole::System,
+                    content: format!(
+                        "[TOKEN BUDGET SUMMARY — {} messages compressed]\n{}",
+                        summarized_parts.len(),
+                        summarized_parts.join("\n")
+                    ),
+                    timestamp: chrono::Utc::now(),
+                    metadata: None,
+                    importance: 0.3,
+                    pinned: false,
+                    reference_count: 0,
+                    partition: ContextPartition::Active,
+                    category: ContextCategory::History,
+                },
+            );
         }
     }
 
@@ -141,6 +335,11 @@ impl ContextWindow {
                             ),
                             timestamp: chrono::Utc::now(),
                             metadata: None,
+                            importance: 0.3,
+                            pinned: false,
+                            reference_count: 0,
+                            partition: ContextPartition::default(),
+                            category: ContextCategory::History,
                         },
                     );
                 }
@@ -165,19 +364,138 @@ impl ContextWindow {
                     self.entries
                         .extend(non_system[recent_start..].iter().cloned());
                 }
+                OverflowStrategy::SemanticEviction => {
+                    self.evict_by_semantic_score();
+                }
             }
         }
         self.entries.push(entry);
     }
 
-    /// Get all entries as a slice (for assembling LLM prompts).
+    /// Push an entry with an explicit category tag.
+    /// Used by `ContextCompiler` to build structured context windows.
+    pub fn push_categorized(
+        &mut self,
+        role: ContextRole,
+        content: String,
+        category: ContextCategory,
+        importance: f32,
+        pinned: bool,
+    ) {
+        self.entries.push(ContextEntry {
+            role,
+            content,
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance,
+            pinned,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category,
+        });
+    }
+
+    /// Semantic eviction: compute a composite score per entry and evict the lowest.
+    ///
+    /// Score = importance * 0.4 + recency * 0.3 + reference_weight * 0.3
+    /// Pinned entries are never evicted.
+    fn evict_by_semantic_score(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+
+        let now = chrono::Utc::now();
+        let oldest = self
+            .entries
+            .iter()
+            .map(|e| e.timestamp)
+            .min()
+            .unwrap_or(now);
+        let time_range = now.signed_duration_since(oldest).num_seconds().max(1) as f32;
+
+        let max_refs = self
+            .entries
+            .iter()
+            .map(|e| e.reference_count)
+            .max()
+            .unwrap_or(1)
+            .max(1) as f32;
+
+        let mut worst_idx = None;
+        let mut worst_score = f32::MAX;
+
+        for (idx, entry) in self.entries.iter().enumerate() {
+            // Never evict pinned entries
+            if entry.pinned {
+                continue;
+            }
+
+            let recency = now.signed_duration_since(entry.timestamp).num_seconds() as f32;
+            let recency_score = 1.0 - (recency / time_range); // 1.0 = newest, 0.0 = oldest
+
+            let ref_score = entry.reference_count as f32 / max_refs;
+
+            let composite = entry.importance * 0.4 + recency_score * 0.3 + ref_score * 0.3;
+
+            if composite < worst_score {
+                worst_score = composite;
+                worst_idx = Some(idx);
+            }
+        }
+
+        if let Some(idx) = worst_idx {
+            self.entries.remove(idx);
+        } else {
+            // All entries pinned — evict oldest as fallback
+            self.entries.remove(0);
+        }
+    }
+
+    /// Get all entries as a slice (includes all partitions).
     pub fn as_entries(&self) -> &[ContextEntry] {
         &self.entries
+    }
+
+    /// Get only active partition entries (for assembling LLM prompts).
+    /// Scratchpad entries are excluded.
+    pub fn active_entries(&self) -> Vec<&ContextEntry> {
+        self.entries
+            .iter()
+            .filter(|e| e.partition == ContextPartition::Active)
+            .collect()
+    }
+
+    /// Move entries between partitions.
+    pub fn set_partition(&mut self, partition: ContextPartition) {
+        // Set the partition for the most recent non-system entry
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|e| e.role != ContextRole::System)
+        {
+            entry.partition = partition;
+        }
     }
 
     /// Clear all non-system entries.
     pub fn clear_history(&mut self) {
         self.entries.retain(|e| e.role == ContextRole::System);
+    }
+
+    /// Clear all non-pinned, non-system entries (used by rollback).
+    pub fn clear_unpinned(&mut self) {
+        self.entries
+            .retain(|e| e.role == ContextRole::System || e.pinned);
+    }
+
+    /// Estimate total token count for all active entries (4 chars ≈ 1 token).
+    pub fn estimated_tokens(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.partition == ContextPartition::Active)
+            .map(|e| e.content.len() / 4 + 1)
+            .sum()
     }
 }
 
@@ -185,47 +503,51 @@ impl ContextWindow {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_context_window_push_and_evict() {
-        let mut ctx = ContextWindow::new(3);
-        ctx.push(ContextEntry {
-            role: ContextRole::System,
-            content: "You are an agent.".into(),
-            timestamp: chrono::Utc::now(),
-            metadata: None,
-        });
-        ctx.push(ContextEntry {
-            role: ContextRole::User,
-            content: "Hello".into(),
-            timestamp: chrono::Utc::now(),
-            metadata: None,
-        });
-        ctx.push(ContextEntry {
-            role: ContextRole::Assistant,
-            content: "Hi!".into(),
-            timestamp: chrono::Utc::now(),
-            metadata: None,
-        });
-        // At capacity — next push should evict oldest non-system entry ("Hello")
-        ctx.push(ContextEntry {
-            role: ContextRole::User,
-            content: "Next message".into(),
-            timestamp: chrono::Utc::now(),
-            metadata: None,
-        });
-        assert_eq!(ctx.entries.len(), 3);
-        assert_eq!(ctx.entries[0].content, "You are an agent."); // system preserved
-        assert_eq!(ctx.entries[1].content, "Hi!"); // second non-system kept
-        assert_eq!(ctx.entries[2].content, "Next message"); // newest pushed
-    }
-
     fn make_entry(role: ContextRole, content: &str) -> ContextEntry {
         ContextEntry {
             role,
             content: content.to_string(),
             timestamp: chrono::Utc::now(),
             metadata: None,
+            importance: default_importance(),
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::default(),
         }
+    }
+
+    fn make_entry_with_importance(
+        role: ContextRole,
+        content: &str,
+        importance: f32,
+        pinned: bool,
+    ) -> ContextEntry {
+        ContextEntry {
+            role,
+            content: content.to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance,
+            pinned,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::default(),
+        }
+    }
+
+    #[test]
+    fn test_context_window_push_and_evict() {
+        let mut ctx = ContextWindow::new(3);
+        ctx.push(make_entry(ContextRole::System, "You are an agent."));
+        ctx.push(make_entry(ContextRole::User, "Hello"));
+        ctx.push(make_entry(ContextRole::Assistant, "Hi!"));
+        // At capacity — next push should evict oldest non-system entry ("Hello")
+        ctx.push(make_entry(ContextRole::User, "Next message"));
+        assert_eq!(ctx.entries.len(), 3);
+        assert_eq!(ctx.entries[0].content, "You are an agent."); // system preserved
+        assert_eq!(ctx.entries[1].content, "Hi!"); // second non-system kept
+        assert_eq!(ctx.entries[2].content, "Next message"); // newest pushed
     }
 
     #[test]
@@ -242,7 +564,7 @@ mod tests {
         assert!(ctx.entries.len() <= 4);
         assert_eq!(ctx.entries[0].content, "System"); // system preserved
         assert_eq!(ctx.entries.last().unwrap().content, "Resp2"); // newest
-        // Middle old entries should be dropped
+                                                                  // Middle old entries should be dropped
         assert!(!ctx.entries.iter().any(|e| e.content == "Msg1"));
     }
 
@@ -271,5 +593,88 @@ mod tests {
         let ctx = ContextWindow::with_strategy(10, OverflowStrategy::SlidingWindow);
         assert_eq!(ctx.overflow_strategy, OverflowStrategy::SlidingWindow);
         assert_eq!(ctx.max_entries, 10);
+    }
+
+    #[test]
+    fn test_semantic_eviction_preserves_pinned() {
+        let mut ctx = ContextWindow::with_strategy(3, OverflowStrategy::SemanticEviction);
+
+        // Pinned system prompt
+        ctx.push(make_entry_with_importance(
+            ContextRole::System,
+            "System prompt",
+            1.0,
+            true,
+        ));
+        // Pinned user prompt
+        ctx.push(make_entry_with_importance(
+            ContextRole::User,
+            "Important task",
+            0.95,
+            true,
+        ));
+        // Low importance tool result
+        ctx.push(make_entry_with_importance(
+            ContextRole::ToolResult,
+            "Old result",
+            0.2,
+            false,
+        ));
+
+        // This push should evict "Old result" (lowest importance, not pinned)
+        ctx.push(make_entry_with_importance(
+            ContextRole::Assistant,
+            "New response",
+            0.5,
+            false,
+        ));
+
+        assert_eq!(ctx.entries.len(), 3);
+        assert!(ctx.entries.iter().any(|e| e.content == "System prompt"));
+        assert!(ctx.entries.iter().any(|e| e.content == "Important task"));
+        assert!(ctx.entries.iter().any(|e| e.content == "New response"));
+        assert!(!ctx.entries.iter().any(|e| e.content == "Old result"));
+    }
+
+    #[test]
+    fn test_semantic_eviction_prefers_low_importance() {
+        let mut ctx = ContextWindow::with_strategy(3, OverflowStrategy::SemanticEviction);
+
+        ctx.push(make_entry_with_importance(
+            ContextRole::System,
+            "System",
+            1.0,
+            true,
+        ));
+        ctx.push(make_entry_with_importance(
+            ContextRole::ToolResult,
+            "High importance result",
+            0.9,
+            false,
+        ));
+        ctx.push(make_entry_with_importance(
+            ContextRole::ToolResult,
+            "Low importance result",
+            0.1,
+            false,
+        ));
+
+        ctx.push(make_entry_with_importance(
+            ContextRole::Assistant,
+            "Response",
+            0.5,
+            false,
+        ));
+
+        assert_eq!(ctx.entries.len(), 3);
+        // Low importance should be evicted
+        assert!(!ctx
+            .entries
+            .iter()
+            .any(|e| e.content == "Low importance result"));
+        assert!(ctx
+            .entries
+            .iter()
+            .any(|e| e.content == "High importance result"));
     }
 }

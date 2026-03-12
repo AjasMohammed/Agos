@@ -1,0 +1,24 @@
+[manifest]
+name        = "memory-block-list"
+version     = "1.0.0"
+description = "List labels for agent-scoped memory blocks"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["memory.blocks:r"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "MemoryBlockListIntent"
+output = "MemoryBlockListResult"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 3000
+syscalls      = []

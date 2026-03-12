@@ -3,6 +3,7 @@ name        = "file-reader"
 version     = "1.0.0"
 description = "Reads files from the data directory and returns their content as text or structured data"
 author      = "agentos-core"
+trust_tier  = "core"
 
 [capabilities_required]
 permissions = ["fs.user_data:r"]

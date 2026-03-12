@@ -3,13 +3,25 @@ use crate::master_key::{MasterKey, ZeroizingString};
 use agentos_audit::{AuditEntry, AuditEventType, AuditLog, AuditSeverity};
 use agentos_types::*;
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// An in-memory proxy token entry. Never written to disk.
+struct ProxyTokenEntry {
+    secret_name: String,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
 
 pub struct SecretsVault {
     conn: Mutex<Connection>,
     master_key: MasterKey,
     audit: Arc<AuditLog>,
+    /// In-memory proxy token store. Token handles are opaque to tools.
+    proxy_tokens: Mutex<HashMap<String, ProxyTokenEntry>>,
+    /// Emergency lockdown flag — when set, all proxy token operations are denied.
+    locked_down: AtomicBool,
 }
 
 const VAULT_SENTINEL: &str = "AGENTOS_VAULT_OK";
@@ -72,6 +84,8 @@ impl SecretsVault {
             conn: Mutex::new(conn),
             master_key,
             audit,
+            proxy_tokens: Mutex::new(HashMap::new()),
+            locked_down: AtomicBool::new(false),
         })
     }
 
@@ -114,6 +128,8 @@ impl SecretsVault {
             conn: Mutex::new(conn),
             master_key,
             audit,
+            proxy_tokens: Mutex::new(HashMap::new()),
+            locked_down: AtomicBool::new(false),
         })
     }
 
@@ -166,6 +182,8 @@ impl SecretsVault {
             tool_id: None,
             details: serde_json::json!({ "secret_name": name, "owner": owner }),
             severity: AuditSeverity::Security,
+            reversible: false,
+            rollback_ref: None,
         });
 
         Ok(id)
@@ -202,6 +220,8 @@ impl SecretsVault {
             tool_id: None,
             details: serde_json::json!({ "secret_name": name }),
             severity: AuditSeverity::Security,
+            reversible: false,
+            rollback_ref: None,
         });
 
         let decrypted = decrypt(&self.master_key, &encrypted_value)?;
@@ -274,6 +294,8 @@ impl SecretsVault {
             tool_id: None,
             details: serde_json::json!({ "secret_name": name }),
             severity: AuditSeverity::Security,
+            reversible: false,
+            rollback_ref: None,
         });
 
         Ok(())
@@ -328,9 +350,189 @@ impl SecretsVault {
             tool_id: None,
             details: serde_json::json!({ "secret_name": name }),
             severity: AuditSeverity::Security,
+            reversible: false,
+            rollback_ref: None,
         });
 
         Ok(())
+    }
+
+    /// Check whether the given `agent_id` is authorized to access a secret
+    /// based on its `owner` and `scope` columns.
+    ///
+    /// Rules:
+    /// - `SecretScope::Global` → any agent may access.
+    /// - `SecretScope::Agent(id)` → only `id` may access.
+    /// - `SecretScope::Tool(id)` → the requesting agent must match the owner.
+    /// - `SecretOwner::Kernel` with non-global scope → only kernel (agent_id == None).
+    fn check_scope(&self, secret_name: &str, agent_id: AgentID) -> Result<(), AgentOSError> {
+        let conn = self.conn.lock().unwrap();
+        let (owner_json, scope_json): (String, String) = conn
+            .query_row(
+                "SELECT owner, scope FROM secrets WHERE name = ?1",
+                params![secret_name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| AgentOSError::VaultError(format!("DB error during scope check: {}", e)))?
+            .ok_or_else(|| AgentOSError::SecretNotFound(secret_name.to_string()))?;
+
+        let scope: SecretScope = serde_json::from_str(&scope_json).unwrap_or(SecretScope::Global);
+        let owner: SecretOwner = serde_json::from_str(&owner_json).unwrap_or(SecretOwner::Kernel);
+
+        match scope {
+            SecretScope::Global => Ok(()),
+            SecretScope::Agent(scoped_id) => {
+                if scoped_id == agent_id {
+                    Ok(())
+                } else {
+                    Err(AgentOSError::VaultError(format!(
+                        "Agent {} is not authorized to access secret '{}' (scoped to agent {})",
+                        agent_id, secret_name, scoped_id
+                    )))
+                }
+            }
+            SecretScope::Tool(_) => {
+                // For tool-scoped secrets, the requesting agent must be the owner
+                match owner {
+                    SecretOwner::Agent(owner_id) if owner_id == agent_id => Ok(()),
+                    _ => Err(AgentOSError::VaultError(format!(
+                        "Agent {} is not authorized to access tool-scoped secret '{}'",
+                        agent_id, secret_name
+                    ))),
+                }
+            }
+        }
+    }
+
+    /// Issue a short-lived proxy token for a secret (Spec §3 zero-exposure architecture).
+    ///
+    /// Returns an opaque handle of the form `VAULT_PROXY:tok_<uuid>`.
+    /// The tool receives this handle instead of the plaintext secret.
+    /// Call `resolve_proxy()` at tool invocation time to substitute the real value.
+    ///
+    /// **Scope enforcement:** The requesting `agent_id` must be authorized
+    /// for the secret's scope/owner. Global secrets are accessible to all;
+    /// agent-scoped secrets require a matching agent_id.
+    pub fn issue_proxy_token(
+        &self,
+        secret_name: &str,
+        ttl_seconds: u64,
+        agent_id: AgentID,
+    ) -> Result<String, AgentOSError> {
+        // Emergency lockdown check
+        if self.locked_down.load(Ordering::SeqCst) {
+            return Err(AgentOSError::VaultError(
+                "Vault is in emergency lockdown — proxy token issuance denied".to_string(),
+            ));
+        }
+
+        // Scope enforcement: verify the agent is authorized for this secret
+        self.check_scope(secret_name, agent_id)?;
+
+        let token_id = uuid::Uuid::new_v4().to_string().replace('-', "");
+        let handle = format!("VAULT_PROXY:tok_{}", token_id);
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(ttl_seconds as i64);
+
+        self.proxy_tokens.lock().unwrap().insert(
+            handle.clone(),
+            ProxyTokenEntry {
+                secret_name: secret_name.to_string(),
+                expires_at,
+            },
+        );
+
+        let _ = self.audit.append(AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: AuditEventType::SecretAccessed,
+            agent_id: Some(agent_id),
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({
+                "secret_name": secret_name,
+                "action": "proxy_token_issued",
+                "ttl_seconds": ttl_seconds,
+            }),
+            severity: AuditSeverity::Security,
+            reversible: false,
+            rollback_ref: None,
+        });
+
+        Ok(handle)
+    }
+
+    /// Resolve a proxy token to the underlying secret value.
+    ///
+    /// Validates expiry, then decrypts and returns the plaintext value.
+    /// The caller is responsible for zeroizing the value after use.
+    /// Returns `Err` if the token is unknown, expired, or the secret was revoked.
+    pub fn resolve_proxy(&self, handle: &str) -> Result<ZeroizingString, AgentOSError> {
+        if !handle.starts_with("VAULT_PROXY:") {
+            return Err(AgentOSError::VaultError(
+                "Not a vault proxy handle".to_string(),
+            ));
+        }
+
+        let entry = {
+            let mut tokens = self.proxy_tokens.lock().unwrap();
+            // Remove on first use (single-use tokens, plus sweep expired)
+            tokens.remove(handle).ok_or_else(|| {
+                AgentOSError::VaultError(format!("Unknown or already-used proxy token: {}", handle))
+            })?
+        };
+
+        if chrono::Utc::now() > entry.expires_at {
+            return Err(AgentOSError::VaultError(format!(
+                "Proxy token expired at {}",
+                entry.expires_at
+            )));
+        }
+
+        // Delegate to the real get() for decryption and audit logging
+        self.get(&entry.secret_name)
+    }
+
+    /// Remove all proxy tokens whose TTL has passed (call periodically).
+    pub fn sweep_expired_proxy_tokens(&self) {
+        let now = chrono::Utc::now();
+        self.proxy_tokens
+            .lock()
+            .unwrap()
+            .retain(|_, entry| entry.expires_at > now);
+    }
+
+    /// Emergency lockdown: atomically revoke all active proxy tokens and
+    /// prevent new ones from being issued until the vault is restarted.
+    ///
+    /// This is a one-way operation within a vault lifetime. Once locked down,
+    /// the vault must be re-opened to resume normal proxy token operations.
+    pub fn lockdown(&self) {
+        self.locked_down.store(true, Ordering::SeqCst);
+        self.proxy_tokens.lock().unwrap().clear();
+
+        let _ = self.audit.append(AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: AuditEventType::SecretRevoked,
+            agent_id: None,
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({
+                "action": "emergency_lockdown",
+                "message": "All proxy tokens revoked, new issuance denied",
+            }),
+            severity: AuditSeverity::Security,
+            reversible: false,
+            rollback_ref: None,
+        });
+
+        // The audit entry above records this event; no tracing crate in this crate.
+    }
+
+    /// Check if the vault is in emergency lockdown mode.
+    pub fn is_locked_down(&self) -> bool {
+        self.locked_down.load(Ordering::SeqCst)
     }
 
     pub fn is_initialized(path: &Path) -> bool {
@@ -353,6 +555,45 @@ impl SecretsVault {
         } else {
             false
         }
+    }
+}
+
+/// Zero-exposure vault proxy: the only interface tools receive at execution time.
+///
+/// Tools get an `Arc<ProxyVault>` instead of `Arc<SecretsVault>`, so they can only
+/// resolve proxy token handles into short-lived secret values — never enumerate,
+/// create, rotate, or revoke secrets directly.
+#[derive(Clone)]
+pub struct ProxyVault {
+    inner: Arc<SecretsVault>,
+}
+
+impl ProxyVault {
+    /// Wrap a vault reference into a proxy handle.
+    pub fn new(vault: Arc<SecretsVault>) -> Self {
+        Self { inner: vault }
+    }
+
+    /// Resolve a proxy token handle (e.g. `VAULT_PROXY:tok_...`) to the secret value.
+    ///
+    /// The token is consumed on first use. Returns an error if the token is unknown,
+    /// expired, or the underlying secret has been revoked.
+    pub fn resolve(&self, handle: &str) -> Result<ZeroizingString, AgentOSError> {
+        self.inner.resolve_proxy(handle)
+    }
+
+    /// Resolve a secret by name for a given agent, using a single-use proxy token internally.
+    ///
+    /// This is the primary interface for tools that need a secret value. It enforces
+    /// scope checks (the agent must be authorized for the secret) and audit logging,
+    /// while preventing tools from enumerating, creating, rotating, or revoking secrets.
+    pub fn get(
+        &self,
+        secret_name: &str,
+        agent_id: AgentID,
+    ) -> Result<ZeroizingString, AgentOSError> {
+        let handle = self.inner.issue_proxy_token(secret_name, 5, agent_id)?;
+        self.inner.resolve_proxy(&handle)
     }
 }
 
@@ -448,5 +689,98 @@ mod tests {
 
         let retrieved = vault.get("KEY1").unwrap();
         assert_eq!(retrieved.as_str(), "new-value");
+    }
+
+    #[test]
+    fn test_scope_enforcement_agent_cannot_access_other_agent_secret() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test_vault.db");
+        let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
+
+        let vault = SecretsVault::initialize(&path, "pass", audit).unwrap();
+
+        let agent_a = agentos_types::AgentID::new();
+        let agent_b = agentos_types::AgentID::new();
+
+        // Agent A creates a secret scoped to itself
+        vault
+            .set(
+                "AGENT_A_KEY",
+                "secret-for-a",
+                SecretOwner::Agent(agent_a),
+                SecretScope::Agent(agent_a),
+            )
+            .unwrap();
+
+        // Agent A can get a proxy token for its own secret
+        let result = vault.issue_proxy_token("AGENT_A_KEY", 60, agent_a);
+        assert!(result.is_ok(), "Agent A should access its own secret");
+
+        // Agent B cannot get a proxy token for Agent A's secret
+        let result = vault.issue_proxy_token("AGENT_A_KEY", 60, agent_b);
+        assert!(
+            result.is_err(),
+            "Agent B should NOT access Agent A's secret"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("not authorized"),
+            "Error should mention authorization"
+        );
+    }
+
+    #[test]
+    fn test_scope_enforcement_global_secret_accessible_to_all() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test_vault.db");
+        let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
+
+        let vault = SecretsVault::initialize(&path, "pass", audit).unwrap();
+
+        let agent_a = agentos_types::AgentID::new();
+        let agent_b = agentos_types::AgentID::new();
+
+        // Create a global-scope secret
+        vault
+            .set(
+                "SHARED_KEY",
+                "shared-secret",
+                SecretOwner::Kernel,
+                SecretScope::Global,
+            )
+            .unwrap();
+
+        // Both agents should be able to get proxy tokens
+        assert!(vault.issue_proxy_token("SHARED_KEY", 60, agent_a).is_ok());
+        assert!(vault.issue_proxy_token("SHARED_KEY", 60, agent_b).is_ok());
+    }
+
+    #[test]
+    fn test_lockdown_prevents_proxy_tokens() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test_vault.db");
+        let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
+
+        let vault = SecretsVault::initialize(&path, "pass", audit).unwrap();
+        let agent_id = agentos_types::AgentID::new();
+
+        vault
+            .set("KEY1", "value", SecretOwner::Kernel, SecretScope::Global)
+            .unwrap();
+
+        // Before lockdown: proxy tokens work
+        assert!(vault.issue_proxy_token("KEY1", 60, agent_id).is_ok());
+        assert!(!vault.is_locked_down());
+
+        // Lockdown
+        vault.lockdown();
+        assert!(vault.is_locked_down());
+
+        // After lockdown: proxy tokens denied
+        let result = vault.issue_proxy_token("KEY1", 60, agent_id);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("lockdown"),
+            "Error should mention lockdown"
+        );
     }
 }

@@ -10,3 +10,4 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 chrono = { workspace = true }
 cron = { workspace = true }
 thiserror = { workspace = true }
+hex = { workspace = true }

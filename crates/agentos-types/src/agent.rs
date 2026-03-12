@@ -19,6 +19,10 @@ pub struct AgentProfile {
     pub description: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_active: chrono::DateTime<chrono::Utc>,
+    /// Ed25519 public key (hex-encoded) for cryptographic identity.
+    /// None if identity has not been generated yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key_hex: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

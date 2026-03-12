@@ -86,6 +86,8 @@ impl Kernel {
                 hal: self.hal.clone(),
                 data_dir: self.data_dir.clone(),
                 context_manager: self.context_manager.clone(),
+                cost_tracker: self.cost_tracker.clone(),
+                agent_id: AgentID::new(),
             };
 
             let engine = self.pipeline_engine.clone();
@@ -134,7 +136,10 @@ impl Kernel {
                 })),
             }
         } else {
-            let executor = KernelPipelineExecutor { kernel: self };
+            let executor = KernelPipelineExecutor {
+                kernel: self,
+                agent_id: AgentID::new(),
+            };
 
             match self
                 .pipeline_engine
@@ -241,6 +246,7 @@ impl Kernel {
 /// Uses borrowed kernel reference — suitable for synchronous (non-detach) pipeline runs.
 pub(crate) struct KernelPipelineExecutor<'a> {
     pub(crate) kernel: &'a Kernel,
+    pub(crate) agent_id: AgentID,
 }
 
 #[async_trait::async_trait]
@@ -274,7 +280,9 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
             agent_id: AgentID::new(),
             trace_id: TraceID::new(),
             permissions: PermissionSet::new(),
-            vault: Some(self.kernel.vault.clone()),
+            vault: Some(std::sync::Arc::new(agentos_vault::ProxyVault::new(
+                self.kernel.vault.clone(),
+            ))),
             hal: Some(self.kernel.hal.clone()),
         };
 
@@ -284,6 +292,35 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
             .execute(tool_name, input, context)
             .await?;
         Ok(serde_json::to_string(&result).unwrap_or_default())
+    }
+
+    async fn check_budget(&self) -> Result<(), AgentOSError> {
+        use crate::cost_tracker::BudgetCheckResult;
+        match self.kernel.cost_tracker.check_budget(&self.agent_id).await {
+            BudgetCheckResult::Ok
+            | BudgetCheckResult::Warning { .. }
+            | BudgetCheckResult::ModelDowngradeRecommended { .. } => Ok(()),
+            BudgetCheckResult::PauseRequired { resource, .. } => Err(AgentOSError::KernelError {
+                reason: format!("Pipeline budget pause required: {}", resource),
+            }),
+            BudgetCheckResult::HardLimitExceeded { resource, .. } => {
+                Err(AgentOSError::KernelError {
+                    reason: format!("Pipeline budget exceeded: {}", resource),
+                })
+            }
+            BudgetCheckResult::ModelNotAllowed { model, .. } => Err(AgentOSError::KernelError {
+                reason: format!("Pipeline model not allowed: {}", model),
+            }),
+            BudgetCheckResult::WallTimeExceeded {
+                elapsed_secs,
+                limit_secs,
+            } => Err(AgentOSError::KernelError {
+                reason: format!(
+                    "Pipeline wall-time exceeded: {}s elapsed, {}s limit",
+                    elapsed_secs, limit_secs
+                ),
+            }),
+        }
     }
 }
 
@@ -298,6 +335,8 @@ pub(crate) struct OwnedPipelineExecutor {
     pub(crate) hal: Arc<HardwareAbstractionLayer>,
     pub(crate) data_dir: PathBuf,
     pub(crate) context_manager: Arc<ContextManager>,
+    pub(crate) cost_tracker: Arc<crate::cost_tracker::CostTracker>,
+    pub(crate) agent_id: AgentID,
 }
 
 #[async_trait::async_trait]
@@ -340,6 +379,11 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
                     content: prompt.to_string(),
                     timestamp: chrono::Utc::now(),
                     metadata: None,
+                    importance: 0.9,
+                    pinned: false,
+                    reference_count: 0,
+                    partition: ContextPartition::default(),
+                    category: ContextCategory::Task,
                 },
             )
             .await
@@ -371,11 +415,42 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
             agent_id: AgentID::new(),
             trace_id: TraceID::new(),
             permissions: PermissionSet::new(),
-            vault: Some(self.vault.clone()),
+            vault: Some(std::sync::Arc::new(agentos_vault::ProxyVault::new(
+                self.vault.clone(),
+            ))),
             hal: Some(self.hal.clone()),
         };
 
         let result = self.tool_runner.execute(tool_name, input, context).await?;
         Ok(serde_json::to_string(&result).unwrap_or_default())
+    }
+
+    async fn check_budget(&self) -> Result<(), AgentOSError> {
+        use crate::cost_tracker::BudgetCheckResult;
+        match self.cost_tracker.check_budget(&self.agent_id).await {
+            BudgetCheckResult::Ok
+            | BudgetCheckResult::Warning { .. }
+            | BudgetCheckResult::ModelDowngradeRecommended { .. } => Ok(()),
+            BudgetCheckResult::PauseRequired { resource, .. } => Err(AgentOSError::KernelError {
+                reason: format!("Pipeline budget pause required: {}", resource),
+            }),
+            BudgetCheckResult::HardLimitExceeded { resource, .. } => {
+                Err(AgentOSError::KernelError {
+                    reason: format!("Pipeline budget exceeded: {}", resource),
+                })
+            }
+            BudgetCheckResult::ModelNotAllowed { model, .. } => Err(AgentOSError::KernelError {
+                reason: format!("Pipeline model not allowed: {}", model),
+            }),
+            BudgetCheckResult::WallTimeExceeded {
+                elapsed_secs,
+                limit_secs,
+            } => Err(AgentOSError::KernelError {
+                reason: format!(
+                    "Pipeline wall-time exceeded: {}s elapsed, {}s limit",
+                    elapsed_secs, limit_secs
+                ),
+            }),
+        }
     }
 }

@@ -58,15 +58,15 @@ impl AgentTool for MemoryWrite {
 
             let summary = payload.get("summary").and_then(|v| v.as_str());
             self.episodic
-                .record(
-                    &context.task_id,
-                    &context.agent_id,
-                    agentos_memory::EpisodeType::SystemEvent,
+                .record(agentos_memory::EpisodeRecordInput {
+                    task_id: &context.task_id,
+                    agent_id: &context.agent_id,
+                    entry_type: agentos_memory::EpisodeType::SystemEvent,
                     content,
                     summary,
-                    None,
-                    &context.trace_id,
-                )
+                    metadata: None,
+                    trace_id: &context.trace_id,
+                })
                 .map_err(|e| AgentOSError::ToolExecutionFailed {
                     tool_name: "memory-write".into(),
                     reason: format!("Episodic write failed: {}", e),

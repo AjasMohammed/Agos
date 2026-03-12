@@ -1,6 +1,7 @@
 ---
 title: AgentOS Knowledge Base
-tags: [index, moc]
+tags:
+  - moc
 ---
 
 # AgentOS Knowledge Base
@@ -42,8 +43,17 @@ tags: [index, moc]
 - [[Intent Processing Flow]] - Tool call validation and execution
 - [[Agent Communication Flow]] - Inter-agent messaging
 
-### Roadmap
+### Roadmap & Next Steps
 - [[V3 Roadmap]] - Planned features and build steps
+- [[Feedback Implementation Plan]] - Phase 0–7 implementation plan
+- [[next-steps/Index|Next Steps Dashboard]] - Live implementation status + what's left to build
+  - [[next-steps/01-Critical Build Fix|01 · Critical Build Fix]] — Fix broken AuditEntry initializers (blocker)
+  - [[next-steps/02-Ed25519 Tool Signing|02 · Ed25519 Tool Signing]] — Spec #1: capability-signed tool registry
+  - [[next-steps/03-Snapshot Rollback|03 · Snapshot/Rollback]] — Spec #5: checkpoint and rollback system
+  - [[next-steps/04-Kernel Modularization|04 · Kernel Modularization]] — Phase 0.1: split kernel.rs
+  - [[next-steps/05-Episodic Memory Completion|05 · Episodic Memory]] — Phase 5.1: auto-write on task completion
+  - [[next-steps/06-Command Bus Wiring|06 · Command Bus Wiring]] — Verify router dispatch coverage
+  - [[next-steps/07-Hardware Abstraction Layer|07 · Hardware Abstraction Layer]] — Spec #9: per-agent HAL
 
 ---
 

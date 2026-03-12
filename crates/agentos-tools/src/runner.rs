@@ -1,10 +1,16 @@
 use crate::agent_message::AgentMessageTool;
+use crate::archival_insert::ArchivalInsert;
+use crate::archival_search::ArchivalSearch;
 use crate::data_parser::DataParser;
 use crate::file_reader::FileReader;
 use crate::file_writer::FileWriter;
 use crate::hardware_info::HardwareInfoTool;
 use crate::http_client::HttpClientTool;
 use crate::log_reader::LogReaderTool;
+use crate::memory_block_delete::MemoryBlockDeleteTool;
+use crate::memory_block_list::MemoryBlockListTool;
+use crate::memory_block_read::MemoryBlockReadTool;
+use crate::memory_block_write::MemoryBlockWriteTool;
 use crate::memory_search::MemorySearch;
 use crate::memory_write::MemoryWrite;
 use crate::network_monitor::NetworkMonitorTool;
@@ -60,7 +66,16 @@ impl ToolRunner {
             semantic.clone(),
             episodic.clone(),
         )));
-        runner.register(Box::new(MemoryWrite::new(semantic, episodic)));
+        runner.register(Box::new(MemoryWrite::new(
+            semantic.clone(),
+            episodic.clone(),
+        )));
+        runner.register(Box::new(ArchivalInsert::new(semantic.clone())));
+        runner.register(Box::new(ArchivalSearch::new(semantic.clone())));
+        runner.register(Box::new(MemoryBlockWriteTool::new()));
+        runner.register(Box::new(MemoryBlockReadTool::new()));
+        runner.register(Box::new(MemoryBlockListTool::new()));
+        runner.register(Box::new(MemoryBlockDeleteTool::new()));
         runner.register(Box::new(DataParser::new()));
         runner.register(Box::new(ShellExec::new()));
         runner.register(Box::new(AgentMessageTool::new()));

@@ -1,25 +1,64 @@
 [kernel]
+# Development defaults. Use config/production.toml for deployment.
 max_concurrent_tasks = 4
 default_task_timeout_secs = 60
 context_window_max_entries = 100
+context_window_token_budget = 8000
 
 [secrets]
+# Development default path (ephemeral on many systems).
 vault_path = "/tmp/agentos/vault/secrets.db"
 
 [audit]
+# Development default path (ephemeral on many systems).
 log_path = "/tmp/agentos/data/audit.db"
 
 [tools]
+# Development default paths (ephemeral on many systems).
 core_tools_dir = "/tmp/agentos/tools/core"
 user_tools_dir = "/tmp/agentos/tools/user"
 data_dir = "/tmp/agentos/data"
 
 [bus]
+# Development default socket path.
 socket_path = "/tmp/agentos/agentos.sock"
 
 [ollama]
+# Development default host. Override with AGENTOS_OLLAMA_HOST or production config.
 host = "http://localhost:11434"
 default_model = "llama3.2"
 
+[llm]
+# Optional custom/OpenAI-compatible provider endpoint.
+# For production, set AGENTOS_LLM_URL or configure this in config/production.toml.
+# custom_base_url = "https://llm-gateway.example.com/v1"
+# Optional OpenAI base URL override (for gateways/proxies).
+openai_base_url = "https://api.openai.com/v1"
+# Reserved for provider endpoint documentation parity.
+anthropic_base_url = "https://api.anthropic.com/v1"
+gemini_base_url = "https://generativelanguage.googleapis.com/v1beta"
+
 [memory]
 model_cache_dir = "models"
+
+[memory.extraction]
+enabled = true
+conflict_threshold = 0.85
+max_facts_per_result = 5
+min_result_length = 50
+
+[memory.consolidation]
+enabled = true
+min_pattern_occurrences = 3
+task_completions_trigger = 100
+time_trigger_hours = 24
+max_episodes_per_cycle = 500
+
+[context_budget]
+total_tokens = 128000
+reserve_pct = 0.25
+system_pct = 0.15
+tools_pct = 0.18
+knowledge_pct = 0.30
+history_pct = 0.25
+task_pct = 0.12

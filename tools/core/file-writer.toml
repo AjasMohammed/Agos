@@ -3,6 +3,7 @@ name        = "file-writer"
 version     = "1.0.0"
 description = "Writes content to files in the data directory"
 author      = "agentos-core"
+trust_tier  = "core"
 
 [capabilities_required]
 permissions = ["fs.user_data:w"]

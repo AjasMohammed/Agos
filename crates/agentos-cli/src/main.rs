@@ -6,9 +6,11 @@ use std::sync::Arc;
 
 mod commands;
 use commands::{
-    agent::AgentCommands, audit::AuditCommands, bg::BgCommands, perm::PermCommands,
-    pipeline::PipelineCommands, role::RoleCommands, schedule::ScheduleCommands,
-    secret::SecretCommands, task::TaskCommands, tool::ToolCommands,
+    agent::AgentCommands, audit::AuditCommands, bg::BgCommands, cost::CostCommands,
+    escalation::EscalationCommands, event::EventCommands, identity::IdentityCommands,
+    perm::PermCommands, pipeline::PipelineCommands, resource::ResourceCommands, role::RoleCommands,
+    schedule::ScheduleCommands, secret::SecretCommands, snapshot::SnapshotCommands,
+    task::TaskCommands, tool::ToolCommands,
 };
 
 #[derive(Parser)]
@@ -95,6 +97,42 @@ pub enum Commands {
         #[command(subcommand)]
         command: PipelineCommands,
     },
+
+    /// View agent cost and budget reports
+    Cost {
+        #[command(subcommand)]
+        command: CostCommands,
+    },
+
+    /// Manage resource locks (arbitration)
+    Resource {
+        #[command(subcommand)]
+        command: ResourceCommands,
+    },
+
+    /// View and resolve human approval requests from agents
+    Escalation {
+        #[command(subcommand)]
+        command: EscalationCommands,
+    },
+
+    /// Manage task snapshots and rollback
+    Snapshot {
+        #[command(subcommand)]
+        command: SnapshotCommands,
+    },
+
+    /// Manage event subscriptions and view event history
+    Event {
+        #[command(subcommand)]
+        command: EventCommands,
+    },
+
+    /// Manage agent cryptographic identities
+    Identity {
+        #[command(subcommand)]
+        command: IdentityCommands,
+    },
 }
 
 #[tokio::main]
@@ -110,6 +148,12 @@ async fn main() -> anyhow::Result<()> {
         Commands::Start { vault_passphrase } => {
             cmd_start(&cli.config, vault_passphrase).await?;
         }
+
+        // Offline tool subcommands run without a kernel connection
+        Commands::Tool { command } if commands::tool::is_offline(&command) => {
+            commands::tool::handle_offline(command)?;
+        }
+
         other => {
             let config_path = Path::new(&cli.config);
             if !config_path.exists() {
@@ -335,6 +379,68 @@ mod tests {
                 assert_eq!(name, "process-data");
                 assert_eq!(agent, "worker");
                 assert!(detach);
+            }
+            _ => panic!("Wrong command parsed"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_event_subscribe() {
+        let cli = Cli::try_parse_from([
+            "agentctl",
+            "event",
+            "subscribe",
+            "--agent",
+            "analyst",
+            "--event",
+            "AgentAdded",
+            "--throttle",
+            "once_per:30s",
+            "--priority",
+            "high",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Event {
+                command:
+                    EventCommands::Subscribe {
+                        agent,
+                        event,
+                        throttle,
+                        priority,
+                    },
+            } => {
+                assert_eq!(agent, "analyst");
+                assert_eq!(event, "AgentAdded");
+                assert_eq!(throttle, Some("once_per:30s".to_string()));
+                assert_eq!(priority, "high");
+            }
+            _ => panic!("Wrong command parsed"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_event_subscriptions_list() {
+        let cli = Cli::try_parse_from(["agentctl", "event", "subscriptions", "list"]).unwrap();
+
+        match cli.command {
+            Commands::Event {
+                command: EventCommands::Subscriptions { command: _ },
+            } => {}
+            _ => panic!("Wrong command parsed"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_event_history() {
+        let cli = Cli::try_parse_from(["agentctl", "event", "history", "--last", "50"]).unwrap();
+
+        match cli.command {
+            Commands::Event {
+                command: EventCommands::History { last },
+            } => {
+                assert_eq!(last, 50);
             }
             _ => panic!("Wrong command parsed"),
         }

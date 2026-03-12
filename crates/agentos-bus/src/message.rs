@@ -63,6 +63,9 @@ pub enum KernelCommand {
         name: String,
         value: String, // encrypted in transit? No — UDS is local-only
         scope: SecretScope,
+        /// Raw scope string from CLI (e.g. "agent:notifier") for kernel-side resolution.
+        #[serde(default)]
+        scope_raw: Option<String>,
     },
     ListSecrets,
     RevokeSecret {
@@ -147,6 +150,7 @@ pub enum KernelCommand {
         members: Vec<String>,
     },
     BroadcastToGroup {
+        from_name: String,
         group_name: String,
         content: String,
     },
@@ -155,6 +159,9 @@ pub enum KernelCommand {
     GetStatus,
     GetAuditLogs {
         limit: u32,
+    },
+    VerifyAuditChain {
+        from_seq: Option<i64>,
     },
     Shutdown,
 
@@ -193,6 +200,23 @@ pub enum KernelCommand {
         name: String,
     },
 
+    // Escalation management
+    ListEscalations {
+        pending_only: bool,
+    },
+    GetEscalation {
+        id: u64,
+    },
+    ResolveEscalation {
+        id: u64,
+        decision: String,
+    },
+
+    // Cost management
+    GetCostReport {
+        agent_name: Option<String>,
+    },
+
     // Pipeline management
     InstallPipeline {
         yaml: String,
@@ -214,6 +238,74 @@ pub enum KernelCommand {
     },
     RemovePipeline {
         name: String,
+    },
+
+    // Resource arbitration (Spec §8)
+    ListResourceLocks,
+    ReleaseResourceLock {
+        resource_id: String,
+        agent_name: String,
+    },
+    ReleaseAllResourceLocks {
+        agent_name: String,
+    },
+
+    // Checkpoint / Rollback (Spec §5)
+    ListSnapshots {
+        task_id: TaskID,
+    },
+    RollbackTask {
+        task_id: TaskID,
+        /// Snapshot reference (e.g. "snap_0001"). None = most recent.
+        snapshot_ref: Option<String>,
+    },
+
+    // Vault lockdown (Spec §3)
+    VaultLockdown,
+
+    // Identity management (Spec §10)
+    IdentityShow {
+        agent_name: String,
+    },
+    IdentityRevoke {
+        agent_name: String,
+    },
+
+    // Audit export
+    ExportAuditChain {
+        limit: Option<u32>,
+    },
+
+    // Resource contention
+    ResourceContention,
+
+    // Event system
+    EventSubscribe {
+        agent_name: String,
+        /// Event type filter: "all", "category:AgentLifecycle", or exact like "AgentAdded"
+        event_filter: String,
+        /// Optional throttle: "none", "once_per:30s", "max:5/60s"
+        throttle: Option<String>,
+        /// Subscription priority: "critical", "high", "normal", "low"
+        priority: Option<String>,
+    },
+    EventUnsubscribe {
+        subscription_id: String,
+    },
+    EventListSubscriptions {
+        agent_name: Option<String>,
+    },
+    EventGetSubscription {
+        subscription_id: String,
+    },
+    EventEnableSubscription {
+        subscription_id: String,
+    },
+    EventDisableSubscription {
+        subscription_id: String,
+    },
+    EventHistory {
+        last: u32,
     },
 }
 
@@ -240,10 +332,33 @@ pub enum KernelResponse {
     BackgroundPoolList(Vec<agentos_types::schedule::BackgroundTask>),
     BackgroundLogs(Vec<String>),
 
+    // Escalation
+    EscalationList(Vec<serde_json::Value>),
+
+    // Cost
+    CostReport(Vec<agentos_types::CostSnapshot>),
+
     // Pipeline
     PipelineList(Vec<serde_json::Value>),
     PipelineRunStatus(serde_json::Value),
     PipelineStepLogs(Vec<serde_json::Value>),
+
+    // Resource arbitration
+    ResourceLockList(Vec<serde_json::Value>),
+
+    // Checkpoint / Rollback
+    SnapshotList(Vec<serde_json::Value>),
+
+    // Audit export
+    AuditChainExport(String),
+
+    // Resource contention
+    ResourceContentionStats(serde_json::Value),
+
+    // Event system
+    EventSubscriptionId(String),
+    EventSubscriptionList(Vec<serde_json::Value>),
+    EventHistoryList(Vec<serde_json::Value>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

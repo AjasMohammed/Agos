@@ -20,6 +20,13 @@ pub trait PipelineExecutor: Send + Sync {
         tool_name: &str,
         input: serde_json::Value,
     ) -> Result<String, AgentOSError>;
+
+    /// Check budget before executing a pipeline step. Returns Ok(()) if within budget,
+    /// or Err if budget is exhausted for the pipeline's agent.
+    /// Default implementation always returns Ok (no budget enforcement).
+    async fn check_budget(&self) -> Result<(), AgentOSError> {
+        Ok(())
+    }
 }
 
 pub struct PipelineEngine {
@@ -77,6 +84,16 @@ impl PipelineEngine {
 
         // Execute each step in order
         for step in sorted_steps {
+            // Check budget before executing each step
+            if let Err(e) = executor.check_budget().await {
+                tracing::warn!(step = %step.id, error = %e, "Pipeline step rejected: budget exhausted");
+                run.status = PipelineRunStatus::Failed;
+                run.error = Some(format!("Budget exhausted before step '{}': {}", step.id, e));
+                run.completed_at = Some(Utc::now());
+                self.store.update_run(&run)?;
+                return Ok(run);
+            }
+
             let result = self.execute_step(step, &context, &run, executor).await;
 
             match result {
@@ -409,7 +426,7 @@ mod tests {
                 agent_response: Box::new(|agent, prompt| {
                     Ok(format!("[{agent} processed: {prompt}]"))
                 }),
-                tool_response: Box::new(|tool, input| {
+                tool_response: Box::new(|tool, _input| {
                     Ok(format!("[{tool} executed with: {{input}}]"))
                 }),
             }
@@ -582,12 +599,23 @@ output: research_result
         let def = PipelineDefinition::from_yaml(yaml).unwrap();
         let run_id = RunID::new();
 
-        let run = engine.run(&def, "quantum computing", run_id, &executor).await.unwrap();
+        let run = engine
+            .run(&def, "quantum computing", run_id, &executor)
+            .await
+            .unwrap();
 
         assert_eq!(run.status, PipelineRunStatus::Complete);
         assert!(run.output.is_some());
-        assert!(run.output.as_ref().unwrap().contains("researcher processed"));
-        assert!(run.output.as_ref().unwrap().contains("Research: quantum computing"));
+        assert!(run
+            .output
+            .as_ref()
+            .unwrap()
+            .contains("researcher processed"));
+        assert!(run
+            .output
+            .as_ref()
+            .unwrap()
+            .contains("Research: quantum computing"));
         assert!(run.completed_at.is_some());
         assert!(run.error.is_none());
 
@@ -601,13 +629,13 @@ output: research_result
     #[tokio::test]
     async fn test_run_multi_step_pipeline_with_variable_passing() {
         let (engine, _dir) = test_engine();
-        let executor = MockExecutor::new().with_agent_response(|agent, _prompt| {
-            match agent {
-                "researcher" => Ok("Raw research data about quantum computing".to_string()),
-                "analyst" => Ok("Key finding: quantum supremacy achieved".to_string()),
-                "summarizer" => Ok("Executive summary: quantum computing has reached a milestone".to_string()),
-                _ => Ok("unknown agent".to_string()),
+        let executor = MockExecutor::new().with_agent_response(|agent, _prompt| match agent {
+            "researcher" => Ok("Raw research data about quantum computing".to_string()),
+            "analyst" => Ok("Key finding: quantum supremacy achieved".to_string()),
+            "summarizer" => {
+                Ok("Executive summary: quantum computing has reached a milestone".to_string())
             }
+            _ => Ok("unknown agent".to_string()),
         });
 
         let yaml = r#"
@@ -632,7 +660,10 @@ output: summary
 "#;
         install_def(&engine, yaml);
         let def = PipelineDefinition::from_yaml(yaml).unwrap();
-        let run = engine.run(&def, "quantum computing", RunID::new(), &executor).await.unwrap();
+        let run = engine
+            .run(&def, "quantum computing", RunID::new(), &executor)
+            .await
+            .unwrap();
 
         assert_eq!(run.status, PipelineRunStatus::Complete);
         assert_eq!(
@@ -644,8 +675,12 @@ output: summary
         // Verify variable passing: analyst should have received researcher's output
         let calls = executor.agent_calls.lock().unwrap();
         assert_eq!(calls.len(), 3);
-        assert!(calls[1].1.contains("Raw research data about quantum computing"));
-        assert!(calls[2].1.contains("Key finding: quantum supremacy achieved"));
+        assert!(calls[1]
+            .1
+            .contains("Raw research data about quantum computing"));
+        assert!(calls[2]
+            .1
+            .contains("Key finding: quantum supremacy achieved"));
     }
 
     #[tokio::test]
@@ -654,7 +689,10 @@ output: summary
         let executor = MockExecutor::new()
             .with_agent_response(|_, _| Ok("Generated report content".to_string()))
             .with_tool_response(|_tool, input| {
-                Ok(format!("Saved to {}", input.get("path").and_then(|v| v.as_str()).unwrap_or("?")))
+                Ok(format!(
+                    "Saved to {}",
+                    input.get("path").and_then(|v| v.as_str()).unwrap_or("?")
+                ))
             });
 
         let yaml = r#"
@@ -676,7 +714,10 @@ output: save_result
 "#;
         install_def(&engine, yaml);
         let def = PipelineDefinition::from_yaml(yaml).unwrap();
-        let run = engine.run(&def, "AI trends", RunID::new(), &executor).await.unwrap();
+        let run = engine
+            .run(&def, "AI trends", RunID::new(), &executor)
+            .await
+            .unwrap();
 
         assert_eq!(run.status, PipelineRunStatus::Complete);
 
@@ -726,7 +767,10 @@ output: result3
 "#;
         install_def(&engine, yaml);
         let def = PipelineDefinition::from_yaml(yaml).unwrap();
-        let run = engine.run(&def, "test", RunID::new(), &executor).await.unwrap();
+        let run = engine
+            .run(&def, "test", RunID::new(), &executor)
+            .await
+            .unwrap();
 
         assert_eq!(run.status, PipelineRunStatus::Failed);
         assert!(run.error.is_some());
@@ -769,7 +813,10 @@ output: result
 "#;
         install_def(&engine, yaml);
         let def = PipelineDefinition::from_yaml(yaml).unwrap();
-        let run = engine.run(&def, "test", RunID::new(), &executor).await.unwrap();
+        let run = engine
+            .run(&def, "test", RunID::new(), &executor)
+            .await
+            .unwrap();
 
         assert_eq!(run.status, PipelineRunStatus::Complete);
         assert_eq!(run.output.as_deref(), Some("Success on retry"));
@@ -798,7 +845,10 @@ output: result
 "#;
         install_def(&engine, yaml);
         let def = PipelineDefinition::from_yaml(yaml).unwrap();
-        let run = engine.run(&def, "test", RunID::new(), &executor).await.unwrap();
+        let run = engine
+            .run(&def, "test", RunID::new(), &executor)
+            .await
+            .unwrap();
 
         assert_eq!(run.status, PipelineRunStatus::Failed);
         assert!(run.error.as_ref().unwrap().contains("Always fails"));
@@ -878,9 +928,7 @@ steps:
     #[tokio::test]
     async fn test_builtin_variables_available() {
         let (engine, _dir) = test_engine();
-        let executor = MockExecutor::new().with_agent_response(|_, prompt| {
-            Ok(prompt.to_string())
-        });
+        let executor = MockExecutor::new().with_agent_response(|_, prompt| Ok(prompt.to_string()));
 
         let yaml = r#"
 name: "builtins"
@@ -894,7 +942,10 @@ output: result
 "#;
         install_def(&engine, yaml);
         let def = PipelineDefinition::from_yaml(yaml).unwrap();
-        let run = engine.run(&def, "hello", RunID::new(), &executor).await.unwrap();
+        let run = engine
+            .run(&def, "hello", RunID::new(), &executor)
+            .await
+            .unwrap();
 
         let output = run.output.unwrap();
         assert!(output.contains("input=hello"));
@@ -944,7 +995,10 @@ output: result3
 "#;
         install_def(&engine, yaml);
         let def = PipelineDefinition::from_yaml(yaml).unwrap();
-        let run = engine.run(&def, "test", RunID::new(), &executor).await.unwrap();
+        let run = engine
+            .run(&def, "test", RunID::new(), &executor)
+            .await
+            .unwrap();
 
         assert_eq!(run.status, PipelineRunStatus::Complete);
         assert_eq!(run.step_results["step1"].status, StepStatus::Complete);
@@ -984,7 +1038,10 @@ output: result2
 "#;
         install_def(&engine, yaml);
         let def = PipelineDefinition::from_yaml(yaml).unwrap();
-        let run = engine.run(&def, "test", RunID::new(), &executor).await.unwrap();
+        let run = engine
+            .run(&def, "test", RunID::new(), &executor)
+            .await
+            .unwrap();
 
         assert_eq!(run.status, PipelineRunStatus::Complete);
         // step2 should have received the default value from step1

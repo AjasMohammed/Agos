@@ -1,3 +1,4 @@
+use crate::signing::verify_manifest;
 use agentos_types::{AgentOSError, ToolManifest};
 use std::path::{Path, PathBuf};
 
@@ -8,7 +9,13 @@ pub struct LoadedManifest {
     pub manifest_dir: PathBuf,
 }
 
-/// Load a ToolManifest from a TOML file.
+/// Load a ToolManifest from a TOML file and verify its trust-tier signature.
+///
+/// Returns an error if:
+/// - The file cannot be read or parsed.
+/// - The manifest has `trust_tier = "blocked"`.
+/// - The manifest has `trust_tier = "community"` or `"verified"` but the
+///   Ed25519 signature is absent or does not match the signing payload.
 pub fn load_manifest(path: &Path) -> Result<LoadedManifest, AgentOSError> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         AgentOSError::ToolNotFound(format!("Cannot read manifest {:?}: {}", path, e))
@@ -17,6 +24,9 @@ pub fn load_manifest(path: &Path) -> Result<LoadedManifest, AgentOSError> {
     let manifest: ToolManifest = toml::from_str(&content).map_err(|e| {
         AgentOSError::SchemaValidation(format!("Invalid manifest {:?}: {}", path, e))
     })?;
+
+    // Enforce trust tier policy before accepting the manifest.
+    verify_manifest(&manifest)?;
 
     let manifest_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
 

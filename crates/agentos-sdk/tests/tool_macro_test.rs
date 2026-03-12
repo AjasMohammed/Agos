@@ -30,7 +30,10 @@ fn test_tool_version() {
 
 #[test]
 fn test_tool_description() {
-    assert_eq!(TestTool::description(), "A test tool for macro verification");
+    assert_eq!(
+        TestTool::description(),
+        "A test tool for macro verification"
+    );
 }
 
 #[test]
@@ -53,7 +56,10 @@ async fn test_tool_execute() {
         task_id: agentos_types::TaskID::new(),
         agent_id: agentos_types::AgentID::new(),
         trace_id: agentos_types::TraceID::new(),
-        permissions: agentos_types::PermissionSet { entries: vec![] },
+        permissions: agentos_types::PermissionSet {
+            entries: vec![],
+            deny_entries: vec![],
+        },
         vault: None,
         hal: None,
     };
