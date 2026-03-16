@@ -100,6 +100,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -113,6 +114,7 @@ dependencies = [
  "agentos-llm",
  "agentos-tools",
  "agentos-types",
+ "agentos-vault",
  "anyhow",
  "chrono",
  "clap",

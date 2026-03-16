@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "plans/full-codebase-review/Full Codebase Review Plan.md",
+                "file": "reference/handbook/04-CLI Reference Complete.md",
                 "mode": "preview",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Full Codebase Review Plan"
+              "title": "04-CLI Reference Complete"
             }
           },
           {
@@ -269,8 +269,25 @@
   },
   "active": "d0ea60c9beca429b",
   "lastOpenFiles": [
-    "plans/full-codebase-review/Full Codebase Review Data Flow.md",
+    "plans/user-handbook/03-agent-and-task-system.md.tmp.580295.1773676280078",
+    "reference/handbook/06-Task System.md",
+    "reference/handbook/06-Task System.md.tmp.580295.1773676267990",
+    "reference/handbook/05-Agent Management.md",
+    "plans/user-handbook/02-cli-reference.md",
+    "reference/handbook/04-CLI Reference Complete.md",
+    "plans/full-codebase-review/02-infrastructure-review.md",
+    "plans/full-codebase-review/04-tools-and-wasm-review.md",
+    "plans/full-codebase-review/03-bus-and-capability-review.md",
+    "reference/handbook/01-Introduction and Philosophy.md",
+    "plans/full-codebase-review/03-bus-and-capability-review.md.tmp.498194.1773674386223",
+    "plans/user-handbook/01-foundation-chapters.md",
+    "reference/handbook/03-Architecture Overview.md",
+    "reference/handbook/03-Architecture Overview.md.tmp.499748.1773674104630",
+    "reference/handbook/02-Installation and First Run.md",
+    "reference/handbook/02-Installation and First Run.md.tmp.499748.1773674004489",
+    "reference/handbook/01-Introduction and Philosophy.md.tmp.499748.1773673934758",
     "plans/full-codebase-review/Full Codebase Review Plan.md",
+    "plans/full-codebase-review/Full Codebase Review Data Flow.md",
     "plans/full-codebase-review/01-foundation-types-review.md",
     "reference/First Deployment Runbook.md",
     "incomplete-plans.md.tmp.428468.1773668514540",
@@ -278,11 +295,6 @@
     "reference/First Deployment Runbook.md.tmp.428468.1773668497677",
     "reference/Release Process.md.tmp.428468.1773668482290",
     "reference/First Deployment Runbook.md.tmp.428468.1773668475156",
-    "reference/First Deployment Runbook.md.tmp.428468.1773668469264",
-    "incomplete-plans.md.tmp.428468.1773668221537",
-    "incomplete-plans.md.tmp.428468.1773668200137",
-    "incomplete-plans.md.tmp.428468.1773668187617",
-    "incomplete-plans.md.tmp.428468.1773668051970",
     "reference/Release Process.md",
     "incomplete-plans.md",
     "next-steps/10-High-Priority Gaps.md",
@@ -292,18 +304,6 @@
     "codebase_review.md",
     "next-steps/16-Full Codebase Review.md",
     "next-steps/21-Future-Improvements.md",
-    "next-steps/20-V1-Release-Fix-Plan.md",
-    "plans/first-deployment-readiness/04-security-gate-closure.md",
-    "plans/first-deployment-readiness/03-containerization-and-runtime.md",
-    "plans/first-deployment-readiness/02-production-config-baseline.md",
-    "plans/bug-fixes-and-deployment-readiness/05-issues-and-fixes-audit-update.md",
-    "plans/bug-fixes-and-deployment-readiness/04-docker-deployment-artifacts.md",
-    "plans/bug-fixes-and-deployment-readiness/03-integration-test-harness.md",
-    "plans/user-handbook/01-foundation-chapters.md",
-    "plans/bug-fixes-and-deployment-readiness/02-event-hmac-audit-fix.md",
-    "plans/user-handbook/09-troubleshooting-and-index.md",
-    "plans/user-handbook/08-audit-config-advanced.md",
-    "plans/user-handbook/07-pipeline-event-cost.md",
-    "plans/user-handbook/06-memory-system.md"
+    "next-steps/20-V1-Release-Fix-Plan.md"
   ]
 }

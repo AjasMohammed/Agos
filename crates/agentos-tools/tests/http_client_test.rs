@@ -32,7 +32,12 @@ async fn setup_temp_vault(dir: &TempDir, secret_name: &str, secret_value: &str) 
     let audit_db = dir.path().join("audit.db");
     let audit = Arc::new(agentos_audit::AuditLog::open(&audit_db).unwrap());
 
-    let vault = SecretsVault::initialize(&db_path, "pass", audit).unwrap();
+    let vault = SecretsVault::initialize(
+        &db_path,
+        &agentos_vault::ZeroizingString::new("pass".to_string()),
+        audit,
+    )
+    .unwrap();
     vault
         .set(
             secret_name,

@@ -28,7 +28,8 @@ pub fn encrypt(master_key: &MasterKey, plaintext: &[u8]) -> Result<Vec<u8>, Agen
 
 /// Decrypt: first 12 bytes are nonce, remainder is ciphertext + tag.
 pub fn decrypt(master_key: &MasterKey, encrypted: &[u8]) -> Result<Vec<u8>, AgentOSError> {
-    if encrypted.len() < 12 {
+    // AES-256-GCM: 12-byte nonce + 16-byte auth tag minimum
+    if encrypted.len() < 28 {
         return Err(AgentOSError::VaultError("Encrypted data too short".into()));
     }
 

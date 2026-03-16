@@ -1,5 +1,6 @@
 use agentos_bus::client::BusClient;
 use agentos_kernel::Kernel;
+use agentos_vault::ZeroizingString;
 use clap::{Parser, Subcommand};
 use std::path::Path;
 use std::sync::Arc;
@@ -180,7 +181,7 @@ async fn cmd_start(config_str: &str, vault_passphrase: Option<String>) -> anyhow
         anyhow::bail!("Config file not found: {}", config_str);
     }
 
-    let passphrase = match vault_passphrase {
+    let passphrase = ZeroizingString::new(match vault_passphrase {
         Some(p) => p,
         None => match std::env::var("AGENTOS_VAULT_PASSPHRASE") {
             Ok(env_pass) if !env_pass.is_empty() => env_pass,
@@ -189,7 +190,7 @@ async fn cmd_start(config_str: &str, vault_passphrase: Option<String>) -> anyhow
                 rpassword::read_password()?
             }
         },
-    };
+    });
 
     println!("🚀 Booting AgentOS kernel...");
 

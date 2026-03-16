@@ -26,7 +26,7 @@ impl ProcessDriver {
     }
 
     pub fn list_processes(&self) -> Result<Vec<ProcessEntry>, AgentOSError> {
-        let mut sys = self.sys.lock().unwrap();
+        let mut sys = self.sys.lock().unwrap_or_else(|e| e.into_inner());
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
         let mut processes = Vec::new();
@@ -57,7 +57,24 @@ impl ProcessDriver {
     }
 
     pub fn kill_process(&self, target_pid: u32) -> Result<(), AgentOSError> {
-        let mut sys = self.sys.lock().unwrap();
+        // Guard against killing critical system processes or self
+        if target_pid == 0 {
+            return Err(AgentOSError::HalError(
+                "Cannot kill PID 0 (kernel scheduler)".to_string(),
+            ));
+        }
+        if target_pid == 1 {
+            return Err(AgentOSError::HalError(
+                "Cannot kill PID 1 (init/systemd)".to_string(),
+            ));
+        }
+        if target_pid == std::process::id() {
+            return Err(AgentOSError::HalError(
+                "Cannot kill the AgentOS kernel process".to_string(),
+            ));
+        }
+
+        let mut sys = self.sys.lock().unwrap_or_else(|e| e.into_inner());
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
         let pid = Pid::from_u32(target_pid);

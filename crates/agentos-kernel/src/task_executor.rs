@@ -1439,18 +1439,12 @@ impl Kernel {
                                     SandboxExecutor::parse_result(&sandbox_result)
                                 }
                                 Err(e) => {
-                                    tracing::warn!(
+                                    tracing::error!(
                                         tool = %tool_call.tool_name,
                                         error = %e,
-                                        "Sandbox spawn failed, falling back to in-process execution"
+                                        "Sandbox spawn failed — refusing unsandboxed execution"
                                     );
-                                    self.tool_runner
-                                        .execute(
-                                            &tool_call.tool_name,
-                                            tool_call.payload,
-                                            exec_context,
-                                        )
-                                        .await
+                                    Err(e)
                                 }
                             }
                         } else {

@@ -36,10 +36,22 @@ impl LogReaderDriver {
         let mut lines = reader.lines();
 
         let mut entries = Vec::new();
+        const MAX_REGEX_LEN: usize = 1024;
+        const MAX_LOG_ENTRIES: usize = 50_000;
+
         let grep_regex = match query.grep_pattern.as_ref() {
-            Some(pattern) => Some(Regex::new(pattern).map_err(|e| {
-                AgentOSError::HalError(format!("Invalid grep pattern '{}': {}", pattern, e))
-            })?),
+            Some(pattern) => {
+                if pattern.len() > MAX_REGEX_LEN {
+                    return Err(AgentOSError::HalError(format!(
+                        "Grep pattern too long: {} bytes (max {})",
+                        pattern.len(),
+                        MAX_REGEX_LEN
+                    )));
+                }
+                Some(Regex::new(pattern).map_err(|e| {
+                    AgentOSError::HalError(format!("Invalid grep pattern '{}': {}", pattern, e))
+                })?)
+            }
             None => None,
         };
 
@@ -74,6 +86,10 @@ impl LogReaderDriver {
                             message: line,
                             source: path.to_string_lossy().to_string(),
                         });
+                        // Cap total entries to prevent OOM on large log files
+                        if entries.len() >= MAX_LOG_ENTRIES {
+                            break;
+                        }
                     }
                 }
                 Ok(None) => break,
@@ -112,8 +128,17 @@ fn parse_log_line_metadata(line: &str) -> (chrono::DateTime<chrono::Utc>, LogLev
 }
 
 fn try_parse_timestamp(line: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    // Try first 30 chars for a timestamp
-    let prefix = if line.len() > 35 { &line[..35] } else { line };
+    // Try first ~35 chars for a timestamp (safe UTF-8 boundary)
+    let prefix = if line.len() > 35 {
+        // Find the last valid char boundary at or before byte 35
+        let end = (0..=35)
+            .rev()
+            .find(|&i| line.is_char_boundary(i))
+            .unwrap_or(0);
+        &line[..end]
+    } else {
+        line
+    };
 
     // Try RFC 3339 / ISO 8601
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(prefix.split_whitespace().next()?) {

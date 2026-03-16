@@ -20,7 +20,14 @@ async fn test_secrets_full_lifecycle() {
     std::fs::create_dir_all(temp_dir.path().join("vault")).unwrap();
     std::fs::create_dir_all(temp_dir.path().join("tools/core")).unwrap();
 
-    let kernel = Arc::new(Kernel::boot(&config_path, "test-passphrase").await.unwrap());
+    let kernel = Arc::new(
+        Kernel::boot(
+            &config_path,
+            &agentos_vault::ZeroizingString::new("test-passphrase".to_string()),
+        )
+        .await
+        .unwrap(),
+    );
 
     // Spawn kernel in background
     let kernel_clone = kernel.clone();

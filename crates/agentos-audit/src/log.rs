@@ -149,11 +149,15 @@ struct EntryHashInput<'a> {
     event_type: &'a str,
     agent_id: &'a str,
     task_id: &'a str,
+    tool_id: &'a str,
     details: &'a str,
     severity: &'a str,
     reversible: bool,
     rollback_ref: &'a str,
 }
+
+/// Maximum allowed size (bytes) for the `details` JSON payload of a single audit entry.
+const MAX_DETAILS_BYTES: usize = 64 * 1024; // 64 KiB
 
 impl AuditLog {
     pub fn open(path: &Path) -> Result<Self, AgentOSError> {
@@ -236,6 +240,8 @@ impl AuditLog {
         hasher.update(b"|");
         hasher.update(input.task_id.as_bytes());
         hasher.update(b"|");
+        hasher.update(input.tool_id.as_bytes());
+        hasher.update(b"|");
         hasher.update(input.details.as_bytes());
         hasher.update(b"|");
         hasher.update(input.severity.as_bytes());
@@ -248,11 +254,19 @@ impl AuditLog {
     }
 
     pub fn append(&self, entry: AuditEntry) -> Result<(), AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         let details = serde_json::to_string(&entry.details).map_err(|e| {
             AgentOSError::Serialization(format!("AuditEntry serialize failed: {}", e))
         })?;
+
+        if details.len() > MAX_DETAILS_BYTES {
+            return Err(AgentOSError::VaultError(format!(
+                "Audit entry details too large: {} bytes (max {})",
+                details.len(),
+                MAX_DETAILS_BYTES
+            )));
+        }
 
         let event_type_str = serde_json::to_string(&entry.event_type).map_err(|e| {
             AgentOSError::Serialization(format!("AuditEventType serialize failed: {}", e))
@@ -288,6 +302,7 @@ impl AuditLog {
             )
             .map_err(|e| AgentOSError::VaultError(format!("Failed to get next seq: {}", e)))?;
 
+        let tool_id_for_hash = tool_id_str.clone().unwrap_or_default();
         let rollback_ref_str = entry.rollback_ref.clone().unwrap_or_default();
         let entry_hash = Self::compute_entry_hash(EntryHashInput {
             seq: next_seq,
@@ -297,6 +312,7 @@ impl AuditLog {
             event_type: event_type_str,
             agent_id: &agent_id_str,
             task_id: &task_id_str,
+            tool_id: &tool_id_for_hash,
             details: &details,
             severity: severity_str,
             reversible: entry.reversible,
@@ -328,13 +344,14 @@ impl AuditLog {
 
     /// Verify the integrity of the Merkle hash chain.
     pub fn verify_chain(&self, from_seq: Option<i64>) -> Result<ChainVerification, AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let from = from_seq.unwrap_or(1);
 
         let mut stmt = conn
             .prepare(
                 "SELECT id, timestamp, trace_id, event_type, \
                  COALESCE(agent_id, ''), COALESCE(task_id, ''), \
+                 COALESCE(tool_id, ''), \
                  details, severity, COALESCE(reversible, 0), COALESCE(rollback_ref, ''), \
                  prev_hash, entry_hash \
                  FROM audit_log WHERE id >= ?1 ORDER BY id ASC",
@@ -352,10 +369,11 @@ impl AuditLog {
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
-                    row.get::<_, i32>(8)?,
-                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i32>(9)?,
                     row.get::<_, String>(10)?,
                     row.get::<_, String>(11)?,
+                    row.get::<_, String>(12)?,
                 ))
             })
             .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
@@ -382,6 +400,7 @@ impl AuditLog {
                 event_type,
                 agent_id,
                 task_id,
+                tool_id,
                 details,
                 severity,
                 reversible_int,
@@ -416,6 +435,7 @@ impl AuditLog {
                 event_type: &event_type,
                 agent_id: &agent_id,
                 task_id: &task_id,
+                tool_id: &tool_id,
                 details: &details,
                 severity: &severity,
                 reversible: reversible_int != 0,
@@ -446,7 +466,7 @@ impl AuditLog {
     }
 
     pub fn query_recent(&self, limit: u32) -> Result<Vec<AuditEntry>, AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare("SELECT timestamp, trace_id, event_type, agent_id, task_id, tool_id, details, severity, reversible, rollback_ref FROM audit_log ORDER BY id DESC LIMIT ?1")
             .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
 
@@ -458,7 +478,7 @@ impl AuditLog {
         agent_id: &AgentID,
         limit: u32,
     ) -> Result<Vec<AuditEntry>, AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn
             .prepare("SELECT timestamp, trace_id, event_type, agent_id, task_id, tool_id, details, severity, reversible, rollback_ref FROM audit_log WHERE agent_id = ?1 ORDER BY id DESC LIMIT ?2")
             .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
@@ -467,7 +487,7 @@ impl AuditLog {
     }
 
     pub fn query_by_trace(&self, trace_id: &TraceID) -> Result<Vec<AuditEntry>, AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare("SELECT timestamp, trace_id, event_type, agent_id, task_id, tool_id, details, severity, reversible, rollback_ref FROM audit_log WHERE trace_id = ?1 ORDER BY id ASC")
             .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
 
@@ -479,7 +499,7 @@ impl AuditLog {
         event_type: AuditEventType,
         limit: u32,
     ) -> Result<Vec<AuditEntry>, AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         let event_type_str = serde_json::to_string(&event_type).map_err(|e| {
             AgentOSError::Serialization(format!("AuditEventType serialize failed: {}", e))
@@ -498,7 +518,7 @@ impl AuditLog {
         to: chrono::DateTime<chrono::Utc>,
         limit: u32,
     ) -> Result<Vec<AuditEntry>, AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare("SELECT timestamp, trace_id, event_type, agent_id, task_id, tool_id, details, severity, reversible, rollback_ref FROM audit_log WHERE timestamp >= ?1 AND timestamp <= ?2 ORDER BY id DESC LIMIT ?3")
             .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
 
@@ -511,8 +531,8 @@ impl AuditLog {
     /// Export the audit chain as JSONL (one JSON object per line).
     /// Each entry includes its sequence, hashes, and all fields.
     pub fn export_chain_json(&self, limit: Option<u32>) -> Result<String, AgentOSError> {
-        let conn = self.conn.lock().unwrap();
-        let limit_val = limit.unwrap_or(u32::MAX);
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let limit_val = limit.unwrap_or(100_000);
         let mut stmt = conn
             .prepare(
                 "SELECT id, timestamp, trace_id, event_type, \
@@ -529,8 +549,9 @@ impl AuditLog {
                 let details_str: String = row.get(7)?;
                 // details is stored as JSON text; parse it back so it embeds as a
                 // proper nested object rather than a double-encoded string.
-                let details_val: serde_json::Value =
-                    serde_json::from_str(&details_str).unwrap_or(serde_json::Value::Null);
+                // If corrupt, preserve the raw string rather than silently discarding.
+                let details_val: serde_json::Value = serde_json::from_str(&details_str)
+                    .unwrap_or_else(|_| serde_json::Value::String(details_str.clone()));
                 Ok(serde_json::json!({
                     "seq": row.get::<_, i64>(0)?,
                     "timestamp": row.get::<_, String>(1)?,
@@ -563,7 +584,7 @@ impl AuditLog {
     }
 
     pub fn count(&self) -> Result<u64, AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let count: u64 = conn
             .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))
             .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
@@ -587,7 +608,7 @@ impl AuditLog {
             return Ok(0); // 0 = unlimited; caller should not prune
         }
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         let current_count: u64 = conn
             .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))
@@ -617,38 +638,71 @@ impl AuditLog {
     where
         P: rusqlite::Params,
     {
+        /// Helper to convert a parse error into a rusqlite error for use inside query_map closures.
+        fn parse_err(msg: String) -> rusqlite::Error {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, msg)),
+            )
+        }
+
         let rows = stmt
             .query_map(params, |row| {
                 let timestamp_str: String = row.get(0)?;
                 let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc);
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .map_err(|e| parse_err(format!("Invalid timestamp: {}", e)))?;
 
                 let trace_id_str: String = row.get(1)?;
-                let trace_id = TraceID::from_uuid(uuid::Uuid::parse_str(&trace_id_str).unwrap());
+                let trace_id_uuid = uuid::Uuid::parse_str(&trace_id_str)
+                    .map_err(|e| parse_err(format!("Invalid trace_id UUID: {}", e)))?;
+                let trace_id = TraceID::from_uuid(trace_id_uuid);
 
                 let event_type_str: String = row.get(2)?;
                 let event_type: AuditEventType =
-                    serde_json::from_str(&format!("\"{}\"", event_type_str)).unwrap();
+                    serde_json::from_value(serde_json::Value::String(event_type_str.clone()))
+                        .map_err(|e| {
+                            parse_err(format!("Invalid event_type '{}': {}", event_type_str, e))
+                        })?;
 
                 let agent_id_str: Option<String> = row.get(3)?;
-                let agent_id =
-                    agent_id_str.map(|s| AgentID::from_uuid(uuid::Uuid::parse_str(&s).unwrap()));
+                let agent_id = agent_id_str
+                    .map(|s| {
+                        uuid::Uuid::parse_str(&s)
+                            .map(AgentID::from_uuid)
+                            .map_err(|e| parse_err(format!("Invalid agent_id UUID: {}", e)))
+                    })
+                    .transpose()?;
 
                 let task_id_str: Option<String> = row.get(4)?;
-                let task_id =
-                    task_id_str.map(|s| TaskID::from_uuid(uuid::Uuid::parse_str(&s).unwrap()));
+                let task_id = task_id_str
+                    .map(|s| {
+                        uuid::Uuid::parse_str(&s)
+                            .map(TaskID::from_uuid)
+                            .map_err(|e| parse_err(format!("Invalid task_id UUID: {}", e)))
+                    })
+                    .transpose()?;
 
                 let tool_id_str: Option<String> = row.get(5)?;
-                let tool_id =
-                    tool_id_str.map(|s| ToolID::from_uuid(uuid::Uuid::parse_str(&s).unwrap()));
+                let tool_id = tool_id_str
+                    .map(|s| {
+                        uuid::Uuid::parse_str(&s)
+                            .map(ToolID::from_uuid)
+                            .map_err(|e| parse_err(format!("Invalid tool_id UUID: {}", e)))
+                    })
+                    .transpose()?;
 
                 let details_str: String = row.get(6)?;
-                let details: serde_json::Value = serde_json::from_str(&details_str).unwrap();
+                let details: serde_json::Value = serde_json::from_str(&details_str)
+                    .map_err(|e| parse_err(format!("Invalid details JSON: {}", e)))?;
 
                 let severity_str: String = row.get(7)?;
                 let severity: AuditSeverity =
-                    serde_json::from_str(&format!("\"{}\"", severity_str)).unwrap();
+                    serde_json::from_value(serde_json::Value::String(severity_str.clone()))
+                        .map_err(|e| {
+                            parse_err(format!("Invalid severity '{}': {}", severity_str, e))
+                        })?;
 
                 let reversible_int: i32 = row.get(8).unwrap_or(0);
                 let rollback_ref: Option<String> = row.get(9).unwrap_or(None);

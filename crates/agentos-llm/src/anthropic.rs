@@ -18,7 +18,11 @@ pub struct AnthropicCore {
 impl AnthropicCore {
     pub fn new(api_key: SecretString, model: String) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
             api_key,
             model,
             capabilities: ModelCapabilities {

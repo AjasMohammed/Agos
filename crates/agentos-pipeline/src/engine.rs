@@ -251,7 +251,7 @@ impl PipelineEngine {
             match result {
                 Ok(output) => {
                     let completed_at = Utc::now();
-                    let duration_ms = (completed_at - started_at).num_milliseconds() as u64;
+                    let duration_ms = (completed_at - started_at).num_milliseconds().max(0) as u64;
                     return Ok(StepResult {
                         step_id: step.id.clone(),
                         status: StepStatus::Complete,
@@ -287,7 +287,11 @@ impl PipelineEngine {
     /// Unresolved variables are logged and replaced with a visible marker.
     /// Double braces avoid conflicts with JSON `{...}` and natural language.
     pub fn render_template(template: &str, context: &HashMap<String, String>) -> String {
-        let re = Regex::new(r"\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}").unwrap();
+        // Compile once; this pattern is constant and cannot fail
+        static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+            Regex::new(r"\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}").expect("static regex is valid")
+        });
+        let re = &*RE;
         re.replace_all(template, |caps: &regex::Captures| {
             let var_name = &caps[1];
             context.get(var_name).cloned().unwrap_or_else(|| {
@@ -339,7 +343,9 @@ impl PipelineEngine {
             sorted.push(current);
             if let Some(neighbors) = adj.get(current) {
                 for &neighbor in neighbors {
-                    let deg = in_degree.get_mut(neighbor).unwrap();
+                    let Some(deg) = in_degree.get_mut(neighbor) else {
+                        continue;
+                    };
                     *deg -= 1;
                     if *deg == 0 {
                         queue.push(neighbor);
@@ -358,7 +364,7 @@ impl PipelineEngine {
         // Map back to step references
         Ok(sorted
             .into_iter()
-            .map(|id| *step_map.get(id).unwrap())
+            .filter_map(|id| step_map.get(id).copied())
             .collect())
     }
 

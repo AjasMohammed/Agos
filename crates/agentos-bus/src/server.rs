@@ -4,6 +4,9 @@ use agentos_types::AgentOSError;
 use std::path::{Path, PathBuf};
 use tokio::net::{UnixListener, UnixStream};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 pub struct BusServer {
     listener: UnixListener,
     socket_path: PathBuf,
@@ -30,6 +33,13 @@ impl BusServer {
 
         let listener = UnixListener::bind(socket_path)
             .map_err(|e| AgentOSError::BusError(format!("Failed to bind to Unix socket: {}", e)))?;
+
+        // Restrict socket to owner-only access (0600) to prevent other local users
+        // from connecting and issuing privileged commands.
+        #[cfg(unix)]
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |e| AgentOSError::BusError(format!("Failed to set socket permissions to 0600: {}", e)),
+        )?;
 
         tracing::info!("Intent Bus listening on {:?}", socket_path);
 

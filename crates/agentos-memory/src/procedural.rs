@@ -300,6 +300,8 @@ impl ProceduralStore {
         })?;
         let agent_id_str = agent_id.map(|id| id.as_uuid().to_string());
 
+        // Sanitize query to prevent FTS5 operator injection
+        let sanitized_query = format!("\"{}\"", query.replace('"', "\"\""));
         let fts_ranks: HashMap<i64, f32> = {
             let mut map = HashMap::new();
             if let Ok(mut stmt) = conn.prepare(
@@ -308,7 +310,7 @@ impl ProceduralStore {
                  ORDER BY rank
                  LIMIT 200",
             ) {
-                if let Ok(rows) = stmt.query_map(params![query], |row| {
+                if let Ok(rows) = stmt.query_map(params![sanitized_query], |row| {
                     let rowid: i64 = row.get(0)?;
                     let rank: f64 = row.get(1)?;
                     Ok((rowid, rank as f32))

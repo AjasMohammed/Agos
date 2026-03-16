@@ -238,6 +238,8 @@ impl SemanticStore {
         let agent_id_str = agent_id.map(|id| id.as_uuid().to_string());
 
         // Phase 1: FTS5 pre-filter — find candidate chunk rowids by text relevance
+        // Sanitize query to prevent FTS5 operator injection (*, OR, NOT, NEAR, etc.)
+        let sanitized_query = format!("\"{}\"", query.replace('"', "\"\""));
         let fts_ranks: HashMap<i64, f32> = {
             let mut fts_map = HashMap::new();
             // FTS5 MATCH can fail on certain query syntax; fall back gracefully
@@ -245,7 +247,7 @@ impl SemanticStore {
                 "SELECT rowid, rank FROM semantic_fts WHERE semantic_fts MATCH ?1 ORDER BY rank LIMIT ?2",
             ) {
                 if let Ok(rows) = fts_stmt.query_map(
-                    params![query, Self::FTS_CANDIDATE_LIMIT as i64],
+                    params![sanitized_query, Self::FTS_CANDIDATE_LIMIT as i64],
                     |row| {
                         let rowid: i64 = row.get(0)?;
                         let rank: f64 = row.get(1)?;

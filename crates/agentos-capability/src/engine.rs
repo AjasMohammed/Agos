@@ -4,15 +4,23 @@ use rand::RngCore;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::RwLock;
 use std::time::Duration;
+use zeroize::Zeroize;
 
 /// Internal vault key name for the persisted HMAC signing key.
 const SIGNING_KEY_NAME: &str = "__internal_hmac_signing_key";
 
 pub struct CapabilityEngine {
     /// The kernel's secret signing key (256-bit).
+    /// Zeroized on drop to prevent key material lingering in memory.
     signing_key: [u8; 32],
     /// Per-agent permission sets. Key is AgentID.
     agent_permissions: RwLock<HashMap<AgentID, PermissionSet>>,
+}
+
+impl Drop for CapabilityEngine {
+    fn drop(&mut self) {
+        self.signing_key.zeroize();
+    }
 }
 
 impl CapabilityEngine {
@@ -258,33 +266,10 @@ impl CapabilityEngine {
 
     /// Check ONLY the HMAC signature validity (not expiry or permissions).
     /// Uses constant-time comparison to prevent timing side-channel attacks.
+    ///
+    /// Delegates to `verify_token_signature` to avoid duplicating the HMAC field layout.
     pub fn verify_signature(&self, token: &CapabilityToken) -> bool {
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-
-        type HmacSha256 = Hmac<Sha256>;
-
-        // Recompute the HMAC and use verify_slice for constant-time comparison
-        let mut mac =
-            HmacSha256::new_from_slice(&self.signing_key).expect("HMAC can take any size key");
-
-        // Replicate the same signing process from compute_signature
-        mac.update(token.task_id.as_uuid().as_bytes());
-        mac.update(token.agent_id.as_uuid().as_bytes());
-        for tool_id in &token.allowed_tools {
-            mac.update(tool_id.as_uuid().as_bytes());
-        }
-        for flag in &token.allowed_intents {
-            mac.update(&[*flag as u8]);
-        }
-        for entry in &token.permissions.entries {
-            mac.update(entry.resource.as_bytes());
-            mac.update(&[entry.read as u8, entry.write as u8, entry.execute as u8]);
-        }
-        mac.update(token.issued_at.to_rfc3339().as_bytes());
-        mac.update(token.expires_at.to_rfc3339().as_bytes());
-
-        mac.verify_slice(&token.signature).is_ok()
+        crate::token::verify_token_signature(&self.signing_key, token)
     }
 
     /// Sign arbitrary bytes using the kernel's HMAC-SHA256 signing key.
@@ -455,5 +440,115 @@ mod tests {
             }
             _ => panic!("Expected permission denied error"),
         }
+    }
+
+    #[test]
+    fn test_deny_entries_tampering_invalidates_signature() {
+        let engine = CapabilityEngine::new();
+        let agent_id = AgentID::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs:/home/user/".into(), true, true, false, None);
+        perms.deny("fs:/home/user/.ssh/".into());
+        engine.register_agent(agent_id, perms.clone());
+
+        let mut token = engine
+            .issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                perms,
+                Duration::from_secs(300),
+            )
+            .unwrap();
+
+        // Verify original token is valid
+        assert!(engine.verify_signature(&token));
+
+        // Tamper: strip all deny entries
+        token.permissions.deny_entries.clear();
+
+        // Signature must now be invalid
+        assert!(!engine.verify_signature(&token));
+    }
+
+    #[test]
+    fn test_expires_at_tampering_invalidates_signature() {
+        let engine = CapabilityEngine::new();
+        let agent_id = AgentID::new();
+        let mut perms = PermissionSet::new();
+        let past = chrono::Utc::now() - chrono::Duration::seconds(60);
+        perms.grant("fs:/tmp/".into(), true, false, false, Some(past));
+        engine.register_agent(agent_id, perms.clone());
+
+        let mut token = engine
+            .issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                perms,
+                Duration::from_secs(300),
+            )
+            .unwrap();
+
+        // Verify original token is valid
+        assert!(engine.verify_signature(&token));
+
+        // Tamper: remove expires_at to make the time-limited permission permanent
+        token.permissions.entries[0].expires_at = None;
+
+        // Signature must now be invalid
+        assert!(!engine.verify_signature(&token));
+    }
+
+    #[test]
+    fn test_cross_engine_token_rejected() {
+        let engine1 = CapabilityEngine::new();
+        let engine2 = CapabilityEngine::new();
+        let agent_id = AgentID::new();
+        engine1.register_agent(agent_id, PermissionSet::new());
+
+        let token = engine1
+            .issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                PermissionSet::new(),
+                Duration::from_secs(300),
+            )
+            .unwrap();
+
+        // Token signed by engine1 must fail verification on engine2 (different key)
+        assert!(!engine2.verify_signature(&token));
+    }
+
+    #[test]
+    fn test_serialization_roundtrip_preserves_signature() {
+        let engine = CapabilityEngine::new();
+        let agent_id = AgentID::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".into(), true, true, false, None);
+        perms.deny("fs:~/.ssh/".into());
+        engine.register_agent(agent_id, perms.clone());
+
+        let token = engine
+            .issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read, IntentTypeFlag::Write]),
+                perms,
+                Duration::from_secs(300),
+            )
+            .unwrap();
+
+        // Serialize to JSON and back
+        let json = serde_json::to_string(&token).unwrap();
+        let deserialized: CapabilityToken = serde_json::from_str(&json).unwrap();
+
+        // Signature must still verify after round-trip
+        assert!(engine.verify_signature(&deserialized));
     }
 }

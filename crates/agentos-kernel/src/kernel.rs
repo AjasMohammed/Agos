@@ -22,7 +22,7 @@ use agentos_pipeline::{PipelineEngine, PipelineStore};
 use agentos_sandbox::SandboxExecutor;
 use agentos_tools::runner::ToolRunner;
 use agentos_types::*;
-use agentos_vault::SecretsVault;
+use agentos_vault::{SecretsVault, ZeroizingString};
 use agentos_wasm::WasmToolExecutor;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -109,7 +109,10 @@ impl Kernel {
     }
 
     /// Boot the kernel: load config, open subsystems, start bus, begin accepting.
-    pub async fn boot(config_path: &Path, vault_passphrase: &str) -> Result<Self, anyhow::Error> {
+    pub async fn boot(
+        config_path: &Path,
+        vault_passphrase: &ZeroizingString,
+    ) -> Result<Self, anyhow::Error> {
         // 1. Load config
         let config = load_config(config_path)?;
         tracing::info!(

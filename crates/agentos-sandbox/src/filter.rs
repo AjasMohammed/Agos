@@ -145,10 +145,10 @@ pub fn build_seccomp_filter(config: &SandboxConfig) -> Result<BpfProgram, AgentO
 
     let filter = SeccompFilter::new(
         rules.into_iter().collect(),
-        // on-match action: allow the syscall
-        SeccompAction::Allow,
-        // default (mismatch) action: deny with EPERM
+        // mismatch action: deny syscalls NOT in the allowlist
         SeccompAction::Errno(libc::EPERM as u32),
+        // match action: allow syscalls IN the allowlist
+        SeccompAction::Allow,
         arch,
     )
     .map_err(|e| AgentOSError::SandboxFilterError {

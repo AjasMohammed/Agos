@@ -182,7 +182,12 @@ async fn scenario_c_secret_scope_denial() {
     let audit_path = dir.path().join("audit.db");
     let audit = Arc::new(agentos_audit::AuditLog::open(&audit_path).unwrap());
 
-    let vault = SecretsVault::initialize(&vault_path, "test-passphrase-sec", audit).unwrap();
+    let vault = SecretsVault::initialize(
+        &vault_path,
+        &agentos_vault::ZeroizingString::new("test-passphrase-sec".to_string()),
+        audit,
+    )
+    .unwrap();
 
     let agent_a = AgentID::new();
     let agent_b = AgentID::new();

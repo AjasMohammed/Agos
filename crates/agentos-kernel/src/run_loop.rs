@@ -310,7 +310,7 @@ impl Kernel {
 
                                 // Sweep expired snapshots every ~10 minutes (60 ticks × 10s)
                                 tick += 1;
-                                if tick % 60 == 0 {
+                                if tick.is_multiple_of(60) {
                                     kernel.sweep_expired_snapshots(
                                         Duration::from_secs(72 * 3600), // 72h (Spec §5)
                                     );

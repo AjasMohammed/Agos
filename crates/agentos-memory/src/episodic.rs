@@ -166,7 +166,7 @@ impl EpisodicStore {
         let mut stmt = conn
             .prepare(
                 "SELECT id, task_id, agent_id, entry_type, content, summary, metadata, timestamp, trace_id
-                 FROM episodic_events WHERE task_id = ?1 ORDER BY timestamp ASC",
+                 FROM episodic_events WHERE task_id = ?1 ORDER BY timestamp ASC LIMIT 10000",
             )
             .map_err(|e| AgentOSError::StorageError(format!("Failed to prepare query: {}", e)))?;
 

@@ -33,7 +33,11 @@ impl PipelineStore {
     }
 
     fn init_tables(&self) -> Result<(), AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to enable foreign keys: {}", e))
+            })?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS pipelines (
                 name        TEXT PRIMARY KEY,
@@ -83,7 +87,7 @@ impl PipelineStore {
         version: &str,
         yaml: &str,
     ) -> Result<(), AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT OR REPLACE INTO pipelines (name, version, definition, installed_at) VALUES (?1, ?2, ?3, ?4)",
@@ -94,7 +98,7 @@ impl PipelineStore {
     }
 
     pub fn get_pipeline_yaml(&self, name: &str) -> Result<String, AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.query_row(
             "SELECT definition FROM pipelines WHERE name = ?1",
             rusqlite::params![name],
@@ -106,7 +110,7 @@ impl PipelineStore {
     }
 
     pub fn list_pipelines(&self) -> Result<Vec<PipelineSummary>, AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn
             .prepare("SELECT name, version, definition, installed_at FROM pipelines ORDER BY name")
             .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
@@ -144,7 +148,7 @@ impl PipelineStore {
     }
 
     pub fn remove_pipeline(&self, name: &str) -> Result<(), AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let deleted = conn
             .execute(
                 "DELETE FROM pipelines WHERE name = ?1",
@@ -162,7 +166,7 @@ impl PipelineStore {
     // --- Run tracking ---
 
     pub fn create_run(&self, run: &PipelineRun) -> Result<(), AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let step_results_json = serde_json::to_string(&run.step_results)
             .map_err(|e| AgentOSError::Serialization(e.to_string()))?;
         conn.execute(
@@ -185,7 +189,7 @@ impl PipelineStore {
     }
 
     pub fn update_run(&self, run: &PipelineRun) -> Result<(), AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let step_results_json = serde_json::to_string(&run.step_results)
             .map_err(|e| AgentOSError::Serialization(e.to_string()))?;
         conn.execute(
@@ -204,7 +208,7 @@ impl PipelineStore {
     }
 
     pub fn get_run(&self, run_id: &RunID) -> Result<PipelineRun, AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.query_row(
             "SELECT id, pipeline_name, input, status, step_results, output, started_at, completed_at, error FROM pipeline_runs WHERE id = ?1",
             rusqlite::params![run_id.to_string()],
@@ -219,10 +223,30 @@ impl PipelineStore {
                 let completed_at_str: Option<String> = row.get(7)?;
                 let error: Option<String> = row.get(8)?;
 
-                let id = RunID::from_uuid(uuid::Uuid::parse_str(&id_str).unwrap_or_default());
+                let id = RunID::from_uuid(
+                    uuid::Uuid::parse_str(&id_str).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("Invalid UUID: {}", e),
+                            )),
+                        )
+                    })?,
+                );
                 let status = PipelineRunStatus::parse_or_failed(&status_str);
                 let step_results: HashMap<String, StepResult> =
-                    serde_json::from_str(&step_results_json).unwrap_or_default();
+                    serde_json::from_str(&step_results_json).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("Invalid step_results JSON: {}", e),
+                            )),
+                        )
+                    })?;
                 let started_at = chrono::DateTime::parse_from_rfc3339(&started_at_str)
                     .map(|t| t.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now());
@@ -257,7 +281,7 @@ impl PipelineStore {
         run_id: &RunID,
         result: &StepResult,
     ) -> Result<(), AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO step_executions (run_id, step_id, status, output, error, started_at, completed_at, attempt)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -281,7 +305,7 @@ impl PipelineStore {
         run_id: &RunID,
         step_id: &str,
     ) -> Result<Vec<StepResult>, AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn
             .prepare(
                 "SELECT step_id, status, output, error, started_at, completed_at, attempt
@@ -310,7 +334,7 @@ impl PipelineStore {
                         .ok()
                 });
                 let duration_ms = match (started_at, completed_at) {
-                    (Some(s), Some(e)) => Some((e - s).num_milliseconds() as u64),
+                    (Some(s), Some(e)) => Some((e - s).num_milliseconds().max(0) as u64),
                     _ => None,
                 };
 

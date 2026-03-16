@@ -50,7 +50,14 @@ max_cpu_ms = 1000
         std::fs::write(core_tools_dir.join(format!("tool-{}.toml", i)), manifest).unwrap();
     }
 
-    let kernel = Arc::new(Kernel::boot(&config_path, "test-passphrase").await.unwrap());
+    let kernel = Arc::new(
+        Kernel::boot(
+            &config_path,
+            &agentos_vault::ZeroizingString::new("test-passphrase".to_string()),
+        )
+        .await
+        .unwrap(),
+    );
 
     let logs = kernel.audit.query_recent(10).unwrap();
     assert!(logs

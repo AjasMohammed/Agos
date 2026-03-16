@@ -20,7 +20,11 @@ impl CustomCore {
     /// Create a new Custom adapter.
     pub fn new(api_key: Option<SecretString>, model: String, base_url: String) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
             api_key,
             model,
             base_url,

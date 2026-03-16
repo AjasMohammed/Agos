@@ -16,7 +16,14 @@ async fn setup_kernel_and_client(temp_dir: &tempfile::TempDir) -> (Arc<Kernel>, 
     std::fs::create_dir_all(temp_dir.path().join("vault")).unwrap();
     std::fs::create_dir_all(temp_dir.path().join("tools/core")).unwrap();
 
-    let kernel = Arc::new(Kernel::boot(&config_path, "test-passphrase").await.unwrap());
+    let kernel = Arc::new(
+        Kernel::boot(
+            &config_path,
+            &agentos_vault::ZeroizingString::new("test-passphrase".to_string()),
+        )
+        .await
+        .unwrap(),
+    );
 
     let kernel_clone = kernel.clone();
     tokio::spawn(async move {

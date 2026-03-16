@@ -37,7 +37,7 @@ const VAULT_SENTINEL: &str = "AGENTOS_VAULT_OK";
 impl SecretsVault {
     pub fn initialize(
         path: &Path,
-        passphrase: &str,
+        passphrase: &ZeroizingString,
         audit: Arc<AuditLog>,
     ) -> Result<Self, AgentOSError> {
         if Self::is_initialized(path) {
@@ -48,6 +48,15 @@ impl SecretsVault {
 
         let conn = Connection::open(path)
             .map_err(|e| AgentOSError::VaultError(format!("Vault DB open failed: {}", e)))?;
+
+        // Restrict file permissions so only the owner can read/write the vault
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |e| AgentOSError::VaultError(format!("Failed to set vault permissions: {}", e)),
+            )?;
+        }
 
         conn.execute_batch(
             "
@@ -97,7 +106,11 @@ impl SecretsVault {
         })
     }
 
-    pub fn open(path: &Path, passphrase: &str, audit: Arc<AuditLog>) -> Result<Self, AgentOSError> {
+    pub fn open(
+        path: &Path,
+        passphrase: &ZeroizingString,
+        audit: Arc<AuditLog>,
+    ) -> Result<Self, AgentOSError> {
         let conn = Connection::open(path)
             .map_err(|e| AgentOSError::VaultError(format!("Vault DB open failed: {}", e)))?;
 
@@ -111,6 +124,12 @@ impl SecretsVault {
                 AgentOSError::VaultError("Vault not initialized or corrupt salt".to_string())
             })?;
 
+        if salt_vec.len() != 32 {
+            return Err(AgentOSError::VaultError(format!(
+                "Corrupt salt: expected 32 bytes, got {}",
+                salt_vec.len()
+            )));
+        }
         let mut salt = [0u8; 32];
         salt.copy_from_slice(&salt_vec);
 
@@ -259,10 +278,10 @@ impl SecretsVault {
                 let name: String = row.get(0)?;
                 let scope_json: String = row.get(1)?;
 
-                // Corrupted scope JSON: surface as an error row so callers see the problem
-                // rather than silently treating the entry as Global (would widen access).
+                // Corrupted scope JSON: treat as Kernel so it gets filtered out below,
+                // preventing silent access widening to Global.
                 let scope: SecretScope =
-                    serde_json::from_str(&scope_json).unwrap_or(SecretScope::Global); // fallback: will be filtered below
+                    serde_json::from_str(&scope_json).unwrap_or(SecretScope::Kernel);
 
                 let created_str: String = row.get(2)?;
                 let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
@@ -532,10 +551,7 @@ impl SecretsVault {
         };
 
         if chrono::Utc::now() > entry.expires_at {
-            return Err(AgentOSError::VaultError(format!(
-                "Proxy token expired at {}",
-                entry.expires_at
-            )));
+            return Err(AgentOSError::VaultError("Proxy token expired".to_string()));
         }
 
         self.get(&entry.secret_name).await
@@ -638,7 +654,8 @@ mod tests {
     fn make_vault(dir: &TempDir) -> SecretsVault {
         let path = dir.path().join("test_vault.db");
         let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
-        SecretsVault::initialize(&path, "test-passphrase-123", audit).unwrap()
+        let passphrase = ZeroizingString::new("test-passphrase-123".to_string());
+        SecretsVault::initialize(&path, &passphrase, audit).unwrap()
     }
 
     #[tokio::test]
@@ -666,9 +683,11 @@ mod tests {
         let path = dir.path().join("test_vault.db");
         let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
 
-        SecretsVault::initialize(&path, "correct-pass", audit.clone()).unwrap();
+        let correct = ZeroizingString::new("correct-pass".to_string());
+        SecretsVault::initialize(&path, &correct, audit.clone()).unwrap();
 
-        let result = SecretsVault::open(&path, "wrong-pass", audit);
+        let wrong = ZeroizingString::new("wrong-pass".to_string());
+        let result = SecretsVault::open(&path, &wrong, audit);
         assert!(result.is_err());
     }
 

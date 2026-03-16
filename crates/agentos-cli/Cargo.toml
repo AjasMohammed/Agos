@@ -11,6 +11,7 @@ path = "src/main.rs"
 agentos-types = { path = "../agentos-types" }
 agentos-kernel = { path = "../agentos-kernel" }
 agentos-bus = { path = "../agentos-bus" }
+agentos-vault = { path = "../agentos-vault" }
 agentos-tools = { path = "../agentos-tools" }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }

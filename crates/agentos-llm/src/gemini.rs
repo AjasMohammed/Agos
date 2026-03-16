@@ -18,7 +18,11 @@ pub struct GeminiCore {
 impl GeminiCore {
     pub fn new(api_key: SecretString, model: String) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
             api_key,
             model,
             capabilities: ModelCapabilities {
@@ -62,9 +66,8 @@ impl LLMCore for GeminiCore {
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
         let start_time = Instant::now();
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
             self.model,
-            self.api_key.expose_secret()
         );
 
         let contents = self.format_contents(context);
@@ -87,6 +90,7 @@ impl LLMCore for GeminiCore {
             .client
             .post(&url)
             .header("Content-Type", "application/json")
+            .header("x-goog-api-key", self.api_key.expose_secret())
             .json(&body);
 
         let res = req.send().await.map_err(|e| AgentOSError::LLMError {
@@ -153,11 +157,16 @@ impl LLMCore for GeminiCore {
         use crate::types::HealthStatus;
         let start = std::time::Instant::now();
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}?key={}",
+            "https://generativelanguage.googleapis.com/v1beta/models/{}",
             self.model,
-            self.api_key.expose_secret()
         );
-        match self.client.get(&url).send().await {
+        match self
+            .client
+            .get(&url)
+            .header("x-goog-api-key", self.api_key.expose_secret())
+            .send()
+            .await
+        {
             Ok(res) if res.status().is_success() => {
                 let latency = start.elapsed();
                 if latency > std::time::Duration::from_secs(2) {

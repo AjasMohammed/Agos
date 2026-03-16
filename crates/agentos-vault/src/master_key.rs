@@ -1,5 +1,5 @@
 use agentos_types::AgentOSError;
-use argon2::Argon2;
+use argon2::{Algorithm, Argon2, Params, Version};
 use rand::RngCore;
 use zeroize::ZeroizeOnDrop;
 
@@ -11,12 +11,19 @@ pub struct MasterKey {
 
 impl MasterKey {
     /// Derive a 256-bit key from passphrase using Argon2id.
-    pub fn derive(passphrase: &str, salt: &[u8; 32]) -> Result<MasterKey, AgentOSError> {
-        let argon2 = Argon2::default(); // Argon2id with recommended params
+    ///
+    /// Parameters: 64 MiB memory, 3 iterations, 1 lane, 32-byte output.
+    pub fn derive(
+        passphrase: &ZeroizingString,
+        salt: &[u8; 32],
+    ) -> Result<MasterKey, AgentOSError> {
+        let params = Params::new(65536, 3, 1, Some(32))
+            .map_err(|e| AgentOSError::VaultError(format!("Invalid Argon2 params: {}", e)))?;
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let mut key_bytes = [0u8; 32];
 
         argon2
-            .hash_password_into(passphrase.as_bytes(), salt, &mut key_bytes)
+            .hash_password_into(passphrase.as_str().as_bytes(), salt, &mut key_bytes)
             .map_err(|e| AgentOSError::VaultError(format!("Key derivation failed: {}", e)))?;
 
         Ok(MasterKey { key_bytes })

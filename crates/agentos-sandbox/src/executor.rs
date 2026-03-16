@@ -87,6 +87,13 @@ impl SandboxExecutor {
             .stderr(std::process::Stdio::piped())
             .stdin(std::process::Stdio::null());
 
+        // Sanitize environment: clear inherited env vars (API keys, LD_PRELOAD, etc.)
+        // and set only the minimum required variables.
+        cmd.env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &self.data_dir)
+            .env("LANG", "C.UTF-8");
+
         // 3. Set resource limits and seccomp via pre-exec hook (unsafe because pre_exec)
         let max_memory = config.max_memory_bytes;
         let max_cpu_secs = config.max_cpu_ms.div_ceil(1000); // round up to full seconds
@@ -104,6 +111,20 @@ impl SandboxExecutor {
             let bpf_for_closure = bpf_filter.clone();
 
             cmd.pre_exec(move || {
+                // Close all inherited file descriptors > 2 (keep stdin/stdout/stderr)
+                // to prevent child from accessing parent's DB connections, sockets, etc.
+                #[cfg(target_os = "linux")]
+                {
+                    // close_range is available since Linux 5.9
+                    let ret = libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32);
+                    if ret != 0 {
+                        // Fallback: iterate and close
+                        for fd in 3..1024 {
+                            libc::close(fd);
+                        }
+                    }
+                }
+
                 // Set RLIMIT_AS (virtual memory limit)
                 let mem_limit = libc::rlimit {
                     rlim_cur: max_memory,
@@ -119,6 +140,33 @@ impl SandboxExecutor {
                     rlim_max: max_cpu_secs,
                 };
                 if libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+
+                // Set RLIMIT_NPROC (prevent fork bombs)
+                let nproc_limit = libc::rlimit {
+                    rlim_cur: 4,
+                    rlim_max: 4,
+                };
+                if libc::setrlimit(libc::RLIMIT_NPROC, &nproc_limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+
+                // Set RLIMIT_FSIZE (prevent disk filling via large file writes)
+                let fsize_limit = libc::rlimit {
+                    rlim_cur: max_memory, // use same limit as memory
+                    rlim_max: max_memory,
+                };
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &fsize_limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+
+                // Set RLIMIT_NOFILE (limit open file descriptors)
+                let nofile_limit = libc::rlimit {
+                    rlim_cur: 256,
+                    rlim_max: 256,
+                };
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &nofile_limit) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
 

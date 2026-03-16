@@ -126,8 +126,14 @@ mod tests {
         let vault_path = dir.path().join("test.vault");
         let audit_path = dir.path().join("audit.db");
         let audit = Arc::new(AuditLog::open(&audit_path).unwrap());
-        let vault =
-            Arc::new(SecretsVault::initialize(&vault_path, "test-passphrase", audit).unwrap());
+        let vault = Arc::new(
+            SecretsVault::initialize(
+                &vault_path,
+                &agentos_vault::ZeroizingString::new("test-passphrase".to_string()),
+                audit,
+            )
+            .unwrap(),
+        );
         (dir, vault)
     }
 

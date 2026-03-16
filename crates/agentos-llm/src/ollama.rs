@@ -16,7 +16,11 @@ pub struct OllamaCore {
 impl OllamaCore {
     pub fn new(host: &str, model: &str) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
             host: host.to_string(),
             model: model.to_string(),
             capabilities: ModelCapabilities {
