@@ -353,7 +353,11 @@ impl Kernel {
         // Return early if signing fails so the unsigned message is never sent
         // (the bus would reject it anyway, but with a misleading error).
         let payload = msg.signing_payload();
-        match self.identity_manager.sign_message(&task.agent_id, &payload).await {
+        match self
+            .identity_manager
+            .sign_message(&task.agent_id, &payload)
+            .await
+        {
             Ok(sig_hex) => msg.signature = Some(sig_hex),
             Err(e) => {
                 return KernelActionResult {

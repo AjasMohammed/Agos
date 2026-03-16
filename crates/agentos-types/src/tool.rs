@@ -9,7 +9,11 @@ use std::path::PathBuf;
 /// - `Verified`  — community tool reviewed and co-signed by maintainers; author sig required.
 /// - `Community` — author-signed only; user must opt-in to install.
 /// - `Blocked`   — revoked; kernel hard-rejects even if locally installed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+///
+/// Variant order is significant for trust comparisons: Core > Verified > Community > Blocked.
+/// Note: derived Ord orders variants top-to-bottom (Core = 0, Blocked = 3), so
+/// *lower numeric value = higher trust*. Use explicit comparisons: `tier <= TrustTier::Verified`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TrustTier {
     Core,

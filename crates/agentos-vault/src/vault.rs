@@ -261,8 +261,8 @@ impl SecretsVault {
 
                 // Corrupted scope JSON: surface as an error row so callers see the problem
                 // rather than silently treating the entry as Global (would widen access).
-                let scope: SecretScope = serde_json::from_str(&scope_json)
-                    .unwrap_or_else(|_| SecretScope::Global); // fallback: will be filtered below
+                let scope: SecretScope =
+                    serde_json::from_str(&scope_json).unwrap_or(SecretScope::Global); // fallback: will be filtered below
 
                 let created_str: String = row.get(2)?;
                 let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
@@ -456,15 +456,13 @@ impl SecretsVault {
                     )))
                 }
             }
-            SecretScope::Tool(_) => {
-                match owner {
-                    SecretOwner::Agent(owner_id) if owner_id == agent_id => Ok(()),
-                    _ => Err(AgentOSError::VaultError(format!(
-                        "Agent {} is not authorized to access tool-scoped secret '{}'",
-                        agent_id, secret_name
-                    ))),
-                }
-            }
+            SecretScope::Tool(_) => match owner {
+                SecretOwner::Agent(owner_id) if owner_id == agent_id => Ok(()),
+                _ => Err(AgentOSError::VaultError(format!(
+                    "Agent {} is not authorized to access tool-scoped secret '{}'",
+                    agent_id, secret_name
+                ))),
+            },
         }
     }
 
@@ -624,7 +622,10 @@ impl ProxyVault {
         secret_name: &str,
         agent_id: AgentID,
     ) -> Result<ZeroizingString, AgentOSError> {
-        let handle = self.inner.issue_proxy_token(secret_name, 5, agent_id).await?;
+        let handle = self
+            .inner
+            .issue_proxy_token(secret_name, 5, agent_id)
+            .await?;
         self.inner.resolve_proxy(&handle).await
     }
 }
@@ -774,8 +775,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(vault.issue_proxy_token("SHARED_KEY", 60, agent_a).await.is_ok());
-        assert!(vault.issue_proxy_token("SHARED_KEY", 60, agent_b).await.is_ok());
+        assert!(vault
+            .issue_proxy_token("SHARED_KEY", 60, agent_a)
+            .await
+            .is_ok());
+        assert!(vault
+            .issue_proxy_token("SHARED_KEY", 60, agent_b)
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
@@ -796,7 +803,10 @@ mod tests {
             .unwrap();
 
         let result = vault.issue_proxy_token("__kernel_key", 60, agent).await;
-        assert!(result.is_err(), "Agent should not access kernel-scoped secret");
+        assert!(
+            result.is_err(),
+            "Agent should not access kernel-scoped secret"
+        );
         assert!(
             result.unwrap_err().to_string().contains("kernel-scoped"),
             "Error should mention kernel scope"
@@ -835,12 +845,20 @@ mod tests {
         let vault = make_vault(&dir);
 
         vault
-            .set("__internal_hmac_key", "hmac-value", SecretOwner::Kernel, SecretScope::Kernel)
+            .set(
+                "__internal_hmac_key",
+                "hmac-value",
+                SecretOwner::Kernel,
+                SecretScope::Kernel,
+            )
             .await
             .unwrap();
 
         let result = vault.revoke("__internal_hmac_key").await;
-        assert!(result.is_err(), "Kernel-scoped secret must not be revocable");
+        assert!(
+            result.is_err(),
+            "Kernel-scoped secret must not be revocable"
+        );
         assert!(
             result.unwrap_err().to_string().contains("kernel-scoped"),
             "Error should mention kernel scope"
@@ -857,12 +875,20 @@ mod tests {
         let vault = make_vault(&dir);
 
         vault
-            .set("__internal_hmac_key", "original-value", SecretOwner::Kernel, SecretScope::Kernel)
+            .set(
+                "__internal_hmac_key",
+                "original-value",
+                SecretOwner::Kernel,
+                SecretScope::Kernel,
+            )
             .await
             .unwrap();
 
         let result = vault.rotate("__internal_hmac_key", "attacker-value").await;
-        assert!(result.is_err(), "Kernel-scoped secret must not be rotatable");
+        assert!(
+            result.is_err(),
+            "Kernel-scoped secret must not be rotatable"
+        );
         assert!(
             result.unwrap_err().to_string().contains("kernel-scoped"),
             "Error should mention kernel scope"
@@ -894,16 +920,30 @@ mod tests {
         let vault = make_vault(&dir);
 
         vault
-            .set("public-key", "value1", SecretOwner::Kernel, SecretScope::Global)
+            .set(
+                "public-key",
+                "value1",
+                SecretOwner::Kernel,
+                SecretScope::Global,
+            )
             .await
             .unwrap();
         vault
-            .set("__internal_hmac_key", "hidden", SecretOwner::Kernel, SecretScope::Kernel)
+            .set(
+                "__internal_hmac_key",
+                "hidden",
+                SecretOwner::Kernel,
+                SecretScope::Kernel,
+            )
             .await
             .unwrap();
 
         let list = vault.list().await.unwrap();
-        assert_eq!(list.len(), 1, "Kernel-scoped secret must not appear in list()");
+        assert_eq!(
+            list.len(),
+            1,
+            "Kernel-scoped secret must not appear in list()"
+        );
         assert_eq!(list[0].name, "public-key");
         assert!(!list.iter().any(|m| m.name.contains("hmac")));
     }

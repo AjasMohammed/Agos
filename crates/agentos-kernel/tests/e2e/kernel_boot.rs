@@ -43,7 +43,11 @@ async fn test_list_agents_empty_on_fresh_boot() {
 
     match response {
         KernelResponse::AgentList(agents) => {
-            assert!(agents.is_empty(), "expected no agents, got {}", agents.len());
+            assert!(
+                agents.is_empty(),
+                "expected no agents, got {}",
+                agents.len()
+            );
         }
         other => panic!("Expected AgentList, got: {other:?}"),
     }
@@ -113,7 +117,10 @@ async fn test_list_tools_returns_core_tools() {
 
     match response {
         KernelResponse::ToolList(tools) => {
-            assert!(!tools.is_empty(), "expected at least one core tool installed");
+            assert!(
+                !tools.is_empty(),
+                "expected at least one core tool installed"
+            );
         }
         other => panic!("Expected ToolList, got: {other:?}"),
     }
@@ -166,6 +173,12 @@ async fn test_audit_log_rotation() {
     let pruned = audit.prune_old_entries(2).unwrap();
     let remaining = audit.count().unwrap();
 
-    assert!(pruned > 0 || remaining <= 2, "prune should have trimmed entries");
-    assert!(remaining <= 2, "expected at most 2 entries after rotation, got {remaining}");
+    assert!(
+        pruned > 0 || remaining <= 2,
+        "prune should have trimmed entries"
+    );
+    assert!(
+        remaining <= 2,
+        "expected at most 2 entries after rotation, got {remaining}"
+    );
 }

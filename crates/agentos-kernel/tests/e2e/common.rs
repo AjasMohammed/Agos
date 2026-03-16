@@ -121,11 +121,7 @@ pub async fn setup_kernel() -> (Arc<Kernel>, BusClient, tempfile::TempDir) {
 
 /// Register a mock agent directly into the kernel registry and wire up a
 /// deterministic `MockLLMCore` for it.
-pub async fn register_mock_agent(
-    kernel: &Kernel,
-    name: &str,
-    responses: Vec<String>,
-) -> AgentID {
+pub async fn register_mock_agent(kernel: &Kernel, name: &str, responses: Vec<String>) -> AgentID {
     let agent_id = AgentID::new();
     let now = chrono::Utc::now();
 

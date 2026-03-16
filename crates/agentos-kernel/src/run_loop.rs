@@ -670,11 +670,7 @@ impl Kernel {
 
                     // Per-agent rate limit: prevents one agent from bypassing limits via multiple connections
                     if let Some(ref agent_key) = cmd.agent_key() {
-                        if let Err(wait) = self
-                            .per_agent_rate_limiter
-                            .lock()
-                            .await
-                            .check(agent_key)
+                        if let Err(wait) = self.per_agent_rate_limiter.lock().await.check(agent_key)
                         {
                             crate::metrics::record_rate_limited();
                             self.audit_log(agentos_audit::AuditEntry {

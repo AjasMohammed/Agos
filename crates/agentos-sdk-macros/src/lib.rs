@@ -108,22 +108,40 @@ fn to_pascal_case(s: &str) -> String {
         .collect()
 }
 
-/// Parse a permission string like "fs.read:r" into (resource, PermissionOp).
-fn parse_permission(perm: &str) -> (String, proc_macro2::TokenStream) {
+/// Parse a permission string like "fs.data:r" into one or more (resource, PermissionOp) pairs.
+///
+/// Compound ops like "rw" or "rwx" expand to multiple entries so no permission is silently dropped.
+fn parse_permission(perm: &str) -> Vec<(String, proc_macro2::TokenStream)> {
     let parts: Vec<&str> = perm.splitn(2, ':').collect();
     let resource = parts[0].to_string();
-    let op = if parts.len() > 1 {
+    if parts.len() > 1 {
         match parts[1] {
-            "r" => quote! { agentos_types::PermissionOp::Read },
-            "w" => quote! { agentos_types::PermissionOp::Write },
-            "x" => quote! { agentos_types::PermissionOp::Execute },
-            "rw" => quote! { agentos_types::PermissionOp::Read }, // default to read for compound
-            _ => quote! { agentos_types::PermissionOp::Read },
+            "r" => vec![(resource, quote! { agentos_types::PermissionOp::Read })],
+            "w" => vec![(resource, quote! { agentos_types::PermissionOp::Write })],
+            "x" => vec![(resource, quote! { agentos_types::PermissionOp::Execute })],
+            "rw" | "wr" => vec![
+                (
+                    resource.clone(),
+                    quote! { agentos_types::PermissionOp::Read },
+                ),
+                (resource, quote! { agentos_types::PermissionOp::Write }),
+            ],
+            "rwx" | "rxw" | "wrx" | "wxr" | "xrw" | "xwr" => vec![
+                (
+                    resource.clone(),
+                    quote! { agentos_types::PermissionOp::Read },
+                ),
+                (
+                    resource.clone(),
+                    quote! { agentos_types::PermissionOp::Write },
+                ),
+                (resource, quote! { agentos_types::PermissionOp::Execute }),
+            ],
+            _ => vec![(resource, quote! { agentos_types::PermissionOp::Read })],
         }
     } else {
-        quote! { agentos_types::PermissionOp::Read }
-    };
-    (resource, op)
+        vec![(resource, quote! { agentos_types::PermissionOp::Read })]
+    }
 }
 
 /// Attribute macro that generates an `AgentTool` implementation from an async function.
@@ -162,12 +180,12 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     let struct_name_str = to_pascal_case(tool_name);
     let struct_name = format_ident!("{}", struct_name_str);
 
-    // Parse permissions
+    // Parse permissions — compound ops like "rw" expand to multiple entries
     let perm_entries: Vec<_> = attrs
         .permissions
         .iter()
-        .map(|p| {
-            let (resource, op) = parse_permission(p);
+        .flat_map(|p| parse_permission(p))
+        .map(|(resource, op)| {
             let resource_lit = LitStr::new(&resource, proc_macro2::Span::call_site());
             quote! { (#resource_lit.to_string(), #op) }
         })

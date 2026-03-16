@@ -49,6 +49,43 @@ pub enum TaskState {
     Cancelled,
 }
 
+impl TaskState {
+    /// Returns `true` if transitioning from `self` to `next` is a legal state machine move.
+    ///
+    /// Legal transitions:
+    /// - Queued   → Running | Cancelled
+    /// - Running  → Waiting | Complete | Failed | Cancelled
+    /// - Waiting  → Running | Failed | Cancelled
+    /// - Complete, Failed, Cancelled are terminal — no further transitions allowed.
+    pub fn can_transition_to(self, next: TaskState) -> bool {
+        matches!(
+            (self, next),
+            (TaskState::Queued, TaskState::Running)
+                | (TaskState::Queued, TaskState::Cancelled)
+                | (TaskState::Running, TaskState::Waiting)
+                | (TaskState::Running, TaskState::Complete)
+                | (TaskState::Running, TaskState::Failed)
+                | (TaskState::Running, TaskState::Cancelled)
+                | (TaskState::Waiting, TaskState::Running)
+                | (TaskState::Waiting, TaskState::Failed)
+                | (TaskState::Waiting, TaskState::Cancelled)
+        )
+    }
+
+    /// Attempt to transition to `next`. Returns an error string if the transition is illegal.
+    pub fn transition(&mut self, next: TaskState) -> Result<(), String> {
+        if self.can_transition_to(next) {
+            *self = next;
+            Ok(())
+        } else {
+            Err(format!(
+                "invalid task state transition: {:?} → {:?}",
+                self, next
+            ))
+        }
+    }
+}
+
 /// Summary of a task for display purposes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSummary {
@@ -73,7 +110,8 @@ pub struct TaskReasoningHints {
 }
 
 /// Estimated complexity of a task, used for scheduling hints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Variant order is significant: Low < Medium < High (derived Ord).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ComplexityLevel {
     /// Simple lookup or single-step operation.
     Low,
@@ -84,7 +122,8 @@ pub enum ComplexityLevel {
 }
 
 /// How sensitive a task is to being preempted or timed out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Variant order is significant: Low < Normal < High (derived Ord).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PreemptionLevel {
     /// Can be safely interrupted at any point.
     Low,

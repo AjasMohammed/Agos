@@ -354,7 +354,7 @@ impl Kernel {
         let snapshot_manager = Arc::new(crate::snapshot::SnapshotManager::new(
             data_dir.join("snapshots"),
             data_dir.clone(), // allowed_root: only paths within data_dir may be snapshotted
-            72, // hours
+            72,               // hours
         ));
 
         let event_bus = Arc::new(crate::event_bus::EventBus::new());

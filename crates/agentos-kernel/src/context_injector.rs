@@ -13,12 +13,7 @@ impl Kernel {
         &self,
         task: &AgentTask,
         task_trace_id: &TraceID,
-    ) -> anyhow::Result<(
-        String,
-        String,
-        String,
-        crate::retrieval_gate::RetrievalPlan,
-    )> {
+    ) -> anyhow::Result<(String, String, String, crate::retrieval_gate::RetrievalPlan)> {
         // 1. Collect elements for CompilationInputs
         let tools_desc = self.tool_registry.read().await.tools_for_prompt();
         let agent_directory = self.build_agent_directory(&task.agent_id).await;

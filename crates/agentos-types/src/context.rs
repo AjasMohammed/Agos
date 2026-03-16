@@ -141,9 +141,9 @@ impl TokenBudget {
             + self.knowledge_pct
             + self.history_pct
             + self.task_pct;
-        if sum > 1.05 {
+        if sum > 1.001 {
             return Err(format!(
-                "Category percentages sum to {:.2}, exceeding 1.0",
+                "Category percentages sum to {:.4}, exceeding 1.0",
                 sum
             ));
         }
@@ -225,8 +225,9 @@ impl ContextWindow {
                     ContextRole::ToolResult => "ToolResult",
                     ContextRole::System => unreachable!(),
                 };
-                let snippet = if e.content.len() > 150 {
-                    format!("{}...", &e.content[..150])
+                // Use char-boundary-safe truncation to avoid panics on multi-byte UTF-8
+                let snippet = if e.content.chars().count() > 150 {
+                    format!("{}...", e.content.chars().take(150).collect::<String>())
                 } else {
                     e.content.clone()
                 };
@@ -305,8 +306,12 @@ impl ContextWindow {
                                     ContextRole::ToolResult => "ToolResult",
                                     ContextRole::System => unreachable!(),
                                 },
-                                if e.content.len() > 200 {
-                                    format!("{}...", &e.content[..200])
+                                // Use char-boundary-safe truncation to avoid panics on multi-byte UTF-8
+                                if e.content.chars().count() > 200 {
+                                    format!(
+                                        "{}...",
+                                        e.content.chars().take(200).collect::<String>()
+                                    )
                                 } else {
                                     e.content
                                 }
@@ -374,6 +379,7 @@ impl ContextWindow {
 
     /// Push an entry with an explicit category tag.
     /// Used by `ContextCompiler` to build structured context windows.
+    /// Routes through `push()` so overflow/eviction is applied correctly.
     pub fn push_categorized(
         &mut self,
         role: ContextRole,
@@ -382,7 +388,7 @@ impl ContextWindow {
         importance: f32,
         pinned: bool,
     ) {
-        self.entries.push(ContextEntry {
+        self.push(ContextEntry {
             role,
             content,
             timestamp: chrono::Utc::now(),

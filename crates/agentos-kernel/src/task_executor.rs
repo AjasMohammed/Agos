@@ -18,7 +18,9 @@ pub(crate) struct TaskResult {
 }
 
 impl Kernel {
-    pub(crate) fn classify_task_failure(error_message: &str) -> (&'static str, EventSeverity, bool) {
+    pub(crate) fn classify_task_failure(
+        error_message: &str,
+    ) -> (&'static str, EventSeverity, bool) {
         let lower = error_message.to_ascii_lowercase();
         if lower.starts_with("task paused:") {
             return ("task_paused", EventSeverity::Warning, true);
@@ -1578,10 +1580,8 @@ impl Kernel {
                                 {
                                     // Include a truncated excerpt of the suspicious content so
                                     // the human reviewer can make an informed allow/deny decision.
-                                    let content_excerpt = Self::truncate_for_prompt_payload(
-                                        &result_str,
-                                        300,
-                                    );
+                                    let content_excerpt =
+                                        Self::truncate_for_prompt_payload(&result_str, 300);
                                     self.escalation_manager
                                         .create_escalation(
                                             task.id,

@@ -59,10 +59,7 @@ pub async fn handle(client: &mut BusClient, cmd: HalCommands) -> anyhow::Result<
                     println!("{}", "-".repeat(74));
                     for d in &devices {
                         let id = d.get("id").and_then(|v| v.as_str()).unwrap_or("-");
-                        let dtype = d
-                            .get("device_type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("-");
+                        let dtype = d.get("device_type").and_then(|v| v.as_str()).unwrap_or("-");
                         let status = d.get("status").and_then(|v| v.as_str()).unwrap_or("-");
                         let granted = d
                             .get("granted_to")
@@ -164,10 +161,7 @@ pub async fn handle(client: &mut BusClient, cmd: HalCommands) -> anyhow::Result<
                         if let Some(err) = d.get("error").and_then(|v| v.as_str()) {
                             eprintln!("Error: {}", err);
                         } else {
-                            println!(
-                                "Revoked '{}' access to device '{}'.",
-                                agent, device
-                            );
+                            println!("Revoked '{}' access to device '{}'.", agent, device);
                         }
                     }
                 }

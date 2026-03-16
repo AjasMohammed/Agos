@@ -49,10 +49,7 @@ impl Kernel {
                 }
             }
             LLMProvider::Anthropic => {
-                let key_result = match self
-                    .vault
-                    .get(&format!("{}_anthropic_api_key", name))
-                    .await
+                let key_result = match self.vault.get(&format!("{}_anthropic_api_key", name)).await
                 {
                     ok @ Ok(_) => ok,
                     Err(_) => self.vault.get("anthropic_api_key").await,

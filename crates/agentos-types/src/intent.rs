@@ -136,7 +136,9 @@ pub enum IntentCoherenceResult {
 
 /// Risk level for an action, determining what approval is required.
 /// Based on the AgentOS Action Risk Taxonomy (Spec §12).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Variant order is significant: Autonomous < Notify < SoftApproval < HardApproval < Forbidden
+/// (derived Ord — variants are ordered top-to-bottom as written).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ActionRiskLevel {
     /// Level 0: Autonomous — no approval needed (read ops, queries).
     Autonomous,

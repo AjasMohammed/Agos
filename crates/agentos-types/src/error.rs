@@ -1,7 +1,7 @@
 use crate::ids::*;
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum AgentOSError {
     // Kernel errors
     #[error("Task not found: {0}")]
@@ -102,7 +102,13 @@ pub enum AgentOSError {
     #[error("Event delivery failed: {0}")]
     EventDeliveryFailed(String),
 
-    // IO
+    // IO — wrapped in Arc so AgentOSError is Clone while preserving the error source chain.
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[source] std::sync::Arc<std::io::Error>),
+}
+
+impl From<std::io::Error> for AgentOSError {
+    fn from(e: std::io::Error) -> Self {
+        AgentOSError::Io(std::sync::Arc::new(e))
+    }
 }

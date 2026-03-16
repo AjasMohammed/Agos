@@ -19,7 +19,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             default_task_timeout_secs: 60,
             context_window_max_entries: 100,
             context_window_token_budget: 0,
-            health_port: 0, // 0 = disabled in tests
+            health_port: 0,          // 0 = disabled in tests
             per_agent_rate_limit: 0, // 0 = unlimited in tests
         },
         routing: Default::default(),

@@ -176,15 +176,15 @@ impl AgentTool for HttpClientTool {
                         for part in parts {
                             if part.starts_with('$') && part.len() > 1 {
                                 let secret_name = &part[1..]; // Strip '$'
-                                let secret_val = vault
-                                    .get(secret_name, agent_id)
-                                    .await
-                                    .map_err(|e| AgentOSError::ToolExecutionFailed {
-                                        tool_name: "http-client".into(),
-                                        reason: format!(
-                                            "Failed to resolve secret '{}': {}",
-                                            secret_name, e
-                                        ),
+                                let secret_val =
+                                    vault.get(secret_name, agent_id).await.map_err(|e| {
+                                        AgentOSError::ToolExecutionFailed {
+                                            tool_name: "http-client".into(),
+                                            reason: format!(
+                                                "Failed to resolve secret '{}': {}",
+                                                secret_name, e
+                                            ),
+                                        }
                                     })?;
 
                                 final_header_val =
@@ -193,13 +193,12 @@ impl AgentTool for HttpClientTool {
                         }
                     } else {
                         // If no '$' found, treat the whole string as the secret name
-                        let secret_val = vault
-                            .get(v_str, agent_id)
-                            .await
-                            .map_err(|e| AgentOSError::ToolExecutionFailed {
+                        let secret_val = vault.get(v_str, agent_id).await.map_err(|e| {
+                            AgentOSError::ToolExecutionFailed {
                                 tool_name: "http-client".into(),
                                 reason: format!("Failed to resolve secret '{}': {}", v_str, e),
-                            })?;
+                            }
+                        })?;
                         final_header_val = secret_val.as_str().to_string();
                     }
 

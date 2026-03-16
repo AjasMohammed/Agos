@@ -339,7 +339,10 @@ impl KernelCommand {
     pub fn agent_key(&self) -> Option<String> {
         match self {
             // Agent-targeting commands that can be issued repeatedly — rate limit per agent name.
-            KernelCommand::RunTask { agent_name: Some(name), .. } => Some(name.clone()),
+            KernelCommand::RunTask {
+                agent_name: Some(name),
+                ..
+            } => Some(name.clone()),
             KernelCommand::ConnectAgent { name, .. } => Some(name.clone()),
             KernelCommand::GrantPermission { agent_name, .. } => Some(agent_name.clone()),
             KernelCommand::RevokePermission { agent_name, .. } => Some(agent_name.clone()),

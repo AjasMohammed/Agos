@@ -63,6 +63,7 @@ pub struct PermissionEntry {
 
 /// Well-known private/reserved IP ranges that agents must never connect to
 /// (Spec §2: `deny_private_ranges: true` prevents SSRF to 192.168.x.x, 10.x.x.x, etc.).
+/// All entries are lowercase — the SSRF check normalizes the host to lowercase before matching.
 const PRIVATE_NETWORK_PREFIXES: &[&str] = &[
     "10.",
     "172.16.",
@@ -85,10 +86,12 @@ const PRIVATE_NETWORK_PREFIXES: &[&str] = &[
     "127.",
     "169.254.",
     "0.",
-    "fd",    // IPv6 ULA
-    "fe80:", // IPv6 link-local
-    "::1",   // IPv6 loopback
     "localhost",
+    "::1",   // IPv6 loopback
+    "fe80:", // IPv6 link-local
+    "::ffff:", // IPv6-mapped IPv4 (e.g. ::ffff:192.168.1.1)
+             // Note: IPv6 ULA (fd00::/8) is checked separately to avoid false-positives
+             // on hostnames like "fdic.gov" that start with "fd".
 ];
 
 impl PermissionSet {
@@ -125,13 +128,36 @@ impl PermissionSet {
                 .strip_prefix("net:")
                 .or_else(|| resource.strip_prefix("network:"))
                 .unwrap_or("");
-            // Strip protocol prefix if present (e.g. "https://10.0.0.1/...")
-            let host = target
+            // Lowercase first so protocol-case bypasses like "HTTP://127.0.0.1/" are caught
+            let target_lc = target.to_lowercase();
+            let host_raw = target_lc
                 .strip_prefix("https://")
-                .or_else(|| target.strip_prefix("http://"))
-                .unwrap_or(target);
+                .or_else(|| target_lc.strip_prefix("http://"))
+                .unwrap_or(target_lc.as_str());
+            // Normalize bracketed IPv6 (e.g. "[::1]:8080/path" → "::1")
+            // or strip path from bare hostnames (e.g. "127.0.0.1:8080/path" → "127.0.0.1")
+            let host = if host_raw.starts_with('[') {
+                host_raw
+                    .trim_start_matches('[')
+                    .split(']')
+                    .next()
+                    .unwrap_or("")
+            } else {
+                host_raw.split('/').next().unwrap_or(host_raw)
+            };
+            // Normalize to lowercase to block case-variation bypasses
+            // (e.g. "LOCALHOST", "LocalHost", "HTTP://10.0.0.1/")
+            let host_lower = host.to_lowercase();
             for prefix in PRIVATE_NETWORK_PREFIXES {
-                if host.starts_with(prefix) {
+                if host_lower.starts_with(prefix) {
+                    return true;
+                }
+            }
+            // IPv6 ULA (fd00::/8): "fd" followed by a hex digit or colon.
+            // Checked separately to avoid false-positives on hostnames like "fdic.gov".
+            if host_lower.starts_with("fd") && host_lower.len() > 2 {
+                let next = host_lower.chars().nth(2).unwrap_or(' ');
+                if next.is_ascii_hexdigit() || next == ':' {
                     return true;
                 }
             }
@@ -145,17 +171,22 @@ impl PermissionSet {
     /// Uses path-prefix matching: a grant on `"fs:/home/user/"` allows
     /// operations on `"fs:/home/user/docs/file.txt"`.
     /// Deny entries are checked first and take absolute precedence.
+    /// Expired permission entries are treated as if they do not exist.
     pub fn check(&self, resource: &str, operation: PermissionOp) -> bool {
         // Deny entries take precedence
         if self.is_denied(resource) {
             return false;
         }
 
+        let now = chrono::Utc::now();
         self.entries.iter().any(|e| {
             // Exact match or prefix match (grant on "fs:/home/" covers "fs:/home/user/x.txt")
             let resource_matches = e.resource == resource || resource.starts_with(&e.resource);
+            // Expired entries are treated as absent
+            let not_expired = e.expires_at.is_none_or(|exp| now < exp);
 
             resource_matches
+                && not_expired
                 && match operation {
                     PermissionOp::Read => e.read,
                     PermissionOp::Write => e.write,
@@ -230,6 +261,17 @@ impl PermissionSet {
                         expires_at,
                     });
                 }
+            }
+        }
+        // Union of deny entries: any resource denied by either set is denied in the result.
+        for pattern in &self.deny_entries {
+            if !intersected.deny_entries.contains(pattern) {
+                intersected.deny_entries.push(pattern.clone());
+            }
+        }
+        for pattern in &other.deny_entries {
+            if !intersected.deny_entries.contains(pattern) {
+                intersected.deny_entries.push(pattern.clone());
             }
         }
         intersected
@@ -315,5 +357,72 @@ mod tests {
         assert!(perms.is_denied("fs:/etc/passwd"));
         assert!(perms.is_denied("fs:~/.env"));
         assert!(!perms.is_denied("fs:/tmp/data.txt"));
+    }
+
+    #[test]
+    fn test_expired_permission_is_denied() {
+        let mut perms = PermissionSet::new();
+        // Grant that expired 1 second ago
+        let past = chrono::Utc::now() - chrono::Duration::seconds(1);
+        perms.grant("fs:/tmp/".into(), true, false, false, Some(past));
+        // Should NOT grant access — entry is expired
+        assert!(!perms.check("fs:/tmp/file.txt", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_non_expired_permission_is_allowed() {
+        let mut perms = PermissionSet::new();
+        // Grant that expires 1 hour from now
+        let future = chrono::Utc::now() + chrono::Duration::hours(1);
+        perms.grant("fs:/tmp/".into(), true, false, false, Some(future));
+        assert!(perms.check("fs:/tmp/file.txt", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_ssrf_case_bypass_blocked() {
+        let mut perms = PermissionSet::new();
+        perms.grant("net:".into(), true, false, true, None);
+
+        // Case-variation bypasses must be blocked
+        assert!(!perms.check("net:https://LOCALHOST/admin", PermissionOp::Read));
+        assert!(!perms.check("net:http://LocalHost:8080/", PermissionOp::Read));
+        assert!(!perms.check("net:HTTP://127.0.0.1/", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_ssrf_ipv6_mapped_blocked() {
+        let mut perms = PermissionSet::new();
+        perms.grant("net:".into(), true, false, true, None);
+
+        // IPv6-mapped IPv4 private addresses must be blocked
+        assert!(!perms.check("net:http://[::ffff:192.168.1.1]/", PermissionOp::Read));
+        assert!(!perms.check("net:http://[::ffff:127.0.0.1]/", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_ssrf_ipv6_ula_blocked() {
+        let mut perms = PermissionSet::new();
+        perms.grant("net:".into(), true, false, true, None);
+
+        // IPv6 ULA (fd00::/8) — must be blocked
+        assert!(!perms.check("net:http://[fd00::1]/", PermissionOp::Read));
+        // Public host starting with "fd" must NOT be blocked
+        assert!(perms.check("net:https://fdic.gov/", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_intersect_preserves_deny_entries() {
+        let mut a = PermissionSet::new();
+        a.grant("fs:/tmp/".into(), true, false, false, None);
+        a.deny("fs:/etc/".into());
+
+        let mut b = PermissionSet::new();
+        b.grant("fs:/tmp/".into(), true, false, false, None);
+        b.deny("fs:~/.ssh/".into());
+
+        let intersected = a.intersect(&b);
+        // Both deny entries must appear in the intersection
+        assert!(intersected.deny_entries.contains(&"fs:/etc/".to_string()));
+        assert!(intersected.deny_entries.contains(&"fs:~/.ssh/".to_string()));
     }
 }

@@ -94,7 +94,10 @@ mod tests {
     fn per_agent_zero_limit_is_unlimited() {
         let mut rl = PerAgentRateLimiter::new(0);
         for _ in 0..1000 {
-            assert!(rl.check("agent-a").is_ok(), "0 = unlimited, should always allow");
+            assert!(
+                rl.check("agent-a").is_ok(),
+                "0 = unlimited, should always allow"
+            );
         }
     }
 
@@ -104,10 +107,16 @@ mod tests {
         // agent-a can send 2
         assert!(rl.check("agent-a").is_ok());
         assert!(rl.check("agent-a").is_ok());
-        assert!(rl.check("agent-a").is_err(), "agent-a should be rate limited");
+        assert!(
+            rl.check("agent-a").is_err(),
+            "agent-a should be rate limited"
+        );
 
         // agent-b has its own independent window — not affected by agent-a
-        assert!(rl.check("agent-b").is_ok(), "agent-b has its own independent window");
+        assert!(
+            rl.check("agent-b").is_ok(),
+            "agent-b has its own independent window"
+        );
         assert!(rl.check("agent-b").is_ok());
         assert!(rl.check("agent-b").is_err());
     }

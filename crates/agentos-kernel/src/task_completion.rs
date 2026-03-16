@@ -203,8 +203,10 @@ impl Kernel {
             .fail(&task.id, error_message.clone())
             .await;
 
-        let failure_summary =
-            format!("Task failed: {}\nError: {}", task.original_prompt, error_message);
+        let failure_summary = format!(
+            "Task failed: {}\nError: {}",
+            task.original_prompt, error_message
+        );
         match self
             .episodic_memory
             .record(agentos_memory::EpisodeRecordInput {
@@ -213,9 +215,7 @@ impl Kernel {
                 entry_type: agentos_memory::EpisodeType::SystemEvent,
                 content: &failure_summary,
                 summary: Some("Task failed"),
-                metadata: Some(
-                    serde_json::json!({ "outcome": "failure", "error": error_message }),
-                ),
+                metadata: Some(serde_json::json!({ "outcome": "failure", "error": error_message })),
                 trace_id: &task_trace_id,
             }) {
             Ok(_) => {

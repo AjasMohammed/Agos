@@ -42,9 +42,7 @@ pub struct SnapshotManager {
 impl SnapshotManager {
     pub fn new(storage_dir: PathBuf, allowed_root: PathBuf, retention_hours: u64) -> Self {
         // Canonicalize the root at construction time so all comparisons are stable.
-        let allowed_root = allowed_root
-            .canonicalize()
-            .unwrap_or(allowed_root);
+        let allowed_root = allowed_root.canonicalize().unwrap_or(allowed_root);
         Self {
             snapshots: RwLock::new(HashMap::new()),
             storage_dir,

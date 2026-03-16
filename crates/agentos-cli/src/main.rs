@@ -500,7 +500,13 @@ mod tests {
     #[test]
     fn test_cli_parses_hal_register() {
         let cli = Cli::try_parse_from([
-            "agentctl", "hal", "register", "--id", "gpu:0", "--type", "nvidia-rtx-4090",
+            "agentctl",
+            "hal",
+            "register",
+            "--id",
+            "gpu:0",
+            "--type",
+            "nvidia-rtx-4090",
         ])
         .unwrap();
 
@@ -517,10 +523,8 @@ mod tests {
 
     #[test]
     fn test_cli_parses_hal_approve() {
-        let cli = Cli::try_parse_from([
-            "agentctl", "hal", "approve", "gpu:0", "--agent", "worker",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["agentctl", "hal", "approve", "gpu:0", "--agent", "worker"])
+            .unwrap();
 
         match cli.command {
             Commands::Hal {
