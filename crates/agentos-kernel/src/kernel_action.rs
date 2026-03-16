@@ -350,9 +350,19 @@ impl Kernel {
         };
 
         // Sign the message with the sender's Ed25519 identity key (Spec §7).
+        // Return early if signing fails so the unsigned message is never sent
+        // (the bus would reject it anyway, but with a misleading error).
         let payload = msg.signing_payload();
-        if let Ok(sig_hex) = self.identity_manager.sign_message(&task.agent_id, &payload) {
-            msg.signature = Some(sig_hex);
+        match self.identity_manager.sign_message(&task.agent_id, &payload).await {
+            Ok(sig_hex) => msg.signature = Some(sig_hex),
+            Err(e) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Agent has no identity key — message signing failed: {}", e)
+                    }),
+                };
+            }
         }
 
         match self.message_bus.send_direct(msg).await {

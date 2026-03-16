@@ -93,6 +93,42 @@ You can customize these paths for your environment. For production use, change `
 
 ---
 
+## Docker Quick Start
+
+If you prefer containers over building from source, the repository ships a production-ready compose stack.
+
+### Prerequisites
+
+- [Docker Engine 24+](https://docs.docker.com/engine/install/) and the `docker compose` plugin
+- An `.env` file with `AGENTOS_VAULT_PASSPHRASE` set (see below)
+
+### Steps
+
+```bash
+# 1. Copy the environment template and set a strong vault passphrase
+cp .env.example .env
+# Generate a passphrase: openssl rand -base64 32
+
+# 2. Build the image and start the stack (AgentOS + Ollama)
+docker compose up -d
+
+# 3. Verify the stack is healthy
+docker compose ps
+curl http://localhost:9091/healthz
+
+# 4. Tail startup logs
+docker compose logs --tail=100 agentos
+```
+
+The stack automatically:
+- Loads `config/docker.toml` (persistent paths, Ollama at `http://ollama:11434`)
+- Mounts named volumes for vault, audit log, and user tools — state survives restarts
+- Runs as a non-root user with a read-only root filesystem
+
+For full configuration options see [07 — Configuration](07-configuration.md#docker--container-profile).
+
+---
+
 ## Starting AgentOS
 
 ### Step 1: Boot the Kernel

@@ -30,6 +30,9 @@ pub enum KernelCommand {
         provider: LLMProvider,
         model: String,
         base_url: Option<String>,
+        /// Roles assigned to the agent; defaults to ["general"] if empty.
+        #[serde(default)]
+        roles: Vec<String>,
     },
     ListAgents,
     DisconnectAgent {
@@ -216,6 +219,7 @@ pub enum KernelCommand {
     GetCostReport {
         agent_name: Option<String>,
     },
+    GetRetrievalMetrics,
 
     // Pipeline management
     InstallPipeline {
@@ -279,11 +283,31 @@ pub enum KernelCommand {
     // Resource contention
     ResourceContention,
 
+    // Hardware Abstraction Layer (Spec §9)
+    HalListDevices,
+    HalApproveDevice {
+        device_id: String,
+        agent_name: String,
+    },
+    HalDenyDevice {
+        device_id: String,
+    },
+    HalRevokeDevice {
+        device_id: String,
+        agent_name: String,
+    },
+    HalRegisterDevice {
+        device_id: String,
+        device_type: String,
+    },
+
     // Event system
     EventSubscribe {
         agent_name: String,
         /// Event type filter: "all", "category:AgentLifecycle", or exact like "AgentAdded"
         event_filter: String,
+        /// Optional payload predicate (e.g. "cpu_percent > 85 AND severity == Critical")
+        payload_filter: Option<String>,
         /// Optional throttle: "none", "once_per:30s", "max:5/60s"
         throttle: Option<String>,
         /// Subscription priority: "critical", "high", "normal", "low"
@@ -307,6 +331,27 @@ pub enum KernelCommand {
     EventHistory {
         last: u32,
     },
+}
+
+impl KernelCommand {
+    /// Returns an agent-identifying key for per-agent rate limiting, if the command
+    /// targets a specific agent. Returns `None` for agent-agnostic commands.
+    pub fn agent_key(&self) -> Option<String> {
+        match self {
+            // Agent-targeting commands that can be issued repeatedly — rate limit per agent name.
+            KernelCommand::RunTask { agent_name: Some(name), .. } => Some(name.clone()),
+            KernelCommand::ConnectAgent { name, .. } => Some(name.clone()),
+            KernelCommand::GrantPermission { agent_name, .. } => Some(agent_name.clone()),
+            KernelCommand::RevokePermission { agent_name, .. } => Some(agent_name.clone()),
+            KernelCommand::SendAgentMessage { from_name, .. } => Some(from_name.clone()),
+            KernelCommand::BroadcastToGroup { from_name, .. } => Some(from_name.clone()),
+            KernelCommand::EventSubscribe { agent_name, .. } => Some(agent_name.clone()),
+            // DisconnectAgent is intentionally excluded: it is a one-shot cleanup op and its
+            // agent_id (UUID) differs from the name-keyed limiter, which would cause a
+            // separate entry that never gets evicted, leaking memory.
+            _ => None,
+        }
+    }
 }
 
 /// Responses from kernel to CLI.
@@ -359,6 +404,9 @@ pub enum KernelResponse {
     EventSubscriptionId(String),
     EventSubscriptionList(Vec<serde_json::Value>),
     EventHistoryList(Vec<serde_json::Value>),
+
+    // Hardware Abstraction Layer
+    HalDeviceList(Vec<serde_json::Value>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

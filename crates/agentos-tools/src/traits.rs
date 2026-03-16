@@ -32,4 +32,7 @@ pub struct ToolExecutionContext {
     pub permissions: PermissionSet,
     pub vault: Option<std::sync::Arc<agentos_vault::ProxyVault>>,
     pub hal: Option<std::sync::Arc<agentos_hal::HardwareAbstractionLayer>>,
+    /// Shared file lock registry injected by `ToolRunner`. `None` when tools
+    /// are called directly in tests without going through the runner.
+    pub file_lock_registry: Option<std::sync::Arc<crate::file_lock::FileLockRegistry>>,
 }

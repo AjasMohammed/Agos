@@ -6,7 +6,7 @@ tags:
   - kernel
   - phase-0
 date: 2026-03-11
-status: partial
+status: complete
 effort: 4h
 priority: medium
 feedback-plan-ref: "Phase 0.1"

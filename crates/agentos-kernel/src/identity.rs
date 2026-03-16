@@ -22,7 +22,7 @@ impl IdentityManager {
 
     /// Generate a new Ed25519 keypair for an agent.
     /// Returns the hex-encoded public key. The private key is stored in the vault.
-    pub fn generate_identity(&self, agent_id: &AgentID) -> Result<String, anyhow::Error> {
+    pub async fn generate_identity(&self, agent_id: &AgentID) -> Result<String, anyhow::Error> {
         let mut csprng = rand::rngs::OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
         let verifying_key = signing_key.verifying_key();
@@ -36,6 +36,7 @@ impl IdentityManager {
                 SecretOwner::Agent(*agent_id),
                 SecretScope::Agent(*agent_id),
             )
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to store signing key: {}", e))?;
 
         let public_hex = hex::encode(verifying_key.to_bytes());
@@ -44,12 +45,12 @@ impl IdentityManager {
 
     /// Load an existing signing key from the vault.
     /// Returns None if no identity exists for this agent.
-    pub fn load_signing_key(
+    pub async fn load_signing_key(
         &self,
         agent_id: &AgentID,
     ) -> Result<Option<SigningKey>, anyhow::Error> {
         let vault_key = format!("agent_identity:{}", agent_id);
-        match self.vault.get(&vault_key) {
+        match self.vault.get(&vault_key).await {
             Ok(zeroizing_str) => {
                 let bytes = hex::decode(zeroizing_str.as_str())
                     .map_err(|e| anyhow::anyhow!("Invalid hex in vault: {}", e))?;
@@ -63,24 +64,26 @@ impl IdentityManager {
     }
 
     /// Revoke an agent's identity by removing the signing key from the vault.
-    pub fn revoke_identity(&self, agent_id: &AgentID) -> Result<(), anyhow::Error> {
+    pub async fn revoke_identity(&self, agent_id: &AgentID) -> Result<(), anyhow::Error> {
         let vault_key = format!("agent_identity:{}", agent_id);
         self.vault
             .revoke(&vault_key)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to revoke identity: {}", e))?;
         Ok(())
     }
 
     /// Sign a message with the agent's private key.
     /// Returns the hex-encoded signature, or an error if the agent has no identity.
-    pub fn sign_message(
+    pub async fn sign_message(
         &self,
         agent_id: &AgentID,
         message: &[u8],
     ) -> Result<String, anyhow::Error> {
         use ed25519_dalek::Signer;
         let signing_key = self
-            .load_signing_key(agent_id)?
+            .load_signing_key(agent_id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("No identity found for agent {}", agent_id))?;
         let signature = signing_key.sign(message);
         Ok(hex::encode(signature.to_bytes()))
@@ -115,28 +118,29 @@ impl IdentityManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentos_audit::AuditLog;
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, Arc<SecretsVault>) {
         let dir = TempDir::new().unwrap();
         let vault_path = dir.path().join("test.vault");
         let audit_path = dir.path().join("audit.db");
-        let audit = Arc::new(agentos_audit::AuditLog::open(&audit_path).unwrap());
+        let audit = Arc::new(AuditLog::open(&audit_path).unwrap());
         let vault =
             Arc::new(SecretsVault::initialize(&vault_path, "test-passphrase", audit).unwrap());
         (dir, vault)
     }
 
-    #[test]
-    fn test_generate_and_load_identity() {
+    #[tokio::test]
+    async fn test_generate_and_load_identity() {
         let (_dir, vault) = setup();
         let mgr = IdentityManager::new(vault);
         let agent_id = AgentID::new();
 
-        let pub_hex = mgr.generate_identity(&agent_id).unwrap();
+        let pub_hex = mgr.generate_identity(&agent_id).await.unwrap();
         assert_eq!(pub_hex.len(), 64); // 32 bytes = 64 hex chars
 
-        let loaded = mgr.load_signing_key(&agent_id).unwrap();
+        let loaded = mgr.load_signing_key(&agent_id).await.unwrap();
         assert!(loaded.is_some());
 
         // Verify the loaded key produces the same public key
@@ -144,16 +148,16 @@ mod tests {
         assert_eq!(pub_hex, loaded_pub);
     }
 
-    #[test]
-    fn test_sign_and_verify() {
+    #[tokio::test]
+    async fn test_sign_and_verify() {
         let (_dir, vault) = setup();
         let mgr = IdentityManager::new(vault);
         let agent_id = AgentID::new();
 
-        let pub_hex = mgr.generate_identity(&agent_id).unwrap();
+        let pub_hex = mgr.generate_identity(&agent_id).await.unwrap();
         let message = b"hello world";
 
-        let sig_hex = mgr.sign_message(&agent_id, message).unwrap();
+        let sig_hex = mgr.sign_message(&agent_id, message).await.unwrap();
         let valid = IdentityManager::verify_signature(&pub_hex, message, &sig_hex).unwrap();
         assert!(valid);
 
@@ -162,26 +166,26 @@ mod tests {
         assert!(!valid2);
     }
 
-    #[test]
-    fn test_revoke_identity() {
+    #[tokio::test]
+    async fn test_revoke_identity() {
         let (_dir, vault) = setup();
         let mgr = IdentityManager::new(vault);
         let agent_id = AgentID::new();
 
-        mgr.generate_identity(&agent_id).unwrap();
-        mgr.revoke_identity(&agent_id).unwrap();
+        mgr.generate_identity(&agent_id).await.unwrap();
+        mgr.revoke_identity(&agent_id).await.unwrap();
 
-        let loaded = mgr.load_signing_key(&agent_id).unwrap();
+        let loaded = mgr.load_signing_key(&agent_id).await.unwrap();
         assert!(loaded.is_none());
     }
 
-    #[test]
-    fn test_no_identity_sign_fails() {
+    #[tokio::test]
+    async fn test_no_identity_sign_fails() {
         let (_dir, vault) = setup();
         let mgr = IdentityManager::new(vault);
         let agent_id = AgentID::new();
 
-        let result = mgr.sign_message(&agent_id, b"test");
+        let result = mgr.sign_message(&agent_id, b"test").await;
         assert!(result.is_err());
     }
 }

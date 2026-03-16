@@ -13,12 +13,40 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "roadmap/Issues and Fixes.md",
+                "file": "reference/First Deployment Runbook.md",
                 "mode": "preview",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Issues and Fixes"
+              "title": "First Deployment Runbook"
+            }
+          },
+          {
+            "id": "5295270b8af71b90",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "next-steps/10-High-Priority Gaps.md",
+                "mode": "preview",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "10-High-Priority Gaps"
+            }
+          },
+          {
+            "id": "0343d190005c8791",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "next-steps/07-Hardware Abstraction Layer.md",
+                "mode": "preview",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "07-Hardware Abstraction Layer"
             }
           },
           {
@@ -239,43 +267,43 @@
       "bases:Create new base": false
     }
   },
-  "active": "d0ea60c9beca429b",
+  "active": "a9bdbdc87d6f2fda",
   "lastOpenFiles": [
-    "next-steps/17-05-Context Freshness and Procedural Min Score.md",
-    "plans/agentos-contextentry-category-backfill.md",
-    "plans/first-deployment-readiness/subtasks/16-00-Code Safety Hardening.md",
-    "plans/first-deployment-readiness/03-containerization-and-runtime.md",
-    "next-steps/17-04-Consolidation and Memory Blocks.md",
-    "next-steps/17-03-Structured Memory Extraction Engine.md",
-    "next-steps/17-02-Adaptive Retrieval Gate Implementation.md",
-    "next-steps/17-01-Kernel Memory Wiring.md",
-    "next-steps/17-Memory Context Architecture Completion Sprint.md",
-    "plans/first-deployment-readiness/02-production-config-baseline.md",
-    "plans/full-codebase-review/01-foundation-types-review.md",
-    "plans/full-codebase-review/Full Codebase Review Plan.md",
+    "incomplete-plans.md.tmp.428468.1773668514540",
+    "incomplete-plans.md.tmp.428468.1773668506622",
+    "reference/First Deployment Runbook.md.tmp.428468.1773668497677",
+    "reference/Release Process.md.tmp.428468.1773668482290",
+    "reference/First Deployment Runbook.md.tmp.428468.1773668475156",
+    "reference/First Deployment Runbook.md.tmp.428468.1773668469264",
+    "incomplete-plans.md.tmp.428468.1773668221537",
+    "incomplete-plans.md.tmp.428468.1773668200137",
+    "incomplete-plans.md.tmp.428468.1773668187617",
+    "incomplete-plans.md.tmp.428468.1773668051970",
+    "reference/Release Process.md",
+    "reference/First Deployment Runbook.md",
+    "reference/First Deployment Runbook.md.tmp.428468.1773667989412",
+    "incomplete-plans.md",
+    "next-steps/10-High-Priority Gaps.md",
+    "next-steps/07-Hardware Abstraction Layer.md",
+    "next-steps/04-Kernel Modularization.md",
+    "completed-plans.md",
+    "codebase_review.md",
     "next-steps/16-Full Codebase Review.md",
-    "next-steps/16-Full Codebase Review.md.tmp.564175.1773341805775",
-    "plans/full-codebase-review/10-synthesis-and-report.md",
-    "plans/full-codebase-review/10-synthesis-and-report.md.tmp.564175.1773341779117",
-    "plans/full-codebase-review/09-config-and-manifests-review.md",
-    "plans/full-codebase-review/09-config-and-manifests-review.md.tmp.564175.1773341763204",
-    "plans/full-codebase-review/08-security-deep-dives.md",
-    "plans/full-codebase-review/08-security-deep-dives.md.tmp.564175.1773341753249",
-    "plans/full-codebase-review/07-cross-cutting-passes.md",
-    "plans/full-codebase-review/07-cross-cutting-passes.md.tmp.564175.1773341726969",
-    "plans/full-codebase-review/06-user-interfaces-review.md",
-    "plans/full-codebase-review/06-user-interfaces-review.md.tmp.564175.1773341695073",
-    "plans/full-codebase-review/05-kernel-core-review.md",
-    "plans/full-codebase-review/05-kernel-core-review.md.tmp.564175.1773341662621",
-    "plans/full-codebase-review/04-tools-and-wasm-review.md",
-    "plans/full-codebase-review/04-tools-and-wasm-review.md.tmp.564175.1773341610028",
-    "plans/full-codebase-review/03-bus-and-capability-review.md",
-    "plans/first-deployment-readiness/00-code-safety-hardening.md",
-    "plans/full-codebase-review/02-infrastructure-review.md",
-    "plans/full-codebase-review/02-infrastructure-review.md.tmp.564175.1773341563096",
-    "plans/full-codebase-review/01-foundation-types-review.md.tmp.564175.1773341538089",
-    "plans/full-codebase-review/Full Codebase Review Data Flow.md",
-    "plans/first-deployment-readiness/First Deployment Readiness Plan.md",
-    "plans/first-deployment-readiness/01-quality-gates-stabilization.md"
+    "next-steps/21-Future-Improvements.md",
+    "next-steps/20-V1-Release-Fix-Plan.md",
+    "plans/first-deployment-readiness/04-security-gate-closure.md",
+    "plans/first-deployment-readiness/03-containerization-and-runtime.md",
+    "plans/first-deployment-readiness/02-production-config-baseline.md",
+    "plans/bug-fixes-and-deployment-readiness/05-issues-and-fixes-audit-update.md",
+    "plans/bug-fixes-and-deployment-readiness/04-docker-deployment-artifacts.md",
+    "plans/bug-fixes-and-deployment-readiness/03-integration-test-harness.md",
+    "plans/user-handbook/01-foundation-chapters.md",
+    "plans/bug-fixes-and-deployment-readiness/02-event-hmac-audit-fix.md",
+    "plans/user-handbook/09-troubleshooting-and-index.md",
+    "plans/user-handbook/08-audit-config-advanced.md",
+    "plans/user-handbook/07-pipeline-event-cost.md",
+    "plans/user-handbook/06-memory-system.md",
+    "plans/user-handbook/05-security-and-vault.md",
+    "plans/user-handbook/04-tool-system.md"
   ]
 }

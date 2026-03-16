@@ -3,6 +3,14 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use tokio::sync::{Mutex, RwLock};
 
+#[derive(Debug, Clone)]
+pub struct TimedOutTask {
+    pub task_id: TaskID,
+    pub agent_id: AgentID,
+    pub timeout_seconds: u64,
+    pub elapsed_seconds: u64,
+}
+
 pub struct TaskScheduler {
     /// Priority queue — higher priority tasks are dequeued first.
     queue: Mutex<BinaryHeap<PrioritizedTask>>,
@@ -109,6 +117,14 @@ impl TaskScheduler {
         task_id
     }
 
+    /// Register a task in scheduler state without placing it on the run queue.
+    /// Used by synchronous execution paths that run outside the background loop.
+    pub async fn register_external(&self, task: AgentTask) -> TaskID {
+        let task_id = task.id;
+        self.tasks.write().await.insert(task_id, task);
+        task_id
+    }
+
     /// Dequeue the highest-priority task that is in Queued state.
     pub async fn dequeue(&self) -> Option<AgentTask> {
         let mut queue = self.queue.lock().await;
@@ -123,6 +139,31 @@ impl TaskScheduler {
         None
     }
 
+    /// Requeue an existing task by ID and mark it as Queued.
+    /// No-ops silently if the task is already in a terminal state (Complete, Failed, Cancelled).
+    pub async fn requeue(&self, task_id: &TaskID) -> Result<(), AgentOSError> {
+        let mut tasks = self.tasks.write().await;
+        let task = match tasks.get_mut(task_id) {
+            Some(task) => task,
+            None => return Err(AgentOSError::TaskNotFound(*task_id)),
+        };
+        if matches!(
+            task.state,
+            TaskState::Complete | TaskState::Failed | TaskState::Cancelled
+        ) {
+            return Ok(());
+        }
+        task.state = TaskState::Queued;
+        let prioritized = PrioritizedTask {
+            priority: task.priority,
+            created_at: task.created_at,
+            task_id: *task_id,
+        };
+        drop(tasks);
+        self.queue.lock().await.push(prioritized);
+        Ok(())
+    }
+
     /// Update a task's state.
     pub async fn update_state(
         &self,
@@ -134,6 +175,29 @@ impl TaskScheduler {
             Some(task) => {
                 task.state = state;
                 Ok(())
+            }
+            None => Err(AgentOSError::TaskNotFound(*task_id)),
+        }
+    }
+
+    /// Update a task state only if the current state is not terminal.
+    /// Returns Ok(true) when updated, Ok(false) when no-op due to terminal state.
+    pub async fn update_state_if_not_terminal(
+        &self,
+        task_id: &TaskID,
+        state: TaskState,
+    ) -> Result<bool, AgentOSError> {
+        let mut tasks = self.tasks.write().await;
+        match tasks.get_mut(task_id) {
+            Some(task) => {
+                if matches!(
+                    task.state,
+                    TaskState::Complete | TaskState::Failed | TaskState::Cancelled
+                ) {
+                    return Ok(false);
+                }
+                task.state = state;
+                Ok(true)
             }
             None => Err(AgentOSError::TaskNotFound(*task_id)),
         }
@@ -172,15 +236,28 @@ impl TaskScheduler {
             .count()
     }
 
+    /// Set `started_at` timestamp on a task (when it transitions to Running).
+    pub async fn mark_started(&self, task_id: &TaskID) -> Result<(), AgentOSError> {
+        let mut tasks = self.tasks.write().await;
+        match tasks.get_mut(task_id) {
+            Some(task) => {
+                task.started_at = Some(chrono::Utc::now());
+                Ok(())
+            }
+            None => Err(AgentOSError::TaskNotFound(*task_id)),
+        }
+    }
+
     /// Check for timed-out tasks and mark them as Failed.
-    pub async fn check_timeouts(&self) -> Vec<TaskID> {
+    pub async fn check_timeouts(&self) -> Vec<TimedOutTask> {
         let mut timed_out = Vec::new();
         let mut tasks = self.tasks.write().await;
         let now = chrono::Utc::now();
         for task in tasks.values_mut() {
             if task.state == TaskState::Running {
+                let baseline = task.started_at.unwrap_or(task.created_at);
                 let elapsed = now
-                    .signed_duration_since(task.created_at)
+                    .signed_duration_since(baseline)
                     .to_std()
                     .unwrap_or_default();
                 // Apply timeout multiplier based on preemption sensitivity
@@ -196,7 +273,12 @@ impl TaskScheduler {
 
                 if elapsed > effective_timeout {
                     task.state = TaskState::Failed;
-                    timed_out.push(task.id);
+                    timed_out.push(TimedOutTask {
+                        task_id: task.id,
+                        agent_id: task.agent_id,
+                        timeout_seconds: effective_timeout.as_secs(),
+                        elapsed_seconds: elapsed.as_secs(),
+                    });
                 }
             }
         }
@@ -265,6 +347,7 @@ mod tests {
             assigned_llm: None,
             priority,
             created_at: chrono::Utc::now(),
+            started_at: None,
             timeout: Duration::from_secs(300),
             original_prompt: prompt.to_string(),
             history: Vec::new(),
@@ -358,5 +441,151 @@ mod tests {
         let waiters = scheduler.complete_dependency(child_id).await;
         assert_eq!(waiters.len(), 1);
         assert_eq!(waiters[0], parent_id);
+    }
+
+    #[tokio::test]
+    async fn test_check_timeouts_returns_task_metadata() {
+        let scheduler = TaskScheduler::new(10);
+        let mut task = make_task(5, "times out");
+        task.state = TaskState::Running;
+        task.timeout = Duration::from_secs(1);
+        task.created_at = chrono::Utc::now() - chrono::Duration::seconds(5);
+        let task_id = task.id;
+        let agent_id = task.agent_id;
+
+        scheduler.enqueue(task).await;
+        let timed_out = scheduler.check_timeouts().await;
+
+        assert_eq!(timed_out.len(), 1);
+        let record = &timed_out[0];
+        assert_eq!(record.task_id, task_id);
+        assert_eq!(record.agent_id, agent_id);
+        assert_eq!(record.timeout_seconds, 1);
+        assert!(record.elapsed_seconds >= 5);
+    }
+
+    #[tokio::test]
+    async fn test_requeue_marks_task_queued_and_enqueues() {
+        let scheduler = TaskScheduler::new(10);
+        let mut task = make_task(5, "requeue me");
+        task.state = TaskState::Waiting;
+        let task_id = task.id;
+
+        scheduler.enqueue(task).await;
+        scheduler.requeue(&task_id).await.unwrap();
+
+        let popped = scheduler.dequeue().await.expect("task should be queued");
+        assert_eq!(popped.id, task_id);
+        assert_eq!(popped.state, TaskState::Queued);
+    }
+
+    #[tokio::test]
+    async fn test_update_state_if_not_terminal_noops_for_complete() {
+        let scheduler = TaskScheduler::new(10);
+        let mut task = make_task(5, "done");
+        task.state = TaskState::Complete;
+        let task_id = task.id;
+
+        scheduler.enqueue(task).await;
+        let updated = scheduler
+            .update_state_if_not_terminal(&task_id, TaskState::Failed)
+            .await
+            .unwrap();
+        assert!(!updated);
+
+        let current = scheduler.get_task(&task_id).await.unwrap();
+        assert_eq!(current.state, TaskState::Complete);
+    }
+
+    #[tokio::test]
+    async fn test_requeue_noops_for_terminal_states() {
+        let scheduler = TaskScheduler::new(10);
+
+        // Complete task should not be requeued
+        let mut task = make_task(5, "completed task");
+        task.state = TaskState::Complete;
+        let task_id = task.id;
+        scheduler.enqueue(task).await;
+        scheduler.requeue(&task_id).await.unwrap();
+        let current = scheduler.get_task(&task_id).await.unwrap();
+        assert_eq!(current.state, TaskState::Complete);
+
+        // Failed task should not be requeued
+        let mut task2 = make_task(5, "failed task");
+        task2.state = TaskState::Failed;
+        let task2_id = task2.id;
+        scheduler.enqueue(task2).await;
+        scheduler.requeue(&task2_id).await.unwrap();
+        let current2 = scheduler.get_task(&task2_id).await.unwrap();
+        assert_eq!(current2.state, TaskState::Failed);
+
+        // Cancelled task should not be requeued
+        let mut task3 = make_task(5, "cancelled task");
+        task3.state = TaskState::Cancelled;
+        let task3_id = task3.id;
+        scheduler.enqueue(task3).await;
+        scheduler.requeue(&task3_id).await.unwrap();
+        let current3 = scheduler.get_task(&task3_id).await.unwrap();
+        assert_eq!(current3.state, TaskState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn test_check_timeouts_uses_started_at() {
+        let scheduler = TaskScheduler::new(10);
+        let mut task = make_task(5, "started recently");
+        task.state = TaskState::Running;
+        task.timeout = Duration::from_secs(10);
+        // created_at is 60 seconds ago — would timeout if measured from created_at
+        task.created_at = chrono::Utc::now() - chrono::Duration::seconds(60);
+        // started_at is 2 seconds ago — should NOT timeout since 2 < 10
+        task.started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(2));
+        let task_id = task.id;
+
+        scheduler.enqueue(task).await;
+        let timed_out = scheduler.check_timeouts().await;
+
+        assert!(
+            timed_out.is_empty(),
+            "Task should NOT time out when started_at is recent"
+        );
+
+        // Verify task is still Running
+        let current = scheduler.get_task(&task_id).await.unwrap();
+        assert_eq!(current.state, TaskState::Running);
+    }
+
+    #[tokio::test]
+    async fn test_check_timeouts_falls_back_to_created_at() {
+        let scheduler = TaskScheduler::new(10);
+        let mut task = make_task(5, "no started_at");
+        task.state = TaskState::Running;
+        task.timeout = Duration::from_secs(1);
+        task.created_at = chrono::Utc::now() - chrono::Duration::seconds(5);
+        task.started_at = None; // no started_at — should use created_at
+
+        scheduler.enqueue(task).await;
+        let timed_out = scheduler.check_timeouts().await;
+
+        assert_eq!(
+            timed_out.len(),
+            1,
+            "Task should time out using created_at fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mark_started_sets_timestamp() {
+        let scheduler = TaskScheduler::new(10);
+        let task = make_task(5, "to be started");
+        let task_id = task.id;
+        scheduler.enqueue(task).await;
+
+        let before = scheduler.get_task(&task_id).await.unwrap();
+        assert!(before.started_at.is_none());
+
+        scheduler.mark_started(&task_id).await.unwrap();
+
+        let after = scheduler.get_task(&task_id).await.unwrap();
+        assert!(after.started_at.is_some());
     }
 }

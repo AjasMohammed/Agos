@@ -42,6 +42,8 @@ struct LockWaiter {
     /// Priority of the requesting agent (higher = more important). Used for
     /// priority-based preemption on deadlock detection.
     priority: u8,
+    /// TTL requested by the caller — preserved so the grant uses the original value.
+    ttl_seconds: u64,
     notify: tokio::sync::oneshot::Sender<Result<(), String>>,
 }
 
@@ -309,6 +311,7 @@ impl ResourceArbiter {
                 agent_id,
                 mode,
                 priority,
+                ttl_seconds,
                 notify: tx,
             });
         }
@@ -388,8 +391,9 @@ impl ResourceArbiter {
             let mode = waiter.mode;
             let agent_id = waiter.agent_id;
             let priority = waiter.priority;
+            let ttl = waiter.ttl_seconds;
 
-            if state.try_grant_with_priority(agent_id, mode, 30, priority) {
+            if state.try_grant_with_priority(agent_id, mode, ttl, priority) {
                 // Grant succeeded — pop and notify
                 if let Some(w) = state.waiters.pop_front() {
                     // Remove from wait-for graph: agent is no longer waiting

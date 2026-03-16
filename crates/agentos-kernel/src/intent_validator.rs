@@ -180,6 +180,8 @@ fn check_scope_escalation(
         IntentType::Message => IntentTypeFlag::Message,
         IntentType::Broadcast => IntentTypeFlag::Broadcast,
         IntentType::Escalate => IntentTypeFlag::Escalate,
+        IntentType::Subscribe => IntentTypeFlag::Subscribe,
+        IntentType::Unsubscribe => IntentTypeFlag::Unsubscribe,
     };
 
     if !task.capability_token.allowed_intents.contains(&intent_flag) {
@@ -247,7 +249,7 @@ impl Kernel {
                 self.audit_log(agentos_audit::AuditEntry {
                     timestamp: chrono::Utc::now(),
                     trace_id,
-                    event_type: agentos_audit::AuditEventType::PermissionDenied,
+                    event_type: agentos_audit::AuditEventType::RiskEscalation,
                     agent_id: Some(task.agent_id),
                     task_id: Some(task.id),
                     tool_id: None,
@@ -317,6 +319,7 @@ mod tests {
             assigned_llm: None,
             priority: 5,
             created_at: chrono::Utc::now(),
+            started_at: None,
             timeout: Duration::from_secs(300),
             original_prompt: "test task".to_string(),
             history: Vec::new(),

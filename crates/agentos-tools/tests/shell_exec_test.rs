@@ -13,6 +13,7 @@ fn make_context(data_dir: &Path) -> ToolExecutionContext {
         permissions: PermissionSet::new(),
         vault: None,
         hal: None,
+        file_lock_registry: None,
     }
 }
 

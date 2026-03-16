@@ -180,21 +180,22 @@ impl EscalationManager {
     }
 
     /// Resolve an escalation with a human decision.
-    /// Returns the task_id and whether it was blocking (so the caller can resume the task).
-    pub async fn resolve(&self, id: u64, resolution: String) -> Option<(TaskID, bool)> {
+    /// Returns the task_id, agent_id, and whether it was blocking.
+    pub async fn resolve(&self, id: u64, resolution: String) -> Option<(TaskID, AgentID, bool)> {
         let mut escalations = self.escalations.write().await;
         if let Some(esc) = escalations.iter_mut().find(|e| e.id == id && !e.resolved) {
             esc.resolved = true;
             esc.resolution = Some(resolution);
             esc.resolved_at = Some(chrono::Utc::now());
             let task_id = esc.task_id;
+            let agent_id = esc.agent_id;
             let blocking = esc.blocking;
             tracing::info!(
                 escalation_id = id,
                 task_id = %task_id,
                 "Escalation resolved"
             );
-            Some((task_id, blocking))
+            Some((task_id, agent_id, blocking))
         } else {
             None
         }
@@ -225,8 +226,8 @@ impl EscalationManager {
     /// - `AutoAction::Deny` → auto-deny (original behavior)
     /// - `AutoAction::Approve` → soft-approval (auto-approve on expiry)
     ///
-    /// Returns `(id, task_id, blocking, approved)` for each expired escalation.
-    pub async fn sweep_expired(&self) -> Vec<(u64, TaskID, bool)> {
+    /// Returns `(id, task_id, agent_id, blocking, auto_action)` for each expired escalation.
+    pub async fn sweep_expired(&self) -> Vec<(u64, TaskID, AgentID, bool, AutoAction)> {
         let now = chrono::Utc::now();
         let mut escalations = self.escalations.write().await;
         let mut expired = Vec::new();
@@ -256,7 +257,13 @@ impl EscalationManager {
                     }
                 }
 
-                expired.push((esc.id, esc.task_id, esc.blocking));
+                expired.push((
+                    esc.id,
+                    esc.task_id,
+                    esc.agent_id,
+                    esc.blocking,
+                    esc.auto_action,
+                ));
             }
         }
 
@@ -373,8 +380,9 @@ mod tests {
 
         let result = manager.resolve(id, "Approved by admin".to_string()).await;
         assert!(result.is_some());
-        let (resolved_task_id, blocking) = result.unwrap();
+        let (resolved_task_id, resolved_agent_id, blocking) = result.unwrap();
         assert_eq!(resolved_task_id, task_id);
+        assert_eq!(resolved_agent_id, manager.list_all().await[0].agent_id);
         assert!(blocking);
 
         // Should no longer appear in pending
@@ -446,7 +454,9 @@ mod tests {
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].0, 1); // id
         assert_eq!(expired[0].1, task_id);
-        assert!(expired[0].2); // blocking
+        assert_eq!(expired[0].2, manager.list_all().await[0].agent_id);
+        assert!(expired[0].3); // blocking
+        assert_eq!(expired[0].4, AutoAction::Deny);
 
         // Should no longer appear in pending
         assert!(manager.list_pending().await.is_empty());
@@ -454,5 +464,48 @@ mod tests {
         // Resolution should indicate auto-deny
         let all = manager.list_all().await;
         assert!(all[0].resolution.as_ref().unwrap().contains("Auto-denied"));
+    }
+
+    #[tokio::test]
+    async fn test_sweep_expired_auto_approves() {
+        let manager = EscalationManager {
+            escalations: RwLock::new(Vec::new()),
+            next_id: RwLock::new(1),
+            timeout_secs: 0, // expire immediately
+            notify_url: RwLock::new(None),
+        };
+
+        let task_id = TaskID::new();
+        manager
+            .create_escalation(
+                task_id,
+                AgentID::new(),
+                EscalationReason::AuthorizationRequired,
+                "test".to_string(),
+                "test".to_string(),
+                vec![],
+                "normal".to_string(),
+                true,
+                TraceID::new(),
+                Some(AutoAction::Approve),
+            )
+            .await;
+
+        let expired = manager.sweep_expired().await;
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].0, 1); // id
+        assert_eq!(expired[0].1, task_id);
+        assert_eq!(expired[0].2, manager.list_all().await[0].agent_id);
+        assert!(expired[0].3); // blocking
+        assert_eq!(expired[0].4, AutoAction::Approve);
+
+        assert!(manager.list_pending().await.is_empty());
+
+        let all = manager.list_all().await;
+        assert!(all[0]
+            .resolution
+            .as_ref()
+            .unwrap()
+            .contains("Auto-approved"));
     }
 }

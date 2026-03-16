@@ -19,6 +19,11 @@ pub enum AgentCommands {
         /// Optional base URL for custom providers
         #[arg(long)]
         base_url: Option<String>,
+        /// Role(s) for the agent — may be repeated (e.g. --role orchestrator).
+        /// Supported: orchestrator, security-monitor, sysops, memory-manager, tool-manager, general.
+        /// Defaults to "general" if omitted.
+        #[arg(long = "role")]
+        roles: Vec<String>,
     },
     /// List connected agents
     List,
@@ -81,6 +86,7 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
             model,
             name,
             base_url,
+            roles,
         } => {
             let provider = parse_provider(&provider)?;
             let response = client
@@ -89,6 +95,7 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                     model,
                     name: name.clone(),
                     base_url,
+                    roles,
                 })
                 .await?;
 

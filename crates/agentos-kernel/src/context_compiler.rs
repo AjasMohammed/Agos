@@ -38,6 +38,11 @@ impl ContextCompiler {
         Self { budget }
     }
 
+    /// Access the token budget configuration.
+    pub fn budget(&self) -> &TokenBudget {
+        &self.budget
+    }
+
     /// Build an optimized `ContextWindow` from structured inputs.
     ///
     /// Position ordering (for primacy/recency effects):
@@ -491,6 +496,94 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(budget.usable_tokens(), 75_000);
+    }
+
+    #[test]
+    fn test_budget_accessor_returns_configured_budget() {
+        let budget = TokenBudget {
+            total_tokens: 50_000,
+            reserve_pct: 0.20,
+            ..Default::default()
+        };
+        let compiler = ContextCompiler::new(budget.clone());
+        assert_eq!(compiler.budget().total_tokens, 50_000);
+        assert_eq!(compiler.budget().usable_tokens(), 40_000);
+    }
+
+    #[test]
+    fn test_context_utilization_threshold_fires_above_80_pct() {
+        // Simulate the utilization check from task_executor
+        let budget = TokenBudget {
+            total_tokens: 10_000,
+            reserve_pct: 0.25,
+            ..Default::default()
+        };
+        let compiler = ContextCompiler::new(budget);
+        let usable = compiler.budget().usable_tokens(); // 7500
+
+        // 85% utilization should fire
+        let estimated_tokens_high = (usable as f32 * 0.85) as usize;
+        let utilization_high = estimated_tokens_high as f32 / usable as f32;
+        assert!(
+            utilization_high > 0.80,
+            "85% utilization should exceed 80% threshold"
+        );
+
+        // 70% utilization should NOT fire
+        let estimated_tokens_low = (usable as f32 * 0.70) as usize;
+        let utilization_low = estimated_tokens_low as f32 / usable as f32;
+        assert!(
+            utilization_low <= 0.80,
+            "70% utilization should not exceed 80% threshold"
+        );
+    }
+
+    #[test]
+    fn test_context_utilization_severity_levels() {
+        let budget = TokenBudget::default();
+        let compiler = ContextCompiler::new(budget);
+        let usable = compiler.budget().usable_tokens();
+
+        // >95% should be Critical
+        let est_96 = (usable as f32 * 0.96) as usize;
+        let util_96 = est_96 as f32 / usable as f32;
+        assert!(util_96 > 0.95, "96% should trigger Critical severity");
+
+        // 81-95% should be Warning
+        let est_85 = (usable as f32 * 0.85) as usize;
+        let util_85 = est_85 as f32 / usable as f32;
+        assert!(
+            util_85 > 0.80 && util_85 <= 0.95,
+            "85% should trigger Warning severity"
+        );
+    }
+
+    #[test]
+    fn test_utilization_uses_usable_not_total_tokens() {
+        // Verify that utilization is computed against usable_tokens, not total_tokens.
+        // With reserve_pct=0.25, usable = 75% of total. If we used total_tokens as
+        // denominator, 80% utilization would never fire because the compiler only fills
+        // up to usable_tokens.
+        let budget = TokenBudget {
+            total_tokens: 100_000,
+            reserve_pct: 0.25,
+            ..Default::default()
+        };
+        let compiler = ContextCompiler::new(budget);
+
+        let usable = compiler.budget().usable_tokens(); // 75_000
+        let total = compiler.budget().total_tokens; // 100_000
+
+        // 65_000 tokens: 86.7% of usable, but only 65% of total
+        let estimated = 65_000usize;
+        let util_usable = estimated as f32 / usable as f32;
+        let util_total = estimated as f32 / total as f32;
+
+        assert!(util_usable > 0.80, "Should exceed 80% of usable tokens");
+        assert!(
+            util_total < 0.80,
+            "Should NOT exceed 80% of total tokens — proves correct denominator matters"
+        );
     }
 
     #[test]

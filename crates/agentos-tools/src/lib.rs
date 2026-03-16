@@ -2,6 +2,7 @@ pub mod agent_message;
 pub mod archival_insert;
 pub mod archival_search;
 pub mod data_parser;
+pub mod file_lock;
 pub mod file_reader;
 pub mod file_writer;
 pub mod hardware_info;
@@ -28,6 +29,7 @@ pub use agent_message::AgentMessageTool;
 pub use archival_insert::ArchivalInsert;
 pub use archival_search::ArchivalSearch;
 pub use data_parser::DataParser;
+pub use file_lock::{FileLockRegistry, WriteLockGuard};
 pub use file_reader::FileReader;
 pub use file_writer::FileWriter;
 pub use hardware_info::HardwareInfoTool;
@@ -71,6 +73,7 @@ mod tests {
             permissions: PermissionSet::new(),
             vault: None,
             hal: None,
+            file_lock_registry: None,
         };
 
         let result = tool.execute(payload, ctx).await.unwrap();
@@ -102,6 +105,7 @@ mod tests {
             permissions: PermissionSet::new(),
             vault: None,
             hal: None,
+            file_lock_registry: None,
         };
 
         let result = tool.execute(payload, ctx).await.unwrap();
@@ -136,6 +140,25 @@ mod tests {
             permissions,
             vault: None,
             hal: None,
+            file_lock_registry: None,
+        }
+    }
+
+    fn make_context_with_lock_registry(
+        data_dir: &Path,
+        registry: std::sync::Arc<crate::file_lock::FileLockRegistry>,
+    ) -> ToolExecutionContext {
+        let mut permissions = PermissionSet::new();
+        permissions.grant("fs.user_data".to_string(), true, true, false, None);
+        ToolExecutionContext {
+            data_dir: data_dir.to_path_buf(),
+            task_id: TaskID::new(),
+            agent_id: AgentID::new(),
+            trace_id: TraceID::new(),
+            permissions,
+            vault: None,
+            hal: None,
+            file_lock_registry: Some(registry),
         }
     }
 
@@ -432,5 +455,246 @@ mod tests {
         assert!(tools.contains(&"memory-search".to_string()));
         assert!(tools.contains(&"memory-write".to_string()));
         assert!(tools.contains(&"data-parser".to_string()));
+    }
+
+    // ── file-reader pagination ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_file_reader_pagination() {
+        let dir = TempDir::new().unwrap();
+        let lines: Vec<String> = (0..100).map(|i| format!("line {}", i)).collect();
+        std::fs::write(dir.path().join("big.txt"), lines.join("\n")).unwrap();
+
+        let tool = FileReader::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), true, false, false, None);
+        let ctx = make_context_with_permissions(dir.path(), perms);
+
+        let result = tool
+            .execute(
+                serde_json::json!({"path": "big.txt", "offset": 10, "limit": 10}),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result["returned_lines"], 10);
+        assert_eq!(result["offset"], 10);
+        assert_eq!(result["total_lines"], 100);
+        assert_eq!(result["has_more"], true);
+        assert!(result["content"].as_str().unwrap().starts_with("line 10"));
+    }
+
+    #[tokio::test]
+    async fn test_file_reader_has_more_flag() {
+        let dir = TempDir::new().unwrap();
+        let content = (0..20)
+            .map(|i| format!("L{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.path().join("f.txt"), &content).unwrap();
+
+        let tool = FileReader::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), true, false, false, None);
+        let ctx = make_context_with_permissions(dir.path(), perms);
+
+        let result = tool
+            .execute(serde_json::json!({"path": "f.txt", "limit": 5}), ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(result["returned_lines"], 5);
+        assert_eq!(result["has_more"], true);
+    }
+
+    #[tokio::test]
+    async fn test_file_reader_no_more_when_within_limit() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("small.txt"), "a\nb\nc").unwrap();
+
+        let tool = FileReader::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), true, false, false, None);
+        let ctx = make_context_with_permissions(dir.path(), perms);
+
+        let result = tool
+            .execute(serde_json::json!({"path": "small.txt", "limit": 500}), ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(result["has_more"], false);
+        assert_eq!(result["total_lines"], 3);
+    }
+
+    #[tokio::test]
+    async fn test_file_reader_directory_list() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("alpha.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("beta.txt"), "b").unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+
+        let tool = FileReader::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), true, false, false, None);
+        let ctx = make_context_with_permissions(dir.path(), perms);
+
+        let result = tool
+            .execute(serde_json::json!({"path": ".", "mode": "list"}), ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(result["mode"], "list");
+        assert_eq!(result["count"], 3);
+        let entries = result["entries"].as_array().unwrap();
+        let names: Vec<&str> = entries
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"alpha.txt"));
+        assert!(names.contains(&"beta.txt"));
+        assert!(names.contains(&"subdir"));
+    }
+
+    // ── file-reader lock enforcement ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_file_reader_blocked_when_locked() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("locked.txt"), "secret").unwrap();
+
+        let registry = std::sync::Arc::new(crate::file_lock::FileLockRegistry::new());
+        let locked_path = dir.path().canonicalize().unwrap().join("locked.txt");
+        registry
+            .try_acquire(&locked_path, AgentID::new(), TaskID::new())
+            .unwrap();
+
+        let ctx = make_context_with_lock_registry(dir.path(), registry);
+        let tool = FileReader::new();
+        let err = tool
+            .execute(serde_json::json!({"path": "locked.txt"}), ctx)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, AgentOSError::FileLocked { .. }));
+    }
+
+    // ── file-writer modes ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_file_writer_create_only_succeeds_on_new_file() {
+        let dir = TempDir::new().unwrap();
+        let tool = FileWriter::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), false, true, false, None);
+        let ctx = make_context_with_permissions(dir.path(), perms);
+
+        let result = tool
+            .execute(
+                serde_json::json!({"path": "new.txt", "content": "hello", "mode": "create_only"}),
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result["mode"], "create_only");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_writer_create_only_fails_if_exists() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("exists.txt"), "old").unwrap();
+
+        let tool = FileWriter::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), false, true, false, None);
+        let ctx = make_context_with_permissions(dir.path(), perms);
+
+        let err = tool
+            .execute(
+                serde_json::json!({"path": "exists.txt", "content": "new", "mode": "create_only"}),
+                ctx,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, AgentOSError::ToolExecutionFailed { .. }));
+        // Original content must be untouched.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("exists.txt")).unwrap(),
+            "old"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_writer_size_guard() {
+        let dir = TempDir::new().unwrap();
+        let tool = FileWriter::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".to_string(), false, true, false, None);
+        let ctx = make_context_with_permissions(dir.path(), perms);
+
+        let big = "x".repeat(200);
+        let err = tool
+            .execute(
+                serde_json::json!({"path": "out.txt", "content": big, "max_bytes": 100}),
+                ctx,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, AgentOSError::ToolExecutionFailed { .. }));
+    }
+
+    // ── file-writer lock enforcement ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_file_writer_blocked_when_locked() {
+        let dir = TempDir::new().unwrap();
+        let registry = std::sync::Arc::new(crate::file_lock::FileLockRegistry::new());
+
+        // Pre-acquire the lock as a different agent.
+        let locked_path = dir.path().canonicalize().unwrap().join("data.txt");
+        registry
+            .try_acquire(&locked_path, AgentID::new(), TaskID::new())
+            .unwrap();
+
+        let ctx = make_context_with_lock_registry(dir.path(), registry);
+        let tool = FileWriter::new();
+        let err = tool
+            .execute(
+                serde_json::json!({"path": "data.txt", "content": "hi"}),
+                ctx,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, AgentOSError::FileLocked { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_file_writer_lock_released_after_write() {
+        let dir = TempDir::new().unwrap();
+        let registry = std::sync::Arc::new(crate::file_lock::FileLockRegistry::new());
+        let ctx = make_context_with_lock_registry(dir.path(), registry.clone());
+
+        let tool = FileWriter::new();
+        tool.execute(
+            serde_json::json!({"path": "out.txt", "content": "hello"}),
+            ctx,
+        )
+        .await
+        .unwrap();
+
+        // After write, the lock must be released and the path must be free.
+        let resolved = dir.path().canonicalize().unwrap().join("out.txt");
+        assert!(
+            registry.check(&resolved).is_ok(),
+            "Lock should be released after write"
+        );
     }
 }

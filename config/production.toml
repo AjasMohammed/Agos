@@ -10,6 +10,8 @@ vault_path = "/var/lib/agentos/vault/secrets.db"
 
 [audit]
 log_path = "/var/lib/agentos/data/audit.db"
+# Retain at most 500,000 entries; older rows pruned on each 10-minute sweep.
+max_audit_entries = 500000
 
 [tools]
 core_tools_dir = "/var/lib/agentos/tools/core"

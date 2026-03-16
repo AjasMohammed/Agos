@@ -18,6 +18,8 @@ pub struct KernelConfig {
     /// allocation if omitted from config TOML.
     #[serde(default)]
     pub context_budget: agentos_types::TokenBudget,
+    #[serde(default)]
+    pub health_monitor: HealthMonitorConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -37,10 +39,17 @@ pub struct KernelSettings {
     pub context_window_token_budget: usize,
     #[serde(default = "default_health_port")]
     pub health_port: u16,
+    /// Maximum commands per second per agent (across all connections). 0 = unlimited.
+    #[serde(default = "default_per_agent_rate_limit")]
+    pub per_agent_rate_limit: u32,
 }
 
 fn default_health_port() -> u16 {
     9091
+}
+
+fn default_per_agent_rate_limit() -> u32 {
+    100
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -51,6 +60,10 @@ pub struct SecretsSettings {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuditSettings {
     pub log_path: String,
+    /// Maximum number of audit log rows to retain. Older entries are pruned when the
+    /// TimeoutChecker runs its periodic sweep. `0` means unlimited (default).
+    #[serde(default)]
+    pub max_audit_entries: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -129,6 +142,46 @@ fn default_model_cache_dir() -> String {
     "models".to_string()
 }
 
+/// Configuration for the periodic system health monitoring loop.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HealthMonitorConfig {
+    pub enabled: bool,
+    pub check_interval_secs: u64,
+    pub thresholds: HealthThresholds,
+}
+
+impl Default for HealthMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            check_interval_secs: 30,
+            thresholds: HealthThresholds::default(),
+        }
+    }
+}
+
+/// Threshold values for each health metric. Percentages are 0–100.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HealthThresholds {
+    pub cpu_warning_percent: f32,
+    pub memory_warning_percent: f32,
+    pub disk_warning_percent: f32,
+    pub disk_critical_percent: f32,
+    pub gpu_vram_warning_percent: f32,
+}
+
+impl Default for HealthThresholds {
+    fn default() -> Self {
+        Self {
+            cpu_warning_percent: 85.0,
+            memory_warning_percent: 80.0,
+            disk_warning_percent: 85.0,
+            disk_critical_percent: 95.0,
+            gpu_vram_warning_percent: 90.0,
+        }
+    }
+}
+
 /// Load kernel configuration from a TOML file.
 pub fn load_config(path: &std::path::Path) -> Result<KernelConfig, anyhow::Error> {
     let content = std::fs::read_to_string(path)?;
@@ -176,6 +229,17 @@ fn warn_on_tmp_paths(config: &KernelConfig) {
                 "Runtime path points to a temporary location; use persistent storage in production"
             );
         }
+    }
+
+    // Only warn for model_cache_dir when it is absolute; relative paths inherit
+    // their safety from tools.data_dir, which is already checked above.
+    let model_cache = config.memory.model_cache_dir.as_str();
+    if std::path::Path::new(model_cache).is_absolute() && is_tmp_path(model_cache) {
+        tracing::warn!(
+            config_key = "memory.model_cache_dir",
+            path = %model_cache,
+            "Runtime path points to a temporary location; use persistent storage in production"
+        );
     }
 }
 

@@ -88,6 +88,81 @@ model_cache_dir = "/var/lib/agentos/data/models"
 
 ---
 
+## Docker / Container Profile
+
+Use `config/docker.toml` when running inside a Docker container (loaded automatically by the `Dockerfile`'s `CMD`):
+
+```toml
+[kernel]
+max_concurrent_tasks = 4
+default_task_timeout_secs = 300
+context_window_max_entries = 200
+context_window_token_budget = 128000
+health_port = 9091
+
+[bus]
+socket_path = "/var/lib/agentos/data/agentos.sock"
+
+[audit]
+log_path = "/var/lib/agentos/data/audit.db"
+
+[secrets]
+vault_path = "/var/lib/agentos/data/vault.db"
+
+[tools]
+core_tools_dir = "/var/lib/agentos/tools/core"
+user_tools_dir  = "/var/lib/agentos/tools/user"
+data_dir        = "/var/lib/agentos/data"
+
+[ollama]
+host          = "http://ollama:11434"
+default_model = "llama3.2"
+```
+
+> The snippet above shows the key sections. The full file (`config/docker.toml`) also includes `[llm]`, `[memory]`, `[memory.extraction]`, `[memory.consolidation]`, `[context_budget]`, and `[health_monitor]` sections.
+
+Key differences from the development default:
+- All runtime paths are under `/var/lib/agentos/` (backed by named Docker volumes — survives restarts)
+- Ollama is reachable at `http://ollama:11434` (Docker service name, not `localhost`)
+- Health monitor enabled; exposes `/healthz` on port `9091`
+- `context_window_token_budget` raised to `128000` for larger models
+
+### Environment Variables
+
+The compose stack passes credentials via environment variables rather than baking them into the image.
+Copy `.env.example` to `.env` and fill in the required values before starting:
+
+```bash
+cp .env.example .env
+# edit .env — set AGENTOS_VAULT_PASSPHRASE to a strong random value:
+#   openssl rand -base64 32
+```
+
+| Variable | Required | Description |
+|---|---|---|
+| `AGENTOS_VAULT_PASSPHRASE` | **Yes** | Derives the AES-256-GCM vault key. Never commit this value. |
+| `AGENTOS_OLLAMA_HOST` | No | Override Ollama URL (default: `http://ollama:11434`) |
+| `AGENTOS_LLM_URL` | No | Custom/OpenAI-compatible gateway base URL |
+| `AGENTOS_OPENAI_BASE_URL` | No | Override OpenAI base URL |
+| `RUST_LOG` | No | Tracing filter — `agentos=info` for production |
+
+### Security settings in `docker-compose.yml`
+
+The provided `docker-compose.yml` enables two important hardening options:
+
+```yaml
+read_only: true            # Root filesystem is read-only
+security_opt:
+  - no-new-privileges:true # Process cannot escalate privileges
+tmpfs:
+  - /tmp                   # Writable tmpfs for scratch space
+  - /run                   # Writable tmpfs for runtime sockets
+```
+
+All persistent state lives in named volumes (`agentos-data`, `agentos-user-tools`), not in the container filesystem.
+
+---
+
 ## LLM Endpoint Resolution
 
 For agent connect flows, endpoint precedence is:

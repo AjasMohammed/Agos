@@ -135,7 +135,11 @@ impl ConsolidationEngine {
                     continue;
                 }
                 Ok(_) => {}
-                Err(_) => {}
+                Err(_) => {
+                    // Skip storing on dedup search failure to avoid creating duplicates.
+                    report.failed += 1;
+                    continue;
+                }
             }
 
             match self.procedural_store.store(&procedure).await {

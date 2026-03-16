@@ -22,7 +22,8 @@
 14. [Security Hardening for Deployment](#security-hardening-for-deployment)
 15. [Upgrade & Migration Strategy](#upgrade--migration-strategy)
 16. [Monitoring & Observability](#monitoring--observability)
-17. [Deployment Checklist](#deployment-checklist)
+17. [Security Gate — Required before launch](#security-gate--required-before-launch)
+18. [Deployment Checklist](#deployment-checklist)
 
 ---
 
@@ -1331,6 +1332,38 @@ scrape_configs:
 | `agentos_tool_errors_total` | Tool execution errors | Rate > 1/min |
 | `agentos_memory_semantic_size` | Semantic store size | > 10GB |
 | `agentos_audit_log_size` | Audit log size | > 5GB |
+
+---
+
+## Security Gate — Required before launch
+
+**All 7 security acceptance scenarios must pass before any deployment.** This is a hard gate — no exceptions.
+
+### Run the suite
+
+```bash
+cargo test -p agentos-kernel --test security_acceptance_test
+```
+
+Expected result: `test result: ok. 7 passed; 0 failed; 0 ignored`
+
+### Scenario checklist
+
+| # | Scenario | Pass? |
+|---|----------|-------|
+| A | Unsigned A2A message rejected | must be ✓ |
+| B | Forged Ed25519 signature rejected | must be ✓ |
+| C | Secret scope denial enforced (Agent B denied Agent A's secret) | must be ✓ |
+| D | High-risk (`Delegate`) intent requires hard approval — task enters `PendingEscalation` | must be ✓ |
+| E | Prompt injection payloads detected and flagged by `InjectionScanner` | must be ✓ |
+| F | `Blocked`-tier tool registration fails with `ToolBlocked` error | must be ✓ |
+| G | Community tool with invalid Ed25519 signature fails with `ToolSignatureInvalid` | must be ✓ |
+
+### Policy
+
+- Any scenario failure is a **hard deployment block** — resolve before proceeding.
+- After any change to `agent_message_bus.rs`, `vault.rs`, `risk_classifier.rs`, `injection_scanner.rs`, or `tool_registry.rs`, re-run the suite.
+- The audit log must contain corresponding security events for each triggered scenario.
 
 ---
 

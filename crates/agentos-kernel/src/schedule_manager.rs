@@ -2,16 +2,56 @@ use agentos_types::*;
 use cron::Schedule;
 use std::collections::HashMap;
 use std::str::FromStr;
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+
+/// Lightweight notification sent by ScheduleManager to the kernel.
+/// The kernel converts these into properly HMAC-signed EventMessages with audit trail.
+#[derive(Debug, Clone)]
+pub struct ScheduleNotification {
+    pub event_type: EventType,
+    pub severity: EventSeverity,
+    pub payload: serde_json::Value,
+}
 
 pub struct ScheduleManager {
     jobs: RwLock<HashMap<ScheduleID, ScheduledJob>>,
+    /// Optional channel for notifying the kernel of schedule events.
+    /// The kernel converts these into properly signed EventMessages.
+    notification_sender: RwLock<Option<mpsc::Sender<ScheduleNotification>>>,
 }
 
 impl ScheduleManager {
     pub fn new() -> Self {
         Self {
             jobs: RwLock::new(HashMap::new()),
+            notification_sender: RwLock::new(None),
+        }
+    }
+
+    /// Inject the notification sender so the kernel receives schedule events
+    /// and converts them into properly HMAC-signed EventMessages.
+    pub async fn set_notification_sender(&self, sender: mpsc::Sender<ScheduleNotification>) {
+        *self.notification_sender.write().await = Some(sender);
+    }
+
+    /// Send a lightweight notification to the kernel for signing and dispatch.
+    async fn notify(
+        &self,
+        event_type: EventType,
+        severity: EventSeverity,
+        payload: serde_json::Value,
+    ) {
+        let sender = self.notification_sender.read().await;
+        if let Some(ref sender) = *sender {
+            let notification = ScheduleNotification {
+                event_type,
+                severity,
+                payload,
+            };
+            if let Err(e) = sender.try_send(notification) {
+                tracing::warn!(error = %e, "Failed to send schedule notification (possibly full or closed)");
+            }
         }
     }
 
@@ -58,10 +98,9 @@ impl ScheduleManager {
             job.state = ScheduleState::Paused;
             Ok(())
         } else {
-            Err(AgentOSError::VaultError(format!(
-                "Schedule {} not found",
-                id
-            )))
+            Err(AgentOSError::KernelError {
+                reason: format!("Schedule {} not found", id),
+            })
         }
     }
 
@@ -71,10 +110,9 @@ impl ScheduleManager {
             job.state = ScheduleState::Active;
             Ok(())
         } else {
-            Err(AgentOSError::VaultError(format!(
-                "Schedule {} not found",
-                id
-            )))
+            Err(AgentOSError::KernelError {
+                reason: format!("Schedule {} not found", id),
+            })
         }
     }
 
@@ -83,10 +121,9 @@ impl ScheduleManager {
         if jobs.remove(id).is_some() {
             Ok(())
         } else {
-            Err(AgentOSError::VaultError(format!(
-                "Schedule {} not found",
-                id
-            )))
+            Err(AgentOSError::KernelError {
+                reason: format!("Schedule {} not found", id),
+            })
         }
     }
 
@@ -131,7 +168,55 @@ impl ScheduleManager {
             }
         }
 
+        // Emit CronJobFired for each due job (outside the write lock)
+        drop(jobs);
+        for job in &due {
+            self.notify(
+                EventType::CronJobFired,
+                EventSeverity::Info,
+                serde_json::json!({
+                    "schedule_id": job.id.to_string(),
+                    "schedule_name": job.name,
+                    "cron_expression": job.cron_expression,
+                    "run_count": job.run_count,
+                }),
+            )
+            .await;
+        }
+
         due
+    }
+
+    /// Emit a `ScheduledTaskMissed` event when a due job's target agent is unavailable.
+    /// Called by the kernel when it cannot find the target agent for a fired cron job.
+    pub async fn emit_task_missed(&self, job: &ScheduledJob, reason: &str) {
+        self.notify(
+            EventType::ScheduledTaskMissed,
+            EventSeverity::Warning,
+            serde_json::json!({
+                "schedule_id": job.id.to_string(),
+                "schedule_name": job.name,
+                "agent_name": job.agent_name,
+                "reason": reason,
+            }),
+        )
+        .await;
+    }
+
+    /// Emit a `ScheduledTaskFailed` event when a scheduled task completes with error.
+    /// Called by the kernel after a cron-triggered task fails.
+    pub async fn emit_task_failed(&self, job: &ScheduledJob, error: &str) {
+        self.notify(
+            EventType::ScheduledTaskFailed,
+            EventSeverity::Warning,
+            serde_json::json!({
+                "schedule_id": job.id.to_string(),
+                "schedule_name": job.name,
+                "agent_name": job.agent_name,
+                "error": error,
+            }),
+        )
+        .await;
     }
 }
 
@@ -189,5 +274,129 @@ mod tests {
         // Just verify state changed
         let jobs = mgr.list_jobs().await;
         assert_eq!(jobs[0].state, ScheduleState::Paused);
+    }
+
+    #[tokio::test]
+    async fn test_check_due_jobs_emits_cron_job_fired() {
+        let mgr = ScheduleManager::new();
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        mgr.set_notification_sender(event_tx).await;
+
+        // "* * * * * *" fires every second — next_run_at will be <= now by the time we check
+        mgr.create_job(
+            "every-sec".into(),
+            "* * * * * *".into(),
+            "agent".into(),
+            "do something".into(),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+        // First call initializes next_run_at; wait briefly for it to become due
+        let _ = mgr.check_due_jobs().await;
+        // Small delay to ensure next_run_at is in the past
+        tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
+        let due = mgr.check_due_jobs().await;
+        assert!(!due.is_empty(), "job should be due");
+
+        let notif = event_rx
+            .try_recv()
+            .expect("should receive CronJobFired notification");
+        assert_eq!(notif.event_type, EventType::CronJobFired);
+        assert_eq!(
+            notif.payload["schedule_name"].as_str().unwrap(),
+            "every-sec"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_emit_task_missed() {
+        let mgr = ScheduleManager::new();
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        mgr.set_notification_sender(event_tx).await;
+
+        let job = ScheduledJob {
+            id: ScheduleID::new(),
+            name: "missed-job".into(),
+            cron_expression: "* * * * * *".into(),
+            agent_name: "ghost-agent".into(),
+            task_prompt: "do stuff".into(),
+            permissions: vec![],
+            state: ScheduleState::Active,
+            created_at: chrono::Utc::now(),
+            last_run_at: None,
+            next_run_at: None,
+            run_count: 0,
+            max_retries: 3,
+            retry_count: 0,
+            output_destination: None,
+        };
+
+        mgr.emit_task_missed(&job, "agent not connected").await;
+
+        let notif = event_rx
+            .try_recv()
+            .expect("should receive ScheduledTaskMissed notification");
+        assert_eq!(notif.event_type, EventType::ScheduledTaskMissed);
+        assert_eq!(notif.severity, EventSeverity::Warning);
+        assert_eq!(notif.payload["agent_name"].as_str().unwrap(), "ghost-agent");
+        assert_eq!(
+            notif.payload["reason"].as_str().unwrap(),
+            "agent not connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_emit_task_failed() {
+        let mgr = ScheduleManager::new();
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        mgr.set_notification_sender(event_tx).await;
+
+        let job = ScheduledJob {
+            id: ScheduleID::new(),
+            name: "failed-job".into(),
+            cron_expression: "* * * * * *".into(),
+            agent_name: "worker".into(),
+            task_prompt: "process data".into(),
+            permissions: vec![],
+            state: ScheduleState::Active,
+            created_at: chrono::Utc::now(),
+            last_run_at: None,
+            next_run_at: None,
+            run_count: 1,
+            max_retries: 3,
+            retry_count: 0,
+            output_destination: None,
+        };
+
+        mgr.emit_task_failed(&job, "timeout exceeded").await;
+
+        let notif = event_rx
+            .try_recv()
+            .expect("should receive ScheduledTaskFailed notification");
+        assert_eq!(notif.event_type, EventType::ScheduledTaskFailed);
+        assert_eq!(notif.severity, EventSeverity::Warning);
+        assert_eq!(notif.payload["error"].as_str().unwrap(), "timeout exceeded");
+    }
+
+    #[tokio::test]
+    async fn test_schedule_works_without_notification_sender() {
+        // Verify the manager works correctly when notification_sender is None
+        let mgr = ScheduleManager::new();
+        mgr.create_job(
+            "no-sender".into(),
+            "* * * * * *".into(),
+            "agent".into(),
+            "task".into(),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+        let _ = mgr.check_due_jobs().await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
+        let due = mgr.check_due_jobs().await;
+        assert!(!due.is_empty());
     }
 }

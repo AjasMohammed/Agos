@@ -10,6 +10,8 @@ pub enum CostCommands {
         #[arg(long)]
         agent: Option<String>,
     },
+    /// Show retrieval refresh/reuse efficiency metrics
+    Retrieval,
 }
 
 pub async fn handle(client: &mut BusClient, cmd: CostCommands) -> anyhow::Result<()> {
@@ -53,6 +55,48 @@ pub async fn handle(client: &mut BusClient, cmd: CostCommands) -> anyhow::Result
                         "{:<20} {:>12} {:>12.6} {:>12}",
                         "TOTAL", total_tokens, total_cost, total_calls
                     );
+                }
+                KernelResponse::Error { message } => {
+                    eprintln!("Error: {}", message);
+                }
+                _ => {
+                    eprintln!("Unexpected response");
+                }
+            }
+        }
+        CostCommands::Retrieval => {
+            let response = client
+                .send_command(KernelCommand::GetRetrievalMetrics)
+                .await?;
+            match response {
+                KernelResponse::Success { data: Some(data) } => {
+                    let refresh_total = data
+                        .get("refresh_total")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let reuse_total = data
+                        .get("reuse_total")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let total_decisions = data
+                        .get("total_decisions")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let refresh_ratio = data
+                        .get("refresh_ratio")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let reuse_ratio = data
+                        .get("reuse_ratio")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+
+                    println!("Retrieval Refresh Efficiency");
+                    println!("  Refresh decisions: {}", refresh_total);
+                    println!("  Reuse decisions:   {}", reuse_total);
+                    println!("  Total decisions:   {}", total_decisions);
+                    println!("  Refresh ratio:     {:.2}%", refresh_ratio * 100.0);
+                    println!("  Reuse ratio:       {:.2}%", reuse_ratio * 100.0);
                 }
                 KernelResponse::Error { message } => {
                     eprintln!("Error: {}", message);

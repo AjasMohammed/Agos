@@ -13,6 +13,10 @@ pub enum EventCommands {
         #[arg(long)]
         event: String,
 
+        /// Optional payload filter expression (e.g. "cpu_percent > 85 AND severity == Critical")
+        #[arg(long)]
+        filter: Option<String>,
+
         /// Throttle policy: "none", "once_per:<dur>", "max:<count>/<dur>" (e.g. "once_per:30s")
         #[arg(long)]
         throttle: Option<String>,
@@ -78,6 +82,7 @@ pub async fn handle(client: &mut BusClient, command: EventCommands) -> anyhow::R
         EventCommands::Subscribe {
             agent,
             event,
+            filter,
             throttle,
             priority,
         } => {
@@ -85,6 +90,7 @@ pub async fn handle(client: &mut BusClient, command: EventCommands) -> anyhow::R
                 .send_command(KernelCommand::EventSubscribe {
                     agent_name: agent,
                     event_filter: event,
+                    payload_filter: filter,
                     throttle,
                     priority: Some(priority),
                 })
@@ -133,10 +139,10 @@ pub async fn handle(client: &mut BusClient, command: EventCommands) -> anyhow::R
                         }
 
                         println!(
-                            "{:<38} {:<38} {:<20} {:<10} {:<8}",
-                            "ID", "AGENT_ID", "FILTER", "PRIORITY", "ENABLED"
+                            "{:<38} {:<38} {:<20} {:<20} {:<10} {:<8}",
+                            "ID", "AGENT_ID", "EVENT", "PAYLOAD", "PRIORITY", "ENABLED"
                         );
-                        println!("{}", "-".repeat(114));
+                        println!("{}", "-".repeat(135));
 
                         for entry in &list {
                             let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("-");
@@ -144,8 +150,12 @@ pub async fn handle(client: &mut BusClient, command: EventCommands) -> anyhow::R
                                 .get("agent_id")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("-");
-                            let filter = entry
+                            let event_filter = entry
                                 .get("event_type_filter")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("-");
+                            let payload_filter = entry
+                                .get("payload_filter")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("-");
                             let priority = entry
@@ -159,17 +169,23 @@ pub async fn handle(client: &mut BusClient, command: EventCommands) -> anyhow::R
 
                             let short_id = &id[..id.len().min(36)];
                             let short_agent = &agent_id[..agent_id.len().min(36)];
-                            let short_filter = if filter.len() > 18 {
-                                format!("{}...", &filter[..18])
+                            let short_event_filter = if event_filter.len() > 18 {
+                                format!("{}...", &event_filter[..18])
                             } else {
-                                filter.to_string()
+                                event_filter.to_string()
+                            };
+                            let short_payload_filter = if payload_filter.len() > 18 {
+                                format!("{}...", &payload_filter[..18])
+                            } else {
+                                payload_filter.to_string()
                             };
 
                             println!(
-                                "{:<38} {:<38} {:<20} {:<10} {:<8}",
+                                "{:<38} {:<38} {:<20} {:<20} {:<10} {:<8}",
                                 short_id,
                                 short_agent,
-                                short_filter,
+                                short_event_filter,
+                                short_payload_filter,
                                 priority,
                                 if enabled { "yes" } else { "no" }
                             );
@@ -198,8 +214,14 @@ pub async fn handle(client: &mut BusClient, command: EventCommands) -> anyhow::R
                             sub.get("agent_id").and_then(|v| v.as_str()).unwrap_or("-")
                         );
                         println!(
-                            "Filter:       {}",
+                            "Event filter: {}",
                             sub.get("event_type_filter")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("-")
+                        );
+                        println!(
+                            "Payload:      {}",
+                            sub.get("payload_filter")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("-")
                         );

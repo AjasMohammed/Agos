@@ -1,7 +1,7 @@
 [manifest]
 name        = "file-reader"
-version     = "1.0.0"
-description = "Reads files from the data directory and returns their content as text or structured data"
+version     = "1.1.0"
+description = "Reads files from the data directory with line-based pagination and directory listing. Respects write locks — returns FileLocked if another agent is writing."
 author      = "agentos-core"
 trust_tier  = "core"
 

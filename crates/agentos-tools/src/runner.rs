@@ -2,6 +2,7 @@ use crate::agent_message::AgentMessageTool;
 use crate::archival_insert::ArchivalInsert;
 use crate::archival_search::ArchivalSearch;
 use crate::data_parser::DataParser;
+use crate::file_lock::FileLockRegistry;
 use crate::file_reader::FileReader;
 use crate::file_writer::FileWriter;
 use crate::hardware_info::HardwareInfoTool;
@@ -28,6 +29,7 @@ use tracing::warn;
 
 pub struct ToolRunner {
     tools: HashMap<String, Box<dyn AgentTool>>,
+    file_lock_registry: Arc<FileLockRegistry>,
 }
 
 impl ToolRunner {
@@ -38,6 +40,7 @@ impl ToolRunner {
     pub fn new_with_model_cache_dir(data_dir: &Path, model_cache_dir: &Path) -> Self {
         let mut runner = Self {
             tools: HashMap::new(),
+            file_lock_registry: Arc::new(FileLockRegistry::new()),
         };
 
         // Initialize shared memory stores
@@ -59,34 +62,54 @@ impl ToolRunner {
         let episodic =
             Arc::new(EpisodicStore::open(data_dir).expect("Failed to open episodic memory store"));
 
-        // Register all built-in tools
-        runner.register(Box::new(FileReader::new()));
-        runner.register(Box::new(FileWriter::new()));
-        runner.register(Box::new(MemorySearch::new(
-            semantic.clone(),
-            episodic.clone(),
-        )));
-        runner.register(Box::new(MemoryWrite::new(
-            semantic.clone(),
-            episodic.clone(),
-        )));
-        runner.register(Box::new(ArchivalInsert::new(semantic.clone())));
-        runner.register(Box::new(ArchivalSearch::new(semantic.clone())));
-        runner.register(Box::new(MemoryBlockWriteTool::new()));
-        runner.register(Box::new(MemoryBlockReadTool::new()));
-        runner.register(Box::new(MemoryBlockListTool::new()));
-        runner.register(Box::new(MemoryBlockDeleteTool::new()));
-        runner.register(Box::new(DataParser::new()));
-        runner.register(Box::new(ShellExec::new()));
-        runner.register(Box::new(AgentMessageTool::new()));
-        runner.register(Box::new(TaskDelegate::new()));
-        runner.register(Box::new(HttpClientTool::new()));
-        runner.register(Box::new(SysMonitorTool::new()));
-        runner.register(Box::new(ProcessManagerTool::new()));
-        runner.register(Box::new(LogReaderTool::new()));
-        runner.register(Box::new(NetworkMonitorTool::new()));
-        runner.register(Box::new(HardwareInfoTool::new()));
+        runner.register_memory_tools(semantic, episodic);
         runner
+    }
+
+    pub fn new_with_shared_memory(
+        semantic: Arc<SemanticStore>,
+        episodic: Arc<EpisodicStore>,
+    ) -> Self {
+        let mut runner = Self {
+            tools: HashMap::new(),
+            file_lock_registry: Arc::new(FileLockRegistry::new()),
+        };
+        runner.register_memory_tools(semantic, episodic);
+        runner
+    }
+
+    fn register_memory_tools(
+        &mut self,
+        semantic: Arc<SemanticStore>,
+        episodic: Arc<EpisodicStore>,
+    ) {
+        // Register all built-in tools
+        self.register(Box::new(FileReader::new()));
+        self.register(Box::new(FileWriter::new()));
+        self.register(Box::new(MemorySearch::new(
+            semantic.clone(),
+            episodic.clone(),
+        )));
+        self.register(Box::new(MemoryWrite::new(
+            semantic.clone(),
+            episodic.clone(),
+        )));
+        self.register(Box::new(ArchivalInsert::new(semantic.clone())));
+        self.register(Box::new(ArchivalSearch::new(semantic.clone())));
+        self.register(Box::new(MemoryBlockWriteTool::new()));
+        self.register(Box::new(MemoryBlockReadTool::new()));
+        self.register(Box::new(MemoryBlockListTool::new()));
+        self.register(Box::new(MemoryBlockDeleteTool::new()));
+        self.register(Box::new(DataParser::new()));
+        self.register(Box::new(ShellExec::new()));
+        self.register(Box::new(AgentMessageTool::new()));
+        self.register(Box::new(TaskDelegate::new()));
+        self.register(Box::new(HttpClientTool::new()));
+        self.register(Box::new(SysMonitorTool::new()));
+        self.register(Box::new(ProcessManagerTool::new()));
+        self.register(Box::new(LogReaderTool::new()));
+        self.register(Box::new(NetworkMonitorTool::new()));
+        self.register(Box::new(HardwareInfoTool::new()));
     }
 
     pub fn register(&mut self, tool: Box<dyn AgentTool>) {
@@ -102,8 +125,12 @@ impl ToolRunner {
         &self,
         tool_name: &str,
         payload: serde_json::Value,
-        context: ToolExecutionContext,
+        mut context: ToolExecutionContext,
     ) -> Result<serde_json::Value, AgentOSError> {
+        // Inject the shared file lock registry so file tools can coordinate
+        // exclusive access across concurrent agents.
+        context.file_lock_registry = Some(self.file_lock_registry.clone());
+
         let tool = self
             .tools
             .get(tool_name)

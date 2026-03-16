@@ -210,3 +210,61 @@ agentctl audit logs --last 100
 ```
 
 The audit log is an append-only SQLite database. Only the kernel can write to it — no tool, agent, or external process can modify or delete entries.
+
+---
+
+## Deployment Security Acceptance
+
+Before any deployment, the security acceptance suite **must pass in full**. This is a hard deployment gate — any failure blocks launch.
+
+### How to Run
+
+```bash
+# Run the full security acceptance suite
+cargo test -p agentos-kernel --test security_acceptance_test
+
+# Verify all 7 scenarios are present
+cargo test -p agentos-kernel --test security_acceptance_test -- --list 2>&1 | grep 'test ' | wc -l
+# Expected output: 7
+```
+
+### The 7 Mandatory Scenarios
+
+| # | Scenario | Component | What It Validates |
+|---|----------|-----------|-------------------|
+| A | Unsigned A2A message rejected | `AgentMessageBus` | Messages without a signature are refused at delivery |
+| B | Forged signature rejected | `AgentMessageBus` | Tampered signatures fail Ed25519 verification |
+| C | Secret scope denial enforced | `SecretsVault` | Agent B cannot access a secret scoped to Agent A |
+| D | High-risk action escalated | `RiskClassifier` + `EscalationManager` | `Delegate` intents require hard approval before execution |
+| E | Prompt injection detected | `InjectionScanner` | Known injection payloads (role override, system prompt exfil, delimiter injection) are flagged |
+| F | Blocked trust tier rejected | `ToolRegistry` | Tools with `trust_tier = "blocked"` fail registration with `ToolBlocked` error |
+| G | Invalid tool signature rejected | `ToolRegistry` / signing | Community-tier tools with invalid Ed25519 signatures fail registration with `ToolSignatureInvalid` |
+
+### Expected Pass Criteria
+
+All 7 tests must report `ok`. A passing run looks like:
+
+```
+running 7 tests
+test scenario_a_reject_unsigned_message ... ok
+test scenario_b_reject_forged_signature ... ok
+test scenario_c_secret_scope_denial ... ok
+test scenario_d_escalate_high_risk_action ... ok
+test scenario_e_detect_prompt_injection ... ok
+test scenario_f_block_tool_blocked_tier ... ok
+test scenario_g_reject_tool_invalid_signature ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored
+```
+
+### What to Do If a Scenario Fails
+
+| Failure | Root Cause | Resolution |
+|---------|-----------|------------|
+| Scenario A/B | A2A signature enforcement disabled or bypassed | Check `agent_message_bus.rs::send_direct()` — signature verification must run unconditionally |
+| Scenario C | Secret scope check missing or skipped | Check `vault.rs::issue_proxy_token()` — scope must be compared against requestor's AgentID |
+| Scenario D | Risk classifier not returning `HardApproval` for delegate intents | Check `risk_classifier.rs` — `IntentType::Delegate` must map to `ActionRiskLevel::HardApproval` |
+| Scenario E | Injection scanner patterns out of date or scanner not called | Check `injection_scanner.rs` patterns; ensure scanner is called in `run_loop.rs` on LLM output |
+| Scenario F/G | Tool registry accepting blocked/unsigned tools | Check `tool_registry.rs::register()` — trust tier and signature validation must run before any registration |
+
+**A failure in any scenario is a hard block. Do not deploy until all 7 pass.**

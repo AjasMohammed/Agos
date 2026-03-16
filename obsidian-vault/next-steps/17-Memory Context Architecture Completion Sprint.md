@@ -5,7 +5,7 @@ tags:
   - kernel
   - next-steps
 date: 2026-03-13
-status: in-progress
+status: complete
 effort: 3d
 priority: critical
 ---
@@ -32,7 +32,9 @@ Deliver a working retrieval gate, structured extraction, consolidation pipeline,
 | 02 | [[17-02-Adaptive Retrieval Gate Implementation]] | `crates/agentos-kernel/src/retrieval_gate.rs` | complete |
 | 03 | [[17-03-Structured Memory Extraction Engine]] | `crates/agentos-kernel/src/memory_extraction.rs` | complete |
 | 04 | [[17-04-Consolidation and Memory Blocks]] | `crates/agentos-kernel/src/consolidation.rs`, `memory_blocks.rs` | complete |
-| 05 | [[17-05-Context Freshness and Procedural Min Score]] | `crates/agentos-kernel/src/task_executor.rs`, `crates/agentos-memory/src/procedural.rs` | in-progress |
+| 05 | [[17-05-Context Freshness and Procedural Min Score]] | `crates/agentos-kernel/src/task_executor.rs`, `crates/agentos-memory/src/procedural.rs` | complete |
+| 06 | [[17-06-Memory Runtime Efficiency Hardening]] | `crates/agentos-kernel/src/kernel.rs`, `crates/agentos-tools/src/runner.rs`, `crates/agentos-kernel/src/task_executor.rs` | complete |
+| 07 | [[17-07-Retrieval Refresh Metrics]] | `crates/agentos-kernel/src/metrics.rs`, `crates/agentos-kernel/src/task_executor.rs` | complete |
 
 ## Verification
 

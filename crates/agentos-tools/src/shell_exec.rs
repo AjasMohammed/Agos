@@ -61,6 +61,12 @@ impl AgentTool for ShellExec {
         // Check if bwrap is available (at runtime)
         let bwrap_check = Command::new("bwrap").arg("--version").output().await;
 
+        // Determine whether network access is explicitly requested
+        let allow_network = payload
+            .get("allow_network")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let mut cmd = if bwrap_check.is_ok() {
             // Build the bwrap command
             // We want to mount the root filesystem read-only,
@@ -103,8 +109,14 @@ impl AgentTool for ShellExec {
                 .arg("/dev")
                 .arg("--proc")
                 .arg("/proc")
-                .arg("--unshare-all")
-                .arg("--share-net") // or omit depending on network requirements for this tool
+                .arg("--unshare-all");
+
+            // Only share network if explicitly requested — default is isolated
+            if allow_network {
+                proc.arg("--share-net");
+            }
+
+            proc
                 // Change to the data dir
                 .arg("--chdir")
                 .arg(&data_dir_str)
@@ -116,12 +128,13 @@ impl AgentTool for ShellExec {
 
             proc
         } else {
-            // Fallback for development without bwrap (Warn user in logs)
-            tracing::warn!("bwrap not found, running shell-exec WITHOUT path isolation! This is dangerous in production!");
-            let mut proc = Command::new("sh");
-            proc.arg("-c").arg(command);
-            proc.current_dir(&data_dir_str);
-            proc
+            // SECURITY: Refuse to run without sandbox isolation.
+            // Running arbitrary shell commands without bwrap is an unacceptable risk
+            // in any environment. Install bwrap (bubblewrap) to use shell-exec.
+            return Err(AgentOSError::ToolExecutionFailed {
+                tool_name: "shell-exec".into(),
+                reason: "bwrap (bubblewrap) is not installed. shell-exec requires sandbox isolation and cannot run without it. Install bwrap to enable shell command execution.".into(),
+            });
         };
 
         let output = tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output())

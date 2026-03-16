@@ -1,3 +1,4 @@
+use crate::event_bus::{parse_event_type_filter, parse_subscription_priority};
 use crate::kernel::Kernel;
 use agentos_bus::KernelResponse;
 use agentos_types::*;
@@ -7,6 +8,7 @@ impl Kernel {
         &self,
         agent_name: String,
         event_filter: String,
+        payload_filter: Option<String>,
         throttle: Option<String>,
         priority: Option<String>,
     ) -> KernelResponse {
@@ -23,7 +25,7 @@ impl Kernel {
         drop(registry);
 
         // Parse event type filter
-        let event_type_filter = match parse_event_filter(&event_filter) {
+        let event_type_filter = match parse_event_type_filter(&event_filter) {
             Some(f) => f,
             None => {
                 return KernelResponse::Error {
@@ -52,26 +54,32 @@ impl Kernel {
         };
 
         // Parse priority
-        let sub_priority = match priority.as_deref() {
-            None | Some("normal") => SubscriptionPriority::Normal,
-            Some("critical") => SubscriptionPriority::Critical,
-            Some("high") => SubscriptionPriority::High,
-            Some("low") => SubscriptionPriority::Low,
-            Some(other) => {
+        let sub_priority = match parse_subscription_priority(priority.as_deref()) {
+            Some(p) => p,
+            None => {
                 return KernelResponse::Error {
                     message: format!(
                         "Invalid priority '{}'. Use 'critical', 'high', 'normal', or 'low'",
-                        other
+                        priority.as_deref().unwrap_or_default()
                     ),
-                }
+                };
             }
         };
+
+        let payload_filter = payload_filter.and_then(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
 
         let sub = EventSubscription {
             id: SubscriptionID::new(),
             agent_id: agent.id,
             event_type_filter,
-            filter: None,
+            filter: payload_filter.clone(),
             priority: sub_priority,
             throttle: throttle_policy,
             enabled: true,
@@ -90,6 +98,7 @@ impl Kernel {
             details: serde_json::json!({
                 "subscription_id": sub_id.to_string(),
                 "event_filter": event_filter,
+                "payload_filter": payload_filter,
                 "agent_name": agent_name,
             }),
             severity: agentos_audit::AuditSeverity::Info,
@@ -163,6 +172,7 @@ impl Kernel {
                     "id": s.id.to_string(),
                     "agent_id": s.agent_id.to_string(),
                     "event_type_filter": format!("{:?}", s.event_type_filter),
+                    "payload_filter": s.filter,
                     "priority": format!("{:?}", s.priority),
                     "throttle": format!("{:?}", s.throttle),
                     "enabled": s.enabled,
@@ -193,6 +203,7 @@ impl Kernel {
                     "id": sub.id.to_string(),
                     "agent_id": sub.agent_id.to_string(),
                     "event_type_filter": format!("{:?}", sub.event_type_filter),
+                    "payload_filter": sub.filter,
                     "priority": format!("{:?}", sub.priority),
                     "throttle": format!("{:?}", sub.throttle),
                     "enabled": sub.enabled,
@@ -275,120 +286,6 @@ impl Kernel {
     }
 }
 
-/// Parse an event filter string into an `EventTypeFilter`.
-///
-/// Formats:
-/// - `"all"` → `EventTypeFilter::All`
-/// - `"category:AgentLifecycle"` → `EventTypeFilter::Category(EventCategory::AgentLifecycle)`
-/// - `"AgentAdded"` → `EventTypeFilter::Exact(EventType::AgentAdded)`
-fn parse_event_filter(filter: &str) -> Option<EventTypeFilter> {
-    if filter.eq_ignore_ascii_case("all") {
-        return Some(EventTypeFilter::All);
-    }
-
-    if let Some(cat_name) = filter.strip_prefix("category:") {
-        let category = parse_event_category(cat_name)?;
-        return Some(EventTypeFilter::Category(category));
-    }
-
-    // Try to parse as an exact event type
-    let event_type = parse_event_type(filter)?;
-    Some(EventTypeFilter::Exact(event_type))
-}
-
-fn parse_event_category(name: &str) -> Option<EventCategory> {
-    match name {
-        "AgentLifecycle" => Some(EventCategory::AgentLifecycle),
-        "TaskLifecycle" => Some(EventCategory::TaskLifecycle),
-        "SecurityEvents" => Some(EventCategory::SecurityEvents),
-        "MemoryEvents" => Some(EventCategory::MemoryEvents),
-        "SystemHealth" => Some(EventCategory::SystemHealth),
-        "HardwareEvents" => Some(EventCategory::HardwareEvents),
-        "ToolEvents" => Some(EventCategory::ToolEvents),
-        "AgentCommunication" => Some(EventCategory::AgentCommunication),
-        "ScheduleEvents" => Some(EventCategory::ScheduleEvents),
-        "ExternalEvents" => Some(EventCategory::ExternalEvents),
-        _ => None,
-    }
-}
-
-fn parse_event_type(name: &str) -> Option<EventType> {
-    match name {
-        // AgentLifecycle
-        "AgentAdded" => Some(EventType::AgentAdded),
-        "AgentRemoved" => Some(EventType::AgentRemoved),
-        "AgentPermissionGranted" => Some(EventType::AgentPermissionGranted),
-        "AgentPermissionRevoked" => Some(EventType::AgentPermissionRevoked),
-        // TaskLifecycle
-        "TaskStarted" => Some(EventType::TaskStarted),
-        "TaskCompleted" => Some(EventType::TaskCompleted),
-        "TaskFailed" => Some(EventType::TaskFailed),
-        "TaskTimedOut" => Some(EventType::TaskTimedOut),
-        "TaskDelegated" => Some(EventType::TaskDelegated),
-        "TaskRetrying" => Some(EventType::TaskRetrying),
-        "TaskDeadlockDetected" => Some(EventType::TaskDeadlockDetected),
-        "TaskPreempted" => Some(EventType::TaskPreempted),
-        // SecurityEvents
-        "PromptInjectionAttempt" => Some(EventType::PromptInjectionAttempt),
-        "CapabilityViolation" => Some(EventType::CapabilityViolation),
-        "UnauthorizedToolAccess" => Some(EventType::UnauthorizedToolAccess),
-        "SecretsAccessAttempt" => Some(EventType::SecretsAccessAttempt),
-        "SandboxEscapeAttempt" => Some(EventType::SandboxEscapeAttempt),
-        "AuditLogTamperAttempt" => Some(EventType::AuditLogTamperAttempt),
-        "AgentImpersonationAttempt" => Some(EventType::AgentImpersonationAttempt),
-        "UnverifiedToolInstalled" => Some(EventType::UnverifiedToolInstalled),
-        // MemoryEvents
-        "ContextWindowNearLimit" => Some(EventType::ContextWindowNearLimit),
-        "ContextWindowExhausted" => Some(EventType::ContextWindowExhausted),
-        "EpisodicMemoryWritten" => Some(EventType::EpisodicMemoryWritten),
-        "SemanticMemoryConflict" => Some(EventType::SemanticMemoryConflict),
-        "MemorySearchFailed" => Some(EventType::MemorySearchFailed),
-        "WorkingMemoryEviction" => Some(EventType::WorkingMemoryEviction),
-        // SystemHealth
-        "CPUSpikeDetected" => Some(EventType::CPUSpikeDetected),
-        "MemoryPressure" => Some(EventType::MemoryPressure),
-        "DiskSpaceLow" => Some(EventType::DiskSpaceLow),
-        "DiskSpaceCritical" => Some(EventType::DiskSpaceCritical),
-        "ProcessCrashed" => Some(EventType::ProcessCrashed),
-        "NetworkInterfaceDown" => Some(EventType::NetworkInterfaceDown),
-        "ContainerResourceQuotaExceeded" => Some(EventType::ContainerResourceQuotaExceeded),
-        "KernelSubsystemError" => Some(EventType::KernelSubsystemError),
-        // HardwareEvents
-        "GPUAvailable" => Some(EventType::GPUAvailable),
-        "GPUMemoryPressure" => Some(EventType::GPUMemoryPressure),
-        "SensorReadingThresholdExceeded" => Some(EventType::SensorReadingThresholdExceeded),
-        "DeviceConnected" => Some(EventType::DeviceConnected),
-        "DeviceDisconnected" => Some(EventType::DeviceDisconnected),
-        "HardwareAccessGranted" => Some(EventType::HardwareAccessGranted),
-        // ToolEvents
-        "ToolInstalled" => Some(EventType::ToolInstalled),
-        "ToolRemoved" => Some(EventType::ToolRemoved),
-        "ToolExecutionFailed" => Some(EventType::ToolExecutionFailed),
-        "ToolSandboxViolation" => Some(EventType::ToolSandboxViolation),
-        "ToolResourceQuotaExceeded" => Some(EventType::ToolResourceQuotaExceeded),
-        "ToolChecksumMismatch" => Some(EventType::ToolChecksumMismatch),
-        "ToolRegistryUpdated" => Some(EventType::ToolRegistryUpdated),
-        // AgentCommunication
-        "DirectMessageReceived" => Some(EventType::DirectMessageReceived),
-        "BroadcastReceived" => Some(EventType::BroadcastReceived),
-        "DelegationReceived" => Some(EventType::DelegationReceived),
-        "DelegationResponseReceived" => Some(EventType::DelegationResponseReceived),
-        "MessageDeliveryFailed" => Some(EventType::MessageDeliveryFailed),
-        "AgentUnreachable" => Some(EventType::AgentUnreachable),
-        // ScheduleEvents
-        "CronJobFired" => Some(EventType::CronJobFired),
-        "ScheduledTaskMissed" => Some(EventType::ScheduledTaskMissed),
-        "ScheduledTaskCompleted" => Some(EventType::ScheduledTaskCompleted),
-        "ScheduledTaskFailed" => Some(EventType::ScheduledTaskFailed),
-        // ExternalEvents
-        "WebhookReceived" => Some(EventType::WebhookReceived),
-        "ExternalFileChanged" => Some(EventType::ExternalFileChanged),
-        "ExternalAPIEvent" => Some(EventType::ExternalAPIEvent),
-        "ExternalAlertReceived" => Some(EventType::ExternalAlertReceived),
-        _ => None,
-    }
-}
-
 /// Parse a throttle string like "once_per:30s" or "max:5/60s".
 fn parse_throttle(s: &str) -> Option<ThrottlePolicy> {
     if let Some(dur_str) = s.strip_prefix("once_per:") {
@@ -436,18 +333,18 @@ mod tests {
     #[test]
     fn test_parse_event_filter_all() {
         assert!(matches!(
-            parse_event_filter("all"),
+            parse_event_type_filter("all"),
             Some(EventTypeFilter::All)
         ));
         assert!(matches!(
-            parse_event_filter("ALL"),
+            parse_event_type_filter("ALL"),
             Some(EventTypeFilter::All)
         ));
     }
 
     #[test]
     fn test_parse_event_filter_category() {
-        match parse_event_filter("category:AgentLifecycle") {
+        match parse_event_type_filter("category:AgentLifecycle") {
             Some(EventTypeFilter::Category(EventCategory::AgentLifecycle)) => {}
             other => panic!("Expected Category(AgentLifecycle), got {:?}", other),
         }
@@ -455,7 +352,7 @@ mod tests {
 
     #[test]
     fn test_parse_event_filter_exact() {
-        match parse_event_filter("AgentAdded") {
+        match parse_event_type_filter("AgentAdded") {
             Some(EventTypeFilter::Exact(EventType::AgentAdded)) => {}
             other => panic!("Expected Exact(AgentAdded), got {:?}", other),
         }
@@ -463,8 +360,8 @@ mod tests {
 
     #[test]
     fn test_parse_event_filter_invalid() {
-        assert!(parse_event_filter("NotAnEvent").is_none());
-        assert!(parse_event_filter("category:NotACategory").is_none());
+        assert!(parse_event_type_filter("NotAnEvent").is_none());
+        assert!(parse_event_type_filter("category:NotACategory").is_none());
     }
 
     #[test]

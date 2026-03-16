@@ -42,3 +42,7 @@ reqwest = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.10"
+serial_test = "3.4.0"
+agentos-llm = { path = "../agentos-llm" }
+agentos-bus = { path = "../agentos-bus" }
+toml = { workspace = true }

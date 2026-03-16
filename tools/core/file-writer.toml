@@ -1,7 +1,7 @@
 [manifest]
 name        = "file-writer"
-version     = "1.0.0"
-description = "Writes content to files in the data directory"
+version     = "1.1.0"
+description = "Writes content to files with exclusive locking, atomic overwrite, append, and create_only modes. Blocks concurrent readers and writers with a FileLocked error."
 author      = "agentos-core"
 trust_tier  = "core"
 

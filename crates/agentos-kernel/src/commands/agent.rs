@@ -1,3 +1,4 @@
+use crate::event_bus::default_subscriptions_for_role;
 use crate::kernel::Kernel;
 use agentos_bus::KernelResponse;
 use agentos_llm::{AnthropicCore, CustomCore, GeminiCore, LLMCore, OllamaCore, OpenAICore};
@@ -12,6 +13,7 @@ impl Kernel {
         provider: LLMProvider,
         model: String,
         base_url: Option<String>,
+        roles: Vec<String>,
     ) -> KernelResponse {
         let now = chrono::Utc::now();
         let agent_id = AgentID::new();
@@ -25,11 +27,11 @@ impl Kernel {
                 Ok(Arc::new(OllamaCore::new(&host, &model)))
             }
             LLMProvider::OpenAI => {
-                match self
-                    .vault
-                    .get(&format!("{}_openai_api_key", name))
-                    .or_else(|_| self.vault.get("openai_api_key"))
-                {
+                let key_result = match self.vault.get(&format!("{}_openai_api_key", name)).await {
+                    ok @ Ok(_) => ok,
+                    Err(_) => self.vault.get("openai_api_key").await,
+                };
+                match key_result {
                     Ok(entry) => {
                         let sec = SecretString::new(entry.as_str().to_string());
                         let resolved_base_url = base_url
@@ -47,11 +49,15 @@ impl Kernel {
                 }
             }
             LLMProvider::Anthropic => {
-                match self
+                let key_result = match self
                     .vault
                     .get(&format!("{}_anthropic_api_key", name))
-                    .or_else(|_| self.vault.get("anthropic_api_key"))
+                    .await
                 {
+                    ok @ Ok(_) => ok,
+                    Err(_) => self.vault.get("anthropic_api_key").await,
+                };
+                match key_result {
                     Ok(entry) => {
                         let sec = SecretString::new(entry.as_str().to_string());
                         Ok(Arc::new(AnthropicCore::new(sec, model.clone())))
@@ -62,11 +68,11 @@ impl Kernel {
                 }
             }
             LLMProvider::Gemini => {
-                match self
-                    .vault
-                    .get(&format!("{}_gemini_api_key", name))
-                    .or_else(|_| self.vault.get("gemini_api_key"))
-                {
+                let key_result = match self.vault.get(&format!("{}_gemini_api_key", name)).await {
+                    ok @ Ok(_) => ok,
+                    Err(_) => self.vault.get("gemini_api_key").await,
+                };
+                match key_result {
                     Ok(entry) => {
                         let sec = SecretString::new(entry.as_str().to_string());
                         Ok(Arc::new(GeminiCore::new(sec, model.clone())))
@@ -77,13 +83,12 @@ impl Kernel {
                 }
             }
             LLMProvider::Custom(_) => {
-                let sec = match self
-                    .vault
-                    .get(&format!("{}_custom_api_key", name))
-                    .or_else(|_| self.vault.get("custom_api_key"))
-                {
+                let sec = match self.vault.get(&format!("{}_custom_api_key", name)).await {
                     Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
-                    _ => None,
+                    Err(_) => match self.vault.get("custom_api_key").await {
+                        Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
+                        _ => None,
+                    },
                 };
                 let url = match base_url
                     .or_else(|| std::env::var("AGENTOS_LLM_URL").ok())
@@ -108,7 +113,7 @@ impl Kernel {
         };
 
         // Generate cryptographic identity for the agent
-        let public_key_hex = match self.identity_manager.generate_identity(&agent_id) {
+        let public_key_hex = match self.identity_manager.generate_identity(&agent_id).await {
             Ok(pk) => {
                 tracing::info!(agent_id = %agent_id, "Generated Ed25519 identity for agent");
                 Some(pk)
@@ -124,6 +129,12 @@ impl Kernel {
             self.message_bus.register_pubkey(agent_id, pk.clone()).await;
         }
 
+        let resolved_roles = if roles.is_empty() {
+            vec!["general".to_string()]
+        } else {
+            roles
+        };
+
         let profile = AgentProfile {
             id: agent_id,
             name,
@@ -131,7 +142,7 @@ impl Kernel {
             model,
             status: AgentStatus::Online,
             permissions: PermissionSet::new(),
-            roles: vec!["base".to_string()],
+            roles: resolved_roles,
             current_task: None,
             description: String::new(),
             created_at: now,
@@ -156,6 +167,30 @@ impl Kernel {
         self.cost_tracker
             .register_agent(agent_id, agent_name.clone(), AgentBudget::default())
             .await;
+
+        // Apply role-based default event subscriptions before AgentAdded is emitted.
+        let mut default_specs: Vec<(EventTypeFilter, SubscriptionPriority)> = Vec::new();
+        for role in &profile.roles {
+            for spec in default_subscriptions_for_role(role) {
+                if !default_specs.contains(&spec) {
+                    default_specs.push(spec);
+                }
+            }
+        }
+        for (event_type_filter, priority) in default_specs {
+            self.event_bus
+                .subscribe(EventSubscription {
+                    id: SubscriptionID::new(),
+                    agent_id,
+                    event_type_filter,
+                    filter: None,
+                    priority,
+                    throttle: ThrottlePolicy::None,
+                    enabled: true,
+                    created_at: chrono::Utc::now(),
+                })
+                .await;
+        }
 
         self.audit_log(agentos_audit::AuditEntry {
             timestamp: chrono::Utc::now(),
@@ -197,15 +232,27 @@ impl Kernel {
 
     pub(crate) async fn cmd_disconnect_agent(&self, agent_id: AgentID) -> KernelResponse {
         let mut registry = self.agent_registry.write().await;
-        if registry.get_by_id(&agent_id).is_none() {
-            return KernelResponse::Error {
-                message: format!("Agent '{}' not found", agent_id),
-            };
-        }
+        let agent_name = match registry.get_by_id(&agent_id) {
+            Some(p) => p.name.clone(),
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Agent '{}' not found", agent_id),
+                }
+            }
+        };
         registry.remove(&agent_id);
         drop(registry);
 
+        // Evict rate-limit state so the slot is reclaimed immediately on disconnect.
+        self.per_agent_rate_limiter.lock().await.remove(&agent_name);
+
         self.cost_tracker.unregister_agent(&agent_id).await;
+
+        // Remove all event subscriptions belonging to this agent (default + dynamic).
+        let agent_subs = self.event_bus.list_subscriptions_for_agent(&agent_id).await;
+        for sub in &agent_subs {
+            self.event_bus.unsubscribe(&sub.id).await;
+        }
 
         self.audit_log(agentos_audit::AuditEntry {
             timestamp: chrono::Utc::now(),
@@ -278,6 +325,7 @@ impl Kernel {
         match self
             .identity_manager
             .sign_message(&from_agent.id, &msg.signing_payload())
+            .await
         {
             Ok(sig) => msg.signature = Some(sig),
             Err(e) => {
@@ -381,6 +429,7 @@ impl Kernel {
         match self
             .identity_manager
             .sign_message(&from_agent.id, &msg.signing_payload())
+            .await
         {
             Ok(sig) => msg.signature = Some(sig),
             Err(e) => {

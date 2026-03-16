@@ -89,7 +89,6 @@ async fn register_mock_agent(kernel: &Kernel, name: &str, responses: Vec<String>
 
 /// Full lifecycle: boot → connect mock agent → run task → verify result → check audit logs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "Requires running kernel/bus; tracked in Issues and Fixes.md"]
 #[serial]
 async fn test_full_lifecycle_with_mock_llm() {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
@@ -153,7 +152,6 @@ async fn test_full_lifecycle_with_mock_llm() {
 
 /// Test that running a task with a nonexistent agent returns an error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "Requires running kernel/bus; tracked in Issues and Fixes.md"]
 #[serial]
 async fn test_run_task_nonexistent_agent() {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
@@ -182,7 +180,6 @@ async fn test_run_task_nonexistent_agent() {
 
 /// Test multi-turn: mock LLM first requests a tool, then gives a final answer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "Requires running kernel/bus; tracked in Issues and Fixes.md"]
 #[serial]
 async fn test_task_with_tool_call() {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
@@ -231,10 +228,10 @@ async fn test_task_with_tool_call() {
         kernel.shutdown();
     })
     .await;
+    result.expect("test_task_with_tool_call timed out");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "Requires running kernel/bus; tracked in Issues and Fixes.md"]
 #[serial]
 async fn test_resource_list_command() {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
@@ -259,7 +256,6 @@ async fn test_resource_list_command() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "Requires running kernel/bus; tracked in Issues and Fixes.md"]
 #[serial]
 async fn test_cost_report_command() {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
@@ -284,7 +280,6 @@ async fn test_cost_report_command() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "Requires running kernel/bus; tracked in Issues and Fixes.md"]
 #[serial]
 async fn test_escalation_list_command() {
     let result = tokio::time::timeout(Duration::from_secs(30), async {

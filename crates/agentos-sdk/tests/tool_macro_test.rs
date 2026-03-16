@@ -62,6 +62,7 @@ async fn test_tool_execute() {
         },
         vault: None,
         hal: None,
+        file_lock_registry: None,
     };
 
     let result = tool.execute(payload, context).await.unwrap();

@@ -88,6 +88,9 @@ impl RiskClassifier {
             // Escalation: Level 0 (agents should always be able to escalate)
             IntentType::Escalate => ActionRiskLevel::Autonomous,
 
+            // Runtime event subscription changes: low operational risk but visible.
+            IntentType::Subscribe | IntentType::Unsubscribe => ActionRiskLevel::Notify,
+
             // Execute: Level 2 by default
             IntentType::Execute => ActionRiskLevel::SoftApproval,
         }
@@ -270,6 +273,15 @@ mod tests {
         assert_eq!(
             classifier.classify(IntentType::Execute, "file-delete", None),
             ActionRiskLevel::HardApproval,
+        );
+    }
+
+    #[test]
+    fn test_subscribe_is_notify() {
+        let classifier = RiskClassifier::new();
+        assert_eq!(
+            classifier.classify(IntentType::Subscribe, "event-subscription", None),
+            ActionRiskLevel::Notify,
         );
     }
 }

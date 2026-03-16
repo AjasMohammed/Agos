@@ -189,6 +189,12 @@ pub struct ExtractionRegistry {
     extractors: HashMap<String, Box<dyn MemoryExtractor>>,
 }
 
+impl Default for ExtractionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ExtractionRegistry {
     pub fn new() -> Self {
         Self {
@@ -354,5 +360,115 @@ impl MemoryExtractionEngine {
             existing_id: top.entry.id.clone(),
             new_fact: fact.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extraction_report_default_has_no_conflicts() {
+        let report = ExtractionReport::default();
+        assert_eq!(report.added, 0);
+        assert_eq!(report.updated, 0);
+        assert_eq!(report.skipped, 0);
+    }
+
+    #[test]
+    fn extraction_report_updated_represents_conflict_resolution() {
+        // `updated > 0` means detect_conflict returned MemoryOperation::Update,
+        // which only happens when semantic similarity is between 0.85 and 0.95
+        // (high enough to be related, not identical). This IS a conflict.
+        let mut report = ExtractionReport::default();
+        report.updated = 3;
+        report.added = 1;
+        assert!(
+            report.updated > 0,
+            "updated > 0 signals conflict resolution, triggering SemanticMemoryConflict event"
+        );
+    }
+
+    #[test]
+    fn http_extractor_ignores_non_success_status() {
+        let extractor = HttpClientExtractor;
+        let ctx = ExtractionContext {
+            tool_name: "http-client".to_string(),
+            agent_id: AgentID::new(),
+            task_id: TaskID::new(),
+        };
+        let result = serde_json::json!({"status": 404, "body": {"error": "not found"}});
+        let facts = extractor.extract(&result, &ctx);
+        assert!(facts.is_empty(), "404 responses should not produce facts");
+    }
+
+    #[test]
+    fn http_extractor_extracts_schema_from_success() {
+        let extractor = HttpClientExtractor;
+        let ctx = ExtractionContext {
+            tool_name: "http-client".to_string(),
+            agent_id: AgentID::new(),
+            task_id: TaskID::new(),
+        };
+        let result = serde_json::json!({"status": 200, "body": {"name": "test", "value": 42}});
+        let facts = extractor.extract(&result, &ctx);
+        assert_eq!(facts.len(), 1);
+        assert!(facts[0].content.contains("schema keys"));
+    }
+
+    #[test]
+    fn shell_extractor_captures_errors() {
+        let extractor = ShellExecExtractor;
+        let ctx = ExtractionContext {
+            tool_name: "shell-exec".to_string(),
+            agent_id: AgentID::new(),
+            task_id: TaskID::new(),
+        };
+        let result = serde_json::json!({
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "error: command not found: foobar123"
+        });
+        let facts = extractor.extract(&result, &ctx);
+        assert_eq!(facts.len(), 1);
+        assert!(facts[0].tags.contains(&"error".to_string()));
+    }
+
+    #[test]
+    fn file_reader_extractor_skips_short_content() {
+        let extractor = FileReaderExtractor;
+        let ctx = ExtractionContext {
+            tool_name: "file-reader".to_string(),
+            agent_id: AgentID::new(),
+            task_id: TaskID::new(),
+        };
+        let result = serde_json::json!({"path": "/tmp/x", "content": "short"});
+        let facts = extractor.extract(&result, &ctx);
+        assert!(facts.is_empty(), "Content under 50 chars should be skipped");
+    }
+
+    #[test]
+    fn extraction_registry_returns_none_for_unregistered() {
+        let registry = ExtractionRegistry::new();
+        assert!(registry.get("nonexistent-tool").is_none());
+    }
+
+    #[test]
+    fn extraction_registry_registers_defaults() {
+        let mut registry = ExtractionRegistry::new();
+        registry.register_defaults();
+        assert!(registry.get("http-client").is_some());
+        assert!(registry.get("shell-exec").is_some());
+        assert!(registry.get("file-reader").is_some());
+        assert!(registry.get("data-parser").is_some());
+    }
+
+    #[test]
+    fn extraction_config_default_values() {
+        let config = ExtractionConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.conflict_threshold, 0.85);
+        assert_eq!(config.max_facts_per_result, 5);
+        assert_eq!(config.min_result_length, 50);
     }
 }

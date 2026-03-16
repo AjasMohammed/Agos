@@ -31,7 +31,8 @@ pub use event::{
 pub use ids::*;
 pub use intent::{
     ActionRiskLevel, HardwareResource, IntentCoherenceResult, IntentMessage, IntentResult,
-    IntentResultStatus, IntentTarget, IntentType, SemanticPayload,
+    IntentResultStatus, IntentTarget, IntentType, SemanticPayload, SubscribePayload,
+    SubscriptionDuration, UnsubscribePayload,
 };
 pub use role::Role;
 pub use secret::{SecretEntry, SecretMetadata, SecretOwner, SecretScope};

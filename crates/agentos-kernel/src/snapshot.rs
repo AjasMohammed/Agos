@@ -32,17 +32,59 @@ pub struct SnapshotManager {
     snapshots: RwLock<HashMap<String, Snapshot>>,
     /// Root directory for any on-disk snapshot blobs
     storage_dir: PathBuf,
+    /// Canonical allowed root for snapshotted/restored files.
+    /// Paths that do not start with this prefix are rejected.
+    allowed_root: PathBuf,
     /// How long snapshots are retained (default: 72 hours)
     retention_hours: u64,
 }
 
 impl SnapshotManager {
-    pub fn new(storage_dir: PathBuf, retention_hours: u64) -> Self {
+    pub fn new(storage_dir: PathBuf, allowed_root: PathBuf, retention_hours: u64) -> Self {
+        // Canonicalize the root at construction time so all comparisons are stable.
+        let allowed_root = allowed_root
+            .canonicalize()
+            .unwrap_or(allowed_root);
         Self {
             snapshots: RwLock::new(HashMap::new()),
             storage_dir,
+            allowed_root,
             retention_hours,
         }
+    }
+
+    /// Returns `Ok(canonical)` if `path_str` resolves to a location within
+    /// `self.allowed_root`, or `Err` if it escapes or contains a traversal.
+    fn validate_path(&self, path_str: &str) -> anyhow::Result<PathBuf> {
+        if path_str.contains("..") {
+            anyhow::bail!("Path contains '..' traversal: {}", path_str);
+        }
+        let path = PathBuf::from(path_str);
+        // Resolve absolute paths directly; relative paths against allowed_root.
+        let resolved = if path.is_absolute() {
+            path.clone()
+        } else {
+            self.allowed_root.join(&path)
+        };
+        // Canonicalize if the path exists; otherwise canonicalize the parent.
+        let canonical = if resolved.exists() {
+            resolved.canonicalize()?
+        } else if let Some(parent) = resolved.parent() {
+            let canon_parent = parent
+                .canonicalize()
+                .unwrap_or_else(|_| parent.to_path_buf());
+            canon_parent.join(resolved.file_name().unwrap_or_default())
+        } else {
+            resolved.clone()
+        };
+        if !canonical.starts_with(&self.allowed_root) {
+            anyhow::bail!(
+                "Path '{}' resolves outside allowed root '{}' — access denied",
+                path_str,
+                self.allowed_root.display()
+            );
+        }
+        Ok(canonical)
     }
 
     fn new_snap_id() -> String {
@@ -65,10 +107,22 @@ impl SnapshotManager {
 
         let mut file_snapshots = Vec::new();
         for path_str in paths {
-            let path = PathBuf::from(&path_str);
-            let existed_before = path.exists();
-            let original_content = if existed_before && path.is_file() {
-                Some(tokio::fs::read(&path).await?)
+            // Validate containment before reading; skip paths that escape the allowed root.
+            let validated_path = match self.validate_path(&path_str) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        path = %path_str,
+                        "Snapshot skipped path that failed validation: {}",
+                        e
+                    );
+                    continue;
+                }
+            };
+            let existed_before = validated_path.exists();
+            let original_content = if existed_before && validated_path.is_file() {
+                Some(tokio::fs::read(&validated_path).await?)
             } else {
                 None
             };
@@ -120,21 +174,29 @@ impl SnapshotManager {
         }
 
         for file_snap in &snapshot.files {
-            let path = PathBuf::from(&file_snap.path);
+            // Validate containment before any I/O — a tampered on-disk snapshot
+            // could contain crafted paths (absolute or with `..`) to escape the root.
+            let validated_path = self.validate_path(&file_snap.path).map_err(|e| {
+                anyhow::anyhow!(
+                    "Snapshot {} path failed validation — restore aborted: {}",
+                    snap_id,
+                    e
+                )
+            })?;
             if file_snap.existed_before {
                 if let Some(ref content) = file_snap.original_content {
-                    if let Some(parent) = path.parent() {
+                    if let Some(parent) = validated_path.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
-                    tokio::fs::write(&path, content).await?;
+                    tokio::fs::write(&validated_path, content).await?;
                 }
             } else {
                 // File didn't exist before, so delete it if it exists now
-                if path.exists() {
-                    if path.is_file() {
-                        tokio::fs::remove_file(&path).await?;
-                    } else if path.is_dir() {
-                        tokio::fs::remove_dir_all(&path).await?;
+                if validated_path.exists() {
+                    if validated_path.is_file() {
+                        tokio::fs::remove_file(&validated_path).await?;
+                    } else if validated_path.is_dir() {
+                        tokio::fs::remove_dir_all(&validated_path).await?;
                     }
                 }
             }
@@ -200,17 +262,14 @@ impl crate::kernel::Kernel {
             }
         };
 
-        // Extract potential file paths from payload
+        // Extract potential file paths from payload (containment validation is done inside
+        // SnapshotManager::take_snapshot via validate_path before any I/O).
         let mut paths = Vec::new();
         if let Some(p) = payload {
-            if let Some(path_str) = p.get("path").and_then(|v| v.as_str()) {
-                paths.push(path_str.to_string());
-            }
-            if let Some(target_str) = p.get("target").and_then(|v| v.as_str()) {
-                paths.push(target_str.to_string());
-            }
-            if let Some(file_str) = p.get("file").and_then(|v| v.as_str()) {
-                paths.push(file_str.to_string());
+            for field in &["path", "target", "file"] {
+                if let Some(path_str) = p.get(*field).and_then(|v| v.as_str()) {
+                    paths.push(path_str.to_string());
+                }
             }
         }
 
@@ -345,7 +404,7 @@ mod tests {
         let work_dir = dir.path().join("work");
         tokio::fs::create_dir_all(&work_dir).await?;
 
-        let manager = SnapshotManager::new(storage_dir, 72);
+        let manager = SnapshotManager::new(storage_dir, work_dir.clone(), 72);
         let task_id = TaskID::new();
 
         // Create a test file
@@ -399,7 +458,7 @@ mod tests {
         let work_dir = dir.path().join("work");
         tokio::fs::create_dir_all(&work_dir).await?;
 
-        let manager = SnapshotManager::new(storage_dir, 72);
+        let manager = SnapshotManager::new(storage_dir, work_dir.clone(), 72);
         let task_id = TaskID::new();
 
         let new_file = work_dir.join("new.txt");

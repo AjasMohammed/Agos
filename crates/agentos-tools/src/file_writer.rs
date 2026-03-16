@@ -1,7 +1,10 @@
+use crate::file_lock::WriteLockGuard;
 use crate::traits::{AgentTool, ToolExecutionContext};
 use agentos_types::*;
 use async_trait::async_trait;
 use std::path::{Component, Path, PathBuf};
+
+const DEFAULT_MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
 
 pub struct FileWriter;
 
@@ -46,10 +49,42 @@ impl AgentTool for FileWriter {
                 AgentOSError::SchemaValidation("file-writer requires 'content' field".into())
             })?;
 
-        let append = payload
+        // Resolve write mode. `mode` takes precedence; `append: true` is legacy compat.
+        let mode = if let Some(m) = payload.get("mode").and_then(|v| v.as_str()) {
+            match m {
+                "overwrite" | "append" | "create_only" => m.to_string(),
+                other => {
+                    return Err(AgentOSError::SchemaValidation(format!(
+                        "file-writer: unknown mode '{}'; expected overwrite | append | create_only",
+                        other
+                    )))
+                }
+            }
+        } else if payload
             .get("append")
             .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+            .unwrap_or(false)
+        {
+            "append".to_string()
+        } else {
+            "overwrite".to_string()
+        };
+
+        // Size guard.
+        let max_bytes = payload
+            .get("max_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_MAX_BYTES);
+        let content_bytes = content.len() as u64;
+        if content_bytes > max_bytes {
+            return Err(AgentOSError::ToolExecutionFailed {
+                tool_name: "file-writer".into(),
+                reason: format!(
+                    "Content size {} bytes exceeds limit of {} bytes",
+                    content_bytes, max_bytes
+                ),
+            });
+        }
 
         // SECURITY: resolve path relative to data_dir only. Prevent path traversal.
         let requested_path = Path::new(path_str);
@@ -60,9 +95,7 @@ impl AgentTool for FileWriter {
             context.data_dir.join(requested_path)
         };
 
-        // Normalize the path to eliminate ".." components BEFORE creating directories.
-        // We can't use canonicalize() because the file may not exist yet, so we
-        // normalize lexically and check that the result stays within data_dir.
+        // Normalize lexically (can't use canonicalize — file may not exist yet).
         let normalized = normalize_path(&resolved);
         let canonical_data_dir =
             context
@@ -80,7 +113,20 @@ impl AgentTool for FileWriter {
             });
         }
 
-        // Create parent directories if needed (safe now that path is validated)
+        // Acquire exclusive write lock. Held until the guard drops at end of scope.
+        // If another agent holds the lock (reader or writer) this returns FileLocked.
+        let _lock_guard = if let Some(registry) = &context.file_lock_registry {
+            Some(WriteLockGuard::acquire(
+                registry,
+                normalized.clone(),
+                context.agent_id,
+                context.task_id,
+            )?)
+        } else {
+            None
+        };
+
+        // Create parent directories (path is validated above).
         if let Some(parent) = normalized.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 AgentOSError::ToolExecutionFailed {
@@ -90,43 +136,70 @@ impl AgentTool for FileWriter {
             })?;
         }
 
-        if append {
-            use tokio::io::AsyncWriteExt;
-            let mut file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&normalized)
-                .await
-                .map_err(|e| AgentOSError::ToolExecutionFailed {
-                    tool_name: "file-writer".into(),
-                    reason: format!("Cannot open for append: {}", e),
+        match mode.as_str() {
+            "create_only" => {
+                // Fail if the file already exists.
+                if tokio::fs::metadata(&normalized).await.is_ok() {
+                    return Err(AgentOSError::ToolExecutionFailed {
+                        tool_name: "file-writer".into(),
+                        reason: format!("File already exists: {}", path_str),
+                    });
+                }
+                // Atomic write: write to .tmp then rename.
+                atomic_write(&normalized, content).await?;
+            }
+            "append" => {
+                use tokio::io::AsyncWriteExt;
+                let mut file = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&normalized)
+                    .await
+                    .map_err(|e| AgentOSError::ToolExecutionFailed {
+                        tool_name: "file-writer".into(),
+                        reason: format!("Cannot open for append: {}", e),
+                    })?;
+                file.write_all(content.as_bytes()).await.map_err(|e| {
+                    AgentOSError::ToolExecutionFailed {
+                        tool_name: "file-writer".into(),
+                        reason: format!("Append failed: {}", e),
+                    }
                 })?;
-            file.write_all(content.as_bytes()).await.map_err(|e| {
-                AgentOSError::ToolExecutionFailed {
-                    tool_name: "file-writer".into(),
-                    reason: format!("Write failed: {}", e),
-                }
-            })?;
-        } else {
-            tokio::fs::write(&normalized, content).await.map_err(|e| {
-                AgentOSError::ToolExecutionFailed {
-                    tool_name: "file-writer".into(),
-                    reason: format!("Write failed: {}", e),
-                }
-            })?;
+            }
+            _ => {
+                // "overwrite" — atomic write via tmp + rename.
+                atomic_write(&normalized, content).await?;
+            }
         }
 
         Ok(serde_json::json!({
             "path": path_str,
-            "bytes_written": content.len(),
-            "mode": if append { "append" } else { "overwrite" },
+            "bytes_written": content_bytes,
+            "mode": mode,
             "success": true,
         }))
     }
 }
 
-/// Lexically normalize a path by resolving `.` and `..` components without touching the filesystem.
-/// This is needed because the target file may not exist yet (so canonicalize() would fail).
+/// Write content to a `.tmp` sibling file then atomically rename it to `target`.
+/// This ensures readers never observe a partial write.
+async fn atomic_write(target: &PathBuf, content: &str) -> Result<(), AgentOSError> {
+    let tmp = target.with_extension("tmp");
+    tokio::fs::write(&tmp, content)
+        .await
+        .map_err(|e| AgentOSError::ToolExecutionFailed {
+            tool_name: "file-writer".into(),
+            reason: format!("Temp write failed: {}", e),
+        })?;
+    tokio::fs::rename(&tmp, target)
+        .await
+        .map_err(|e| AgentOSError::ToolExecutionFailed {
+            tool_name: "file-writer".into(),
+            reason: format!("Atomic rename failed: {}", e),
+        })
+}
+
+/// Lexically normalize a path by resolving `.` and `..` without touching the filesystem.
 fn normalize_path(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for component in path.components() {
@@ -134,7 +207,7 @@ fn normalize_path(path: &Path) -> PathBuf {
             Component::ParentDir => {
                 result.pop();
             }
-            Component::CurDir => {} // skip "."
+            Component::CurDir => {}
             other => result.push(other),
         }
     }

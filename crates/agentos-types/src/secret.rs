@@ -23,8 +23,13 @@ pub enum SecretOwner {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SecretScope {
+    /// Accessible only by the kernel itself — agents cannot obtain proxy tokens for this scope.
+    Kernel,
+    /// Accessible by any agent.
     Global,
+    /// Accessible only by the named agent.
     Agent(AgentID),
+    /// Accessible only by the owning agent (for tool-scoped secrets).
     Tool(ToolID),
 }
 

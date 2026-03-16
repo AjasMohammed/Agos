@@ -152,6 +152,24 @@ impl InjectionScanner {
                 r"(?i)(jailbreak|DAN\s+mode|developer\s+mode|unrestricted\s+mode|no\s+limits\s+mode)",
                 ThreatLevel::High,
             ),
+            // === ChatML / special-token delimiter injection (High) ===
+            // Models like Llama/Mistral use <|im_start|> / <|im_end|> as special tokens.
+            // Injecting these through user-controlled input can hijack role assignments.
+            pattern(
+                "delimiter_chatml_system",
+                r"(?i)<\|im_start\|>\s*system",
+                ThreatLevel::High,
+            ),
+            pattern(
+                "delimiter_chatml_token",
+                r"<\|im_(start|end)\|>",
+                ThreatLevel::High,
+            ),
+            pattern(
+                "delimiter_special_token",
+                r"<\|[a-z_]+\|>",
+                ThreatLevel::Medium,
+            ),
             // === Markdown/HTML injection (Low) ===
             pattern(
                 "html_script_tag",

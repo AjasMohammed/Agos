@@ -29,4 +29,29 @@ impl Kernel {
             }
         }
     }
+
+    pub(crate) async fn cmd_get_retrieval_metrics(&self) -> KernelResponse {
+        let (refresh_total, reuse_total) = crate::metrics::retrieval_refresh_snapshot();
+        let total_decisions = refresh_total + reuse_total;
+        let refresh_ratio = if total_decisions == 0 {
+            0.0
+        } else {
+            refresh_total as f64 / total_decisions as f64
+        };
+        let reuse_ratio = if total_decisions == 0 {
+            0.0
+        } else {
+            reuse_total as f64 / total_decisions as f64
+        };
+
+        KernelResponse::Success {
+            data: Some(serde_json::json!({
+                "refresh_total": refresh_total,
+                "reuse_total": reuse_total,
+                "total_decisions": total_decisions,
+                "refresh_ratio": refresh_ratio,
+                "reuse_ratio": reuse_ratio,
+            })),
+        }
+    }
 }

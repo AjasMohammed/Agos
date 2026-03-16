@@ -1,0 +1,41 @@
+services:
+  agentos:
+    build: .
+    container_name: agentos-kernel
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - AGENTOS_VAULT_PASSPHRASE=${AGENTOS_VAULT_PASSPHRASE:?Set AGENTOS_VAULT_PASSPHRASE in .env or environment}
+      - AGENTOS_OLLAMA_HOST=${AGENTOS_OLLAMA_HOST:-}
+      - AGENTOS_LLM_URL=${AGENTOS_LLM_URL:-}
+      - AGENTOS_OPENAI_BASE_URL=${AGENTOS_OPENAI_BASE_URL:-}
+      - RUST_LOG=${RUST_LOG:-}
+    volumes:
+      - agentos-data:/var/lib/agentos/data
+      - agentos-user-tools:/var/lib/agentos/tools/user
+    ports:
+      - "9091:9091"
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_started
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: agentos-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    # Port 11434 is intentionally NOT exposed to the host.
+    # Uncomment for local debugging only:
+    # ports:
+    #   - "11434:11434"
+
+volumes:
+  agentos-data:
+  agentos-user-tools:
+  ollama-models:

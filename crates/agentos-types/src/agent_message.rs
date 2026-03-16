@@ -36,19 +36,18 @@ impl AgentMessage {
         }
     }
 
-    /// Canonical bytes to sign: id|from|to_str|content_hash|timestamp.
+    /// Canonical bytes to sign: stable JSON encoding of id, from, to, content, and timestamp.
+    /// Uses serde_json for deterministic serialization (not Debug, which is unstable across
+    /// compiler versions).
     pub fn signing_payload(&self) -> Vec<u8> {
-        let to_str = format!("{:?}", self.to);
-        let content_str = format!("{:?}", self.content);
-        format!(
-            "{}|{}|{}|{}|{}",
-            self.id,
-            self.from,
-            to_str,
-            content_str,
-            self.timestamp.timestamp(),
-        )
-        .into_bytes()
+        let canonical = serde_json::json!({
+            "id": self.id.to_string(),
+            "from": self.from.to_string(),
+            "to": serde_json::to_value(&self.to).unwrap_or(serde_json::Value::Null),
+            "content": serde_json::to_value(&self.content).unwrap_or(serde_json::Value::Null),
+            "timestamp": self.timestamp.timestamp(),
+        });
+        canonical.to_string().into_bytes()
     }
 }
 

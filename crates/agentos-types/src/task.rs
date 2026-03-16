@@ -14,6 +14,10 @@ pub struct AgentTask {
     pub assigned_llm: Option<AgentID>,
     pub priority: u8,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// When this task started executing (transitioned to Running).
+    /// Used by the timeout checker to measure elapsed execution time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub timeout: Duration,
     pub original_prompt: String,
     pub history: Vec<IntentMessage>,

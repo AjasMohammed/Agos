@@ -54,6 +54,7 @@ pub enum AuditEventType {
     // System events
     KernelStarted,
     KernelShutdown,
+    KernelSubsystemRestarted,
 
     // agentd - Schedule
     ScheduledJobCreated,
@@ -93,6 +94,13 @@ pub enum AuditEventType {
     EventFilterRejected,
     EventLoopDetected,
     EventTriggeredTask,
+    EventTriggerFailed,
+
+    // Hardware Abstraction Layer (Spec §9)
+    HardwareDeviceDetected,
+    HardwareDeviceApproved,
+    HardwareDeviceDenied,
+    HardwareDeviceRevoked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -445,6 +453,19 @@ impl AuditLog {
         Self::execute_query(&mut stmt, params![limit])
     }
 
+    pub fn query_recent_for_agent(
+        &self,
+        agent_id: &AgentID,
+        limit: u32,
+    ) -> Result<Vec<AuditEntry>, AgentOSError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT timestamp, trace_id, event_type, agent_id, task_id, tool_id, details, severity, reversible, rollback_ref FROM audit_log WHERE agent_id = ?1 ORDER BY id DESC LIMIT ?2")
+            .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
+
+        Self::execute_query(&mut stmt, params![agent_id.to_string(), limit])
+    }
+
     pub fn query_by_trace(&self, trace_id: &TraceID) -> Result<Vec<AuditEntry>, AgentOSError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT timestamp, trace_id, event_type, agent_id, task_id, tool_id, details, severity, reversible, rollback_ref FROM audit_log WHERE trace_id = ?1 ORDER BY id ASC")
@@ -505,6 +526,11 @@ impl AuditLog {
 
         let rows = stmt
             .query_map(params![limit_val], |row| {
+                let details_str: String = row.get(7)?;
+                // details is stored as JSON text; parse it back so it embeds as a
+                // proper nested object rather than a double-encoded string.
+                let details_val: serde_json::Value =
+                    serde_json::from_str(&details_str).unwrap_or(serde_json::Value::Null);
                 Ok(serde_json::json!({
                     "seq": row.get::<_, i64>(0)?,
                     "timestamp": row.get::<_, String>(1)?,
@@ -513,7 +539,7 @@ impl AuditLog {
                     "agent_id": row.get::<_, String>(4)?,
                     "task_id": row.get::<_, String>(5)?,
                     "tool_id": row.get::<_, String>(6)?,
-                    "details": row.get::<_, String>(7)?,
+                    "details": details_val,
                     "severity": row.get::<_, String>(8)?,
                     "reversible": row.get::<_, i32>(9)? != 0,
                     "rollback_ref": row.get::<_, String>(10)?,
@@ -543,6 +569,45 @@ impl AuditLog {
             .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
 
         Ok(count)
+    }
+
+    /// Prune the oldest entries so the total row count does not exceed `max_entries`.
+    ///
+    /// Deletes the `N` oldest rows (by ascending `id`) where `N = count - max_entries`.
+    /// Returns the number of rows deleted. No-op if the count is already within limit.
+    ///
+    /// **Note:** `max_entries = 0` means unlimited — no rows are deleted. Use a positive
+    /// value to enforce a cap. The `[run_loop]` TimeoutChecker guards this call with
+    /// `if max_audit_entries > 0` for the same reason.
+    ///
+    /// **Chain integrity:** Pruning breaks the Merkle chain link before the oldest
+    /// surviving entry. `verify_chain()` is only valid on the retained portion.
+    pub fn prune_old_entries(&self, max_entries: u64) -> Result<u64, AgentOSError> {
+        if max_entries == 0 {
+            return Ok(0); // 0 = unlimited; caller should not prune
+        }
+
+        let conn = self.conn.lock().unwrap();
+
+        let current_count: u64 = conn
+            .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))
+            .map_err(|e| AgentOSError::VaultError(format!("prune count query failed: {}", e)))?;
+
+        if current_count <= max_entries {
+            return Ok(0);
+        }
+
+        let to_delete = current_count - max_entries;
+        let deleted = conn
+            .execute(
+                "DELETE FROM audit_log WHERE id IN (
+                     SELECT id FROM audit_log ORDER BY id ASC LIMIT ?1
+                 )",
+                rusqlite::params![to_delete],
+            )
+            .map_err(|e| AgentOSError::VaultError(format!("prune delete failed: {}", e)))?;
+
+        Ok(deleted as u64)
     }
 
     fn execute_query<P>(
@@ -791,5 +856,98 @@ mod tests {
         let verification = log.verify_chain(Some(3)).unwrap();
         assert!(verification.valid);
         assert_eq!(verification.entries_checked, 3);
+    }
+
+    #[test]
+    fn test_query_recent_for_agent_filters_only_target_agent() {
+        let tmp = NamedTempFile::new().unwrap();
+        let log = AuditLog::open(tmp.path()).unwrap();
+        let target_agent = AgentID::new();
+        let other_agent = AgentID::new();
+
+        log.append(AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: AuditEventType::TaskCreated,
+            agent_id: Some(other_agent),
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({"scope": "other"}),
+            severity: AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        })
+        .unwrap();
+
+        log.append(AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: AuditEventType::TaskCompleted,
+            agent_id: Some(target_agent),
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({"scope": "target"}),
+            severity: AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        })
+        .unwrap();
+
+        let results = log.query_recent_for_agent(&target_agent, 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].agent_id, Some(target_agent));
+        assert_eq!(results[0].event_type, AuditEventType::TaskCompleted);
+    }
+
+    #[test]
+    fn test_query_recent_for_agent_respects_limit_and_order() {
+        let tmp = NamedTempFile::new().unwrap();
+        let log = AuditLog::open(tmp.path()).unwrap();
+        let target_agent = AgentID::new();
+
+        for idx in 0..3 {
+            log.append(AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: AuditEventType::TaskCreated,
+                agent_id: Some(target_agent),
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({"idx": idx}),
+                severity: AuditSeverity::Info,
+                reversible: false,
+                rollback_ref: None,
+            })
+            .unwrap();
+        }
+
+        let results = log.query_recent_for_agent(&target_agent, 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].details["idx"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn test_query_recent_for_agent_empty_when_no_matches() {
+        let tmp = NamedTempFile::new().unwrap();
+        let log = AuditLog::open(tmp.path()).unwrap();
+        let target_agent = AgentID::new();
+        let other_agent = AgentID::new();
+
+        log.append(AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: AuditEventType::TaskCreated,
+            agent_id: Some(other_agent),
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({"scope": "other"}),
+            severity: AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        })
+        .unwrap();
+
+        let results = log.query_recent_for_agent(&target_agent, 5).unwrap();
+        assert!(results.is_empty());
     }
 }

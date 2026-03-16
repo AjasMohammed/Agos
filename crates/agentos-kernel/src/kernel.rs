@@ -14,9 +14,10 @@ use agentos_hal::{
         gpu::GpuDriver, log_reader::LogReaderDriver, network::NetworkDriver,
         process::ProcessDriver, sensor::SensorDriver, storage::StorageDriver, system::SystemDriver,
     },
-    HardwareAbstractionLayer,
+    HardwareAbstractionLayer, HardwareRegistry,
 };
 use agentos_llm::LLMCore;
+use agentos_memory::Embedder;
 use agentos_pipeline::{PipelineEngine, PipelineStore};
 use agentos_sandbox::SandboxExecutor;
 use agentos_tools::runner::ToolRunner;
@@ -57,6 +58,7 @@ pub struct Kernel {
     pub schedule_manager: Arc<ScheduleManager>,
     pub background_pool: Arc<BackgroundPool>,
     pub hal: Arc<HardwareAbstractionLayer>,
+    pub hardware_registry: Arc<HardwareRegistry>,
     pub schema_registry: Arc<crate::schema_registry::SchemaRegistry>,
     pub pipeline_engine: Arc<PipelineEngine>,
     pub intent_validator: Arc<crate::intent_validator::IntentValidator>,
@@ -68,13 +70,29 @@ pub struct Kernel {
     pub resource_arbiter: Arc<crate::resource_arbiter::ResourceArbiter>,
     pub snapshot_manager: Arc<crate::snapshot::SnapshotManager>,
     pub event_bus: Arc<crate::event_bus::EventBus>,
-    pub(crate) event_sender: tokio::sync::mpsc::UnboundedSender<agentos_types::EventMessage>,
-    /// Receiver for event channel — taken by the run loop's EventDispatcher task.
-    pub(crate) event_receiver: Arc<
+    /// Task-scoped subscriptions that should be removed when a task reaches terminal state.
+    pub(crate) task_scoped_subscriptions: Arc<RwLock<HashMap<TaskID, Vec<SubscriptionID>>>>,
+    pub(crate) event_sender: tokio::sync::mpsc::Sender<agentos_types::EventMessage>,
+    /// Receiver for event channel — owned behind a mutex so EventDispatcher can be restarted.
+    pub(crate) event_receiver:
+        Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<agentos_types::EventMessage>>>,
+    /// Receiver for tool lifecycle notifications from ToolRegistry.
+    pub(crate) tool_lifecycle_receiver: Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<crate::tool_registry::ToolLifecycleEvent>>,
+    >,
+    /// Receiver for communication notifications from AgentMessageBus.
+    pub(crate) comm_notification_receiver: Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<crate::agent_message_bus::CommNotification>>,
+    >,
+    /// Receiver for schedule notifications from ScheduleManager.
+    pub(crate) schedule_notification_receiver: Arc<
         tokio::sync::Mutex<
-            Option<tokio::sync::mpsc::UnboundedReceiver<agentos_types::EventMessage>>,
+            tokio::sync::mpsc::Receiver<crate::schedule_manager::ScheduleNotification>,
         >,
     >,
+    /// Per-agent rate limiter: enforces command-rate limits across all connections per agent.
+    pub(crate) per_agent_rate_limiter:
+        Arc<tokio::sync::Mutex<crate::rate_limit::PerAgentRateLimiter>>,
     pub(crate) data_dir: PathBuf,
     pub(crate) started_at: chrono::DateTime<chrono::Utc>,
     /// Token used to signal graceful shutdown to all kernel loops.
@@ -138,7 +156,7 @@ impl Kernel {
         };
 
         // 4. Initialize capability engine (loads or generates HMAC signing key from vault)
-        let capability_engine = Arc::new(CapabilityEngine::boot(&vault));
+        let capability_engine = Arc::new(CapabilityEngine::boot(&vault).await);
 
         // 4.5 Initialize HardwareAbstractionLayer
         let mut hal = HardwareAbstractionLayer::new();
@@ -159,8 +177,12 @@ impl Kernel {
         hal.register(Box::new(LogReaderDriver::new(app_logs, system_logs)));
 
         let hal = Arc::new(hal);
+        let hardware_registry = Arc::new(HardwareRegistry::new());
 
         // 5. Load tools (with optional CRL enforcement)
+        // NOTE: Tools are loaded before the event channel exists, so boot-time
+        // registrations do not emit ToolInstalled events. This is intentional --
+        // the initial tool inventory can be queried via `cmd_list_tools`.
         let crl = if let Some(ref crl_path) = config.tools.crl_path {
             let crl_file = Path::new(crl_path);
             if crl_file.exists() {
@@ -219,7 +241,21 @@ impl Kernel {
             }
         };
         std::fs::create_dir_all(&model_cache_dir)?;
-        let mut tool_runner = ToolRunner::new_with_model_cache_dir(&data_dir, &model_cache_dir);
+        let shared_embedder = Arc::new(
+            Embedder::with_cache_dir(&model_cache_dir)
+                .map_err(|e| anyhow::anyhow!("Failed to initialize shared embedder: {}", e))?,
+        );
+        let episodic_memory = Arc::new(agentos_memory::EpisodicStore::open(&data_dir)?);
+        let semantic_memory = Arc::new(agentos_memory::SemanticStore::open_with_embedder(
+            &data_dir,
+            shared_embedder.clone(),
+        )?);
+        let procedural_memory = Arc::new(agentos_memory::ProceduralStore::open_with_embedder(
+            &data_dir,
+            shared_embedder,
+        )?);
+        let mut tool_runner =
+            ToolRunner::new_with_shared_memory(semantic_memory.clone(), episodic_memory.clone());
 
         // Register WASM tools from manifests that specify executor = wasm
         let wasm_executor = WasmToolExecutor::new(&data_dir);
@@ -280,15 +316,6 @@ impl Kernel {
         let active_llms = Arc::new(RwLock::new(HashMap::new()));
         let message_bus = Arc::new(crate::agent_message_bus::AgentMessageBus::new());
         let profile_manager = Arc::new(ProfileManager::new());
-        let episodic_memory = Arc::new(agentos_memory::EpisodicStore::open(&data_dir)?);
-        let semantic_memory = Arc::new(agentos_memory::SemanticStore::open_with_cache_dir(
-            &data_dir,
-            &model_cache_dir,
-        )?);
-        let procedural_memory = Arc::new(agentos_memory::ProceduralStore::open_with_cache_dir(
-            &data_dir,
-            &model_cache_dir,
-        )?);
         let retrieval_gate = Arc::new(crate::retrieval_gate::RetrievalGate::new(5));
         let retrieval_executor = Arc::new(crate::retrieval_gate::RetrievalExecutor::new(
             semantic_memory.clone(),
@@ -326,11 +353,41 @@ impl Kernel {
 
         let snapshot_manager = Arc::new(crate::snapshot::SnapshotManager::new(
             data_dir.join("snapshots"),
+            data_dir.clone(), // allowed_root: only paths within data_dir may be snapshotted
             72, // hours
         ));
 
         let event_bus = Arc::new(crate::event_bus::EventBus::new());
-        let (event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        // Bounded channel capacity for internal event/notification channels.
+        // Provides backpressure to prevent unbounded memory growth under load.
+        const CHANNEL_CAPACITY: usize = 1024;
+
+        let (event_sender, event_receiver) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
+
+        // Create tool lifecycle notification channel and inject sender into registry.
+        // The kernel receives these lightweight notifications and converts them into
+        // properly HMAC-signed EventMessages with audit trail entries.
+        let (tool_lifecycle_sender, tool_lifecycle_receiver) =
+            tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
+        tool_registry
+            .write()
+            .await
+            .set_lifecycle_sender(tool_lifecycle_sender);
+
+        // Create notification channels for communication and schedule subsystems.
+        // These subsystems send lightweight notifications; the kernel converts them
+        // into properly HMAC-signed EventMessages with audit trail entries.
+        let (comm_notif_sender, comm_notif_receiver) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
+        message_bus.set_notification_sender(comm_notif_sender).await;
+
+        let (schedule_notif_sender, schedule_notif_receiver) =
+            tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
+        schedule_manager
+            .set_notification_sender(schedule_notif_sender)
+            .await;
+
+        let per_agent_rate_limit = config.kernel.per_agent_rate_limit;
 
         let kernel = Kernel {
             config,
@@ -360,6 +417,7 @@ impl Kernel {
             schedule_manager,
             background_pool,
             hal,
+            hardware_registry,
             schema_registry,
             pipeline_engine,
             intent_validator: Arc::new(crate::intent_validator::IntentValidator::new()),
@@ -371,8 +429,17 @@ impl Kernel {
             resource_arbiter: Arc::new(crate::resource_arbiter::ResourceArbiter::new()),
             snapshot_manager,
             event_bus,
+            task_scoped_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             event_sender,
-            event_receiver: Arc::new(tokio::sync::Mutex::new(Some(event_receiver))),
+            event_receiver: Arc::new(tokio::sync::Mutex::new(event_receiver)),
+            tool_lifecycle_receiver: Arc::new(tokio::sync::Mutex::new(tool_lifecycle_receiver)),
+            comm_notification_receiver: Arc::new(tokio::sync::Mutex::new(comm_notif_receiver)),
+            schedule_notification_receiver: Arc::new(tokio::sync::Mutex::new(
+                schedule_notif_receiver,
+            )),
+            per_agent_rate_limiter: Arc::new(tokio::sync::Mutex::new(
+                crate::rate_limit::PerAgentRateLimiter::new(per_agent_rate_limit),
+            )),
             data_dir,
             started_at: chrono::Utc::now(),
             cancellation_token: CancellationToken::new(),
@@ -401,5 +468,11 @@ impl Kernel {
     /// Signal all kernel loops to stop gracefully.
     pub fn shutdown(&self) {
         self.cancellation_token.cancel();
+    }
+
+    /// Number of agents currently tracked by the per-agent rate limiter.
+    /// Exposed for integration testing; 0 means no rate-limit state is retained.
+    pub async fn rate_limiter_tracked_count(&self) -> usize {
+        self.per_agent_rate_limiter.lock().await.tracked_count()
     }
 }

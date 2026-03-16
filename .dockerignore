@@ -1,0 +1,10 @@
+target/
+.git/
+.github/
+obsidian-vault/
+v1-plans/
+v2-plans/
+v3-plans/
+docs/
+*.md
+.claude/

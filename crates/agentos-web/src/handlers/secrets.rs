@@ -14,7 +14,7 @@ pub async fn list(
     State(state): State<AppState>,
     Query(query): Query<ListQuery>,
 ) -> Response {
-    let secrets = state.kernel.vault.list().unwrap_or_default();
+    let secrets = state.kernel.vault.list().await.unwrap_or_default();
 
     let secret_rows: Vec<_> = secrets
         .iter()
@@ -62,6 +62,7 @@ pub async fn create(
         .kernel
         .vault
         .set(&form.name, &form.value, SecretOwner::Kernel, scope)
+        .await
     {
         Ok(_) => axum::response::Redirect::to("/secrets").into_response(),
         Err(e) => (
@@ -76,7 +77,7 @@ pub async fn revoke(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    match state.kernel.vault.revoke(&name) {
+    match state.kernel.vault.revoke(&name).await {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::NOT_FOUND,
     }

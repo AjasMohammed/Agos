@@ -6,7 +6,7 @@ tags:
   - feature
   - next-steps
 date: 2026-03-11
-status: in-progress
+status: complete
 effort: 3d
 priority: high
 ---
@@ -59,28 +59,21 @@ Phase 1 delivers: AgentLifecycle events (AgentAdded, AgentRemoved, PermissionGra
 
 14. **Tests and connectivity verification** — Unit tests, CLI parse tests, integration tests for full event flow. `cargo test --workspace`
 
-### Phase 2: Security & Task Events
-- Add 18 EventType variants (TaskLifecycle + SecurityEvents + MemoryEvents)
-- Wire emissions into task_executor, scheduler, injection_scanner
-- Implement filter evaluation (predicate parsing)
-- Build trigger prompts for CapabilityViolation, PromptInjectionAttempt, TaskDeadlockDetected, ContextWindowNearLimit
+### Phases 2–5: Completed via `plans/event-trigger-completion/`
 
-### Phase 3: SystemHealth & Hardware Events
-- Add 14 EventType variants
-- Wire HAL health monitoring → events in TimeoutChecker
-- Add configurable thresholds in `config/default.toml`
-- Add LeakyBucket and Digest throttle policies
+All remaining phases were delegated to the 10-phase completion plan and are now implemented.
+See [[Event Trigger Completion Plan]] for details.
 
-### Phase 4: Communication & Schedule Events
-- Add 10 EventType variants
-- Wire into agent_message_bus and agentd_loop
-- Build DirectMessageReceived, DelegationReceived prompts
-
-### Phase 5: Tool & External Events
-- Add 11 EventType variants
-- Wire into tool execution and external bridge
-- Build WebhookReceived prompt with injection warning
-- Web UI: Live Event Stream View
+| Phase | Delegated sub-plan | Status |
+|-------|--------------------|--------|
+| Security & Task Events | [[02-security-event-emission]], [[03-security-trigger-prompts]] | complete |
+| Tool Event Emission | [[04-tool-event-emission]] | complete |
+| Memory Events | [[05-memory-event-emission-and-prompt]] | complete |
+| Communication & Schedule Events | [[06-communication-and-schedule-emission]] | complete |
+| Filter Predicates | [[07-event-filter-predicates]] | complete |
+| Dynamic Subscriptions & Role Defaults | [[08-dynamic-subscriptions-and-role-defaults]] | complete |
+| Remaining Trigger Prompts | [[09-remaining-trigger-prompts]] | complete |
+| System Health & Hardware Events | [[10-system-health-and-hardware-emission]] | complete |
 
 ## Files Changed
 

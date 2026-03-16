@@ -284,6 +284,7 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
                 self.kernel.vault.clone(),
             ))),
             hal: Some(self.kernel.hal.clone()),
+            file_lock_registry: None,
         };
 
         let result = self
@@ -362,7 +363,7 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
             "You are an AI agent operating inside AgentOS.\n\
              Available tools:\n{}\n\
              To use a tool, respond with a JSON block:\n\
-             ```json\n{{\"tool\": \"tool-name\", \"intent_type\": \"read|write\", \"payload\": {{...}}}}\n```\n\
+             ```json\n{{\"tool\": \"tool-name\", \"intent_type\": \"read|write|execute|query|observe|delegate|message|broadcast|escalate|subscribe|unsubscribe\", \"payload\": {{...}}}}\n```\n\
              When done, provide your final answer as plain text without any tool call blocks.",
             tools_desc
         );
@@ -419,6 +420,7 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
                 self.vault.clone(),
             ))),
             hal: Some(self.hal.clone()),
+            file_lock_registry: None,
         };
 
         let result = self.tool_runner.execute(tool_name, input, context).await?;

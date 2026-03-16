@@ -1,8 +1,17 @@
-use agentos_types::{AgentID, AgentMessage, AgentOSError, GroupID};
+use agentos_types::{AgentID, AgentMessage, AgentOSError, EventSeverity, EventType, GroupID};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+
+/// Lightweight notification sent by AgentMessageBus to the kernel.
+/// The kernel converts these into properly HMAC-signed EventMessages with audit trail.
+#[derive(Debug, Clone)]
+pub struct CommNotification {
+    pub event_type: EventType,
+    pub severity: EventSeverity,
+    pub payload: serde_json::Value,
+}
 
 pub struct AgentMessageBus {
     /// Per-agent message channels. Each agent has an inbox.
@@ -13,6 +22,9 @@ pub struct AgentMessageBus {
     history: RwLock<Vec<AgentMessage>>,
     /// Agent public keys for signature verification (hex-encoded).
     pub_keys: RwLock<HashMap<AgentID, String>>,
+    /// Optional channel for notifying the kernel of communication events.
+    /// The kernel converts these into properly signed EventMessages.
+    notification_sender: RwLock<Option<mpsc::Sender<CommNotification>>>,
 }
 
 impl AgentMessageBus {
@@ -22,6 +34,33 @@ impl AgentMessageBus {
             groups: RwLock::new(HashMap::new()),
             history: RwLock::new(Vec::new()),
             pub_keys: RwLock::new(HashMap::new()),
+            notification_sender: RwLock::new(None),
+        }
+    }
+
+    /// Inject the notification sender so the kernel receives communication events
+    /// and converts them into properly HMAC-signed EventMessages.
+    pub async fn set_notification_sender(&self, sender: mpsc::Sender<CommNotification>) {
+        *self.notification_sender.write().await = Some(sender);
+    }
+
+    /// Send a lightweight notification to the kernel for signing and dispatch.
+    async fn notify(
+        &self,
+        event_type: EventType,
+        severity: EventSeverity,
+        payload: serde_json::Value,
+    ) {
+        let sender = self.notification_sender.read().await;
+        if let Some(ref sender) = *sender {
+            let notification = CommNotification {
+                event_type,
+                severity,
+                payload,
+            };
+            if let Err(e) = sender.try_send(notification) {
+                tracing::warn!(error = %e, "Failed to send communication notification (possibly full or closed)");
+            }
         }
     }
 
@@ -121,12 +160,35 @@ impl AgentMessageBus {
             }
         };
 
+        let from = message.from;
+        let msg_id = message.id;
+
         let inboxes = self.inboxes.read().await;
         if let Some(tx) = inboxes.get(&agent_id) {
             let _ = tx.send(message.clone());
             self.history.write().await.push(message);
+            self.notify(
+                EventType::DirectMessageReceived,
+                EventSeverity::Info,
+                serde_json::json!({
+                    "from_agent": from.to_string(),
+                    "to_agent": agent_id.to_string(),
+                    "message_id": msg_id.to_string(),
+                }),
+            )
+            .await;
             Ok(())
         } else {
+            self.notify(
+                EventType::MessageDeliveryFailed,
+                EventSeverity::Warning,
+                serde_json::json!({
+                    "from_agent": from.to_string(),
+                    "to_agent": agent_id.to_string(),
+                    "error": format!("Agent {} not found", agent_id),
+                }),
+            )
+            .await;
             Err(AgentOSError::AgentNotFound(agent_id.to_string()))
         }
     }
@@ -135,25 +197,56 @@ impl AgentMessageBus {
     pub async fn broadcast(&self, message: AgentMessage) -> Result<u32, AgentOSError> {
         // Reject expired messages before delivery (Spec §10)
         if message.is_expired() {
-            return Err(AgentOSError::KernelError {
-                reason: format!("Message {} is expired (TTL exceeded)", message.id),
-            });
+            let reason = format!("Message {} is expired (TTL exceeded)", message.id);
+            self.notify(
+                EventType::MessageDeliveryFailed,
+                EventSeverity::Warning,
+                serde_json::json!({
+                    "from_agent": message.from.to_string(),
+                    "error": reason.clone(),
+                }),
+            )
+            .await;
+            return Err(AgentOSError::KernelError { reason });
         }
 
         // Enforce signature verification (Spec §10)
-        self.verify_message_signature(&message).await?;
+        if let Err(e) = self.verify_message_signature(&message).await {
+            self.notify(
+                EventType::MessageDeliveryFailed,
+                EventSeverity::Warning,
+                serde_json::json!({
+                    "from_agent": message.from.to_string(),
+                    "error": e.to_string(),
+                }),
+            )
+            .await;
+            return Err(e);
+        }
 
-        let mut count = 0;
+        let from = message.from;
+        let msg_id = message.id;
+        let mut count = 0u32;
         let inboxes = self.inboxes.read().await;
 
         for (id, tx) in inboxes.iter() {
-            if *id != message.from {
+            if *id != from {
                 let _ = tx.send(message.clone());
                 count += 1;
             }
         }
 
         self.history.write().await.push(message);
+        self.notify(
+            EventType::BroadcastReceived,
+            EventSeverity::Info,
+            serde_json::json!({
+                "from_agent": from.to_string(),
+                "recipient_count": count,
+                "message_id": msg_id.to_string(),
+            }),
+        )
+        .await;
         Ok(count)
     }
 
@@ -165,13 +258,38 @@ impl AgentMessageBus {
     ) -> Result<u32, AgentOSError> {
         // Reject expired messages before delivery (Spec §10)
         if message.is_expired() {
+            self.notify(
+                EventType::MessageDeliveryFailed,
+                EventSeverity::Warning,
+                serde_json::json!({
+                    "from_agent": message.from.to_string(),
+                    "group_id": group_id.to_string(),
+                    "error": format!("Message {} is expired (TTL exceeded)", message.id),
+                }),
+            )
+            .await;
             return Err(AgentOSError::KernelError {
                 reason: format!("Message {} is expired (TTL exceeded)", message.id),
             });
         }
 
         // Enforce signature verification (Spec §10)
-        self.verify_message_signature(&message).await?;
+        if let Err(e) = self.verify_message_signature(&message).await {
+            self.notify(
+                EventType::MessageDeliveryFailed,
+                EventSeverity::Warning,
+                serde_json::json!({
+                    "from_agent": message.from.to_string(),
+                    "group_id": group_id.to_string(),
+                    "error": e.to_string(),
+                }),
+            )
+            .await;
+            return Err(e);
+        }
+
+        let from = message.from;
+        let msg_id = message.id;
 
         let groups = self.groups.read().await;
         let members = groups
@@ -180,11 +298,11 @@ impl AgentMessageBus {
                 reason: format!("Group {} not found", group_id),
             })?;
 
-        let mut count = 0;
+        let mut count = 0u32;
         let inboxes = self.inboxes.read().await;
 
         for &id in members {
-            if id != message.from {
+            if id != from {
                 if let Some(tx) = inboxes.get(&id) {
                     let _ = tx.send(message.clone());
                     count += 1;
@@ -192,7 +310,22 @@ impl AgentMessageBus {
             }
         }
 
+        // Release locks before notifying
+        drop(inboxes);
+        drop(groups);
+
         self.history.write().await.push(message);
+        self.notify(
+            EventType::BroadcastReceived,
+            EventSeverity::Info,
+            serde_json::json!({
+                "from_agent": from.to_string(),
+                "group_id": group_id.to_string(),
+                "recipient_count": count,
+                "message_id": msg_id.to_string(),
+            }),
+        )
+        .await;
         Ok(count)
     }
 
@@ -245,6 +378,7 @@ impl Default for AgentMessageBus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentos_types::{EventSeverity, EventType};
     use agentos_types::{MessageContent, MessageID, MessageTarget, TraceID};
     use ed25519_dalek::{Signer, SigningKey};
 
@@ -457,5 +591,120 @@ mod tests {
         } else {
             panic!("Expected text message");
         }
+    }
+
+    #[tokio::test]
+    async fn test_direct_message_emits_event() {
+        let bus = AgentMessageBus::new();
+        let (notif_tx, mut notif_rx) = mpsc::channel(64);
+        bus.set_notification_sender(notif_tx).await;
+
+        let agent_a = AgentID::new();
+        let agent_b = AgentID::new();
+        let (sk_a, pk_a) = make_keypair();
+
+        bus.register_agent(agent_b).await;
+        bus.register_agent(agent_a).await;
+        bus.register_pubkey(agent_a, pk_a).await;
+
+        let msg = make_signed_msg(
+            &sk_a,
+            agent_a,
+            MessageTarget::Direct(agent_b),
+            "event test",
+            60,
+        );
+        bus.send_direct(msg).await.unwrap();
+
+        let notif = notif_rx
+            .try_recv()
+            .expect("should receive DirectMessageReceived notification");
+        assert_eq!(notif.event_type, EventType::DirectMessageReceived);
+        assert_eq!(notif.severity, EventSeverity::Info);
+        assert_eq!(
+            notif.payload["from_agent"].as_str().unwrap(),
+            agent_a.to_string()
+        );
+        assert_eq!(
+            notif.payload["to_agent"].as_str().unwrap(),
+            agent_b.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_emits_event() {
+        let bus = AgentMessageBus::new();
+        let (notif_tx, mut notif_rx) = mpsc::channel(64);
+        bus.set_notification_sender(notif_tx).await;
+
+        let a = AgentID::new();
+        let b = AgentID::new();
+        let c = AgentID::new();
+        let (sk_a, pk_a) = make_keypair();
+
+        bus.register_agent(a).await;
+        bus.register_agent(b).await;
+        bus.register_agent(c).await;
+        bus.register_pubkey(a, pk_a).await;
+
+        let msg = make_signed_msg(&sk_a, a, MessageTarget::Broadcast, "broadcast event", 60);
+        let count = bus.broadcast(msg).await.unwrap();
+        assert_eq!(count, 2);
+
+        let notif = notif_rx
+            .try_recv()
+            .expect("should receive BroadcastReceived notification");
+        assert_eq!(notif.event_type, EventType::BroadcastReceived);
+        assert_eq!(notif.payload["recipient_count"].as_u64().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_delivery_failure_emits_event() {
+        let bus = AgentMessageBus::new();
+        let (notif_tx, mut notif_rx) = mpsc::channel(64);
+        bus.set_notification_sender(notif_tx).await;
+
+        let from = AgentID::new();
+        let (sk, pk) = make_keypair();
+        bus.register_pubkey(from, pk).await;
+
+        let msg = make_signed_msg(&sk, from, MessageTarget::Direct(AgentID::new()), "fail", 60);
+        assert!(bus.send_direct(msg).await.is_err());
+
+        let notif = notif_rx
+            .try_recv()
+            .expect("should receive MessageDeliveryFailed notification");
+        assert_eq!(notif.event_type, EventType::MessageDeliveryFailed);
+        assert_eq!(notif.severity, EventSeverity::Warning);
+        assert!(notif.payload["error"]
+            .as_str()
+            .unwrap()
+            .contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_bus_works_without_notification_sender() {
+        // Verify the bus works correctly when notification_sender is None
+        let bus = AgentMessageBus::new();
+        let agent_a = AgentID::new();
+        let agent_b = AgentID::new();
+        let (sk_a, pk_a) = make_keypair();
+
+        let mut inbox_b = bus.register_agent(agent_b).await;
+        bus.register_agent(agent_a).await;
+        bus.register_pubkey(agent_a, pk_a.clone()).await;
+
+        let msg = make_signed_msg(
+            &sk_a,
+            agent_a,
+            MessageTarget::Direct(agent_b),
+            "no sender",
+            60,
+        );
+        bus.send_direct(msg).await.unwrap();
+        assert!(inbox_b.try_recv().is_ok());
+
+        let msg = make_signed_msg(&sk_a, agent_a, MessageTarget::Broadcast, "no sender bc", 60);
+        bus.broadcast(msg).await.unwrap();
     }
 }

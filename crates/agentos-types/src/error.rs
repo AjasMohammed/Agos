@@ -36,6 +36,14 @@ pub enum AgentOSError {
     #[error("Tool execution failed: {tool_name}: {reason}")]
     ToolExecutionFailed { tool_name: String, reason: String },
 
+    #[error("File '{path}' is locked by agent {holder_agent_id} (task {holder_task_id}), acquired at {acquired_at}")]
+    FileLocked {
+        path: String,
+        holder_agent_id: crate::ids::AgentID,
+        holder_task_id: crate::ids::TaskID,
+        acquired_at: chrono::DateTime<chrono::Utc>,
+    },
+
     #[error("Tool '{name}' is blocked and cannot be loaded")]
     ToolBlocked { name: String },
 

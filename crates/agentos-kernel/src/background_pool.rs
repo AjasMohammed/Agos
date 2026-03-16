@@ -33,6 +33,13 @@ impl BackgroundPool {
         }
     }
 
+    pub async fn set_waiting(&self, task_id: &TaskID, reason: String) {
+        if let Some(task) = self.tasks.write().await.get_mut(task_id) {
+            task.state = TaskState::Waiting;
+            task.result = Some(serde_json::json!({ "status": "paused", "reason": reason }));
+        }
+    }
+
     pub async fn list_all(&self) -> Vec<BackgroundTask> {
         self.tasks.read().await.values().cloned().collect()
     }

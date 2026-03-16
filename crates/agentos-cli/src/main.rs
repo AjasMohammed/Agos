@@ -7,10 +7,10 @@ use std::sync::Arc;
 mod commands;
 use commands::{
     agent::AgentCommands, audit::AuditCommands, bg::BgCommands, cost::CostCommands,
-    escalation::EscalationCommands, event::EventCommands, identity::IdentityCommands,
-    perm::PermCommands, pipeline::PipelineCommands, resource::ResourceCommands, role::RoleCommands,
-    schedule::ScheduleCommands, secret::SecretCommands, snapshot::SnapshotCommands,
-    task::TaskCommands, tool::ToolCommands,
+    escalation::EscalationCommands, event::EventCommands, hal::HalCommands,
+    identity::IdentityCommands, perm::PermCommands, pipeline::PipelineCommands,
+    resource::ResourceCommands, role::RoleCommands, schedule::ScheduleCommands,
+    secret::SecretCommands, snapshot::SnapshotCommands, task::TaskCommands, tool::ToolCommands,
 };
 
 #[derive(Parser)]
@@ -133,6 +133,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: IdentityCommands,
     },
+
+    /// Manage hardware device access (HAL)
+    Hal {
+        #[command(subcommand)]
+        command: HalCommands,
+    },
 }
 
 #[tokio::main]
@@ -176,10 +182,13 @@ async fn cmd_start(config_str: &str, vault_passphrase: Option<String>) -> anyhow
 
     let passphrase = match vault_passphrase {
         Some(p) => p,
-        None => {
-            eprint!("Enter vault passphrase: ");
-            rpassword::read_password()?
-        }
+        None => match std::env::var("AGENTOS_VAULT_PASSPHRASE") {
+            Ok(env_pass) if !env_pass.is_empty() => env_pass,
+            _ => {
+                eprint!("Enter vault passphrase: ");
+                rpassword::read_password()?
+            }
+        },
     };
 
     println!("🚀 Booting AgentOS kernel...");
@@ -234,6 +243,7 @@ mod tests {
                         model,
                         name,
                         base_url: _,
+                        roles: _,
                     },
             } => {
                 assert_eq!(provider, "openai");
@@ -337,7 +347,7 @@ mod tests {
                         name,
                         cron,
                         agent,
-                        task,
+                        task: _,
                         permissions,
                     },
             } => {
@@ -372,7 +382,7 @@ mod tests {
                     BgCommands::Run {
                         name,
                         agent,
-                        task,
+                        task: _,
                         detach,
                     },
             } => {
@@ -407,14 +417,55 @@ mod tests {
                     EventCommands::Subscribe {
                         agent,
                         event,
+                        filter,
                         throttle,
                         priority,
                     },
             } => {
                 assert_eq!(agent, "analyst");
                 assert_eq!(event, "AgentAdded");
+                assert_eq!(filter, None);
                 assert_eq!(throttle, Some("once_per:30s".to_string()));
                 assert_eq!(priority, "high");
+            }
+            _ => panic!("Wrong command parsed"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_event_subscribe_with_payload_filter() {
+        let cli = Cli::try_parse_from([
+            "agentctl",
+            "event",
+            "subscribe",
+            "--agent",
+            "analyst",
+            "--event",
+            "CPUSpikeDetected",
+            "--filter",
+            "cpu_percent > 90 AND severity == Critical",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Event {
+                command:
+                    EventCommands::Subscribe {
+                        agent,
+                        event,
+                        filter,
+                        throttle,
+                        priority,
+                    },
+            } => {
+                assert_eq!(agent, "analyst");
+                assert_eq!(event, "CPUSpikeDetected");
+                assert_eq!(
+                    filter,
+                    Some("cpu_percent > 90 AND severity == Critical".to_string())
+                );
+                assert_eq!(throttle, None);
+                assert_eq!(priority, "normal");
             }
             _ => panic!("Wrong command parsed"),
         }
@@ -441,6 +492,42 @@ mod tests {
                 command: EventCommands::History { last },
             } => {
                 assert_eq!(last, 50);
+            }
+            _ => panic!("Wrong command parsed"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_hal_register() {
+        let cli = Cli::try_parse_from([
+            "agentctl", "hal", "register", "--id", "gpu:0", "--type", "nvidia-rtx-4090",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Hal {
+                command: HalCommands::Register { id, device_type },
+            } => {
+                assert_eq!(id, "gpu:0");
+                assert_eq!(device_type, "nvidia-rtx-4090");
+            }
+            _ => panic!("Wrong command parsed"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_hal_approve() {
+        let cli = Cli::try_parse_from([
+            "agentctl", "hal", "approve", "gpu:0", "--agent", "worker",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Hal {
+                command: HalCommands::Approve { device, agent },
+            } => {
+                assert_eq!(device, "gpu:0");
+                assert_eq!(agent, "worker");
             }
             _ => panic!("Wrong command parsed"),
         }

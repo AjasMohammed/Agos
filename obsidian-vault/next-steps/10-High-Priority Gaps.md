@@ -8,7 +8,8 @@ tags:
   - next-steps
   - feature
 date: 2026-03-11
-status: in-progress
+completed: 2026-03-16
+status: complete
 effort: 1d
 priority: critical
 ---

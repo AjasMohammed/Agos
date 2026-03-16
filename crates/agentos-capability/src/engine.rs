@@ -36,8 +36,8 @@ impl CapabilityEngine {
 
     /// Boot the capability engine: load existing signing key from the vault,
     /// or generate a new one and persist it. This ensures tokens survive restarts.
-    pub fn boot(vault: &agentos_vault::SecretsVault) -> Self {
-        match vault.get(SIGNING_KEY_NAME) {
+    pub async fn boot(vault: &agentos_vault::SecretsVault) -> Self {
+        match vault.get(SIGNING_KEY_NAME).await {
             Ok(entry) => {
                 let key_str = entry.as_str();
                 // Stored as hex string
@@ -50,27 +50,31 @@ impl CapabilityEngine {
                     }
                 }
                 tracing::warn!("Corrupt signing key in vault, generating new one");
-                Self::generate_and_persist(vault)
+                Self::generate_and_persist(vault).await
             }
             Err(_) => {
                 tracing::info!("No existing signing key found, generating new one");
-                Self::generate_and_persist(vault)
+                Self::generate_and_persist(vault).await
             }
         }
     }
 
     /// Generate a new signing key and persist it in the vault.
-    fn generate_and_persist(vault: &agentos_vault::SecretsVault) -> Self {
+    /// Uses `SecretScope::Kernel` so no agent can proxy-access this key.
+    async fn generate_and_persist(vault: &agentos_vault::SecretsVault) -> Self {
         let mut key = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut key);
         let key_hex = hex::encode(key);
 
-        if let Err(e) = vault.set(
-            SIGNING_KEY_NAME,
-            &key_hex,
-            agentos_types::SecretOwner::Kernel,
-            agentos_types::SecretScope::Global,
-        ) {
+        if let Err(e) = vault
+            .set(
+                SIGNING_KEY_NAME,
+                &key_hex,
+                agentos_types::SecretOwner::Kernel,
+                agentos_types::SecretScope::Kernel,
+            )
+            .await
+        {
             tracing::error!(error = %e, "Failed to persist signing key to vault");
         }
 
@@ -211,6 +215,8 @@ impl CapabilityEngine {
             IntentType::Message => IntentTypeFlag::Message,
             IntentType::Broadcast => IntentTypeFlag::Broadcast,
             IntentType::Escalate => IntentTypeFlag::Escalate,
+            IntentType::Subscribe => IntentTypeFlag::Subscribe,
+            IntentType::Unsubscribe => IntentTypeFlag::Unsubscribe,
         };
 
         if !token.allowed_intents.contains(&intent_flag) {

@@ -33,6 +33,10 @@ pub enum IntentType {
     Broadcast,
     /// Request human review / escalation.
     Escalate,
+    /// Create an event subscription at runtime.
+    Subscribe,
+    /// Remove an existing event subscription at runtime.
+    Unsubscribe,
 }
 
 /// Where the intent is directed.
@@ -63,6 +67,37 @@ pub struct SemanticPayload {
     pub schema: String,
     /// The actual data as a JSON value
     pub data: serde_json::Value,
+}
+
+/// How long a runtime subscription should remain active.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubscriptionDuration {
+    /// Automatically remove when the current task reaches a terminal state.
+    Task,
+    /// Keep until explicitly unsubscribed.
+    Permanent,
+    /// Keep for a fixed TTL in seconds.
+    TTL { seconds: u64 },
+}
+
+/// Payload for `IntentType::Subscribe`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribePayload {
+    /// Event filter, e.g. "SecurityEvents.*" or "TaskLifecycle.TaskFailed".
+    pub event_filter: String,
+    /// Optional payload filter predicate, e.g. "severity == Critical".
+    #[serde(default)]
+    pub filter_predicate: Option<String>,
+    pub duration: SubscriptionDuration,
+    /// Optional priority: "critical", "high", "normal", "low".
+    #[serde(default)]
+    pub priority: Option<String>,
+}
+
+/// Payload for `IntentType::Unsubscribe`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnsubscribePayload {
+    pub subscription_id: String,
 }
 
 /// The result returned by a tool after processing an intent.

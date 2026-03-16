@@ -1,0 +1,65 @@
+[kernel]
+max_concurrent_tasks = 4
+default_task_timeout_secs = 300
+context_window_max_entries = 200
+context_window_token_budget = 128000
+health_port = 9091
+
+[bus]
+socket_path = "/var/lib/agentos/data/agentos.sock"
+
+[audit]
+log_path = "/var/lib/agentos/data/audit.db"
+
+[secrets]
+vault_path = "/var/lib/agentos/data/vault.db"
+
+[tools]
+core_tools_dir = "/var/lib/agentos/tools/core"
+user_tools_dir = "/var/lib/agentos/tools/user"
+data_dir = "/var/lib/agentos/data"
+
+[ollama]
+host = "http://ollama:11434"
+default_model = "llama3.2"
+
+[llm]
+openai_base_url = "https://api.openai.com/v1"
+anthropic_base_url = "https://api.anthropic.com/v1"
+gemini_base_url = "https://generativelanguage.googleapis.com/v1beta"
+
+[memory]
+model_cache_dir = "/var/lib/agentos/data/models"
+
+[memory.extraction]
+enabled = true
+conflict_threshold = 0.85
+max_facts_per_result = 5
+min_result_length = 50
+
+[memory.consolidation]
+enabled = true
+min_pattern_occurrences = 3
+task_completions_trigger = 100
+time_trigger_hours = 24
+max_episodes_per_cycle = 500
+
+[context_budget]
+total_tokens = 128000
+reserve_pct = 0.25
+system_pct = 0.15
+tools_pct = 0.18
+knowledge_pct = 0.30
+history_pct = 0.25
+task_pct = 0.12
+
+[health_monitor]
+enabled = true
+check_interval_secs = 30
+
+[health_monitor.thresholds]
+cpu_warning_percent = 85.0
+memory_warning_percent = 80.0
+disk_warning_percent = 85.0
+disk_critical_percent = 95.0
+gpu_vram_warning_percent = 90.0

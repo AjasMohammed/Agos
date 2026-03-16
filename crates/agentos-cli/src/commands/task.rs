@@ -56,6 +56,23 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
             match response {
                 KernelResponse::Success { data } => {
                     if let Some(data) = data {
+                        let is_paused = data
+                            .get("status")
+                            .and_then(|v: &serde_json::Value| v.as_str())
+                            == Some("paused");
+                        if is_paused {
+                            let task_id = data
+                                .get("task_id")
+                                .and_then(|v: &serde_json::Value| v.as_str())
+                                .unwrap_or("<unknown-task>");
+                            let reason = data
+                                .get("reason")
+                                .and_then(|v: &serde_json::Value| v.as_str())
+                                .unwrap_or("No reason provided");
+                            println!("\n⏸️ Task paused: {}", task_id);
+                            println!("   Reason: {}", reason);
+                            return Ok(());
+                        }
                         println!("\n✅ Task completed:\n");
                         if let Some(result) = data
                             .get("result")

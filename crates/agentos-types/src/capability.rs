@@ -29,6 +29,8 @@ pub enum IntentTypeFlag {
     Message,
     Broadcast,
     Escalate,
+    Subscribe,
+    Unsubscribe,
 }
 
 /// A set of resource permissions in rwx format.

@@ -20,6 +20,7 @@ impl Kernel {
         let has_signing_key = self
             .identity_manager
             .load_signing_key(&agent_id)
+            .await
             .ok()
             .flatten()
             .is_some();
@@ -49,7 +50,7 @@ impl Kernel {
         drop(registry);
 
         // Revoke Ed25519 identity
-        if let Err(e) = self.identity_manager.revoke_identity(&agent_id) {
+        if let Err(e) = self.identity_manager.revoke_identity(&agent_id).await {
             return KernelResponse::Error {
                 message: format!("Failed to revoke identity: {}", e),
             };

@@ -22,11 +22,12 @@ fn make_context(data_dir: &Path, vault: Option<Arc<ProxyVault>>) -> ToolExecutio
         permissions: PermissionSet::new(),
         vault,
         hal: None,
+        file_lock_registry: None,
     }
 }
 
 // Helper to init a temporary vault with a secret, returning a ProxyVault wrapper
-fn setup_temp_vault(dir: &TempDir, secret_name: &str, secret_value: &str) -> Arc<ProxyVault> {
+async fn setup_temp_vault(dir: &TempDir, secret_name: &str, secret_value: &str) -> Arc<ProxyVault> {
     let db_path = dir.path().join("vault.db");
     let audit_db = dir.path().join("audit.db");
     let audit = Arc::new(agentos_audit::AuditLog::open(&audit_db).unwrap());
@@ -39,6 +40,7 @@ fn setup_temp_vault(dir: &TempDir, secret_name: &str, secret_value: &str) -> Arc
             SecretOwner::Kernel,
             SecretScope::Global,
         )
+        .await
         .unwrap();
     Arc::new(ProxyVault::new(Arc::new(vault)))
 }
@@ -113,7 +115,7 @@ async fn test_secret_header_injected_not_returned() {
         .await;
 
     let dir = TempDir::new().unwrap();
-    let vault = setup_temp_vault(&dir, "MY_ACTUAL_TOKEN", "TOP_SECRET_123");
+    let vault = setup_temp_vault(&dir, "MY_ACTUAL_TOKEN", "TOP_SECRET_123").await;
     let ctx = make_context(dir.path(), Some(vault));
     let tool = HttpClientTool::new();
 

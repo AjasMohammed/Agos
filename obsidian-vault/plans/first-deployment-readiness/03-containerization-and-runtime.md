@@ -5,7 +5,7 @@ tags:
   - v3
   - plan
 date: 2026-03-12
-status: planned
+status: complete
 effort: 1.5d
 priority: critical
 ---
@@ -50,11 +50,13 @@ A deployment strategy is not actionable until build and orchestration artifacts 
 | File | Change |
 |------|--------|
 | `Dockerfile` | Canonical multi-stage image build |
-| `docker-compose.yml` | Runtime orchestration with volumes and health |
+| `docker-compose.yml` | Runtime orchestration with volumes, health, and env var pass-through |
 | `.env.example` | Environment template |
 | `.dockerignore` | Exclude build artifacts, docs, git |
-| `agentic-os-deployment.md` | Updated deploy commands |
-| `README.md` | Deployment quick start |
+| `config/docker.toml` | Container runtime config profile |
+| `docs/guide/07-configuration.md` | Docker profile section added |
+| `docs/guide/02-getting-started.md` | Docker quick-start section added |
+| `README.md` | Docker Deployment section (already present) |
 
 ## Dependencies
 

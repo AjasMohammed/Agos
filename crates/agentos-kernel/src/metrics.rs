@@ -1,4 +1,8 @@
 use metrics::{counter, gauge, histogram};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static RETRIEVAL_REFRESH_TOTAL: AtomicU64 = AtomicU64::new(0);
+static RETRIEVAL_REUSE_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// Record a task being added to the queue.
 pub fn record_task_queued() {
@@ -54,4 +58,28 @@ pub fn record_agent_disconnected() {
 /// Record a rate-limited request.
 pub fn record_rate_limited() {
     counter!("agentos_rate_limited_total").increment(1);
+}
+
+/// Record whether retrieval context was refreshed or reused this iteration.
+pub fn record_retrieval_refresh_decision(refreshed: bool) {
+    if refreshed {
+        RETRIEVAL_REFRESH_TOTAL.fetch_add(1, Ordering::Relaxed);
+        counter!("agentos_retrieval_refresh_total").increment(1);
+    } else {
+        RETRIEVAL_REUSE_TOTAL.fetch_add(1, Ordering::Relaxed);
+        counter!("agentos_retrieval_reuse_total").increment(1);
+    }
+}
+
+/// Record retrieval refresh performance and output size.
+pub fn record_retrieval_refresh(duration_ms: u64, knowledge_blocks: usize) {
+    histogram!("agentos_retrieval_refresh_latency_ms").record(duration_ms as f64);
+    histogram!("agentos_retrieval_knowledge_blocks").record(knowledge_blocks as f64);
+}
+
+pub fn retrieval_refresh_snapshot() -> (u64, u64) {
+    (
+        RETRIEVAL_REFRESH_TOTAL.load(Ordering::Relaxed),
+        RETRIEVAL_REUSE_TOTAL.load(Ordering::Relaxed),
+    )
 }

@@ -4,6 +4,7 @@ pub mod background;
 pub mod cost;
 pub mod escalation;
 pub mod event;
+pub mod hal;
 pub mod identity;
 pub mod permission;
 pub mod pipeline;

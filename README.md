@@ -95,6 +95,27 @@ cargo run --bin agentos-cli -- --config config/production.toml start
   - `AGENTOS_LLM_URL`
   - `AGENTOS_OPENAI_BASE_URL`
 
+### Docker Deployment
+
+```bash
+# 1. Copy the env template and set a strong vault passphrase
+cp .env.example .env
+# Edit .env and set AGENTOS_VAULT_PASSPHRASE
+
+# 2. Start AgentOS + Ollama
+docker compose up -d
+
+# 3. Check health
+curl http://localhost:9091/healthz
+```
+
+The compose stack uses:
+- A **read-only root filesystem** with tmpfs mounts for `/tmp` and `/run`
+- **Named volumes** (`agentos-data`, `agentos-user-tools`) for persistent state
+- `config/docker.toml` — pre-configured for the container network (Ollama reachable as `http://ollama:11434`)
+
+See [docs/guide/07-configuration.md](docs/guide/07-configuration.md) for full configuration reference.
+
 ### Run Tests
 
 ```bash
@@ -121,11 +142,16 @@ agos/
 │   ├── agentos-kernel/      # Central orchestrator (scheduler, router, registry)
 │   └── agentos-cli/         # agentctl CLI
 ├── config/
-│   └── default.toml         # Default kernel configuration
+│   ├── default.toml         # Development defaults (uses /tmp paths; kernel warns at startup)
+│   ├── production.toml      # Production baseline (persistent /var/lib paths, internal endpoints)
+│   └── docker.toml          # Docker container profile (/var/lib/agentos, ollama service name)
 ├── tools/
 │   └── core/                # Built-in tool manifests (.toml)
 ├── docs/
 │   └── guide/               # User guide and documentation
+├── .env.example             # Environment variable template for Docker deployments
+├── Dockerfile               # Multi-stage production image (non-root, healthcheck)
+├── docker-compose.yml       # Compose file: agentos + ollama services
 ├── v1-plans/                # Phase 1 implementation plans
 ├── v2-plans/                # Phase 2 implementation plans
 └── Cargo.toml               # Workspace manifest
@@ -152,7 +178,9 @@ agos/
 | **RBAC**                | Role-based access control with persistent roles                                                |
 | **Background Tasks**    | agentd supervisor, cron/schedule management                                                    |
 | **Seccomp Sandbox**     | BPF syscall filtering for tool execution                                                       |
-| **Full CLI**            | agentctl with 9 command groups                                                                 |
+| **Full CLI**            | agentctl with 12 command groups                                                                |
+| **Docker Deployment**   | Multi-stage image, docker-compose with Ollama, read-only rootfs, persistent volumes           |
+| **Production Config**   | `config/production.toml` with persistent paths; kernel warns at startup on `/tmp` paths       |
 
 ### 🔮 Planned (Phase 3+)
 
@@ -163,7 +191,6 @@ agos/
 | GPU Resource Manager         | Phase 3 |
 | Python / Node.js SDKs        | Phase 3 |
 | Multi-Agent Pipelines        | Phase 3 |
-| Docker Production Deployment | Phase 3 |
 
 ---
 
@@ -234,6 +261,30 @@ The `docs/guide/` folder contains a comprehensive user guide:
 - **Immutable audit trail** — append-only log of every action
 - **Memory safety** — implemented entirely in Rust
 - **Secret zeroing** — credentials zeroed from memory after use
+
+---
+
+## Versioning and Releases
+
+AgentOS uses **Semantic Versioning** (`vMAJOR.MINOR.PATCH`). Pre-v1 releases are `v0.x.y`.
+
+### Release Cut Criteria
+
+A release tag may only be created when **all** of the following pass:
+
+```bash
+cargo fmt --all -- --check                          # clean formatting
+cargo clippy --workspace -- -D warnings             # zero warnings
+cargo test --workspace                              # all tests pass
+cargo build --release --workspace                   # release build succeeds
+cargo test -p agentos-kernel --test security_acceptance_test  # 7/7 security scenarios
+```
+
+Plus: Docker build succeeds, health endpoint responds 200, production config reviewed for no `/tmp` paths.
+
+See [`obsidian-vault/reference/Release Process.md`](obsidian-vault/reference/Release%20Process.md) for the full release workflow, sign-off template, and rollback procedure.
+
+See [`obsidian-vault/reference/First Deployment Runbook.md`](obsidian-vault/reference/First%20Deployment%20Runbook.md) for the first-boot smoke checklist and deployment sign-off.
 
 ---
 

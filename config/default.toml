@@ -12,6 +12,8 @@ vault_path = "/tmp/agentos/vault/secrets.db"
 [audit]
 # Development default path (ephemeral on many systems).
 log_path = "/tmp/agentos/data/audit.db"
+# Maximum rows to retain (0 = unlimited). Older rows are pruned on each 10-minute sweep.
+max_audit_entries = 0
 
 [tools]
 # Development default paths (ephemeral on many systems).
@@ -62,3 +64,14 @@ tools_pct = 0.18
 knowledge_pct = 0.30
 history_pct = 0.25
 task_pct = 0.12
+
+[health_monitor]
+enabled = true
+check_interval_secs = 30
+
+[health_monitor.thresholds]
+cpu_warning_percent = 85.0
+memory_warning_percent = 80.0
+disk_warning_percent = 85.0
+disk_critical_percent = 95.0
+gpu_vram_warning_percent = 90.0

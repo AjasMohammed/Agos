@@ -59,35 +59,163 @@ impl Kernel {
 
     pub(crate) async fn cmd_resolve_escalation(&self, id: u64, decision: String) -> KernelResponse {
         match self.escalation_manager.resolve(id, decision.clone()).await {
-            Some((task_id, blocking)) => {
+            Some((task_id, agent_id, blocking)) => {
+                let decision_lower = decision.to_ascii_lowercase();
+                let approved = matches!(
+                    decision_lower.as_str(),
+                    "approve" | "approved" | "allow" | "allowed"
+                );
+                let mut task_resumed = false;
+                let mut infra_failure = false;
                 // If the escalation was blocking, resume the waiting task
                 if blocking {
-                    if let Err(e) = self
-                        .scheduler
-                        .update_state(&task_id, TaskState::Running)
-                        .await
-                    {
-                        tracing::warn!(
-                            task_id = %task_id,
-                            error = %e,
-                            "Failed to resume task after escalation resolve"
-                        );
+                    if approved {
+                        match self.scheduler.requeue(&task_id).await {
+                            Ok(()) => {
+                                task_resumed = true;
+                            }
+                            Err(e) => {
+                                infra_failure = true;
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    error = %e,
+                                    "Failed to requeue task after escalation approve; failing task"
+                                );
+                                let task_snapshot = self.scheduler.get_task(&task_id).await;
+                                let can_transition_failed = task_snapshot
+                                    .as_ref()
+                                    .map(|t| {
+                                        !matches!(
+                                            t.state,
+                                            TaskState::Complete
+                                                | TaskState::Failed
+                                                | TaskState::Cancelled
+                                        )
+                                    })
+                                    .unwrap_or(false);
+                                if can_transition_failed {
+                                    let transitioned = self
+                                        .scheduler
+                                        .update_state_if_not_terminal(&task_id, TaskState::Failed)
+                                        .await
+                                        .unwrap_or(false);
+                                    if !transitioned {
+                                        tracing::warn!(
+                                            task_id = %task_id,
+                                            "Skipped failing task after approve requeue failure due to terminal state"
+                                        );
+                                    } else {
+                                        self.background_pool
+                                            .fail(
+                                                &task_id,
+                                                format!(
+                                                    "Escalation {} approved but requeue failed: {}",
+                                                    id, e
+                                                ),
+                                            )
+                                            .await;
+                                        self.emit_event(
+                                            EventType::TaskFailed,
+                                            EventSource::TaskScheduler,
+                                            EventSeverity::Warning,
+                                            serde_json::json!({
+                                                "task_id": task_id.to_string(),
+                                                "agent_id": agent_id.to_string(),
+                                                "reason": "escalation_approve_requeue_failed",
+                                                "error": format!("Escalation {} approved but requeue failed: {}", id, e),
+                                            }),
+                                            0,
+                                        )
+                                        .await;
+                                        let waiters =
+                                            self.scheduler.complete_dependency(task_id).await;
+                                        for waiter_id in waiters {
+                                            self.scheduler.requeue(&waiter_id).await.ok();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        let task_snapshot = self.scheduler.get_task(&task_id).await;
+                        let can_transition_failed = task_snapshot
+                            .as_ref()
+                            .map(|t| {
+                                !matches!(
+                                    t.state,
+                                    TaskState::Complete | TaskState::Failed | TaskState::Cancelled
+                                )
+                            })
+                            .unwrap_or(false);
+                        if can_transition_failed {
+                            let transitioned = self
+                                .scheduler
+                                .update_state_if_not_terminal(&task_id, TaskState::Failed)
+                                .await
+                                .unwrap_or(false);
+                            if !transitioned {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    "Skipped failing denied escalation task due to terminal state"
+                                );
+                            } else {
+                                self.background_pool
+                                    .fail(
+                                        &task_id,
+                                        format!(
+                                            "Escalation {} denied with decision: {}",
+                                            id, decision
+                                        ),
+                                    )
+                                    .await;
+                                self.emit_event(
+                                    EventType::TaskFailed,
+                                    EventSource::TaskScheduler,
+                                    EventSeverity::Warning,
+                                    serde_json::json!({
+                                        "task_id": task_id.to_string(),
+                                        "agent_id": agent_id.to_string(),
+                                        "reason": "escalation_denied",
+                                        "error": format!("Escalation {} denied with decision: {}", id, decision),
+                                    }),
+                                    0,
+                                )
+                                .await;
+                                let waiters = self.scheduler.complete_dependency(task_id).await;
+                                for waiter_id in waiters {
+                                    self.scheduler.requeue(&waiter_id).await.ok();
+                                }
+                            }
+                        }
                     }
                 }
 
                 self.audit_log(agentos_audit::AuditEntry {
                     timestamp: chrono::Utc::now(),
                     trace_id: TraceID::new(),
-                    event_type: agentos_audit::AuditEventType::ToolExecutionCompleted,
-                    agent_id: None,
+                    event_type: if task_resumed {
+                        agentos_audit::AuditEventType::TaskStateChanged
+                    } else if infra_failure {
+                        agentos_audit::AuditEventType::TaskFailed
+                    } else if approved && !blocking {
+                        agentos_audit::AuditEventType::RiskEscalation
+                    } else {
+                        agentos_audit::AuditEventType::ActionForbidden
+                    },
+                    agent_id: Some(agent_id),
                     task_id: Some(task_id),
                     tool_id: None,
                     details: serde_json::json!({
-                        "escalation_resolved": id,
+                        "escalation_id": id,
                         "decision": decision,
-                        "blocking_resumed": blocking,
+                        "task_resumed": task_resumed,
+                        "blocking": blocking,
                     }),
-                    severity: agentos_audit::AuditSeverity::Info,
+                    severity: if task_resumed || (approved && !blocking) {
+                        agentos_audit::AuditSeverity::Info
+                    } else {
+                        agentos_audit::AuditSeverity::Warn
+                    },
                     reversible: false,
                     rollback_ref: None,
                 });
@@ -97,7 +225,7 @@ impl Kernel {
                         "status": "resolved",
                         "escalation_id": id,
                         "task_id": task_id.to_string(),
-                        "task_resumed": blocking,
+                        "task_resumed": task_resumed,
                     })),
                 }
             }

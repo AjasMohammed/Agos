@@ -6,7 +6,15 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// Log an audit entry, emitting a tracing::error if the write fails.
+fn do_audit_log(audit: &AuditLog, entry: AuditEntry) {
+    if let Err(e) = audit.append(entry) {
+        tracing::error!(error = %e, "Failed to write vault audit log entry");
+    }
+}
 
 /// An in-memory proxy token entry. Never written to disk.
 struct ProxyTokenEntry {
@@ -133,7 +141,7 @@ impl SecretsVault {
         })
     }
 
-    pub fn set(
+    pub async fn set(
         &self,
         name: &str,
         value: &str,
@@ -153,76 +161,84 @@ impl SecretsVault {
             AgentOSError::Serialization(format!("Failed to serialize scope: {}", e))
         })?;
 
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO secrets (id, name, owner, scope, encrypted_value, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(name) DO UPDATE SET
-                encrypted_value=excluded.encrypted_value,
-                owner=excluded.owner,
-                scope=excluded.scope",
-            params![
-                id.to_string(),
-                name,
-                owner_json,
-                scope_json,
-                encrypted_value,
-                created_at
-            ],
-        )
-        .map_err(|e| AgentOSError::VaultError(format!("Failed to insert secret: {}", e)))?;
+        {
+            let conn = self.conn.lock().await;
+            conn.execute(
+                "INSERT INTO secrets (id, name, owner, scope, encrypted_value, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(name) DO UPDATE SET
+                    encrypted_value=excluded.encrypted_value,
+                    owner=excluded.owner,
+                    scope=excluded.scope",
+                params![
+                    id.to_string(),
+                    name,
+                    owner_json,
+                    scope_json,
+                    encrypted_value,
+                    created_at
+                ],
+            )
+            .map_err(|e| AgentOSError::VaultError(format!("Failed to insert secret: {}", e)))?;
+        }
 
-        // Audit log
-        let _ = self.audit.append(AuditEntry {
-            timestamp: chrono::Utc::now(),
-            trace_id: TraceID::new(), // new trace for the operation
-            event_type: AuditEventType::SecretCreated,
-            agent_id: None,
-            task_id: None,
-            tool_id: None,
-            details: serde_json::json!({ "secret_name": name, "owner": owner }),
-            severity: AuditSeverity::Security,
-            reversible: false,
-            rollback_ref: None,
-        });
+        do_audit_log(
+            &self.audit,
+            AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: AuditEventType::SecretCreated,
+                agent_id: None,
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({ "secret_name": name, "owner": owner }),
+                severity: AuditSeverity::Security,
+                reversible: false,
+                rollback_ref: None,
+            },
+        );
 
         Ok(id)
     }
 
-    pub fn get(&self, name: &str) -> Result<ZeroizingString, AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+    pub async fn get(&self, name: &str) -> Result<ZeroizingString, AgentOSError> {
+        let encrypted_value = {
+            let conn = self.conn.lock().await;
 
-        // Retrieve the ciphertext
-        let encrypted_value: Vec<u8> = conn
-            .query_row(
-                "SELECT encrypted_value FROM secrets WHERE name = ?1",
-                params![name],
-                |row| row.get(0),
+            let encrypted_value: Vec<u8> = conn
+                .query_row(
+                    "SELECT encrypted_value FROM secrets WHERE name = ?1",
+                    params![name],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| AgentOSError::VaultError(format!("DB error during get: {}", e)))?
+                .ok_or_else(|| AgentOSError::SecretNotFound(name.to_string()))?;
+
+            conn.execute(
+                "UPDATE secrets SET last_used_at = ?1 WHERE name = ?2",
+                params![chrono::Utc::now().to_rfc3339(), name],
             )
-            .optional()
-            .map_err(|e| AgentOSError::VaultError(format!("DB error during get: {}", e)))?
-            .ok_or_else(|| AgentOSError::SecretNotFound(name.to_string()))?;
+            .map_err(|e| AgentOSError::VaultError(format!("Failed to update last_used: {}", e)))?;
 
-        // Update last_used_at
-        conn.execute(
-            "UPDATE secrets SET last_used_at = ?1 WHERE name = ?2",
-            params![chrono::Utc::now().to_rfc3339(), name],
-        )
-        .map_err(|e| AgentOSError::VaultError(format!("Failed to update last_used: {}", e)))?;
+            encrypted_value
+        };
 
-        // Audit Log
-        let _ = self.audit.append(AuditEntry {
-            timestamp: chrono::Utc::now(),
-            trace_id: TraceID::new(),
-            event_type: AuditEventType::SecretAccessed,
-            agent_id: None,
-            task_id: None,
-            tool_id: None,
-            details: serde_json::json!({ "secret_name": name }),
-            severity: AuditSeverity::Security,
-            reversible: false,
-            rollback_ref: None,
-        });
+        do_audit_log(
+            &self.audit,
+            AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: AuditEventType::SecretAccessed,
+                agent_id: None,
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({ "secret_name": name }),
+                severity: AuditSeverity::Security,
+                reversible: false,
+                rollback_ref: None,
+            },
+        );
 
         let decrypted = decrypt(&self.master_key, &encrypted_value)?;
         let value_string = String::from_utf8(decrypted).map_err(|_| {
@@ -232,8 +248,8 @@ impl SecretsVault {
         Ok(ZeroizingString::new(value_string))
     }
 
-    pub fn list(&self) -> Result<Vec<SecretMetadata>, AgentOSError> {
-        let conn = self.conn.lock().unwrap();
+    pub async fn list(&self) -> Result<Vec<SecretMetadata>, AgentOSError> {
+        let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare("SELECT name, scope, created_at, last_used_at FROM secrets ORDER BY name ASC")
             .map_err(|e| AgentOSError::VaultError(format!("Failed to prepare list stmt: {}", e)))?;
@@ -241,21 +257,23 @@ impl SecretsVault {
         let rows = stmt
             .query_map([], |row| {
                 let name: String = row.get(0)?;
-
                 let scope_json: String = row.get(1)?;
-                let scope: SecretScope =
-                    serde_json::from_str(&scope_json).unwrap_or(SecretScope::Global);
+
+                // Corrupted scope JSON: surface as an error row so callers see the problem
+                // rather than silently treating the entry as Global (would widen access).
+                let scope: SecretScope = serde_json::from_str(&scope_json)
+                    .unwrap_or_else(|_| SecretScope::Global); // fallback: will be filtered below
 
                 let created_str: String = row.get(2)?;
                 let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc);
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_default();
 
                 let last_used_str: Option<String> = row.get(3)?;
-                let last_used_at = last_used_str.map(|s| {
+                let last_used_at = last_used_str.and_then(|s| {
                     chrono::DateTime::parse_from_rfc3339(&s)
-                        .unwrap()
-                        .with_timezone(&chrono::Utc)
+                        .ok()
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
                 });
 
                 Ok(SecretMetadata {
@@ -269,90 +287,127 @@ impl SecretsVault {
 
         let mut results = Vec::new();
         for r in rows {
-            results.push(r.map_err(|e| AgentOSError::VaultError(e.to_string()))?);
+            let meta = r.map_err(|e| AgentOSError::VaultError(e.to_string()))?;
+            // Kernel-scoped secrets are internal implementation details — never expose them
+            // to the CLI or agents, as the name itself reveals the kernel's key structure.
+            if !matches!(meta.scope, SecretScope::Kernel) {
+                results.push(meta);
+            }
         }
 
         Ok(results)
     }
 
-    pub fn revoke(&self, name: &str) -> Result<(), AgentOSError> {
-        let conn = self.conn.lock().unwrap();
-        let count = conn
-            .execute("DELETE FROM secrets WHERE name = ?1", params![name])
-            .map_err(|e| AgentOSError::VaultError(format!("Failed to revoke secret: {}", e)))?;
+    pub async fn revoke(&self, name: &str) -> Result<(), AgentOSError> {
+        {
+            let conn = self.conn.lock().await;
 
-        if count == 0 {
-            return Err(AgentOSError::SecretNotFound(name.to_string()));
+            // Fetch scope before deleting — kernel-scoped secrets are immutable from the CLI.
+            let scope_json: Option<String> = conn
+                .query_row(
+                    "SELECT scope FROM secrets WHERE name = ?1",
+                    params![name],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| AgentOSError::VaultError(format!("DB error during revoke: {}", e)))?;
+
+            let scope_json =
+                scope_json.ok_or_else(|| AgentOSError::SecretNotFound(name.to_string()))?;
+
+            let scope: SecretScope = serde_json::from_str(&scope_json).map_err(|e| {
+                AgentOSError::VaultError(format!("Corrupt scope for '{}': {}", name, e))
+            })?;
+
+            if matches!(scope, SecretScope::Kernel) {
+                return Err(AgentOSError::VaultError(format!(
+                    "Cannot revoke kernel-scoped secret '{}'",
+                    name
+                )));
+            }
+
+            conn.execute("DELETE FROM secrets WHERE name = ?1", params![name])
+                .map_err(|e| AgentOSError::VaultError(format!("Failed to revoke secret: {}", e)))?;
         }
 
-        let _ = self.audit.append(AuditEntry {
-            timestamp: chrono::Utc::now(),
-            trace_id: TraceID::new(),
-            event_type: AuditEventType::SecretRevoked,
-            agent_id: None,
-            task_id: None,
-            tool_id: None,
-            details: serde_json::json!({ "secret_name": name }),
-            severity: AuditSeverity::Security,
-            reversible: false,
-            rollback_ref: None,
-        });
+        do_audit_log(
+            &self.audit,
+            AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: AuditEventType::SecretRevoked,
+                agent_id: None,
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({ "secret_name": name }),
+                severity: AuditSeverity::Security,
+                reversible: false,
+                rollback_ref: None,
+            },
+        );
 
         Ok(())
     }
 
-    pub fn rotate(&self, name: &str, new_value: &str) -> Result<(), AgentOSError> {
+    pub async fn rotate(&self, name: &str, new_value: &str) -> Result<(), AgentOSError> {
         let encrypted_value = encrypt(&self.master_key, new_value.as_bytes())?;
 
-        let conn = self.conn.lock().unwrap();
+        {
+            let conn = self.conn.lock().await;
 
-        // Atomic rotate: read existing metadata, then update in a single transaction
-        let (owner_json, scope_json): (String, String) = conn
-            .query_row(
-                "SELECT owner, scope FROM secrets WHERE name = ?1",
-                params![name],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(|e| AgentOSError::VaultError(format!("DB error during rotate: {}", e)))?
-            .unwrap_or_else(|| {
-                // If the secret doesn't exist yet, default to Kernel/Global
-                (
-                    serde_json::to_string(&SecretOwner::Kernel).unwrap(),
-                    serde_json::to_string(&SecretScope::Global).unwrap(),
+            let (owner_json, scope_json): (String, String) = conn
+                .query_row(
+                    "SELECT owner, scope FROM secrets WHERE name = ?1",
+                    params![name],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
-            });
+                .optional()
+                .map_err(|e| AgentOSError::VaultError(format!("DB error during rotate: {}", e)))?
+                .ok_or_else(|| AgentOSError::SecretNotFound(name.to_string()))?;
 
-        conn.execute(
-            "INSERT INTO secrets (id, name, owner, scope, encrypted_value, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(name) DO UPDATE SET
-                encrypted_value=excluded.encrypted_value",
-            params![
-                SecretID::new().to_string(),
-                name,
-                owner_json,
-                scope_json,
-                encrypted_value,
-                chrono::Utc::now().to_rfc3339()
-            ],
-        )
-        .map_err(|e| AgentOSError::VaultError(format!("Failed to rotate secret: {}", e)))?;
+            // Kernel-scoped secrets cannot be rotated via the CLI / bus.
+            let scope: SecretScope = serde_json::from_str(&scope_json).map_err(|e| {
+                AgentOSError::VaultError(format!("Corrupt scope for '{}': {}", name, e))
+            })?;
+            if matches!(scope, SecretScope::Kernel) {
+                return Err(AgentOSError::VaultError(format!(
+                    "Cannot rotate kernel-scoped secret '{}'",
+                    name
+                )));
+            }
 
-        drop(conn);
+            conn.execute(
+                "INSERT INTO secrets (id, name, owner, scope, encrypted_value, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(name) DO UPDATE SET
+                    encrypted_value=excluded.encrypted_value",
+                params![
+                    SecretID::new().to_string(),
+                    name,
+                    owner_json,
+                    scope_json,
+                    encrypted_value,
+                    chrono::Utc::now().to_rfc3339()
+                ],
+            )
+            .map_err(|e| AgentOSError::VaultError(format!("Failed to rotate secret: {}", e)))?;
+        }
 
-        let _ = self.audit.append(AuditEntry {
-            timestamp: chrono::Utc::now(),
-            trace_id: TraceID::new(),
-            event_type: AuditEventType::SecretRotated,
-            agent_id: None,
-            task_id: None,
-            tool_id: None,
-            details: serde_json::json!({ "secret_name": name }),
-            severity: AuditSeverity::Security,
-            reversible: false,
-            rollback_ref: None,
-        });
+        do_audit_log(
+            &self.audit,
+            AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: AuditEventType::SecretRotated,
+                agent_id: None,
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({ "secret_name": name }),
+                severity: AuditSeverity::Security,
+                reversible: false,
+                rollback_ref: None,
+            },
+        );
 
         Ok(())
     }
@@ -361,26 +416,35 @@ impl SecretsVault {
     /// based on its `owner` and `scope` columns.
     ///
     /// Rules:
+    /// - `SecretScope::Kernel` → only kernel code (no agent) may access; agents always denied.
     /// - `SecretScope::Global` → any agent may access.
     /// - `SecretScope::Agent(id)` → only `id` may access.
     /// - `SecretScope::Tool(id)` → the requesting agent must match the owner.
-    /// - `SecretOwner::Kernel` with non-global scope → only kernel (agent_id == None).
-    fn check_scope(&self, secret_name: &str, agent_id: AgentID) -> Result<(), AgentOSError> {
-        let conn = self.conn.lock().unwrap();
-        let (owner_json, scope_json): (String, String) = conn
-            .query_row(
+    async fn check_scope(&self, secret_name: &str, agent_id: AgentID) -> Result<(), AgentOSError> {
+        let (owner_json, scope_json) = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
                 "SELECT owner, scope FROM secrets WHERE name = ?1",
                 params![secret_name],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
             .map_err(|e| AgentOSError::VaultError(format!("DB error during scope check: {}", e)))?
-            .ok_or_else(|| AgentOSError::SecretNotFound(secret_name.to_string()))?;
+            .ok_or_else(|| AgentOSError::SecretNotFound(secret_name.to_string()))?
+        };
 
-        let scope: SecretScope = serde_json::from_str(&scope_json).unwrap_or(SecretScope::Global);
-        let owner: SecretOwner = serde_json::from_str(&owner_json).unwrap_or(SecretOwner::Kernel);
+        let scope: SecretScope = serde_json::from_str(&scope_json).map_err(|e| {
+            AgentOSError::VaultError(format!("Corrupt scope for '{}': {}", secret_name, e))
+        })?;
+        let owner: SecretOwner = serde_json::from_str(&owner_json).map_err(|e| {
+            AgentOSError::VaultError(format!("Corrupt owner for '{}': {}", secret_name, e))
+        })?;
 
         match scope {
+            SecretScope::Kernel => Err(AgentOSError::VaultError(format!(
+                "Agent {} cannot access kernel-scoped secret '{}'",
+                agent_id, secret_name
+            ))),
             SecretScope::Global => Ok(()),
             SecretScope::Agent(scoped_id) => {
                 if scoped_id == agent_id {
@@ -393,7 +457,6 @@ impl SecretsVault {
                 }
             }
             SecretScope::Tool(_) => {
-                // For tool-scoped secrets, the requesting agent must be the owner
                 match owner {
                     SecretOwner::Agent(owner_id) if owner_id == agent_id => Ok(()),
                     _ => Err(AgentOSError::VaultError(format!(
@@ -406,35 +469,25 @@ impl SecretsVault {
     }
 
     /// Issue a short-lived proxy token for a secret (Spec §3 zero-exposure architecture).
-    ///
-    /// Returns an opaque handle of the form `VAULT_PROXY:tok_<uuid>`.
-    /// The tool receives this handle instead of the plaintext secret.
-    /// Call `resolve_proxy()` at tool invocation time to substitute the real value.
-    ///
-    /// **Scope enforcement:** The requesting `agent_id` must be authorized
-    /// for the secret's scope/owner. Global secrets are accessible to all;
-    /// agent-scoped secrets require a matching agent_id.
-    pub fn issue_proxy_token(
+    pub async fn issue_proxy_token(
         &self,
         secret_name: &str,
         ttl_seconds: u64,
         agent_id: AgentID,
     ) -> Result<String, AgentOSError> {
-        // Emergency lockdown check
         if self.locked_down.load(Ordering::SeqCst) {
             return Err(AgentOSError::VaultError(
                 "Vault is in emergency lockdown — proxy token issuance denied".to_string(),
             ));
         }
 
-        // Scope enforcement: verify the agent is authorized for this secret
-        self.check_scope(secret_name, agent_id)?;
+        self.check_scope(secret_name, agent_id).await?;
 
         let token_id = uuid::Uuid::new_v4().to_string().replace('-', "");
         let handle = format!("VAULT_PROXY:tok_{}", token_id);
         let expires_at = chrono::Utc::now() + chrono::Duration::seconds(ttl_seconds as i64);
 
-        self.proxy_tokens.lock().unwrap().insert(
+        self.proxy_tokens.lock().await.insert(
             handle.clone(),
             ProxyTokenEntry {
                 secret_name: secret_name.to_string(),
@@ -442,32 +495,31 @@ impl SecretsVault {
             },
         );
 
-        let _ = self.audit.append(AuditEntry {
-            timestamp: chrono::Utc::now(),
-            trace_id: TraceID::new(),
-            event_type: AuditEventType::SecretAccessed,
-            agent_id: Some(agent_id),
-            task_id: None,
-            tool_id: None,
-            details: serde_json::json!({
-                "secret_name": secret_name,
-                "action": "proxy_token_issued",
-                "ttl_seconds": ttl_seconds,
-            }),
-            severity: AuditSeverity::Security,
-            reversible: false,
-            rollback_ref: None,
-        });
+        do_audit_log(
+            &self.audit,
+            AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: AuditEventType::SecretAccessed,
+                agent_id: Some(agent_id),
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({
+                    "secret_name": secret_name,
+                    "action": "proxy_token_issued",
+                    "ttl_seconds": ttl_seconds,
+                }),
+                severity: AuditSeverity::Security,
+                reversible: false,
+                rollback_ref: None,
+            },
+        );
 
         Ok(handle)
     }
 
     /// Resolve a proxy token to the underlying secret value.
-    ///
-    /// Validates expiry, then decrypts and returns the plaintext value.
-    /// The caller is responsible for zeroizing the value after use.
-    /// Returns `Err` if the token is unknown, expired, or the secret was revoked.
-    pub fn resolve_proxy(&self, handle: &str) -> Result<ZeroizingString, AgentOSError> {
+    pub async fn resolve_proxy(&self, handle: &str) -> Result<ZeroizingString, AgentOSError> {
         if !handle.starts_with("VAULT_PROXY:") {
             return Err(AgentOSError::VaultError(
                 "Not a vault proxy handle".to_string(),
@@ -475,8 +527,7 @@ impl SecretsVault {
         }
 
         let entry = {
-            let mut tokens = self.proxy_tokens.lock().unwrap();
-            // Remove on first use (single-use tokens, plus sweep expired)
+            let mut tokens = self.proxy_tokens.lock().await;
             tokens.remove(handle).ok_or_else(|| {
                 AgentOSError::VaultError(format!("Unknown or already-used proxy token: {}", handle))
             })?
@@ -489,45 +540,42 @@ impl SecretsVault {
             )));
         }
 
-        // Delegate to the real get() for decryption and audit logging
-        self.get(&entry.secret_name)
+        self.get(&entry.secret_name).await
     }
 
     /// Remove all proxy tokens whose TTL has passed (call periodically).
-    pub fn sweep_expired_proxy_tokens(&self) {
+    pub async fn sweep_expired_proxy_tokens(&self) {
         let now = chrono::Utc::now();
         self.proxy_tokens
             .lock()
-            .unwrap()
+            .await
             .retain(|_, entry| entry.expires_at > now);
     }
 
     /// Emergency lockdown: atomically revoke all active proxy tokens and
     /// prevent new ones from being issued until the vault is restarted.
-    ///
-    /// This is a one-way operation within a vault lifetime. Once locked down,
-    /// the vault must be re-opened to resume normal proxy token operations.
-    pub fn lockdown(&self) {
+    pub async fn lockdown(&self) {
         self.locked_down.store(true, Ordering::SeqCst);
-        self.proxy_tokens.lock().unwrap().clear();
+        self.proxy_tokens.lock().await.clear();
 
-        let _ = self.audit.append(AuditEntry {
-            timestamp: chrono::Utc::now(),
-            trace_id: TraceID::new(),
-            event_type: AuditEventType::SecretRevoked,
-            agent_id: None,
-            task_id: None,
-            tool_id: None,
-            details: serde_json::json!({
-                "action": "emergency_lockdown",
-                "message": "All proxy tokens revoked, new issuance denied",
-            }),
-            severity: AuditSeverity::Security,
-            reversible: false,
-            rollback_ref: None,
-        });
-
-        // The audit entry above records this event; no tracing crate in this crate.
+        do_audit_log(
+            &self.audit,
+            AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: AuditEventType::SecretRevoked,
+                agent_id: None,
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({
+                    "action": "emergency_lockdown",
+                    "message": "All proxy tokens revoked, new issuance denied",
+                }),
+                severity: AuditSeverity::Security,
+                reversible: false,
+                rollback_ref: None,
+            },
+        );
     }
 
     /// Check if the vault is in emergency lockdown mode.
@@ -536,14 +584,12 @@ impl SecretsVault {
     }
 
     pub fn is_initialized(path: &Path) -> bool {
-        // Simple check: does the db file exist and is it reachable
         if !path.exists() {
             return false;
         }
 
         if let Ok(conn) = Connection::open(path) {
             let mut count: i32 = 0;
-            // Best effort check for sentinel presence
             if let Ok(c) = conn.query_row(
                 "SELECT COUNT(*) FROM vault_meta WHERE key = 'sentinel'",
                 [],
@@ -559,41 +605,27 @@ impl SecretsVault {
 }
 
 /// Zero-exposure vault proxy: the only interface tools receive at execution time.
-///
-/// Tools get an `Arc<ProxyVault>` instead of `Arc<SecretsVault>`, so they can only
-/// resolve proxy token handles into short-lived secret values — never enumerate,
-/// create, rotate, or revoke secrets directly.
 #[derive(Clone)]
 pub struct ProxyVault {
     inner: Arc<SecretsVault>,
 }
 
 impl ProxyVault {
-    /// Wrap a vault reference into a proxy handle.
     pub fn new(vault: Arc<SecretsVault>) -> Self {
         Self { inner: vault }
     }
 
-    /// Resolve a proxy token handle (e.g. `VAULT_PROXY:tok_...`) to the secret value.
-    ///
-    /// The token is consumed on first use. Returns an error if the token is unknown,
-    /// expired, or the underlying secret has been revoked.
-    pub fn resolve(&self, handle: &str) -> Result<ZeroizingString, AgentOSError> {
-        self.inner.resolve_proxy(handle)
+    pub async fn resolve(&self, handle: &str) -> Result<ZeroizingString, AgentOSError> {
+        self.inner.resolve_proxy(handle).await
     }
 
-    /// Resolve a secret by name for a given agent, using a single-use proxy token internally.
-    ///
-    /// This is the primary interface for tools that need a secret value. It enforces
-    /// scope checks (the agent must be authorized for the secret) and audit logging,
-    /// while preventing tools from enumerating, creating, rotating, or revoking secrets.
-    pub fn get(
+    pub async fn get(
         &self,
         secret_name: &str,
         agent_id: AgentID,
     ) -> Result<ZeroizingString, AgentOSError> {
-        let handle = self.inner.issue_proxy_token(secret_name, 5, agent_id)?;
-        self.inner.resolve_proxy(&handle)
+        let handle = self.inner.issue_proxy_token(secret_name, 5, agent_id).await?;
+        self.inner.resolve_proxy(&handle).await
     }
 }
 
@@ -602,13 +634,16 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_vault_initialize_and_set_get() {
-        let dir = TempDir::new().unwrap();
+    fn make_vault(dir: &TempDir) -> SecretsVault {
         let path = dir.path().join("test_vault.db");
         let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
+        SecretsVault::initialize(&path, "test-passphrase-123", audit).unwrap()
+    }
 
-        let vault = SecretsVault::initialize(&path, "test-passphrase-123", audit.clone()).unwrap();
+    #[tokio::test]
+    async fn test_vault_initialize_and_set_get() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir);
 
         vault
             .set(
@@ -617,9 +652,10 @@ mod tests {
                 SecretOwner::Kernel,
                 SecretScope::Global,
             )
+            .await
             .unwrap();
 
-        let retrieved = vault.get("OPENAI_KEY").unwrap();
+        let retrieved = vault.get("OPENAI_KEY").await.unwrap();
         assert_eq!(retrieved.as_str(), "sk-test-12345");
     }
 
@@ -635,48 +671,44 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_vault_list_never_exposes_values() {
+    #[tokio::test]
+    async fn test_vault_list_never_exposes_values() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("test_vault.db");
-        let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
+        let vault = make_vault(&dir);
 
-        let vault = SecretsVault::initialize(&path, "pass", audit).unwrap();
         vault
             .set("KEY1", "secret1", SecretOwner::Kernel, SecretScope::Global)
+            .await
             .unwrap();
         vault
             .set("KEY2", "secret2", SecretOwner::Kernel, SecretScope::Global)
+            .await
             .unwrap();
 
-        let list = vault.list().unwrap();
+        let list = vault.list().await.unwrap();
         assert_eq!(list.len(), 2);
-        // SecretMetadata has name, scope, timestamps — but NO value field
     }
 
-    #[test]
-    fn test_vault_revoke() {
+    #[tokio::test]
+    async fn test_vault_revoke() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("test_vault.db");
-        let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
+        let vault = make_vault(&dir);
 
-        let vault = SecretsVault::initialize(&path, "pass", audit).unwrap();
         vault
             .set("KEY1", "secret1", SecretOwner::Kernel, SecretScope::Global)
+            .await
             .unwrap();
-        vault.revoke("KEY1").unwrap();
+        vault.revoke("KEY1").await.unwrap();
 
-        let result = vault.get("KEY1");
-        assert!(result.is_err()); // SecretNotFound
+        let result = vault.get("KEY1").await;
+        assert!(result.is_err());
     }
 
-    #[test]
-    fn test_vault_rotate() {
+    #[tokio::test]
+    async fn test_vault_rotate() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("test_vault.db");
-        let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
+        let vault = make_vault(&dir);
 
-        let vault = SecretsVault::initialize(&path, "pass", audit).unwrap();
         vault
             .set(
                 "KEY1",
@@ -684,25 +716,22 @@ mod tests {
                 SecretOwner::Kernel,
                 SecretScope::Global,
             )
+            .await
             .unwrap();
-        vault.rotate("KEY1", "new-value").unwrap();
+        vault.rotate("KEY1", "new-value").await.unwrap();
 
-        let retrieved = vault.get("KEY1").unwrap();
+        let retrieved = vault.get("KEY1").await.unwrap();
         assert_eq!(retrieved.as_str(), "new-value");
     }
 
-    #[test]
-    fn test_scope_enforcement_agent_cannot_access_other_agent_secret() {
+    #[tokio::test]
+    async fn test_scope_enforcement_agent_cannot_access_other_agent_secret() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("test_vault.db");
-        let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
-
-        let vault = SecretsVault::initialize(&path, "pass", audit).unwrap();
+        let vault = make_vault(&dir);
 
         let agent_a = agentos_types::AgentID::new();
         let agent_b = agentos_types::AgentID::new();
 
-        // Agent A creates a secret scoped to itself
         vault
             .set(
                 "AGENT_A_KEY",
@@ -710,14 +739,13 @@ mod tests {
                 SecretOwner::Agent(agent_a),
                 SecretScope::Agent(agent_a),
             )
+            .await
             .unwrap();
 
-        // Agent A can get a proxy token for its own secret
-        let result = vault.issue_proxy_token("AGENT_A_KEY", 60, agent_a);
+        let result = vault.issue_proxy_token("AGENT_A_KEY", 60, agent_a).await;
         assert!(result.is_ok(), "Agent A should access its own secret");
 
-        // Agent B cannot get a proxy token for Agent A's secret
-        let result = vault.issue_proxy_token("AGENT_A_KEY", 60, agent_b);
+        let result = vault.issue_proxy_token("AGENT_A_KEY", 60, agent_b).await;
         assert!(
             result.is_err(),
             "Agent B should NOT access Agent A's secret"
@@ -728,18 +756,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_scope_enforcement_global_secret_accessible_to_all() {
+    #[tokio::test]
+    async fn test_scope_enforcement_global_secret_accessible_to_all() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("test_vault.db");
-        let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
-
-        let vault = SecretsVault::initialize(&path, "pass", audit).unwrap();
+        let vault = make_vault(&dir);
 
         let agent_a = agentos_types::AgentID::new();
         let agent_b = agentos_types::AgentID::new();
 
-        // Create a global-scope secret
         vault
             .set(
                 "SHARED_KEY",
@@ -747,40 +771,140 @@ mod tests {
                 SecretOwner::Kernel,
                 SecretScope::Global,
             )
+            .await
             .unwrap();
 
-        // Both agents should be able to get proxy tokens
-        assert!(vault.issue_proxy_token("SHARED_KEY", 60, agent_a).is_ok());
-        assert!(vault.issue_proxy_token("SHARED_KEY", 60, agent_b).is_ok());
+        assert!(vault.issue_proxy_token("SHARED_KEY", 60, agent_a).await.is_ok());
+        assert!(vault.issue_proxy_token("SHARED_KEY", 60, agent_b).await.is_ok());
     }
 
-    #[test]
-    fn test_lockdown_prevents_proxy_tokens() {
+    #[tokio::test]
+    async fn test_scope_enforcement_kernel_scoped_secret_blocks_agents() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("test_vault.db");
-        let audit = Arc::new(AuditLog::open(&dir.path().join("audit.db")).unwrap());
+        let vault = make_vault(&dir);
 
-        let vault = SecretsVault::initialize(&path, "pass", audit).unwrap();
+        let agent = agentos_types::AgentID::new();
+
+        vault
+            .set(
+                "__kernel_key",
+                "kernel-only-value",
+                SecretOwner::Kernel,
+                SecretScope::Kernel,
+            )
+            .await
+            .unwrap();
+
+        let result = vault.issue_proxy_token("__kernel_key", 60, agent).await;
+        assert!(result.is_err(), "Agent should not access kernel-scoped secret");
+        assert!(
+            result.unwrap_err().to_string().contains("kernel-scoped"),
+            "Error should mention kernel scope"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lockdown_prevents_proxy_tokens() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir);
         let agent_id = agentos_types::AgentID::new();
 
         vault
             .set("KEY1", "value", SecretOwner::Kernel, SecretScope::Global)
+            .await
             .unwrap();
 
-        // Before lockdown: proxy tokens work
-        assert!(vault.issue_proxy_token("KEY1", 60, agent_id).is_ok());
+        assert!(vault.issue_proxy_token("KEY1", 60, agent_id).await.is_ok());
         assert!(!vault.is_locked_down());
 
-        // Lockdown
-        vault.lockdown();
+        vault.lockdown().await;
         assert!(vault.is_locked_down());
 
-        // After lockdown: proxy tokens denied
-        let result = vault.issue_proxy_token("KEY1", 60, agent_id);
+        let result = vault.issue_proxy_token("KEY1", 60, agent_id).await;
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("lockdown"),
             "Error should mention lockdown"
         );
+    }
+
+    /// Kernel-scoped secrets must not be destroyable via revoke().
+    #[tokio::test]
+    async fn test_kernel_scoped_secret_cannot_be_revoked() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir);
+
+        vault
+            .set("__internal_hmac_key", "hmac-value", SecretOwner::Kernel, SecretScope::Kernel)
+            .await
+            .unwrap();
+
+        let result = vault.revoke("__internal_hmac_key").await;
+        assert!(result.is_err(), "Kernel-scoped secret must not be revocable");
+        assert!(
+            result.unwrap_err().to_string().contains("kernel-scoped"),
+            "Error should mention kernel scope"
+        );
+
+        // Value must still be readable by kernel (via get())
+        assert!(vault.get("__internal_hmac_key").await.is_ok());
+    }
+
+    /// Kernel-scoped secrets must not be replaceable via rotate().
+    #[tokio::test]
+    async fn test_kernel_scoped_secret_cannot_be_rotated() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir);
+
+        vault
+            .set("__internal_hmac_key", "original-value", SecretOwner::Kernel, SecretScope::Kernel)
+            .await
+            .unwrap();
+
+        let result = vault.rotate("__internal_hmac_key", "attacker-value").await;
+        assert!(result.is_err(), "Kernel-scoped secret must not be rotatable");
+        assert!(
+            result.unwrap_err().to_string().contains("kernel-scoped"),
+            "Error should mention kernel scope"
+        );
+
+        // Confirm value is unchanged
+        let val = vault.get("__internal_hmac_key").await.unwrap();
+        assert_eq!(val.as_str(), "original-value");
+    }
+
+    /// rotate() on a non-existent secret must fail rather than silently create it.
+    #[tokio::test]
+    async fn test_rotate_nonexistent_secret_returns_not_found() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir);
+
+        let result = vault.rotate("nonexistent-key", "some-value").await;
+        assert!(result.is_err(), "rotate() on missing secret must fail");
+        match result.unwrap_err() {
+            AgentOSError::SecretNotFound(name) => assert_eq!(name, "nonexistent-key"),
+            other => panic!("Expected SecretNotFound, got: {:?}", other),
+        }
+    }
+
+    /// list() must never expose Kernel-scoped secrets.
+    #[tokio::test]
+    async fn test_list_hides_kernel_scoped_secrets() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir);
+
+        vault
+            .set("public-key", "value1", SecretOwner::Kernel, SecretScope::Global)
+            .await
+            .unwrap();
+        vault
+            .set("__internal_hmac_key", "hidden", SecretOwner::Kernel, SecretScope::Kernel)
+            .await
+            .unwrap();
+
+        let list = vault.list().await.unwrap();
+        assert_eq!(list.len(), 1, "Kernel-scoped secret must not appear in list()");
+        assert_eq!(list[0].name, "public-key");
+        assert!(!list.iter().any(|m| m.name.contains("hmac")));
     }
 }

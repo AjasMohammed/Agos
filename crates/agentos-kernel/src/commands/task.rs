@@ -47,6 +47,8 @@ impl Kernel {
                 IntentTypeFlag::Write,
                 IntentTypeFlag::Execute,
                 IntentTypeFlag::Query,
+                IntentTypeFlag::Subscribe,
+                IntentTypeFlag::Unsubscribe,
             ]),
             effective_permissions,
             Duration::from_secs(self.config.kernel.default_task_timeout_secs),
@@ -68,6 +70,7 @@ impl Kernel {
             assigned_llm: Some(agent.id),
             priority: 5,
             created_at: chrono::Utc::now(),
+            started_at: None,
             timeout: Duration::from_secs(self.config.kernel.default_task_timeout_secs),
             original_prompt: prompt,
             history: Vec::new(),
@@ -76,18 +79,60 @@ impl Kernel {
             trigger_source: None,
         };
 
+        self.scheduler.register_external(task.clone()).await;
+        self.scheduler
+            .update_state_if_not_terminal(&task.id, TaskState::Running)
+            .await
+            .ok();
+        self.scheduler.mark_started(&task.id).await.ok();
+
         // Execute task synchronously so the CLI gets the result
-        let result = self.execute_task_sync(&task).await;
+        let trace_id = TraceID::new();
+        let result = self.execute_task_sync(&task, &trace_id).await;
         match result {
-            Ok(task_result) => KernelResponse::Success {
-                data: Some(serde_json::json!({
-                    "task_id": task.id.to_string(),
-                    "result": task_result.answer,
-                })),
-            },
-            Err(e) => KernelResponse::Error {
-                message: e.to_string(),
-            },
+            Ok(task_result) => {
+                self.scheduler
+                    .update_state_if_not_terminal(&task.id, TaskState::Complete)
+                    .await
+                    .ok();
+                self.cleanup_task_subscriptions(&task.id).await;
+                KernelResponse::Success {
+                    data: Some(serde_json::json!({
+                        "task_id": task.id.to_string(),
+                        "result": task_result.answer,
+                    })),
+                }
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let is_waiting = self
+                    .scheduler
+                    .get_task(&task.id)
+                    .await
+                    .map(|t| t.state == TaskState::Waiting)
+                    .unwrap_or(false);
+                let paused_by_message = msg.to_ascii_lowercase().starts_with("task paused:");
+                if is_waiting || paused_by_message {
+                    self.scheduler
+                        .update_state_if_not_terminal(&task.id, TaskState::Waiting)
+                        .await
+                        .ok();
+                    return KernelResponse::Success {
+                        data: Some(serde_json::json!({
+                            "task_id": task.id.to_string(),
+                            "status": "paused",
+                            "reason": msg,
+                        })),
+                    };
+                }
+
+                self.scheduler
+                    .update_state_if_not_terminal(&task.id, TaskState::Failed)
+                    .await
+                    .ok();
+                self.cleanup_task_subscriptions(&task.id).await;
+                KernelResponse::Error { message: msg }
+            }
         }
     }
 
@@ -126,7 +171,10 @@ impl Kernel {
             .update_state(&task_id, TaskState::Cancelled)
             .await
         {
-            Ok(_) => KernelResponse::Success { data: None },
+            Ok(_) => {
+                self.cleanup_task_subscriptions(&task_id).await;
+                KernelResponse::Success { data: None }
+            }
             Err(e) => KernelResponse::Error {
                 message: e.to_string(),
             },
@@ -170,6 +218,7 @@ impl Kernel {
             assigned_llm: None,
             priority,
             created_at: chrono::Utc::now(),
+            started_at: None,
             timeout: Duration::from_secs(timeout_secs),
             original_prompt: prompt.to_string(),
             history: Vec::new(),
@@ -196,6 +245,40 @@ impl Kernel {
         self.scheduler
             .add_dependency(parent_task.id, child_task.id)
             .await;
+
+        // Emit TaskDelegated from the parent's perspective
+        self.emit_event(
+            EventType::TaskDelegated,
+            EventSource::TaskScheduler,
+            EventSeverity::Info,
+            serde_json::json!({
+                "parent_task_id": parent_task.id.to_string(),
+                "child_task_id": child_task.id.to_string(),
+                "parent_agent_id": parent_task.agent_id.to_string(),
+                "target_agent_id": target.id.to_string(),
+                "target_agent_name": target_agent_name,
+                "prompt_preview": prompt.chars().take(200).collect::<String>(),
+            }),
+            0,
+        )
+        .await;
+
+        // Emit DelegationReceived from the target agent's perspective
+        self.emit_event(
+            EventType::DelegationReceived,
+            EventSource::TaskScheduler,
+            EventSeverity::Info,
+            serde_json::json!({
+                "child_task_id": child_task.id.to_string(),
+                "parent_task_id": parent_task.id.to_string(),
+                "delegating_agent_id": parent_task.agent_id.to_string(),
+                "target_agent_id": target.id.to_string(),
+                "target_agent_name": target_agent_name,
+                "prompt_preview": prompt.chars().take(200).collect::<String>(),
+            }),
+            0,
+        )
+        .await;
 
         Ok(serde_json::json!({
             "delegated_to": target_agent_name,
