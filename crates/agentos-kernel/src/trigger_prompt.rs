@@ -1156,7 +1156,7 @@ Take appropriate action, report findings, escalate if needed, or acknowledge sil
     }
 
     async fn build_os_state_snapshot(&self) -> String {
-        let agent_count = self.agent_registry.read().await.list_all().len();
+        let agent_count = self.agent_registry.read().await.list_online().len();
         let task_count = self.scheduler.running_count().await;
         let uptime = (chrono::Utc::now() - self.started_at).num_seconds();
 

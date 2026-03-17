@@ -31,6 +31,7 @@ pub mod run_loop;
 pub mod schedule_manager;
 pub mod scheduler;
 pub mod schema_registry;
+pub(crate) mod sd_notify;
 pub mod snapshot;
 pub mod task_completion;
 pub mod task_executor;
@@ -45,7 +46,7 @@ pub use context::ContextManager;
 pub use context_compiler::ContextCompiler;
 pub use kernel::Kernel;
 pub use retrieval_gate::{
-    IndexType, RetrievalExecutor, RetrievalGate, RetrievalPlan, RetrievalResult,
+    IndexType, RetrievalExecutor, RetrievalGate, RetrievalOutcome, RetrievalPlan, RetrievalResult,
 };
 pub use scheduler::TaskScheduler;
 pub use tool_call::{parse_tool_call, ParsedToolCall};

@@ -7,13 +7,13 @@ tags:
 aliases:
   - Implementation Dashboard
   - Next Steps Overview
-date: 2026-03-13
+date: 2026-03-17
 status: active
 ---
 
 # AgentOS — Next Steps Master Dashboard
 
-> Comprehensive implementation status as of **2026-03-13**, cross-referenced against [[agos-implementation-spec]] (12-item spec) and [[Feedback Implementation Plan]] (Phases 0--7).
+> Comprehensive implementation status as of **2026-03-17**, cross-referenced against [[agos-implementation-spec]] (12-item spec) and [[Feedback Implementation Plan]] (Phases 0--7).
 
 ---
 
@@ -40,7 +40,7 @@ status: active
 | Concurrent Resource Arbitration | Spec #8 | Done | FIFO locks, DFS deadlock detection, TTL sweep |
 | Hardware Abstraction Layer | Spec #9 | Done | HardwareRegistry with quarantine/approve/deny workflow |
 | Multi-Agent Coordination | Spec #10 | Done | Pipeline + DFS deadlock; A2A TTL expiry enforced |
-| Context / Memory Architecture | Spec #11 | Done | All 8 phases complete: ContextCompiler, ProceduralStore, RetrievalGate, ExtractionEngine, ConsolidationEngine, MemoryBlockStore all implemented and wired — see [[Memory Context Architecture Plan]] |
+| Context / Memory Architecture | Spec #11 | Done | All 8 phases complete: ContextCompiler, ProceduralStore, RetrievalGate, ExtractionEngine, ConsolidationEngine, MemoryBlockStore all implemented and wired -- see [[Memory Context Architecture Plan]] |
 | Approval Gates | Spec #12 | Done | Risk taxonomy + blocking escalation + CLI |
 | Split `kernel.rs` | Phase 0.1 | Done | commands/ directory fully modularized |
 | Tool Output Sanitization | Phase 0.2 | Done | taint_wrap in injection_scanner |
@@ -106,7 +106,7 @@ graph TD
 | 24 | [[21-Future-Improvements\|Future Improvements (18 post-v1 items across 5 categories)]] | ~17d | **Backlog** |
 | 25 | [[22-Unwired Features\|Unwired features: 31 missing event emissions, pipeline security, web UI, stale docs]] | ~5d | **Critical** |
 | 26 | [[23-WebUI Security Fixes\|WebUI security fixes: 6 critical vulns, 8 bugs, 5 arch issues across 8 phases]] | ~5d | **Critical** |
-| 27 | [[audit_report\|Plan Audit Report — gap classification, completion percentages, spec drift analysis]] | — | **Reference** |
+| 27 | [[audit_report\|Plan Audit Report -- gap classification, completion percentages, spec drift analysis]] | -- | **Reference** |
 | 28 | [[TODO-consolidation-background-loop\|Wire consolidation engine background loop (30-min periodic run)]] | ~2h | **High** |
 | 29 | [[TODO-template-deduplication\|Deduplicate web templates using MiniJinja include directives]] | ~1h | **Low** |
 | 30 | [[TODO-execute-review\|Execute full codebase review phases 1-2 and 4-10 (60 steps)]] | ~5d | **Critical** |
@@ -119,6 +119,7 @@ graph TD
 | 37 | [[TODO-update-plan-statuses (unwired)\|Update unwired features plan statuses (phases 01 and 03 complete)]] | ~10m | **Medium** |
 | 38 | [[TODO-close-remaining-gaps\|Close first deployment readiness gaps: fmt fix, status updates, security gate sign-off, v0.1.0 tag]] | ~4h | **High** |
 | 39 | [[TODO-reconcile-review-status\|Reconcile full codebase review status contradiction and execute remaining 9 phases]] | ~5d | **Critical** |
+| 40 | [[24-Production Stability Fixes\|Production stability fixes: memory retrieval resilience, health monitor consolidation, graceful shutdown, agent identity persistence, boot pre-flight, restart hardening, systemd deployment (7 phases, 9 subtasks)]] | ~8d | **Critical** |
 
 ---
 
@@ -141,9 +142,9 @@ The following were designed and implemented from scratch:
 
 ---
 
-## Issues and Fixes Cross-Reference (updated 2026-03-16)
+## Issues and Fixes Cross-Reference (updated 2026-03-17)
 
-All 9 documented issues are now resolved. All 5 phases of the [[Bug Fixes and Deployment Readiness Plan]] are complete:
+All 9 documented issues are now resolved. 3 new production stability issues discovered via audit log analysis:
 
 | # | Issue | Status |
 |---|---|---|
@@ -156,10 +157,13 @@ All 9 documented issues are now resolved. All 5 phases of the [[Bug Fixes and De
 | 7 | Episodic memory `.ok()` | **Resolved** (all use `tracing::warn`) |
 | 8 | Dead code / clippy errors | **Resolved** (dead code removed, 4 clippy errors fixed) |
 | 9 | Event HMAC/audit bypass | **Resolved** (notification channel pattern implemented) |
+| 10 | MemorySearchFailed spam on bootstrap | **Planned** -- [[24-Production Stability Fixes]] |
+| 11 | DiskSpaceLow event flood | **Planned** -- [[24-Production Stability Fixes]] |
+| 12 | Kernel restart instability | **Planned** -- [[24-Production Stability Fixes]] |
 
 Additional deliverables: Dockerfile, docker-compose.yml, config/docker.toml, .dockerignore, env var passphrase fallback.
 
-Full details: [[Bug Fixes and Deployment Readiness Plan]]
+Full details: [[Bug Fixes and Deployment Readiness Plan]], [[Production Stability Fixes Plan]]
 
 ---
 

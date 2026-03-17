@@ -11,3 +11,9 @@ mod common;
 
 #[path = "e2e/kernel_boot.rs"]
 mod kernel_boot;
+
+#[path = "e2e/shutdown_audit.rs"]
+mod shutdown_audit;
+
+#[path = "e2e/agent_identity.rs"]
+mod agent_identity;

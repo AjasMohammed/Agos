@@ -13,7 +13,12 @@ impl Kernel {
         let registry = self.agent_registry.read().await;
         let agent_id = match agent_name {
             Some(name) => match registry.get_by_name(&name) {
-                Some(a) => a.id,
+                Some(a) if a.status != AgentStatus::Offline => a.id,
+                Some(_) => {
+                    return KernelResponse::Error {
+                        message: format!("Agent '{}' is offline", name),
+                    }
+                }
                 None => {
                     return KernelResponse::Error {
                         message: format!("Agent '{}' not found", name),
@@ -21,7 +26,8 @@ impl Kernel {
                 }
             },
             None => {
-                let agents: Vec<AgentProfile> = registry.list_all().into_iter().cloned().collect();
+                let agents: Vec<AgentProfile> =
+                    registry.list_online().into_iter().cloned().collect();
                 match self.router.route(&prompt, &agents).await {
                     Ok(id) => id,
                     Err(e) => {
@@ -201,6 +207,13 @@ impl Kernel {
             .get_by_name(target_agent_name)
             .ok_or_else(|| AgentOSError::AgentNotFound(target_agent_name.to_string()))?
             .clone();
+
+        if target.status == AgentStatus::Offline {
+            return Err(AgentOSError::AgentNotFound(format!(
+                "Agent '{}' is offline",
+                target_agent_name
+            )));
+        }
 
         let target_permissions = registry.compute_effective_permissions(&target.id);
         drop(registry);

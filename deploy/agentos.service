@@ -1,0 +1,109 @@
+[Unit]
+Description=AgentOS Kernel
+Documentation=https://github.com/agentos-project/agentos
+After=network.target
+Wants=network.target
+
+# Restart budget: up to 5 restarts in any 5-minute window before systemd
+# declares the unit failed and stops retrying.
+StartLimitIntervalSec=300s
+StartLimitBurst=5
+
+[Service]
+# Type=notify: the kernel calls sd_notify("READY=1") once fully started,
+# pings WATCHDOG=1 on every health-check cycle, and sends STOPPING=1 on
+# graceful shutdown.  Systemd therefore detects both crashes AND hangs.
+Type=notify
+
+ExecStart=/usr/local/bin/agentctl web serve --host 0.0.0.0 --port 8080
+
+User=agentos
+Group=agentos
+WorkingDirectory=/var/lib/agentos
+
+# ── Restart policy ─────────────────────────────────────────────────────────
+Restart=on-failure
+RestartSec=5s
+
+# ── Watchdog ───────────────────────────────────────────────────────────────
+# 90 s = 3× the default health_monitor check_interval_secs (30 s).
+# The kernel pings WATCHDOG=1 after every successful check cycle in
+# health_monitor.rs.  If the process hangs and stops pinging, systemd kills
+# and restarts it after this deadline.  When health_monitor.enabled = false,
+# a watchdog-only loop still pings at the same interval.
+WatchdogSec=90s
+
+# How long to wait for the process to exit gracefully after SIGTERM before
+# systemd sends SIGKILL.  Must be > the time needed to flush audit logs and
+# complete in-flight tasks.
+TimeoutStopSec=30s
+
+# ── Configuration / secrets ────────────────────────────────────────────────
+Environment="AGENTOS_CONFIG=/etc/agentos/config.toml"
+Environment="RUST_LOG=info"
+
+# Vault passphrase: add AGENTOS_VAULT_PASSPHRASE=<secret> to this file
+# (mode 0600, owned by root:root).  Alternatively use systemd credentials:
+#   LoadCredential=vault-passphrase:/etc/agentos/vault-passphrase
+# and read it from $CREDENTIALS_DIRECTORY/vault-passphrase in a wrapper.
+EnvironmentFile=-/etc/agentos/env
+
+# ── Resource limits ────────────────────────────────────────────────────────
+MemoryMax=2G
+CPUQuota=200%
+TasksMax=256
+LimitNOFILE=65536
+
+# ── Security hardening ─────────────────────────────────────────────────────
+NoNewPrivileges=true
+
+# Make the whole filesystem read-only except the paths listed below.
+ProtectSystem=strict
+ProtectHome=true
+
+# Give the service its own private /tmp.
+PrivateTmp=true
+
+# Writable paths needed at runtime.
+ReadWritePaths=/var/lib/agentos /var/log/agentos
+
+# /run/agentos is created automatically by RuntimeDirectory (writable).
+RuntimeDirectory=agentos
+RuntimeDirectoryMode=0750
+
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+
+# Allow only syscalls from the standard service set.
+# Note: if WASM tool execution via Wasmtime (JIT) is enabled, verify that
+# @system-service includes the mmap/mprotect calls that Wasmtime needs.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Drop all Linux capabilities (process runs as unprivileged user agentos).
+CapabilityBoundingSet=
+
+# Restrict usable socket families to Unix domain + TCP/IP only.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Prevent creating new namespaces (mount, network, user, etc.).
+RestrictNamespaces=true
+
+# Be explicit: only the main process sends sd_notify messages.
+NotifyAccess=main
+
+# Files created by the service should be readable only by agentos.
+UMask=0077
+
+# ── Logging ────────────────────────────────────────────────────────────────
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agentos
+
+[Install]
+WantedBy=multi-user.target

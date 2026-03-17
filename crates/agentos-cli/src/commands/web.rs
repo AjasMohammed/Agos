@@ -96,10 +96,17 @@ pub async fn handle_serve(config_path: &Path, host: &str, port: u16) -> anyhow::
         })
     };
 
-    // Wait for Ctrl+C or either task to finish
+    // Wait for Ctrl+C (SIGINT), SIGTERM (sent by systemd on `systemctl stop`),
+    // or either component task to finish.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("Ctrl+C received, shutting down...");
+            kernel.shutdown();
+            shutdown_token.cancel();
+        }
+        _ = sigterm.recv() => {
+            tracing::info!("SIGTERM received, shutting down...");
             kernel.shutdown();
             shutdown_token.cancel();
         }

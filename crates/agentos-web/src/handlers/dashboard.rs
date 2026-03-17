@@ -6,7 +6,7 @@ use axum_extra::extract::CookieJar;
 use minijinja::context;
 
 pub async fn index(State(state): State<AppState>, jar: CookieJar) -> Response {
-    let agent_count = state.kernel.agent_registry.read().await.list_all().len();
+    let agent_count = state.kernel.agent_registry.read().await.list_online().len();
     let tool_count = state.kernel.tool_registry.read().await.list_all().len();
     let task_count = state.kernel.scheduler.running_count().await;
     let tasks = state.kernel.scheduler.list_tasks().await;

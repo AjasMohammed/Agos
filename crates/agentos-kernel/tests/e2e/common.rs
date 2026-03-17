@@ -1,7 +1,7 @@
 use agentos_bus::client::BusClient;
 use agentos_kernel::config::{
     AuditSettings, BusSettings, HealthMonitorConfig, KernelConfig, KernelSettings, LlmSettings,
-    MemorySettings, OllamaSettings, SecretsSettings, ToolsSettings,
+    MemorySettings, OllamaSettings, PreflightConfig, SecretsSettings, ToolsSettings,
 };
 use agentos_kernel::Kernel;
 use agentos_llm::MockLLMCore;
@@ -77,13 +77,21 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         },
         context_budget: Default::default(),
         health_monitor: HealthMonitorConfig::default(),
+        preflight: PreflightConfig::default(),
     }
 }
 
 /// Boot the kernel into a temp directory, spawn the run loop, and connect a
-/// BusClient. Returns `(kernel, client, temp_dir)` — keep `temp_dir` alive for
-/// the duration of the test.
-pub async fn setup_kernel() -> (Arc<Kernel>, BusClient, tempfile::TempDir) {
+/// BusClient. Returns `(kernel, client, temp_dir, run_handle)` — keep
+/// `temp_dir` alive for the duration of the test. Await `run_handle` after
+/// triggering shutdown to ensure the supervisor loop has fully exited (and
+/// written any shutdown audit entries) before making assertions.
+pub async fn setup_kernel() -> (
+    Arc<Kernel>,
+    BusClient,
+    tempfile::TempDir,
+    tokio::task::JoinHandle<()>,
+) {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let config = create_test_config(&temp_dir);
     let config_path = temp_dir.path().join("config.toml");
@@ -104,7 +112,7 @@ pub async fn setup_kernel() -> (Arc<Kernel>, BusClient, tempfile::TempDir) {
     );
 
     let kernel_clone = kernel.clone();
-    tokio::spawn(async move {
+    let run_handle = tokio::spawn(async move {
         kernel_clone.run().await.unwrap();
     });
 
@@ -123,7 +131,7 @@ pub async fn setup_kernel() -> (Arc<Kernel>, BusClient, tempfile::TempDir) {
         }
     };
 
-    (kernel, client, temp_dir)
+    (kernel, client, temp_dir, run_handle)
 }
 
 /// Register a mock agent directly into the kernel registry and wire up a

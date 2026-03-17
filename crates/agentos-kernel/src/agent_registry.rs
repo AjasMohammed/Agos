@@ -126,6 +126,14 @@ impl AgentRegistry {
         self.agents.values().collect()
     }
 
+    /// Returns only agents that are Online, Idle, or Busy (not Offline).
+    pub fn list_online(&self) -> Vec<&AgentProfile> {
+        self.agents
+            .values()
+            .filter(|a| a.status != AgentStatus::Offline)
+            .collect()
+    }
+
     pub fn update_status(&mut self, id: &AgentID, status: AgentStatus) {
         if let Some(agent) = self.agents.get_mut(id) {
             agent.status = status;
@@ -137,6 +145,21 @@ impl AgentRegistry {
         if let Some(agent) = self.agents.remove(id) {
             self.name_index.remove(&agent.name);
             self.save_to_disk();
+        }
+    }
+
+    /// Remove the Offline entry for `name` if one exists.
+    /// Called before registering a replacement agent with the same name but a
+    /// different provider/model, to prevent unbounded growth of orphaned entries.
+    pub fn remove_offline_by_name(&mut self, name: &str) {
+        if let Some(&id) = self.name_index.get(name) {
+            if let Some(agent) = self.agents.get(&id) {
+                if agent.status == AgentStatus::Offline {
+                    self.agents.remove(&id);
+                    self.name_index.remove(name);
+                    self.save_to_disk();
+                }
+            }
         }
     }
 
@@ -217,7 +240,11 @@ impl AgentRegistry {
 
             if let Ok(content) = fs::read_to_string(&agents_file) {
                 if let Ok(agents_list) = serde_json::from_str::<Vec<AgentProfile>>(&content) {
-                    for agent in agents_list {
+                    for mut agent in agents_list {
+                        // All loaded agents are Offline until they explicitly reconnect.
+                        // This prevents ghost-Online entries from appearing after a
+                        // kernel crash or unclean shutdown.
+                        agent.status = AgentStatus::Offline;
                         let id = agent.id;
                         self.name_index.insert(agent.name.clone(), id);
                         self.agents.insert(id, agent);
@@ -235,7 +262,10 @@ impl AgentRegistry {
             let agents_list: Vec<&AgentProfile> = self.agents.values().collect();
             match serde_json::to_string_pretty(&agents_list) {
                 Ok(json) => {
-                    if let Err(e) = fs::write(&agents_file, json) {
+                    let tmp = agents_file.with_extension("json.tmp");
+                    if let Err(e) =
+                        fs::write(&tmp, &json).and_then(|_| fs::rename(&tmp, &agents_file))
+                    {
                         tracing::warn!(
                             path = %agents_file.display(),
                             error = %e,
@@ -251,7 +281,10 @@ impl AgentRegistry {
             let roles_list: Vec<&Role> = self.roles.values().collect();
             match serde_json::to_string_pretty(&roles_list) {
                 Ok(json) => {
-                    if let Err(e) = fs::write(&roles_file, json) {
+                    let tmp = roles_file.with_extension("json.tmp");
+                    if let Err(e) =
+                        fs::write(&tmp, &json).and_then(|_| fs::rename(&tmp, &roles_file))
+                    {
                         tracing::warn!(
                             path = %roles_file.display(),
                             error = %e,

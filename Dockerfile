@@ -51,17 +51,22 @@ COPY config/docker.toml /etc/agentos/config.toml
 # Copy core tool manifests (baked into image, not overwritten by volumes)
 COPY --chown=nonroot:nonroot tools/core/ /var/lib/agentos/tools/core/
 
+# Copy web UI static assets
+COPY --from=builder /usr/src/agentos/crates/agentos-web/static/ /var/lib/agentos/static/
+
 # Set default config path so every agentctl command finds it automatically
 ENV AGENTOS_CONFIG=/etc/agentos/config.toml
+# Point the web server at the static assets directory inside the container
+ENV AGENTOS_STATIC_DIR=/var/lib/agentos/static
 
 # Use distroless built-in unprivileged user (uid 65532)
 USER nonroot
 WORKDIR /var/lib/agentos
 
-EXPOSE 9091
+EXPOSE 8080 9091
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/agentctl", "healthz"]
 
 ENTRYPOINT ["agentctl"]
-CMD ["start"]
+CMD ["web", "serve", "--host", "0.0.0.0", "--port", "8080"]

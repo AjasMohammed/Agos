@@ -6,15 +6,17 @@ use serial_test::serial;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_kernel_boots_and_accepts_connections() {
-    let (_kernel, _client, _tmp) = common::setup_kernel().await;
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
     // Reaching here means the kernel booted and the bus client connected.
+    kernel.shutdown();
+    handle.await.unwrap();
 }
 
 /// GetStatus returns a SystemStatus with sane initial values.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_get_status_returns_system_info() {
-    let (_kernel, mut client, _tmp) = common::setup_kernel().await;
+    let (kernel, mut client, _tmp, handle) = common::setup_kernel().await;
 
     let response = client
         .send_command(KernelCommand::GetStatus)
@@ -28,13 +30,16 @@ async fn test_get_status_returns_system_info() {
         }
         other => panic!("Expected Status, got: {other:?}"),
     }
+
+    kernel.shutdown();
+    handle.await.unwrap();
 }
 
 /// ListAgents returns an empty list on a freshly-booted kernel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_list_agents_empty_on_fresh_boot() {
-    let (_kernel, mut client, _tmp) = common::setup_kernel().await;
+    let (kernel, mut client, _tmp, handle) = common::setup_kernel().await;
 
     let response = client
         .send_command(KernelCommand::ListAgents)
@@ -51,13 +56,16 @@ async fn test_list_agents_empty_on_fresh_boot() {
         }
         other => panic!("Expected AgentList, got: {other:?}"),
     }
+
+    kernel.shutdown();
+    handle.await.unwrap();
 }
 
 /// After registering a mock agent, ListAgents returns it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_register_and_list_agent() {
-    let (kernel, mut client, _tmp) = common::setup_kernel().await;
+    let (kernel, mut client, _tmp, handle) = common::setup_kernel().await;
 
     let agent_id = common::register_mock_agent(&kernel, "test-agent", vec![]).await;
 
@@ -74,13 +82,16 @@ async fn test_register_and_list_agent() {
         }
         other => panic!("Expected AgentList, got: {other:?}"),
     }
+
+    kernel.shutdown();
+    handle.await.unwrap();
 }
 
 /// Disconnecting an agent removes it from the registry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_disconnect_agent_removes_from_registry() {
-    let (kernel, mut client, _tmp) = common::setup_kernel().await;
+    let (kernel, mut client, _tmp, handle) = common::setup_kernel().await;
     let agent_id = common::register_mock_agent(&kernel, "removable", vec![]).await;
 
     match client
@@ -102,13 +113,16 @@ async fn test_disconnect_agent_removes_from_registry() {
         }
         other => panic!("Expected AgentList, got: {other:?}"),
     }
+
+    kernel.shutdown();
+    handle.await.unwrap();
 }
 
 /// ListTools returns the installed core tools on a fresh kernel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_list_tools_returns_core_tools() {
-    let (_kernel, mut client, _tmp) = common::setup_kernel().await;
+    let (kernel, mut client, _tmp, handle) = common::setup_kernel().await;
 
     let response = client
         .send_command(KernelCommand::ListTools)
@@ -124,6 +138,9 @@ async fn test_list_tools_returns_core_tools() {
         }
         other => panic!("Expected ToolList, got: {other:?}"),
     }
+
+    kernel.shutdown();
+    handle.await.unwrap();
 }
 
 /// Per-agent rate limiter evicts state when an agent disconnects.
@@ -132,7 +149,7 @@ async fn test_list_tools_returns_core_tools() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_rate_limiter_evicted_on_disconnect() {
-    let (kernel, mut client, _tmp) = common::setup_kernel().await;
+    let (kernel, mut client, _tmp, handle) = common::setup_kernel().await;
     let agent_id = common::register_mock_agent(&kernel, "rate-limit-test", vec![]).await;
 
     // Before disconnect: 0 tracked (keys only inserted on first rate-limited command)
@@ -152,13 +169,16 @@ async fn test_rate_limiter_evicted_on_disconnect() {
         0,
         "rate limiter entry not cleaned up on disconnect"
     );
+
+    kernel.shutdown();
+    handle.await.unwrap();
 }
 
 /// Audit log prune_old_entries trims when the row limit is exceeded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_audit_log_rotation() {
-    let (_kernel, mut client, _tmp) = common::setup_kernel().await;
+    let (kernel, mut client, _tmp, handle) = common::setup_kernel().await;
 
     // Generate several audit events by listing agents repeatedly
     for _ in 0..5 {
@@ -169,7 +189,7 @@ async fn test_audit_log_rotation() {
     }
 
     // Prune to max 2 entries directly on the audit log
-    let audit = _kernel.audit.clone();
+    let audit = kernel.audit.clone();
     let pruned = audit.prune_old_entries(2).unwrap();
     let remaining = audit.count().unwrap();
 
@@ -181,4 +201,7 @@ async fn test_audit_log_rotation() {
         remaining <= 2,
         "expected at most 2 entries after rotation, got {remaining}"
     );
+
+    kernel.shutdown();
+    handle.await.unwrap();
 }

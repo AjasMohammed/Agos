@@ -5,6 +5,9 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Mutex;
 
+/// Convenience alias returned by [`AuditLog::load_health_debounce`].
+pub type HealthDebounceMap = std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>;
+
 pub struct AuditLog {
     conn: Mutex<Connection>,
 }
@@ -40,6 +43,7 @@ pub enum AuditEventType {
 
     // LLM events
     AgentConnected,
+    AgentReconnected,
     AgentDisconnected,
     LLMInferenceStarted,
     LLMInferenceCompleted,
@@ -189,6 +193,11 @@ impl AuditLog {
             CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_log(event_type);
             CREATE INDEX IF NOT EXISTS idx_audit_agent_id ON audit_log(agent_id);
             CREATE INDEX IF NOT EXISTS idx_audit_task_id ON audit_log(task_id, id);
+
+            CREATE TABLE IF NOT EXISTS health_debounce (
+                key             TEXT PRIMARY KEY,
+                last_emitted_at TEXT NOT NULL
+            );
             ",
         )
         .map_err(|e| AgentOSError::VaultError(format!("AuditLog init failed: {}", e)))?;
@@ -756,6 +765,62 @@ impl AuditLog {
             .map_err(|e| AgentOSError::VaultError(format!("prune delete failed: {}", e)))?;
 
         Ok(deleted as u64)
+    }
+
+    /// Load all persisted health-monitor debounce timestamps.
+    ///
+    /// Prunes entries older than 24 h before loading (well past the 10-minute
+    /// debounce window). Returns `(map, skipped_keys)` where `skipped_keys`
+    /// lists any keys whose stored timestamp could not be parsed.
+    pub fn load_health_debounce(&self) -> Result<(HealthDebounceMap, Vec<String>), AgentOSError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Prune rows that are older than the debounce window — they can never
+        // suppress a future emission and would accumulate forever for transient
+        // devices (USB, VM network interfaces, sensors).
+        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+        conn.execute(
+            "DELETE FROM health_debounce WHERE last_emitted_at < ?1",
+            params![cutoff],
+        )
+        .map_err(|e| AgentOSError::VaultError(format!("health_debounce prune failed: {}", e)))?;
+
+        let mut stmt = conn
+            .prepare("SELECT key, last_emitted_at FROM health_debounce")
+            .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
+        let mut map = std::collections::HashMap::new();
+        let mut skipped = Vec::new();
+        for row in rows {
+            let (key, ts_str) = row.map_err(|e| AgentOSError::VaultError(e.to_string()))?;
+            match chrono::DateTime::parse_from_rfc3339(&ts_str) {
+                Ok(ts) => {
+                    map.insert(key, ts.with_timezone(&chrono::Utc));
+                }
+                Err(_) => skipped.push(key),
+            }
+        }
+        Ok((map, skipped))
+    }
+
+    /// Upsert a health-monitor debounce timestamp.
+    pub fn save_health_debounce(
+        &self,
+        key: &str,
+        last_emitted_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), AgentOSError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT INTO health_debounce (key, last_emitted_at) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET last_emitted_at = excluded.last_emitted_at",
+            params![key, last_emitted_at.to_rfc3339()],
+        )
+        .map_err(|e| AgentOSError::VaultError(format!("save_health_debounce failed: {}", e)))?;
+        Ok(())
     }
 
     fn execute_query<P>(

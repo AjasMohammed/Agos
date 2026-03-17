@@ -69,6 +69,55 @@ impl RetrievalResult {
     }
 }
 
+/// Typed outcome from `RetrievalExecutor::execute()`.
+///
+/// Distinguishes three cases that callers need to handle differently:
+/// - `NoData`: stores are reachable but returned no matches (normal for new agents).
+/// - `Results`: at least one result was found.
+/// - `SearchError`: one or more stores failed at the infrastructure level.
+#[derive(Debug)]
+pub enum RetrievalOutcome {
+    /// All stores returned empty results — no data exists yet. Not an error.
+    NoData,
+    /// At least one store returned results.
+    Results(Vec<RetrievalResult>),
+    /// One or more stores had infrastructure errors; any partial results are included.
+    SearchError {
+        results: Vec<RetrievalResult>,
+        errors: Vec<String>,
+    },
+}
+
+impl RetrievalOutcome {
+    /// Consume the outcome and return any results, discarding error context.
+    pub fn into_results(self) -> Vec<RetrievalResult> {
+        match self {
+            RetrievalOutcome::NoData => Vec::new(),
+            RetrievalOutcome::Results(r) => r,
+            RetrievalOutcome::SearchError { results, .. } => results,
+        }
+    }
+
+    pub fn has_errors(&self) -> bool {
+        matches!(self, RetrievalOutcome::SearchError { .. })
+    }
+
+    pub fn errors(&self) -> &[String] {
+        match self {
+            RetrievalOutcome::SearchError { errors, .. } => errors,
+            _ => &[],
+        }
+    }
+
+    pub fn result_count(&self) -> usize {
+        match self {
+            RetrievalOutcome::NoData => 0,
+            RetrievalOutcome::Results(r) => r.len(),
+            RetrievalOutcome::SearchError { results, .. } => results.len(),
+        }
+    }
+}
+
 pub struct RetrievalGate {
     default_top_k: usize,
 }
@@ -265,12 +314,13 @@ impl RetrievalExecutor {
         &self,
         plan: &RetrievalPlan,
         agent_id: Option<&AgentID>,
-    ) -> Vec<RetrievalResult> {
+    ) -> RetrievalOutcome {
         if plan.is_empty() {
-            return Vec::new();
+            return RetrievalOutcome::NoData;
         }
 
-        let mut handles: Vec<tokio::task::JoinHandle<Vec<RetrievalResult>>> = Vec::new();
+        let mut handles: Vec<tokio::task::JoinHandle<Result<Vec<RetrievalResult>, String>>> =
+            Vec::new();
         for query in &plan.queries {
             match query.index {
                 IndexType::Semantic => {
@@ -279,22 +329,25 @@ impl RetrievalExecutor {
                     let top_k = query.top_k;
                     let aid = agent_id.copied();
                     handles.push(tokio::spawn(async move {
-                        match store.search(&q, aid.as_ref(), top_k, 0.0).await {
-                            Ok(results) => results
-                                .into_iter()
-                                .map(|r| RetrievalResult {
-                                    source: IndexType::Semantic,
-                                    content: r.chunk.content,
-                                    score: r.rrf_score,
-                                    metadata: Some(serde_json::json!({
-                                        "key": r.entry.key,
-                                        "semantic_score": r.semantic_score,
-                                        "fts_score": r.fts_score,
-                                    })),
-                                })
-                                .collect(),
-                            Err(_) => Vec::new(),
-                        }
+                        store
+                            .search(&q, aid.as_ref(), top_k, 0.0)
+                            .await
+                            .map(|results| {
+                                results
+                                    .into_iter()
+                                    .map(|r| RetrievalResult {
+                                        source: IndexType::Semantic,
+                                        content: r.chunk.content,
+                                        score: r.rrf_score,
+                                        metadata: Some(serde_json::json!({
+                                            "key": r.entry.key,
+                                            "semantic_score": r.semantic_score,
+                                            "fts_score": r.fts_score,
+                                        })),
+                                    })
+                                    .collect()
+                            })
+                            .map_err(|e| format!("semantic search failed: {e}"))
                     }));
                 }
                 IndexType::Episodic => {
@@ -308,7 +361,7 @@ impl RetrievalExecutor {
                         })
                         .await;
                         match result {
-                            Ok(Ok(episodes)) => episodes
+                            Ok(Ok(episodes)) => Ok(episodes
                                 .into_iter()
                                 .map(|ep| RetrievalResult {
                                     source: IndexType::Episodic,
@@ -319,8 +372,9 @@ impl RetrievalExecutor {
                                         "timestamp": ep.timestamp.to_rfc3339(),
                                     })),
                                 })
-                                .collect(),
-                            _ => Vec::new(),
+                                .collect()),
+                            Ok(Err(e)) => Err(format!("episodic search failed: {e}")),
+                            Err(e) => Err(format!("episodic search task panicked: {e}")),
                         }
                     }));
                 }
@@ -330,35 +384,38 @@ impl RetrievalExecutor {
                     let top_k = query.top_k;
                     let aid = agent_id.copied();
                     handles.push(tokio::spawn(async move {
-                        match store.search(&q, aid.as_ref(), top_k, 0.0).await {
-                            Ok(results) => results
-                                .into_iter()
-                                .map(|r| {
-                                    let steps = r
-                                        .procedure
-                                        .steps
-                                        .iter()
-                                        .take(4)
-                                        .map(|s| format!("{}: {}", s.order + 1, s.action))
-                                        .collect::<Vec<_>>()
-                                        .join("; ");
-                                    RetrievalResult {
-                                        source: IndexType::Procedural,
-                                        content: format!(
-                                            "Procedure: {}\n{}\nSteps: {}",
-                                            r.procedure.name, r.procedure.description, steps
-                                        ),
-                                        score: r.rrf_score,
-                                        metadata: Some(serde_json::json!({
-                                            "name": r.procedure.name,
-                                            "success_count": r.procedure.success_count,
-                                            "failure_count": r.procedure.failure_count,
-                                        })),
-                                    }
-                                })
-                                .collect(),
-                            Err(_) => Vec::new(),
-                        }
+                        store
+                            .search(&q, aid.as_ref(), top_k, 0.0)
+                            .await
+                            .map(|results| {
+                                results
+                                    .into_iter()
+                                    .map(|r| {
+                                        let steps = r
+                                            .procedure
+                                            .steps
+                                            .iter()
+                                            .take(4)
+                                            .map(|s| format!("{}: {}", s.order + 1, s.action))
+                                            .collect::<Vec<_>>()
+                                            .join("; ");
+                                        RetrievalResult {
+                                            source: IndexType::Procedural,
+                                            content: format!(
+                                                "Procedure: {}\n{}\nSteps: {}",
+                                                r.procedure.name, r.procedure.description, steps
+                                            ),
+                                            score: r.rrf_score,
+                                            metadata: Some(serde_json::json!({
+                                                "name": r.procedure.name,
+                                                "success_count": r.procedure.success_count,
+                                                "failure_count": r.procedure.failure_count,
+                                            })),
+                                        }
+                                    })
+                                    .collect()
+                            })
+                            .map_err(|e| format!("procedural search failed: {e}"))
                     }));
                 }
                 IndexType::Tools => {
@@ -402,16 +459,19 @@ impl RetrievalExecutor {
                                 .unwrap_or(std::cmp::Ordering::Equal)
                         });
                         results.truncate(top_k);
-                        results
+                        Ok(results)
                     }));
                 }
             }
         }
 
         let mut merged = Vec::new();
+        let mut errors = Vec::new();
         for handle in handles {
-            if let Ok(results) = handle.await {
-                merged.extend(results);
+            match handle.await {
+                Ok(Ok(results)) => merged.extend(results),
+                Ok(Err(e)) => errors.push(e),
+                Err(e) => errors.push(format!("retrieval task panicked: {e}")),
             }
         }
 
@@ -422,10 +482,21 @@ impl RetrievalExecutor {
         });
 
         let mut seen = HashSet::new();
-        merged
+        let deduped: Vec<RetrievalResult> = merged
             .into_iter()
             .filter(|r| seen.insert(r.content_hash()))
-            .collect()
+            .collect();
+
+        if !errors.is_empty() {
+            RetrievalOutcome::SearchError {
+                results: deduped,
+                errors,
+            }
+        } else if deduped.is_empty() {
+            RetrievalOutcome::NoData
+        } else {
+            RetrievalOutcome::Results(deduped)
+        }
     }
 
     pub fn format_as_knowledge_blocks(results: &[RetrievalResult]) -> Vec<String> {
@@ -474,6 +545,41 @@ mod tests {
             .queries
             .iter()
             .any(|q| q.index == IndexType::Procedural));
+    }
+
+    #[test]
+    fn no_data_outcome_has_no_errors_and_empty_results() {
+        let outcome = RetrievalOutcome::NoData;
+        assert!(!outcome.has_errors());
+        assert_eq!(outcome.result_count(), 0);
+        assert!(outcome.errors().is_empty());
+        assert!(outcome.into_results().is_empty());
+    }
+
+    #[test]
+    fn search_error_outcome_exposes_errors_and_partial_results() {
+        let partial = vec![RetrievalResult {
+            source: IndexType::Semantic,
+            content: "partial".to_string(),
+            score: 0.5,
+            metadata: None,
+        }];
+        let outcome = RetrievalOutcome::SearchError {
+            results: partial,
+            errors: vec!["semantic search failed: db error".to_string()],
+        };
+        assert!(outcome.has_errors());
+        assert_eq!(outcome.result_count(), 1);
+        assert_eq!(outcome.errors().len(), 1);
+        let results = outcome.into_results();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn empty_plan_produces_no_data_sync_equivalent() {
+        // RetrievalPlan::empty() is what execute() uses to fast-path to NoData.
+        let plan = RetrievalPlan::empty();
+        assert!(plan.is_empty());
     }
 
     #[test]

@@ -175,6 +175,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "jsonschema",
+ "libc",
  "metrics",
  "metrics-exporter-prometheus",
  "rand 0.8.5",

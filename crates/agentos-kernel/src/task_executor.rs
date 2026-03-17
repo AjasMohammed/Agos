@@ -364,11 +364,55 @@ impl Kernel {
             if refresh_knowledge_blocks {
                 let refresh_start = std::time::Instant::now();
                 knowledge_blocks.clear();
-                if !retrieval_plan.is_empty() {
-                    let retrieved = self
+
+                let chain_depth = task
+                    .trigger_source
+                    .as_ref()
+                    .map(|ts| ts.chain_depth + 1)
+                    .unwrap_or(0);
+
+                // All event-triggered tasks skip adaptive retrieval: for newly registered
+                // agents they have no memories yet; for established agents the trade-off
+                // (avoiding retrieval latency vs. missing memory context on event responses)
+                // is acceptable because Phase 1 already ensures no MemorySearchFailed cascade
+                // even when retrieval runs against empty stores.
+                let is_event_triggered = task.trigger_source.is_some();
+
+                if !retrieval_plan.is_empty() && !is_event_triggered {
+                    let outcome = self
                         .retrieval_executor
                         .execute(&retrieval_plan, Some(&task.agent_id))
                         .await;
+
+                    // Only emit MemorySearchFailed for actual infrastructure errors,
+                    // not for an empty store (which is normal for a new agent).
+                    if outcome.has_errors() {
+                        for err in outcome.errors() {
+                            tracing::warn!(
+                                task_id = %task.id,
+                                error = %err,
+                                "Retrieval backend error (results may be partial)"
+                            );
+                        }
+                        self.emit_event_with_trace(
+                            EventType::MemorySearchFailed,
+                            EventSource::MemoryArbiter,
+                            EventSeverity::Warning,
+                            serde_json::json!({
+                                "agent_id": task.agent_id.to_string(),
+                                "task_id": task.id.to_string(),
+                                "search_type": "adaptive_retrieval",
+                                "query_count": retrieval_plan.queries.len(),
+                                "errors": outcome.errors(),
+                                "partial_results": outcome.result_count() > 0,
+                            }),
+                            chain_depth,
+                            Some(iteration_trace_id),
+                        )
+                        .await;
+                    }
+
+                    let retrieved = outcome.into_results();
                     knowledge_blocks =
                         crate::retrieval_gate::RetrievalExecutor::format_as_knowledge_blocks(
                             &retrieved,
@@ -381,31 +425,12 @@ impl Kernel {
                         retrieval_blocks = knowledge_blocks.len(),
                         "Adaptive retrieval complete"
                     );
-                    // Emit MemorySearchFailed if retrieval returned no results for a non-trivial plan
-                    if retrieved.is_empty() {
-                        let chain_depth = task
-                            .trigger_source
-                            .as_ref()
-                            .map(|ts| ts.chain_depth + 1)
-                            .unwrap_or(0);
-                        self.emit_event_with_trace(
-                            EventType::MemorySearchFailed,
-                            EventSource::MemoryArbiter,
-                            EventSeverity::Warning,
-                            serde_json::json!({
-                                "agent_id": task.agent_id.to_string(),
-                                "task_id": task.id.to_string(),
-                                "search_type": "adaptive_retrieval",
-                                "query_count": retrieval_plan.queries.len(),
-                                "query_preview": retrieval_plan.queries.first()
-                                    .map(|q| q.query.chars().take(100).collect::<String>())
-                                    .unwrap_or_default(),
-                            }),
-                            chain_depth,
-                            Some(iteration_trace_id),
-                        )
-                        .await;
-                    }
+                } else if is_event_triggered && !retrieval_plan.is_empty() {
+                    tracing::debug!(
+                        task_id = %task.id,
+                        chain_depth,
+                        "Skipping adaptive retrieval for event-triggered task"
+                    );
                 }
                 if let Ok(blocks_context) = self.memory_blocks.blocks_for_context(&task.agent_id) {
                     if !blocks_context.is_empty() {
@@ -2004,7 +2029,7 @@ impl Kernel {
             .agent_registry
             .read()
             .await
-            .list_all()
+            .list_online()
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();

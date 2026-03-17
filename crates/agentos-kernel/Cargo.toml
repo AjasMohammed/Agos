@@ -40,10 +40,14 @@ ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.10"
 serial_test = "3.4.0"
+# agentos-audit is also a [dependencies] entry but integration tests in tests/
+# compile as separate crates and need it explicitly listed here.
+agentos-audit = { path = "../agentos-audit" }
 agentos-llm = { path = "../agentos-llm" }
 agentos-bus = { path = "../agentos-bus" }
 toml = { workspace = true }

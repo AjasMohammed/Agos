@@ -18,6 +18,7 @@ services:
       - agentos-data:/var/lib/agentos/data
       - agentos-user-tools:/var/lib/agentos/tools/user
     ports:
+      - "8080:8080"
       - "9091:9091"
     restart: unless-stopped
     depends_on:

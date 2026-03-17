@@ -16,13 +16,16 @@ impl Kernel {
         roles: Vec<String>,
     ) -> KernelResponse {
         let now = chrono::Utc::now();
-        let agent_id = AgentID::new();
 
         // Instantiate LLMCore based on provider
         let core: Result<Arc<dyn LLMCore>, String> = match &provider {
             LLMProvider::Ollama => {
                 let host = base_url
-                    .or_else(|| std::env::var("AGENTOS_OLLAMA_HOST").ok().filter(|s| !s.trim().is_empty()))
+                    .or_else(|| {
+                        std::env::var("AGENTOS_OLLAMA_HOST")
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                    })
                     .unwrap_or_else(|| self.config.ollama.host.clone());
                 Ok(Arc::new(OllamaCore::new(&host, &model)))
             }
@@ -35,7 +38,11 @@ impl Kernel {
                     Ok(entry) => {
                         let sec = SecretString::new(entry.as_str().to_string());
                         let resolved_base_url = base_url
-                            .or_else(|| std::env::var("AGENTOS_OPENAI_BASE_URL").ok().filter(|s| !s.trim().is_empty()))
+                            .or_else(|| {
+                                std::env::var("AGENTOS_OPENAI_BASE_URL")
+                                    .ok()
+                                    .filter(|s| !s.trim().is_empty())
+                            })
                             .or_else(|| self.config.llm.openai_base_url.clone());
                         if let Some(url) = resolved_base_url {
                             Ok(Arc::new(OpenAICore::with_base_url(sec, model.clone(), url)))
@@ -88,7 +95,11 @@ impl Kernel {
                     },
                 };
                 let url = match base_url
-                    .or_else(|| std::env::var("AGENTOS_LLM_URL").ok().filter(|s| !s.trim().is_empty()))
+                    .or_else(|| {
+                        std::env::var("AGENTOS_LLM_URL")
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                    })
                     .or_else(|| self.config.llm.custom_base_url.clone())
                 {
                     Some(url) => url,
@@ -109,55 +120,143 @@ impl Kernel {
             }
         };
 
-        // Generate cryptographic identity for the agent
-        let public_key_hex = match self.identity_manager.generate_identity(&agent_id).await {
-            Ok(pk) => {
-                tracing::info!(agent_id = %agent_id, "Generated Ed25519 identity for agent");
-                Some(pk)
-            }
-            Err(e) => {
-                tracing::warn!(agent_id = %agent_id, error = %e, "Failed to generate agent identity");
+        // Acquire the write lock once for the entire connect sequence: lookup, identity
+        // generation, profile construction, and registration happen atomically, preventing
+        // TOCTOU races from concurrent ConnectAgent calls.
+        let (old_offline_id, profile, is_reconnect) = {
+            let mut registry = self.agent_registry.write().await;
+
+            // Reuse persisted identity when the same name + provider + model reconnects.
+            // A different provider or model means a genuinely different agent — issue a new UUID.
+            let (
+                agent_id,
+                persisted_pubkey,
+                persisted_permissions,
+                persisted_roles,
+                persisted_description,
+                created_at,
+                is_reconnect,
+            ) = match registry.get_by_name(&name) {
+                Some(existing) if existing.provider == provider && existing.model == model => (
+                    existing.id,
+                    existing.public_key_hex.clone(),
+                    existing.permissions.clone(),
+                    existing.roles.clone(),
+                    existing.description.clone(),
+                    existing.created_at,
+                    true,
+                ),
+                _ => (
+                    AgentID::new(),
+                    None,
+                    PermissionSet::new(),
+                    vec![],
+                    String::new(),
+                    now,
+                    false,
+                ),
+            };
+
+            // Capture the ID of any stale Offline entry with this name before removing it,
+            // so we can revoke its vault key after releasing the registry write lock.
+            let old_offline_id: Option<AgentID> = if !is_reconnect {
+                registry
+                    .get_by_name(&name)
+                    .filter(|a| a.status == AgentStatus::Offline)
+                    .map(|a| a.id)
+            } else {
                 None
+            };
+
+            // On reconnect reuse the existing Ed25519 keypair; otherwise generate a fresh one.
+            // If reconnecting but no keypair was ever stored (e.g. prior generation failed),
+            // generate a new one now so the agent always has a signing identity.
+            let public_key_hex = if is_reconnect {
+                match persisted_pubkey {
+                    Some(ref pk) => {
+                        self.message_bus.register_pubkey(agent_id, pk.clone()).await;
+                        tracing::info!(agent_id = %agent_id, "Reused persisted Ed25519 identity for agent");
+                        persisted_pubkey
+                    }
+                    None => match self.identity_manager.generate_identity(&agent_id).await {
+                        Ok(pk) => {
+                            tracing::info!(agent_id = %agent_id, "Generated Ed25519 identity for reconnected agent (no prior key)");
+                            self.message_bus.register_pubkey(agent_id, pk.clone()).await;
+                            Some(pk)
+                        }
+                        Err(e) => {
+                            tracing::warn!(agent_id = %agent_id, error = %e, "Failed to generate agent identity on reconnect");
+                            None
+                        }
+                    },
+                }
+            } else {
+                match self.identity_manager.generate_identity(&agent_id).await {
+                    Ok(pk) => {
+                        tracing::info!(agent_id = %agent_id, "Generated Ed25519 identity for agent");
+                        self.message_bus.register_pubkey(agent_id, pk.clone()).await;
+                        Some(pk)
+                    }
+                    Err(e) => {
+                        tracing::warn!(agent_id = %agent_id, error = %e, "Failed to generate agent identity");
+                        None
+                    }
+                }
+            };
+
+            // Preserve existing roles on reconnect; use the provided roles otherwise.
+            let resolved_roles = if is_reconnect {
+                persisted_roles
+            } else if roles.is_empty() {
+                vec!["general".to_string()]
+            } else {
+                roles
+            };
+
+            let profile = AgentProfile {
+                id: agent_id,
+                name,
+                provider,
+                model,
+                status: AgentStatus::Online,
+                // Preserve custom permissions and description granted before disconnect.
+                permissions: if is_reconnect {
+                    persisted_permissions
+                } else {
+                    PermissionSet::new()
+                },
+                roles: resolved_roles,
+                current_task: None,
+                description: persisted_description,
+                created_at,
+                last_active: now,
+                public_key_hex,
+            };
+
+            // Remove stale Offline entry with same name when a new agent connects with a
+            // different provider/model, to prevent unbounded orphaned profile growth.
+            if !is_reconnect {
+                registry.remove_offline_by_name(&profile.name);
             }
+            registry.register(profile.clone());
+
+            (old_offline_id, profile, is_reconnect)
         };
 
-        // Register public key with message bus for signature verification
-        if let Some(ref pk) = public_key_hex {
-            self.message_bus.register_pubkey(agent_id, pk.clone()).await;
-        }
-
-        let resolved_roles = if roles.is_empty() {
-            vec!["general".to_string()]
-        } else {
-            roles
-        };
-
-        let profile = AgentProfile {
-            id: agent_id,
-            name,
-            provider,
-            model,
-            status: AgentStatus::Online,
-            permissions: PermissionSet::new(),
-            roles: resolved_roles,
-            current_task: None,
-            description: String::new(),
-            created_at: now,
-            last_active: now,
-            public_key_hex,
-        };
-
+        let agent_id = profile.id;
         let agent_name = profile.name.clone();
         let agent_model = profile.model.clone();
 
         {
-            let mut registry = self.agent_registry.write().await;
-            registry.register(profile.clone());
-        }
-
-        {
             let mut active = self.active_llms.write().await;
             active.insert(agent_id, llm_adapter);
+        }
+
+        // Revoke the replaced agent's vault signing key to prevent orphaned key material.
+        if let Some(old_id) = old_offline_id {
+            if let Err(e) = self.identity_manager.revoke_identity(&old_id).await {
+                tracing::warn!(agent_id = %old_id, error = %e, "Failed to revoke replaced agent identity");
+            }
         }
 
         // Register agent with cost tracker (default budget)
@@ -189,10 +288,15 @@ impl Kernel {
                 .await;
         }
 
+        let connect_event = if is_reconnect {
+            agentos_audit::AuditEventType::AgentReconnected
+        } else {
+            agentos_audit::AuditEventType::AgentConnected
+        };
         self.audit_log(agentos_audit::AuditEntry {
             timestamp: chrono::Utc::now(),
             trace_id: TraceID::new(),
-            event_type: agentos_audit::AuditEventType::AgentConnected,
+            event_type: connect_event,
             agent_id: Some(agent_id),
             task_id: None,
             tool_id: None,
@@ -223,13 +327,18 @@ impl Kernel {
 
     pub(crate) async fn cmd_list_agents(&self) -> KernelResponse {
         let registry = self.agent_registry.read().await;
-        let agents: Vec<AgentProfile> = registry.list_all().into_iter().cloned().collect();
+        let agents: Vec<AgentProfile> = registry.list_online().into_iter().cloned().collect();
         KernelResponse::AgentList(agents)
     }
 
     pub(crate) async fn cmd_disconnect_agent(&self, agent_id: AgentID) -> KernelResponse {
         let mut registry = self.agent_registry.write().await;
         let agent_name = match registry.get_by_id(&agent_id) {
+            Some(p) if p.status == AgentStatus::Offline => {
+                return KernelResponse::Error {
+                    message: format!("Agent '{}' is already offline", agent_id),
+                }
+            }
             Some(p) => p.name.clone(),
             None => {
                 return KernelResponse::Error {
@@ -237,8 +346,13 @@ impl Kernel {
                 }
             }
         };
-        registry.remove(&agent_id);
+        // Mark as Offline rather than removing. The persisted profile is needed so
+        // that reconnect with the same name + provider + model can reuse the UUID.
+        registry.update_status(&agent_id, AgentStatus::Offline);
         drop(registry);
+
+        // Evict the LLM adapter so the connection to the provider is released.
+        self.active_llms.write().await.remove(&agent_id);
 
         // Evict rate-limit state so the slot is reclaimed immediately on disconnect.
         self.per_agent_rate_limiter.lock().await.remove(&agent_name);
@@ -287,7 +401,12 @@ impl Kernel {
     ) -> KernelResponse {
         let registry = self.agent_registry.read().await;
         let from_agent = match registry.get_by_name(&from_name) {
-            Some(a) => a.clone(),
+            Some(a) if a.status != AgentStatus::Offline => a.clone(),
+            Some(_) => {
+                return KernelResponse::Error {
+                    message: format!("Sender agent '{}' is offline", from_name),
+                }
+            }
             None => {
                 return KernelResponse::Error {
                     message: format!("Sender agent '{}' not found", from_name),
@@ -295,7 +414,12 @@ impl Kernel {
             }
         };
         let to_agent = match registry.get_by_name(&to_name) {
-            Some(a) => a.clone(),
+            Some(a) if a.status != AgentStatus::Offline => a.clone(),
+            Some(_) => {
+                return KernelResponse::Error {
+                    message: format!("Target agent '{}' is offline", to_name),
+                }
+            }
             None => {
                 return KernelResponse::Error {
                     message: format!("Target agent '{}' not found", to_name),
@@ -399,7 +523,12 @@ impl Kernel {
     ) -> KernelResponse {
         let registry = self.agent_registry.read().await;
         let from_agent = match registry.get_by_name(&from_name) {
-            Some(a) => a.clone(),
+            Some(a) if a.status != AgentStatus::Offline => a.clone(),
+            Some(_) => {
+                return KernelResponse::Error {
+                    message: format!("Sender agent '{}' is offline", from_name),
+                };
+            }
             None => {
                 return KernelResponse::Error {
                     message: format!("Sender agent '{}' not found", from_name),

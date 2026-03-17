@@ -20,6 +20,8 @@ pub struct KernelConfig {
     pub context_budget: agentos_types::TokenBudget,
     #[serde(default)]
     pub health_monitor: HealthMonitorConfig,
+    #[serde(default)]
+    pub preflight: PreflightConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -140,6 +142,35 @@ impl Default for MemorySettings {
 
 fn default_model_cache_dir() -> String {
     "models".to_string()
+}
+
+/// Configuration for boot-time pre-flight system health checks.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PreflightConfig {
+    /// Minimum free disk space in MB on the data directory partition.
+    /// Boot fails if free space is below this threshold. Set to 0 to disable.
+    #[serde(default = "default_min_free_disk_mb")]
+    pub min_free_disk_mb: u64,
+    /// Whether to perform a write test on database parent directories.
+    #[serde(default = "default_check_db_writable")]
+    pub check_db_writable: bool,
+}
+
+impl Default for PreflightConfig {
+    fn default() -> Self {
+        Self {
+            min_free_disk_mb: default_min_free_disk_mb(),
+            check_db_writable: default_check_db_writable(),
+        }
+    }
+}
+
+fn default_min_free_disk_mb() -> u64 {
+    100
+}
+
+fn default_check_db_writable() -> bool {
+    true
 }
 
 /// Configuration for the periodic system health monitoring loop.

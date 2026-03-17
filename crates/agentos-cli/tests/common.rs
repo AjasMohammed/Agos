@@ -72,5 +72,6 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         },
         context_budget: Default::default(),
         health_monitor: HealthMonitorConfig::default(),
+        preflight: Default::default(),
     }
 }

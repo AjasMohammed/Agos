@@ -103,6 +103,11 @@ pub struct Kernel {
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// Token used to signal graceful shutdown to all kernel loops.
     pub cancellation_token: CancellationToken,
+    /// Set to `true` once the first `KernelShutdown` audit entry has been written.
+    /// Guards against double-writes when multiple shutdown paths converge
+    /// (e.g., `KernelCommand::Shutdown` writes the entry, then `cancel()` also
+    /// triggers the `cancelled()` arm in `run()` which would write a second one).
+    pub(crate) shutdown_audited: std::sync::atomic::AtomicBool,
 }
 
 impl Kernel {
@@ -128,6 +133,9 @@ impl Kernel {
             openai_base_url = ?config.llm.openai_base_url,
             "Kernel configuration loaded"
         );
+
+        // 1.5 Run pre-flight system health checks before any subsystem init
+        preflight_checks(&config)?;
 
         // Ensure directories exist. The vault directory is created with 0o700 on Unix
         // so other users on the same host cannot list or access the vault parent directory.
@@ -472,6 +480,7 @@ impl Kernel {
             data_dir,
             started_at: chrono::Utc::now(),
             cancellation_token: CancellationToken::new(),
+            shutdown_audited: std::sync::atomic::AtomicBool::new(false),
         };
 
         // Emit KernelStarted audit event
@@ -494,8 +503,36 @@ impl Kernel {
         Ok(kernel)
     }
 
+    /// Write a `KernelShutdown` audit entry exactly once per kernel lifecycle.
+    ///
+    /// Uses a `compare_exchange` on `shutdown_audited` so that if multiple exit
+    /// paths converge (e.g., `KernelCommand::Shutdown` writes the entry and then
+    /// the `cancelled()` arm in `run()` also fires), only the first caller writes.
+    pub(crate) fn audit_shutdown(&self, reason: &str, severity: agentos_audit::AuditSeverity) {
+        use std::sync::atomic::Ordering;
+        if self
+            .shutdown_audited
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.audit_log(agentos_audit::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: agentos_audit::AuditEventType::KernelShutdown,
+                agent_id: None,
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({ "reason": reason }),
+                severity,
+                reversible: false,
+                rollback_ref: None,
+            });
+        }
+    }
+
     /// Signal all kernel loops to stop gracefully.
     pub fn shutdown(&self) {
+        self.audit_shutdown("api_shutdown", agentos_audit::AuditSeverity::Info);
         self.cancellation_token.cancel();
     }
 
@@ -598,5 +635,295 @@ impl Kernel {
             agentos_bus::KernelResponse::Error { message } => Err(message),
             _ => Err("Unexpected kernel response".to_string()),
         }
+    }
+}
+
+/// Run pre-flight system health checks before initializing any subsystem.
+/// Returns `Err` with a descriptive message if any check fails so that `boot()`
+/// can surface a clear diagnostic instead of crashing deep in subsystem init.
+fn preflight_checks(config: &KernelConfig) -> Result<(), anyhow::Error> {
+    let data_dir = std::path::Path::new(&config.tools.data_dir);
+
+    // 1. Disk space check on the data directory partition
+    if config.preflight.min_free_disk_mb > 0 {
+        let free_mb = get_free_disk_mb(data_dir)?;
+        if free_mb < config.preflight.min_free_disk_mb {
+            return Err(anyhow::anyhow!(
+                "Pre-flight check failed: insufficient disk space on {}. \
+                 Free: {} MB, required: {} MB. \
+                 Free up disk space or set preflight.min_free_disk_mb = 0 to disable this check.",
+                data_dir.display(),
+                free_mb,
+                config.preflight.min_free_disk_mb,
+            ));
+        }
+        tracing::info!(
+            free_mb,
+            min_required_mb = config.preflight.min_free_disk_mb,
+            "Pre-flight: disk space OK"
+        );
+    }
+
+    // 2. Writability checks for database parent directories
+    if config.preflight.check_db_writable {
+        for (label, path_str) in &[
+            ("audit", config.audit.log_path.as_str()),
+            ("vault", config.secrets.vault_path.as_str()),
+        ] {
+            let path = std::path::Path::new(path_str);
+            if let Some(parent) = path.parent() {
+                if parent.exists() {
+                    // Use O_CREAT|O_EXCL (create_new) to avoid following symlinks.
+                    // Include a nanosecond timestamp to prevent false EEXIST from a stale
+                    // file left by a crashed predecessor with the same recycled PID.
+                    let test_file = parent.join(format!(
+                        ".agentos_preflight_{}_{}.tmp",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos()
+                    ));
+                    match std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&test_file)
+                    {
+                        Ok(f) => {
+                            drop(f);
+                            let _ = std::fs::remove_file(&test_file);
+                            tracing::info!(
+                                path = %parent.display(),
+                                "Pre-flight: {} directory writable",
+                                label
+                            );
+                        }
+                        Err(e) => {
+                            return Err(anyhow::anyhow!(
+                                "Pre-flight check failed: {} directory {} is not writable: {}",
+                                label,
+                                parent.display(),
+                                e,
+                            ));
+                        }
+                    }
+                }
+                // Parent does not exist yet -- boot() will create it, skip the check.
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Return free disk space in MB for the partition containing `path`.
+/// Walks up to the first existing ancestor when `path` does not yet exist.
+/// Uses `statvfs(2)` directly — no external binaries required (works in distroless containers).
+/// On non-Unix platforms returns `u64::MAX` so the threshold check is always skipped.
+fn get_free_disk_mb(path: &std::path::Path) -> Result<u64, anyhow::Error> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::mem::MaybeUninit;
+
+        // Walk up to the first existing ancestor.
+        let mut check = path.to_path_buf();
+        loop {
+            if check.exists() {
+                break;
+            }
+            match check.parent().map(|p| p.to_path_buf()) {
+                Some(parent) if parent != check => check = parent,
+                _ => {
+                    check = std::path::PathBuf::from("/");
+                    break;
+                }
+            }
+        }
+
+        // Use OsStrExt::as_bytes() to preserve exact filesystem path bytes without
+        // the lossy UTF-8 replacement that to_string_lossy() would introduce.
+        #[cfg(unix)]
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = CString::new(check.as_os_str().as_bytes())
+            .map_err(|e| anyhow::anyhow!("Invalid path for statvfs: {}", e))?;
+        let mut stat = MaybeUninit::<libc::statvfs>::uninit();
+        let ret = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+        if ret != 0 {
+            return Err(anyhow::anyhow!(
+                "statvfs({}) failed: {}",
+                check.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        let stat = unsafe { stat.assume_init() };
+        // f_bavail: free blocks for unprivileged processes; f_frsize: fundamental block size.
+        // Explicit u64 casts are defensive: on 32-bit platforms fsblkcnt_t/c_ulong are u32
+        // and multiplying two u32 values before widening would overflow.
+        #[allow(clippy::unnecessary_cast)]
+        let free_bytes = (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64);
+        Ok(free_bytes / (1024 * 1024))
+    }
+
+    #[cfg(not(unix))]
+    {
+        tracing::warn!("Disk space pre-flight check not supported on this platform; skipping");
+        Ok(u64::MAX)
+    }
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::*;
+    use crate::config::*;
+    use tempfile::tempdir;
+
+    fn make_test_config(
+        data_dir: &str,
+        audit_log: &str,
+        vault_path: &str,
+        min_free_mb: u64,
+        check_writable: bool,
+    ) -> KernelConfig {
+        KernelConfig {
+            kernel: KernelSettings {
+                max_concurrent_tasks: 1,
+                default_task_timeout_secs: 30,
+                context_window_max_entries: 10,
+                context_window_token_budget: 0,
+                health_port: 9091,
+                per_agent_rate_limit: 0,
+            },
+            secrets: SecretsSettings {
+                vault_path: vault_path.to_string(),
+            },
+            audit: AuditSettings {
+                log_path: audit_log.to_string(),
+                max_audit_entries: 0,
+            },
+            tools: ToolsSettings {
+                core_tools_dir: data_dir.to_string(),
+                user_tools_dir: data_dir.to_string(),
+                data_dir: data_dir.to_string(),
+                crl_path: None,
+            },
+            bus: BusSettings {
+                socket_path: "/tmp/test.sock".to_string(),
+                tls: None,
+            },
+            ollama: OllamaSettings {
+                host: "http://localhost:11434".to_string(),
+                default_model: "test".to_string(),
+            },
+            llm: LlmSettings::default(),
+            memory: MemorySettings::default(),
+            routing: RoutingConfig::default(),
+            context_budget: agentos_types::TokenBudget::default(),
+            health_monitor: HealthMonitorConfig::default(),
+            preflight: PreflightConfig {
+                min_free_disk_mb: min_free_mb,
+                check_db_writable: check_writable,
+            },
+        }
+    }
+
+    #[test]
+    fn preflight_disk_check_disabled_passes() {
+        // min_free_disk_mb = 0 should always succeed regardless of actual disk state.
+        let config = make_test_config("/tmp", "/tmp/audit.db", "/tmp/vault.db", 0, false);
+        assert!(preflight_checks(&config).is_ok());
+    }
+
+    #[test]
+    fn preflight_extremely_high_threshold_fails() {
+        // A threshold of u64::MAX should always fail (no disk has that much free space).
+        let config = make_test_config("/tmp", "/tmp/audit.db", "/tmp/vault.db", u64::MAX, false);
+        let result = preflight_checks(&config);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("insufficient disk space"), "Error: {}", msg);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn preflight_get_free_disk_mb_on_root() {
+        let free = get_free_disk_mb(std::path::Path::new("/")).unwrap();
+        assert!(
+            free > 0,
+            "Root partition should have some free space; got {} MB",
+            free
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn preflight_get_free_disk_mb_nonexistent_path_falls_back() {
+        let free = get_free_disk_mb(std::path::Path::new(
+            "/nonexistent_agentos_preflight_path/deep/dir",
+        ))
+        .unwrap();
+        assert!(
+            free > 0,
+            "Should fall back to / and return > 0 MB; got {}",
+            free
+        );
+    }
+
+    #[test]
+    fn preflight_check_db_writable_nonexistent_parent_passes() {
+        // Directories that don't exist yet are skipped — boot() will create them.
+        let config = make_test_config(
+            "/tmp",
+            "/nonexistent_agentos_dir/audit.db",
+            "/nonexistent_agentos_dir/vault.db",
+            0,
+            true,
+        );
+        assert!(preflight_checks(&config).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn preflight_check_db_writable_readonly_dir_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Skip if running as root (root bypasses permission checks).
+        let is_root = std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .map_or(false, |o| String::from_utf8_lossy(&o.stdout).trim() == "0");
+        if is_root {
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let readonly_dir = dir.path().join("readonly");
+        std::fs::create_dir(&readonly_dir).unwrap();
+        std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let audit_path = readonly_dir.join("audit.db").to_string_lossy().into_owned();
+        let vault_path = readonly_dir.join("vault.db").to_string_lossy().into_owned();
+        let config = make_test_config(
+            dir.path().to_str().unwrap(),
+            &audit_path,
+            &vault_path,
+            0,
+            true,
+        );
+
+        let result = preflight_checks(&config);
+        // Restore permissions so tempdir cleanup succeeds.
+        let _ = std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o755));
+
+        assert!(
+            result.is_err(),
+            "Expected writability check to fail for read-only directory"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not writable"),
+            "Error should mention 'not writable': {}",
+            msg
+        );
     }
 }

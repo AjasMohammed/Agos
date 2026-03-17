@@ -12,10 +12,22 @@ aliases:
 
 # Issues and Fixes
 
-Post-implementation audit of the [[Feedback Implementation Plan]]. All issues discovered after implementing Phases 0–7.
+Post-implementation audit of the [[Feedback Implementation Plan]]. All issues discovered after implementing Phases 0--7.
 
-> [!info] Build Status (updated 2026-03-16)
+> [!info] Build Status (updated 2026-03-17)
 > The project **compiles cleanly** and all unit tests pass. **All 9 original issues have been resolved.** Integration tests now run with full kernel lifecycle harness. Docker deployment artifacts added.
+
+---
+
+## Production Stability Issues (discovered 2026-03-17)
+
+Three critical issues found through audit log analysis (96 entries, 50 minutes of runtime). Full fix plan: [[Production Stability Fixes Plan]]
+
+| # | Issue | Severity | Status | Plan Link |
+|---|-------|----------|--------|-----------|
+| 10 | MemorySearchFailed on every event-triggered task (empty retrieval treated as error) | Critical | Planned | [[24-01-Retrieval Result Typing]], [[24-02-Skip Retrieval for Bootstrap Tasks]] |
+| 11 | DiskSpaceLow event spam: 6 events per health check cycle (per-mount emission, in-memory debounce resets on restart) | High | Planned | [[24-03-Aggregate Disk Health Events]], [[24-04-Persist Health Debounce State]] |
+| 12 | Kernel restart instability: 4 unclean restarts in 50 min, no KernelStopped events, agent identity lost | Critical | Planned | [[24-05-Graceful Shutdown Audit Trail]], [[24-06-Agent Identity Reuse on Reconnect]], [[24-07-Boot Pre-flight Checks]], [[24-08-Exponential Restart Backoff]] |
 
 ---
 
@@ -23,10 +35,10 @@ Post-implementation audit of the [[Feedback Implementation Plan]]. All issues di
 
 | Blocker | Status | Plan Link |
 |---|---|---|
-| Quality gates not green (`fmt`, strict `clippy`) | Resolved (2026-03-16) — clippy fixed in [[01-clippy-ci-gate-fixes]]; fmt already passes | [[16-01-Restore Quality Gates]] |
+| Quality gates not green (`fmt`, strict `clippy`) | Resolved (2026-03-16) -- clippy fixed in [[01-clippy-ci-gate-fixes]]; fmt already passes | [[16-01-Restore Quality Gates]] |
 | Production runtime config uses temporary paths | Open | [[16-02-Harden Production Config]] |
-| Missing canonical Docker deployment artifacts | Resolved (2026-03-16) — Dockerfile, docker-compose.yml, config/docker.toml added in [[04-docker-deployment-artifacts]] | [[16-03-Add Container Deployment Artifacts]] |
-| Security deployment acceptance scenarios not centralized | Resolved (2026-03-16) — all 7 scenarios pass; docs added to `06-security.md` and `agentic-os-deployment.md` | [[16-04-Security Readiness Closure]] |
+| Missing canonical Docker deployment artifacts | Resolved (2026-03-16) -- Dockerfile, docker-compose.yml, config/docker.toml added in [[04-docker-deployment-artifacts]] | [[16-03-Add Container Deployment Artifacts]] |
+| Security deployment acceptance scenarios not centralized | Resolved (2026-03-16) -- all 7 scenarios pass; docs added to `06-security.md` and `agentic-os-deployment.md` | [[16-04-Security Readiness Closure]] |
 | Release version/tag baseline not defined | Open | [[16-05-Release Versioning and Tagging]] |
 | Launch go/no-go checklist not unified | Open | [[16-06-Preflight and Launch Checklist]] |
 
@@ -71,7 +83,7 @@ Post-implementation audit of the [[Feedback Implementation Plan]]. All issues di
 
 | Field | Value |
 |---|---|
-| **Severity** | Medium — Bug |
+| **Severity** | Medium -- Bug |
 | **Status** | Resolved (2026-03-13) |
 | **File** | `crates/agentos-kernel/src/context.rs:176` |
 
@@ -83,7 +95,7 @@ Post-implementation audit of the [[Feedback Implementation Plan]]. All issues di
 
 | Field | Value |
 |---|---|
-| **Severity** | Medium — Architectural |
+| **Severity** | Medium -- Architectural |
 | **Status** | Resolved (2026-03-13) |
 | **Files** | `crates/agentos-llm/src/openai.rs`, `anthropic.rs`, `gemini.rs`, `ollama.rs`, `custom.rs` |
 
@@ -97,7 +109,7 @@ Post-implementation audit of the [[Feedback Implementation Plan]]. All issues di
 
 | Field | Value |
 |---|---|
-| **Severity** | Medium — Incomplete |
+| **Severity** | Medium -- Incomplete |
 | **Status** | Resolved (2026-03-13) |
 | **Files** | `crates/agentos-cli/src/commands/escalation.rs`, `crates/agentos-kernel/src/commands/escalation.rs` |
 
@@ -109,7 +121,7 @@ Post-implementation audit of the [[Feedback Implementation Plan]]. All issues di
 
 | Field | Value |
 |---|---|
-| **Severity** | Low — Stub |
+| **Severity** | Low -- Stub |
 | **Status** | Resolved (2026-03-13) |
 | **Files** | `crates/agentos-llm/src/types.rs:163` |
 
@@ -121,7 +133,7 @@ Post-implementation audit of the [[Feedback Implementation Plan]]. All issues di
 
 | Field | Value |
 |---|---|
-| **Severity** | Low — Stub |
+| **Severity** | Low -- Stub |
 | **Status** | Resolved (2026-03-13) |
 | **Files** | `crates/agentos-kernel/src/commands/task.rs:292` |
 
@@ -133,7 +145,7 @@ Post-implementation audit of the [[Feedback Implementation Plan]]. All issues di
 
 | Field | Value |
 |---|---|
-| **Severity** | Medium — Architectural Debt |
+| **Severity** | Medium -- Architectural Debt |
 | **Status** | Resolved (2026-03-13) |
 | **Files** | `crates/agentos-kernel/src/agent_message_bus.rs`, `crates/agentos-kernel/src/schedule_manager.rs` |
 
@@ -147,7 +159,7 @@ Post-implementation audit of the [[Feedback Implementation Plan]]. All issues di
 
 | Field | Value |
 |---|---|
-| **Severity** | Medium — Silent Failures |
+| **Severity** | Medium -- Silent Failures |
 | **Status** | Resolved (2026-03-13) |
 | **File** | `crates/agentos-kernel/src/task_executor.rs` |
 
@@ -159,7 +171,7 @@ Post-implementation audit of the [[Feedback Implementation Plan]]. All issues di
 
 | Field | Value |
 |---|---|
-| **Severity** | Low — Cleanup |
+| **Severity** | Low -- Cleanup |
 | **Status** | Resolved (2026-03-13) |
 
 **Resolution:** `has_dependencies()` method removed. `make_engine()` test helper removed. `_input` already prefixed. 4 new clippy errors found and fixed in [[01-clippy-ci-gate-fixes]].
@@ -170,15 +182,18 @@ Post-implementation audit of the [[Feedback Implementation Plan]]. All issues di
 
 ```mermaid
 graph LR
-    A[Critical - 1] --> A1[Hanging Tests ✅]
-    B[Bugs - 2] --> B1[Partition Not Persisted ✅]
-    B --> B2[Adapters Ignore Partition ✅]
-    C[Incomplete - 4] --> C1[Escalation CLI ✅]
-    C --> C2[Uncertainty Parsing ✅]
-    C --> C3[Reasoning Hints ✅]
-    C --> C4[Events Bypass HMAC/Audit ✅]
-    D[Quality - 2] --> D1[Silent Memory Errors ✅]
-    D --> D2[Dead Code ✅]
+    A[Critical - 1] --> A1[Hanging Tests]
+    B[Bugs - 2] --> B1[Partition Not Persisted]
+    B --> B2[Adapters Ignore Partition]
+    C[Incomplete - 4] --> C1[Escalation CLI]
+    C --> C2[Uncertainty Parsing]
+    C --> C3[Reasoning Hints]
+    C --> C4[Events Bypass HMAC/Audit]
+    D[Quality - 2] --> D1[Silent Memory Errors]
+    D --> D2[Dead Code]
+    E[Production - 3] --> E1[MemorySearchFailed Spam]
+    E --> E2[DiskSpaceLow Flood]
+    E --> E3[Restart Instability]
 ```
 
 | Priority | Count | Issues | Status |
@@ -186,6 +201,7 @@ graph LR
 | Critical | 1 | #1 Integration Tests | Resolved |
 | Medium | 5 | #2, #3, #4, #7, #9 | All Resolved |
 | Low | 3 | #5, #6, #8 | All Resolved |
+| Production | 3 | #10, #11, #12 | Planned -- [[Production Stability Fixes Plan]] |
 
-> [!success] All 9 issues resolved
-> All issues from the original audit have been addressed. Remaining deployment blockers are tracked in the First Deployment Blockers table above.
+> [!success] All 9 original issues resolved
+> All issues from the original audit have been addressed. 3 new production stability issues discovered via runtime audit log analysis are tracked in [[Production Stability Fixes Plan]].

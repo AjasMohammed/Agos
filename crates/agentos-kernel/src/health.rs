@@ -30,7 +30,7 @@ async fn healthz(State(kernel): State<Arc<Kernel>>) -> Json<HealthResponse> {
 }
 
 async fn readyz(State(kernel): State<Arc<Kernel>>) -> (StatusCode, Json<ReadyResponse>) {
-    let agents = kernel.agent_registry.read().await.list_all().len();
+    let agents = kernel.agent_registry.read().await.list_online().len();
     let tasks = kernel.scheduler.list_tasks().await.len();
 
     if agents == 0 {

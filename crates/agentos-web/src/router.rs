@@ -118,7 +118,13 @@ pub fn build_router(
         // Static files (served without auth — bypassed inside require_auth)
         .nest_service(
             "/static",
-            ServeDir::new(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static")),
+            ServeDir::new(
+                std::env::var("AGENTOS_STATIC_DIR")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| {
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static")
+                    }),
+            ),
         )
         .with_state(state.clone())
         // Execution order (Axum layers run outermost-first on requests):
