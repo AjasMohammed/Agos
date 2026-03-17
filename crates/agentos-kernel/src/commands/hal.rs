@@ -1,4 +1,5 @@
 use crate::kernel::Kernel;
+use agentos_types::{EventSeverity, EventSource, EventType};
 
 impl Kernel {
     /// List all registered hardware devices.
@@ -46,6 +47,18 @@ impl Kernel {
                 reversible: false,
                 rollback_ref: None,
             });
+
+            self.emit_event(
+                EventType::DeviceConnected,
+                EventSource::HardwareAbstractionLayer,
+                EventSeverity::Info,
+                serde_json::json!({
+                    "device_id": device_id,
+                    "device_type": device_type,
+                }),
+                0,
+            )
+            .await;
         }
 
         serde_json::json!({
@@ -93,6 +106,19 @@ impl Kernel {
                     reversible: true,
                     rollback_ref: None,
                 });
+                self.emit_event(
+                    EventType::HardwareAccessGranted,
+                    EventSource::HardwareAbstractionLayer,
+                    EventSeverity::Info,
+                    serde_json::json!({
+                        "device_id": device_id,
+                        "approved_by": "operator",
+                        "agent": agent_name,
+                    }),
+                    0,
+                )
+                .await;
+
                 serde_json::json!({
                     "status": "approved",
                     "device_id": device_id,
@@ -156,6 +182,19 @@ impl Kernel {
 
         self.hardware_registry
             .revoke_agent_access(device_id, &agent_id);
+
+        self.emit_event(
+            EventType::DeviceDisconnected,
+            EventSource::HardwareAbstractionLayer,
+            EventSeverity::Info,
+            serde_json::json!({
+                "device_id": device_id,
+                "reason": "revoked",
+                "agent": agent_name,
+            }),
+            0,
+        )
+        .await;
 
         self.audit_log(agentos_audit::AuditEntry {
             timestamp: chrono::Utc::now(),

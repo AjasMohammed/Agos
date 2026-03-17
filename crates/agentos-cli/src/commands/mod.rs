@@ -8,6 +8,7 @@ pub mod cost;
 pub mod escalation;
 pub mod event;
 pub mod hal;
+pub mod healthz;
 pub mod identity;
 pub mod perm;
 pub mod pipeline;
@@ -19,6 +20,7 @@ pub mod snapshot;
 pub mod status;
 pub mod task;
 pub mod tool;
+pub mod web;
 
 pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow::Result<()> {
     match command {

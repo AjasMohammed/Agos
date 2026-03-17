@@ -7,7 +7,7 @@ tags:
   - plan
   - v3
 date: 2026-03-13
-status: planned
+status: complete
 effort: 3h
 priority: critical
 ---

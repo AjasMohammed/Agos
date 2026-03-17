@@ -3,6 +3,9 @@ use agentos_types::*;
 use async_trait::async_trait;
 use std::path::Path;
 
+/// Maximum file size that file-reader will load into memory (10 MiB).
+const MAX_FILE_READ_BYTES: u64 = 10 * 1024 * 1024;
+
 pub struct FileReader;
 
 impl FileReader {
@@ -62,7 +65,18 @@ impl AgentTool for FileReader {
                 reason: format!("Path not found: {} ({})", path_str, e),
             })?;
 
-        if !canonical.starts_with(&context.data_dir) {
+        // Canonicalize data_dir too so the starts_with comparison is apples-to-apples
+        // even when data_dir itself contains symlinks (e.g. /tmp on macOS).
+        let canonical_data_dir =
+            context
+                .data_dir
+                .canonicalize()
+                .map_err(|e| AgentOSError::ToolExecutionFailed {
+                    tool_name: "file-reader".into(),
+                    reason: format!("Data directory error: {}", e),
+                })?;
+
+        if !canonical.starts_with(&canonical_data_dir) {
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
                 operation: format!("Path traversal denied: {}", path_str),
@@ -82,15 +96,30 @@ impl AgentTool for FileReader {
             registry.check(&canonical)?;
         }
 
+        // Size guard: reject files larger than 10 MiB to prevent OOM.
+        let metadata = tokio::fs::metadata(&canonical).await.map_err(|e| {
+            AgentOSError::ToolExecutionFailed {
+                tool_name: "file-reader".into(),
+                reason: format!("Cannot stat {}: {}", path_str, e),
+            }
+        })?;
+        let size_bytes = metadata.len();
+        if size_bytes > MAX_FILE_READ_BYTES {
+            return Err(AgentOSError::ToolExecutionFailed {
+                tool_name: "file-reader".into(),
+                reason: format!(
+                    "File too large: {} bytes (limit {} bytes). Use pagination or a stream tool.",
+                    size_bytes, MAX_FILE_READ_BYTES
+                ),
+            });
+        }
+
         let content = tokio::fs::read_to_string(&canonical).await.map_err(|e| {
             AgentOSError::ToolExecutionFailed {
                 tool_name: "file-reader".into(),
                 reason: format!("Cannot read {}: {}", path_str, e),
             }
         })?;
-
-        let metadata = tokio::fs::metadata(&canonical).await.ok();
-        let size_bytes = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
 
         // Line-based pagination.
         let offset = payload.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;

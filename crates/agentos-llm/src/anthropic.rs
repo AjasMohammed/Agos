@@ -12,11 +12,18 @@ pub struct AnthropicCore {
     client: Client,
     api_key: SecretString,
     model: String,
+    base_url: String,
     capabilities: ModelCapabilities,
 }
 
 impl AnthropicCore {
+    /// Create a new Anthropic adapter using the default API base URL.
     pub fn new(api_key: SecretString, model: String) -> Self {
+        Self::with_base_url(api_key, model, "https://api.anthropic.com/v1".to_string())
+    }
+
+    /// Create a new Anthropic adapter with a custom base URL (e.g., for enterprise proxies or tests).
+    pub fn with_base_url(api_key: SecretString, model: String, base_url: String) -> Self {
         Self {
             client: Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
@@ -25,6 +32,7 @@ impl AnthropicCore {
                 .unwrap_or_default(),
             api_key,
             model,
+            base_url,
             capabilities: ModelCapabilities {
                 context_window_tokens: 200_000,
                 supports_images: true,
@@ -64,7 +72,7 @@ impl AnthropicCore {
 impl LLMCore for AnthropicCore {
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
         let start_time = Instant::now();
-        let url = "https://api.anthropic.com/v1/messages";
+        let url = format!("{}/messages", self.base_url);
 
         let messages = self.format_messages(context);
         let active = context.active_entries();
@@ -83,7 +91,7 @@ impl LLMCore for AnthropicCore {
 
         let req = self
             .client
-            .post(url)
+            .post(&url)
             .header("x-api-key", self.api_key.expose_secret())
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
@@ -143,7 +151,7 @@ impl LLMCore for AnthropicCore {
     async fn health_check(&self) -> crate::types::HealthStatus {
         use crate::types::HealthStatus;
         let start = std::time::Instant::now();
-        let url = "https://api.anthropic.com/v1/messages";
+        let url = format!("{}/messages", self.base_url);
         let body = json!({
             "model": self.model,
             "max_tokens": 1,
@@ -154,7 +162,7 @@ impl LLMCore for AnthropicCore {
 
         match self
             .client
-            .post(url)
+            .post(&url)
             .header("x-api-key", self.api_key.expose_secret())
             .header("anthropic-version", "2023-06-01")
             .json(&body)

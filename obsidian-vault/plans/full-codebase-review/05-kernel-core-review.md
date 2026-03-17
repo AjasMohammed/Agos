@@ -6,7 +6,7 @@ tags:
   - security
   - phase-5
 date: 2026-03-13
-status: planned
+status: complete
 effort: 8h
 priority: critical
 ---
@@ -263,9 +263,79 @@ The kernel is where **everything converges**: task execution, tool dispatch, cap
 
 ---
 
+## Review Findings & Fixes Applied
+
+### CRITICAL — Fixed
+
+| # | Location | Issue | Fix |
+|---|----------|-------|-----|
+| C1 | `commands/task.rs:36` | `.unwrap()` on `registry.get_by_id()` in production path — panics if agent disappears between routing and execution | Replaced with `match`/`KernelResponse::Error` |
+
+### WARNING — Fixed
+
+| # | Location | Issue | Fix |
+|---|----------|-------|-----|
+| W1 | `router.rs:116,129` | `.last().unwrap()` on sorted agents vec — logically safe but violates no-unwrap convention | Changed to `.ok_or_else(|| AgentOSError::KernelError { ... })?` |
+| W2 | `agent_message_bus.rs` | `UnboundedSender<AgentMessage>` inboxes — OOM risk under message flood | Changed to bounded `mpsc::channel(256)` with `TrySendError::Full` backpressure |
+| W3 | `agent_message_bus.rs` | `Vec<AgentMessage>` history unbounded — OOM risk | Capped at `MAX_HISTORY=10_000` with drain-oldest |
+
+### INFO — No Action
+
+- `injection_scanner.rs`: 20+ regex patterns, case-insensitive, encoded payload detection — well-implemented
+- `escalation.rs`: `expires_at` set on creation, `sweep_expired()` handles both auto-deny and auto-approve — correct
+- `resource_arbiter.rs`: DFS deadlock detection, FIFO waiter queue, TTL auto-release — correct
+- `kernel.rs`: Boot sequence correct, all channels bounded at `CHANNEL_CAPACITY=1024`, `CancellationToken` propagated
+- `context.rs`: 80% → compress oldest quarter, 95% → compress + checkpoint. No unbounded growth
+- `schedule_manager.rs`: Cron validation on job creation, events emitted for fired/missed/completed/failed
+- `task_completion.rs`: `update_state_if_not_terminal` guards TOCTOU race with timeout checker
+- `tool_registry.rs`: `register()` returns `Result`, trust tier + CRL enforced
+
+### WARNING — Fixed (Secondary Review)
+
+| # | Location | Issue | Fix |
+|---|----------|-------|-----|
+| W1 | `escalation.rs` | Webhook URL accepted SSRF targets (RFC 1918, 169.254.x.x, metadata hostnames) | Added `validate_webhook_url()` requiring HTTPS; blocks loopback/private ranges |
+| W2 | `cost_tracker.rs` | Budget reset `period_start` non-atomic under read lock — concurrent threads could both reset | Changed `period_start` to `AtomicI64`; reset via `compare_exchange` |
+| W3 | `cost_tracker.rs` | `cost.total_cost_usd as u64` undefined behavior on NaN/Inf float values | Added `is_finite()` guard; non-finite defaults to 0 |
+| W4 | `commands/permission.rs` | `update_permissions(..).ok()` discarded errors; audit log emitted false-positive `PermissionGranted` | Changed to `if let Err(e)` propagation returning `KernelResponse::Error` |
+| W5 | `commands/permission.rs` | `expires_secs as i64` wraps on values > `i64::MAX` — creates a past expiry | Changed to `i64::try_from(...).unwrap_or(i64::MAX / 2)` |
+| W6 | `agent_registry.rs` | `save_to_disk()` silently swallowed serialization and write failures | Added `tracing::warn!` on both failure paths |
+| W7 | `run_loop.rs` | Timed-out tasks did not remove context window, intent validator state, or release resource locks | Added `remove_context`, `remove_task`, `release_all_for_agent` in timeout path |
+| W8 | `resource_arbiter.rs` | `signed_duration_since().num_seconds() as u64` wraps on NTP clock skew | Added `.max(0)` before `as u64` cast |
+| W9 | `background_pool.rs` | Terminal tasks accumulated indefinitely — memory leak | Added `evict_terminal(max_age_secs)`; called every 10 min from timeout checker |
+| W10 | `task_completion.rs` | Scheduler `update_state_if_not_terminal` errors silently defaulted to `false` | Changed to `.unwrap_or_else(|e| { tracing::error!(...); false })` |
+| W11 | `task_completion.rs` | Consolidation `tokio::spawn` not linked to `CancellationToken` | Wrapped in `tokio::select!` with `token.cancelled()` arm |
+| W12 | `schedule_manager.rs` | No duplicate job name validation — name-based lookup silently returned first match | Added pre-insert name uniqueness check returning `SchemaValidation` error |
+| W13 | `task_executor.rs` | `push_entry(..).await.ok()` silently ignored context push failures | Changed to `if let Err(e)` with `tracing::warn!` |
+
+### Verification
+
+All four checks passed after fixes:
+```
+cargo build -p agentos-kernel  ✓
+cargo test -p agentos-kernel   ✓  (224 tests pass)
+cargo clippy -p agentos-kernel -- -D warnings  ✓
+cargo fmt --all -- --check  ✓
+```
+
 ## Files Changed
 
-No files changed — read-only review phase.
+| File | Change |
+|------|--------|
+| `crates/agentos-kernel/src/commands/task.rs` | Remove `.unwrap()` on agent lookup after routing |
+| `crates/agentos-kernel/src/router.rs` | Remove `.unwrap()` on `.last()` in CapabilityFirst/CostFirst strategies |
+| `crates/agentos-kernel/src/agent_message_bus.rs` | Bound inboxes to 256; cap history at 10,000; differentiate Full vs Closed errors |
+| `crates/agentos-memory/src/semantic.rs` | Fix pre-existing formatting issues (rustfmt) |
+| `crates/agentos-kernel/src/escalation.rs` | `validate_webhook_url()` SSRF guard |
+| `crates/agentos-kernel/src/cost_tracker.rs` | Atomic budget reset; NaN/Inf guard |
+| `crates/agentos-kernel/src/commands/permission.rs` | Error propagation; safe `i64` cast |
+| `crates/agentos-kernel/src/agent_registry.rs` | `save_to_disk()` warn on failure |
+| `crates/agentos-kernel/src/run_loop.rs` | Context/resource cleanup on task timeout; background pool eviction |
+| `crates/agentos-kernel/src/resource_arbiter.rs` | `.max(0)` clock skew guard in `is_expired()` |
+| `crates/agentos-kernel/src/background_pool.rs` | `evict_terminal()` method added |
+| `crates/agentos-kernel/src/task_completion.rs` | Scheduler error logging; cancellation-aware consolidation spawn |
+| `crates/agentos-kernel/src/schedule_manager.rs` | Duplicate job name validation |
+| `crates/agentos-kernel/src/task_executor.rs` | `push_entry` failure warns instead of silently succeeding |
 
 ## Dependencies
 

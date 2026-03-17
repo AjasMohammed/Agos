@@ -11,10 +11,13 @@ agentos-vault = { path = "../agentos-vault" }
 agentos-pipeline = { path = "../agentos-pipeline" }
 
 axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs", "compression-gzip"] }
+tower_governor = "0.8"
 minijinja = { version = "2", features = ["loader"] }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tokio-stream = "0.1"
 tracing = { workspace = true }
 serde = { workspace = true }
@@ -22,6 +25,16 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
+futures = "0.3"
+serde_yaml = "0.9"
+toml = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+dashmap = "6"
+sha2 = "0.10"
+time = "0.3"
+subtle = "2"
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

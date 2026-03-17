@@ -65,34 +65,33 @@ The default development configuration lives at `config/default.toml`. All paths 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `max_concurrent_tasks` | `4` | Maximum agent tasks running in parallel |
-| `task_timeout_secs` | `60` | Seconds before a task is forcibly terminated |
-| `max_context_entries` | `100` | Maximum entries per context window before eviction |
-| `token_budget` | `8000` | Token budget per context window. Compress at 80%, checkpoint at 95% |
+| `default_task_timeout_secs` | `60` | Seconds before a task is forcibly terminated |
+| `context_window_max_entries` | `100` | Maximum entries per context window before eviction |
+| `context_window_token_budget` | `8000` | Token budget per context window. Compress at 80%, checkpoint at 95% |
 
-### `[vault]` — Encrypted secrets store
+### `[secrets]` — Encrypted secrets store
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `db_path` | `"/tmp/agentos/vault.db"` | SQLite database for encrypted secrets |
-| `argon2_mem_cost` | `65536` | Argon2id memory cost in KiB (64 MB) |
-| `argon2_time_cost` | `3` | Argon2id iteration count |
-| `argon2_parallelism` | `4` | Argon2id parallel lanes |
+| `vault_path` | `"/tmp/agentos/vault/secrets.db"` | SQLite database for encrypted secrets |
+
+> [!note]
+> Argon2id key derivation parameters (64 MiB memory, 3 iterations, 4 lanes) are hardcoded for security — they cannot be weakened via config.
 
 ### `[audit]` — Append-only audit log
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `db_path` | `"/tmp/agentos/audit.db"` | SQLite database for audit events |
-| `max_entries` | `100000` | Maximum audit entries before pruning |
-| `prune_sweep_interval_secs` | `600` | How often (seconds) the pruning sweep runs |
+| `log_path` | `"/tmp/agentos/data/audit.db"` | SQLite database for audit events |
+| `max_audit_entries` | `0` | Maximum audit entries before pruning (0 = unlimited) |
 
 ### `[tools]` — Tool discovery and execution
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `core_dir` | `"tools/core"` | Directory containing built-in tool manifests |
-| `user_dir` | `"tools/user"` | Directory for user-installed tool manifests |
-| `sandbox_policy` | `"strict"` | Seccomp sandbox policy: `"strict"`, `"permissive"`, or `"disabled"` |
+| `core_tools_dir` | `"/tmp/agentos/tools/core"` | Directory containing built-in tool manifests |
+| `user_tools_dir` | `"/tmp/agentos/tools/user"` | Directory for user-installed tool manifests |
+| `data_dir` | `"/tmp/agentos/data"` | Agent data directory root |
 
 ### `[bus]` — IPC socket
 
@@ -100,42 +99,55 @@ The default development configuration lives at `config/default.toml`. All paths 
 |-----|---------|-------------|
 | `socket_path` | `"/tmp/agentos/agentos.sock"` | Unix domain socket for CLI ↔ kernel communication |
 
-### `[llm]` — LLM provider configuration
+### `[ollama]` — Ollama LLM provider
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `ollama_host` | `"http://localhost:11434"` | Ollama API endpoint |
+| `host` | `"http://localhost:11434"` | Ollama API endpoint |
 | `default_model` | `"llama3.2"` | Default model for Ollama inference |
 
-### `[memory]` — Memory subsystem
+### `[llm]` — Cloud LLM provider endpoints
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `extraction_enabled` | `true` | Auto-extract memories from task results |
-| `consolidation_interval_secs` | `3600` | How often (seconds) to consolidate episodic → semantic memory |
+| `openai_base_url` | `"https://api.openai.com/v1"` | OpenAI API endpoint |
+| `anthropic_base_url` | `"https://api.anthropic.com/v1"` | Anthropic API endpoint |
+| `gemini_base_url` | `"https://generativelanguage.googleapis.com/v1beta"` | Gemini API endpoint |
 
-### `[context]` — Context window budget allocation
+### `[memory]` / `[memory.extraction]` / `[memory.consolidation]` — Memory subsystem
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `system_prompt_pct` | `15` | Percentage of token budget reserved for system prompt |
-| `tool_results_pct` | `18` | Percentage reserved for tool execution results |
-| `knowledge_pct` | `30` | Percentage reserved for retrieved knowledge/memory |
-| `history_pct` | `25` | Percentage reserved for conversation history |
-| `task_pct` | `12` | Percentage reserved for current task context |
+| `memory.model_cache_dir` | `"models"` | Directory for embedding model cache |
+| `memory.extraction.enabled` | `true` | Auto-extract memories from task results |
+| `memory.consolidation.enabled` | `true` | Enable episodic → semantic memory consolidation |
+| `memory.consolidation.time_trigger_hours` | `24` | Hours between consolidation cycles |
+
+### `[context_budget]` — Context window budget allocation
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `total_tokens` | `128000` | Total context window token budget |
+| `reserve_pct` | `0.25` | Fraction reserved for response generation |
+| `system_pct` | `0.15` | Fraction reserved for system prompt |
+| `tools_pct` | `0.18` | Fraction reserved for tool execution results |
+| `knowledge_pct` | `0.30` | Fraction reserved for retrieved knowledge/memory |
+| `history_pct` | `0.25` | Fraction reserved for conversation history |
+| `task_pct` | `0.12` | Fraction reserved for current task context |
 
 > [!note]
-> Budget percentages sum to 100%. The context manager uses these to allocate the `token_budget` across entry types, compressing or evicting lower-priority entries when a category overflows.
+> Budget fractions are proportional weights, not strict percentages. The context manager uses these to allocate the `total_tokens` budget across entry types, compressing or evicting lower-priority entries when a category overflows.
 
-### `[health]` — System health monitoring
+### `[health_monitor]` — System health monitoring
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `enabled` | `true` | Enable periodic health checks |
-| `interval_secs` | `30` | Health check interval |
-| `cpu_threshold_pct` | `90` | CPU usage warning threshold |
-| `memory_threshold_pct` | `85` | Memory usage warning threshold |
-| `disk_threshold_pct` | `95` | Disk usage warning threshold |
+| `check_interval_secs` | `30` | Health check interval |
+| `thresholds.cpu_warning_percent` | `85.0` | CPU usage warning threshold |
+| `thresholds.memory_warning_percent` | `80.0` | Memory usage warning threshold |
+| `thresholds.disk_warning_percent` | `85.0` | Disk usage warning threshold |
+| `thresholds.disk_critical_percent` | `95.0` | Disk usage critical threshold |
 
 ---
 
@@ -147,17 +159,17 @@ Production configuration lives at `config/production.toml`. It uses persistent p
 
 | Setting | Development | Production |
 |---------|------------|------------|
-| `max_concurrent_tasks` | 4 | 8 |
-| `task_timeout_secs` | 60 | 120 |
-| `max_context_entries` | 100 | 200 |
-| `token_budget` | 8000 | 16000 |
-| `vault.db_path` | `/tmp/agentos/vault.db` | `/var/lib/agentos/vault.db` |
-| `audit.db_path` | `/tmp/agentos/audit.db` | `/var/lib/agentos/audit.db` |
-| `audit.max_entries` | 100,000 | 500,000 |
+| `kernel.max_concurrent_tasks` | 4 | 8 |
+| `kernel.default_task_timeout_secs` | 60 | 120 |
+| `kernel.context_window_max_entries` | 100 | 200 |
+| `kernel.context_window_token_budget` | 8000 | 16000 |
+| `secrets.vault_path` | `/tmp/agentos/vault/secrets.db` | `/var/lib/agentos/vault/secrets.db` |
+| `audit.log_path` | `/tmp/agentos/data/audit.db` | `/var/lib/agentos/data/audit.db` |
+| `audit.max_audit_entries` | 0 (unlimited) | 500,000 |
 | `bus.socket_path` | `/tmp/agentos/agentos.sock` | `/run/agentos/agentos.sock` |
-| `tools.core_dir` | `tools/core` | `/var/lib/agentos/tools/core` |
-| `tools.user_dir` | `tools/user` | `/var/lib/agentos/tools/user` |
-| `llm.ollama_host` | `http://localhost:11434` | `http://ollama.service.consul:11434` |
+| `tools.core_tools_dir` | `/tmp/agentos/tools/core` | `/var/lib/agentos/tools/core` |
+| `tools.user_tools_dir` | `/tmp/agentos/tools/user` | `/var/lib/agentos/tools/user` |
+| `ollama.host` | `http://localhost:11434` | `http://ollama.service.consul:11434` |
 
 Production also adds:
 
@@ -178,9 +190,6 @@ agentctl start
 
 # Using a specific config file
 agentctl --config config/production.toml start
-
-# Providing vault passphrase via argument (not recommended for production)
-agentctl start --vault-passphrase "my-secret-passphrase"
 
 # Providing vault passphrase via environment variable
 export AGENTOS_VAULT_PASSPHRASE="my-secret-passphrase"
@@ -227,9 +236,8 @@ Each subsystem auto-restarts on failure (up to 5 restarts per 60-second window).
 
 The vault passphrase is required to decrypt the secrets store. It is resolved in this order:
 
-1. `--vault-passphrase` CLI argument
-2. `AGENTOS_VAULT_PASSPHRASE` environment variable
-3. Interactive prompt (recommended for production)
+1. `AGENTOS_VAULT_PASSPHRASE` environment variable
+2. Interactive prompt (recommended for production)
 
 > [!warning]
 > Never store the vault passphrase in plain text files or shell history. Use the interactive prompt or a secrets manager to inject the environment variable.
@@ -249,8 +257,8 @@ ollama serve
 # Pull a model
 ollama pull llama3.2
 
-# Register an Ollama agent
-agentctl agent register --name "local-agent" --provider ollama --model llama3.2
+# Connect an Ollama agent
+agentctl agent connect --name "local-agent" --provider ollama --model llama3.2
 ```
 
 ### OpenAI
@@ -259,8 +267,8 @@ agentctl agent register --name "local-agent" --provider ollama --model llama3.2
 # Store your API key in the vault
 agentctl secret set openai-api-key
 
-# Register an OpenAI agent
-agentctl agent register --name "gpt-agent" --provider openai --model gpt-4
+# Connect an OpenAI agent
+agentctl agent connect --name "gpt-agent" --provider openai --model gpt-4
 ```
 
 ### Anthropic
@@ -269,8 +277,8 @@ agentctl agent register --name "gpt-agent" --provider openai --model gpt-4
 # Store your API key in the vault
 agentctl secret set anthropic-api-key
 
-# Register an Anthropic agent
-agentctl agent register --name "claude-agent" --provider anthropic --model claude-sonnet-4-20250514
+# Connect an Anthropic agent
+agentctl agent connect --name "claude-agent" --provider anthropic --model claude-sonnet-4-20250514
 ```
 
 ### Google Gemini
@@ -279,11 +287,11 @@ agentctl agent register --name "claude-agent" --provider anthropic --model claud
 # Store your API key in the vault
 agentctl secret set gemini-api-key
 
-# Register a Gemini agent
-agentctl agent register --name "gemini-agent" --provider gemini --model gemini-pro
+# Connect a Gemini agent
+agentctl agent connect --name "gemini-agent" --provider gemini --model gemini-pro
 ```
 
-After registration, verify your agents are connected:
+After connecting, verify your agents are listed:
 
 ```bash
 agentctl agent list
@@ -297,16 +305,13 @@ With an agent connected, you can run a task:
 
 ```bash
 # Run a simple task
-agentctl task run --agent local-agent --prompt "List the files in the current directory"
-
-# Run with a specific tool enabled
-agentctl task run --agent local-agent --prompt "Read the contents of README.md" --tools file-reader
+agentctl task run --agent local-agent "List the files in the current directory"
 
 # Check task status
 agentctl task list
 
-# View task output
-agentctl task show <task-id>
+# View task logs
+agentctl task logs <task-id>
 ```
 
 ---
@@ -338,12 +343,12 @@ Enter vault passphrase: ********
 [INFO] Bus server listening on /tmp/agentos/agentos.sock
 [INFO] Kernel started successfully
 
-# 4. Register an agent (separate terminal)
-$ ./target/debug/agentctl agent register --name "my-agent" --provider ollama --model llama3.2
-Agent registered: my-agent (id: a1b2c3d4-...)
+# 4. Connect an agent (separate terminal)
+$ ./target/debug/agentctl agent connect --name "my-agent" --provider ollama --model llama3.2
+Agent connected: my-agent (id: a1b2c3d4-...)
 
 # 5. Run a task
-$ ./target/debug/agentctl task run --agent my-agent --prompt "What is 2 + 2?"
+$ ./target/debug/agentctl task run --agent my-agent "What is 2 + 2?"
 Task created: t5e6f7g8-...
 Result: 2 + 2 = 4
 
@@ -355,9 +360,9 @@ Tasks: 1 completed, 0 pending
 Uptime: 45s
 
 # 7. View audit log
-$ ./target/debug/agentctl audit list --limit 5
+$ ./target/debug/agentctl audit logs --last 5
 [2026-03-16T10:00:01Z] KernelStarted
-[2026-03-16T10:00:15Z] AgentRegistered agent=my-agent
+[2026-03-16T10:00:15Z] AgentConnected agent=my-agent
 [2026-03-16T10:00:20Z] TaskCreated task=t5e6f7g8
 [2026-03-16T10:00:21Z] InferenceCompleted agent=my-agent tokens=42
 [2026-03-16T10:00:21Z] TaskCompleted task=t5e6f7g8

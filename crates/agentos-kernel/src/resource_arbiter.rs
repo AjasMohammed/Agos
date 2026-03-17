@@ -2,6 +2,22 @@ use agentos_types::AgentID;
 use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::sync::{Mutex, RwLock};
 
+/// Notification emitted when a lower-priority holder is preempted to resolve a deadlock.
+#[derive(Debug, Clone)]
+pub struct PreemptionNotification {
+    pub preempted_agent: AgentID,
+    pub preempting_agent: AgentID,
+    pub resource_id: String,
+}
+
+/// Notification emitted when a deadlock cycle is detected and the request is rejected.
+#[derive(Debug, Clone)]
+pub struct DeadlockNotification {
+    pub blocked_agent: AgentID,
+    pub holder_agent: AgentID,
+    pub resource_id: String,
+}
+
 /// Lock mode for a resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockMode {
@@ -83,9 +99,13 @@ impl ResourceState {
             return false;
         }
         if let Some(acquired) = self.acquired_at {
+            // Use max(0) before the cast: a backwards NTP clock adjustment can
+            // produce a negative duration, and casting a negative i64 to u64 wraps
+            // to a huge number, which would falsely expire the lock.
             let elapsed = chrono::Utc::now()
                 .signed_duration_since(acquired)
-                .num_seconds() as u64;
+                .num_seconds()
+                .max(0) as u64;
             return elapsed >= self.ttl_seconds;
         }
         false
@@ -175,6 +195,15 @@ pub struct ResourceArbiter {
     /// Protected by a std::sync::Mutex so it can be accessed from both async
     /// and sync (wake_waiters) call sites without holding an await point.
     wait_for: std::sync::Mutex<HashMap<AgentID, AgentID>>,
+    /// Optional channel for notifying the kernel of preemption/deadlock events.
+    arbiter_sender: Option<tokio::sync::mpsc::Sender<ArbiterNotification>>,
+}
+
+/// Notification types emitted by the resource arbiter.
+#[derive(Debug, Clone)]
+pub enum ArbiterNotification {
+    Preemption(PreemptionNotification),
+    Deadlock(DeadlockNotification),
 }
 
 impl ResourceArbiter {
@@ -182,7 +211,13 @@ impl ResourceArbiter {
         Self {
             resources: RwLock::new(HashMap::new()),
             wait_for: std::sync::Mutex::new(HashMap::new()),
+            arbiter_sender: None,
         }
+    }
+
+    /// Set the notification sender for preemption and deadlock events.
+    pub fn set_arbiter_sender(&mut self, sender: tokio::sync::mpsc::Sender<ArbiterNotification>) {
+        self.arbiter_sender = Some(sender);
     }
 
     /// Returns `true` if adding the edge `waiter → holder` would introduce a
@@ -284,6 +319,18 @@ impl ResourceArbiter {
                             holder_priority = state.holder_priority,
                             "Preempting lower-priority holder to resolve deadlock"
                         );
+                        // Notify kernel of preemption
+                        if let Some(ref sender) = self.arbiter_sender {
+                            if let Err(e) = sender.try_send(ArbiterNotification::Preemption(
+                                PreemptionNotification {
+                                    preempted_agent: holder,
+                                    preempting_agent: agent_id,
+                                    resource_id: resource_id.to_string(),
+                                },
+                            )) {
+                                tracing::warn!(error = %e, "Failed to send preemption notification (channel full or closed)");
+                            }
+                        }
                         state.release_all();
                         // Remove preempted holder from wait-for graph
                         wf.remove(&holder);
@@ -294,6 +341,18 @@ impl ResourceArbiter {
                         if state.try_grant_with_priority(agent_id, mode, ttl_seconds, priority) {
                             drop(tx);
                             return Ok(());
+                        }
+                    }
+                    // Notify kernel of deadlock detection
+                    if let Some(ref sender) = self.arbiter_sender {
+                        if let Err(e) =
+                            sender.try_send(ArbiterNotification::Deadlock(DeadlockNotification {
+                                blocked_agent: agent_id,
+                                holder_agent: holder,
+                                resource_id: resource_id.to_string(),
+                            }))
+                        {
+                            tracing::warn!(error = %e, "Failed to send deadlock notification (channel full or closed)");
                         }
                     }
                     return Err(format!(
@@ -322,8 +381,16 @@ impl ResourceArbiter {
             .map_err(|_| format!("Lock wait for '{}' was cancelled", resource_id))?;
 
         // Regardless of outcome, remove the wait edge (we are no longer waiting)
-        if let Ok(mut wf) = self.wait_for.lock() {
-            wf.remove(&agent_id);
+        match self.wait_for.lock() {
+            Ok(mut wf) => {
+                wf.remove(&agent_id);
+            }
+            Err(_) => {
+                tracing::error!(
+                    agent_id = %agent_id,
+                    "wait_for graph lock poisoned; wait edge for agent may be stale"
+                );
+            }
         }
 
         result
@@ -363,8 +430,16 @@ impl ResourceArbiter {
     /// Release all locks held by an agent (called on agent disconnect or task failure).
     pub async fn release_all_for_agent(&self, agent_id: AgentID) {
         // Also remove any wait edge for this agent (in case it was queued but cancelled)
-        if let Ok(mut wf) = self.wait_for.lock() {
-            wf.remove(&agent_id);
+        match self.wait_for.lock() {
+            Ok(mut wf) => {
+                wf.remove(&agent_id);
+            }
+            Err(_) => {
+                tracing::error!(
+                    agent_id = %agent_id,
+                    "wait_for graph lock poisoned; wait edge for agent may be stale"
+                );
+            }
         }
         let resources = self.resources.read().await;
         for mutex in resources.values() {
@@ -397,8 +472,16 @@ impl ResourceArbiter {
                 // Grant succeeded — pop and notify
                 if let Some(w) = state.waiters.pop_front() {
                     // Remove from wait-for graph: agent is no longer waiting
-                    if let Ok(mut wf) = self.wait_for.lock() {
-                        wf.remove(&w.agent_id);
+                    match self.wait_for.lock() {
+                        Ok(mut wf) => {
+                            wf.remove(&w.agent_id);
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                agent_id = %w.agent_id,
+                                "wait_for graph lock poisoned; wait edge for agent may be stale"
+                            );
+                        }
                     }
                     let _ = w.notify.send(Ok(()));
                 }

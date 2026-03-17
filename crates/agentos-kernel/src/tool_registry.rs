@@ -19,6 +19,11 @@ pub enum ToolLifecycleEvent {
         tool_id: ToolID,
         tool_name: String,
     },
+    ChecksumMismatch {
+        tool_name: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 pub struct ToolRegistry {
@@ -92,7 +97,18 @@ impl ToolRegistry {
     /// Returns an error if the manifest is `Blocked`, the author key is revoked,
     /// or if a `Community`/`Verified` manifest has a missing or invalid Ed25519 signature.
     pub fn register(&mut self, manifest: ToolManifest) -> Result<ToolID, AgentOSError> {
-        verify_manifest_with_crl(&manifest, &self.crl)?;
+        if let Err(e) = verify_manifest_with_crl(&manifest, &self.crl) {
+            if let AgentOSError::ToolSignatureInvalid { .. } = &e {
+                if let Some(ref sender) = self.lifecycle_sender {
+                    let _ = sender.try_send(ToolLifecycleEvent::ChecksumMismatch {
+                        tool_name: manifest.manifest.name.clone(),
+                        expected: manifest.manifest.checksum.clone().unwrap_or_default(),
+                        actual: e.to_string(),
+                    });
+                }
+            }
+            return Err(e);
+        }
 
         let tool_id = ToolID::new();
         let name = manifest.manifest.name.clone();
@@ -180,6 +196,39 @@ mod tests {
     use super::*;
     use agentos_types::tool::{ToolCapabilities, ToolInfo, ToolOutputs, ToolSchema};
     use tokio::sync::mpsc;
+
+    fn make_community_manifest_bad_sig(name: &str) -> ToolManifest {
+        ToolManifest {
+            manifest: ToolInfo {
+                name: name.to_string(),
+                version: "0.1.0".to_string(),
+                description: format!("Test community tool {}", name),
+                author: "test".to_string(),
+                checksum: Some("deadbeef".to_string()),
+                author_pubkey: Some("notavalidpubkey".to_string()),
+                signature: Some("notavalidsig".to_string()),
+                trust_tier: TrustTier::Community,
+            },
+            capabilities_required: ToolCapabilities {
+                permissions: vec![],
+            },
+            capabilities_provided: ToolOutputs { outputs: vec![] },
+            intent_schema: ToolSchema {
+                input: "TestInput".to_string(),
+                output: "TestOutput".to_string(),
+            },
+            input_schema: None,
+            sandbox: ToolSandbox {
+                network: false,
+                fs_write: false,
+                gpu: false,
+                max_memory_mb: 64,
+                max_cpu_ms: 5000,
+                syscalls: vec![],
+            },
+            executor: ToolExecutor::default(),
+        }
+    }
 
     fn make_core_manifest(name: &str) -> ToolManifest {
         ToolManifest {
@@ -301,5 +350,29 @@ mod tests {
         registry.remove("tool-a").unwrap();
         assert_eq!(registry.loaded.len(), 1);
         assert_eq!(registry.loaded[0].manifest.manifest.name, "tool-b");
+    }
+
+    #[test]
+    fn register_sends_checksum_mismatch_notification_on_invalid_signature() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut registry = ToolRegistry::new();
+        registry.set_lifecycle_sender(tx);
+        let manifest = make_community_manifest_bad_sig("bad-sig-tool");
+        let result = registry.register(manifest);
+        assert!(result.is_err(), "register should fail on invalid signature");
+        let event = rx
+            .try_recv()
+            .expect("should receive ChecksumMismatch notification");
+        match event {
+            ToolLifecycleEvent::ChecksumMismatch {
+                tool_name,
+                expected,
+                ..
+            } => {
+                assert_eq!(tool_name, "bad-sig-tool");
+                assert_eq!(expected, "deadbeef");
+            }
+            _ => panic!("Expected ChecksumMismatch variant, got {:?}", event),
+        }
     }
 }

@@ -1,0 +1,17 @@
+{# Requires an ancestor element with x-data="{ showRun: false, selectedPipeline: '' }" (see pipelines.html) #}
+{% for pipeline in pipelines %}
+<tr>
+    <td><strong>{{ pipeline.name }}</strong></td>
+    <td>{{ pipeline.version }}</td>
+    <td>{{ pipeline.description|default("-", true) }}</td>
+    <td>{{ pipeline.step_count }}</td>
+    <td>{{ pipeline.installed_at }}</td>
+    <td>
+        <button class="outline small"
+                data-pipeline="{{ pipeline.name }}"
+                @click="showRun = true; selectedPipeline = $el.dataset.pipeline">
+            Run
+        </button>
+    </td>
+</tr>
+{% endfor %}

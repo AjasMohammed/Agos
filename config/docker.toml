@@ -21,7 +21,7 @@ data_dir = "/var/lib/agentos/data"
 
 [ollama]
 host = "http://ollama:11434"
-default_model = "llama3.2"
+default_model = "kimi-k2.5:cloud"
 
 [llm]
 openai_base_url = "https://api.openai.com/v1"

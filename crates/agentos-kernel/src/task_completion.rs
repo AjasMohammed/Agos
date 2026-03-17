@@ -71,7 +71,14 @@ impl Kernel {
             .scheduler
             .update_state_if_not_terminal(&task.id, TaskState::Complete)
             .await
-            .unwrap_or(false);
+            .unwrap_or_else(|e| {
+                tracing::error!(
+                    task_id = %task.id,
+                    error = %e,
+                    "Scheduler error during task completion state transition — completion events skipped"
+                );
+                false
+            });
 
         if completed {
             self.emit_event_with_trace(
@@ -89,20 +96,54 @@ impl Kernel {
             )
             .await;
 
+            // Read scheduled_job_id before complete() to avoid a second lock acquisition
+            let scheduled_job_id = self
+                .background_pool
+                .get_task(&task.id)
+                .await
+                .and_then(|bg| bg.scheduled_job_id);
+
             self.background_pool
                 .complete(&task.id, serde_json::json!({ "result": result.answer }))
                 .await;
 
+            // If this was a scheduled task, emit ScheduledTaskCompleted
+            if let Some(schedule_id) = scheduled_job_id {
+                if let Some(job) = self.schedule_manager.get_job(&schedule_id).await {
+                    self.schedule_manager.emit_task_completed(&job).await;
+                }
+            }
+
             // Wake any parent tasks that were waiting on this child
             let waiters = self.scheduler.complete_dependency(task.id).await;
-            for waiter_id in waiters {
-                self.scheduler.requeue(&waiter_id).await.ok();
+            for waiter_id in &waiters {
+                self.emit_event_with_trace(
+                    EventType::DelegationResponseReceived,
+                    EventSource::TaskScheduler,
+                    EventSeverity::Info,
+                    serde_json::json!({
+                        "parent_task_id": waiter_id.to_string(),
+                        "child_task_id": task.id.to_string(),
+                        "child_agent_id": task.agent_id.to_string(),
+                        "outcome": "success",
+                    }),
+                    0,
+                    Some(task_trace_id),
+                )
+                .await;
+                self.scheduler.requeue(waiter_id).await.ok();
             }
 
             // Trigger consolidation bookkeeping in the background.
+            // Wire the kernel cancellation token so this task doesn't outlive
+            // a graceful shutdown.
             let consolidation = self.consolidation_engine.clone();
+            let token = self.cancellation_token.clone();
             tokio::spawn(async move {
-                consolidation.on_task_completed().await;
+                tokio::select! {
+                    _ = token.cancelled() => {}
+                    _ = consolidation.on_task_completed() => {}
+                }
             });
         } else {
             tracing::info!(
@@ -173,7 +214,14 @@ impl Kernel {
             .scheduler
             .update_state_if_not_terminal(&task.id, TaskState::Failed)
             .await
-            .unwrap_or(false);
+            .unwrap_or_else(|e| {
+                tracing::error!(
+                    task_id = %task.id,
+                    error = %e,
+                    "Scheduler error during task failure state transition — failure events skipped"
+                );
+                false
+            });
 
         if !failed {
             tracing::info!(
@@ -182,6 +230,28 @@ impl Kernel {
             );
             self.cleanup_task_subscriptions(&task.id).await;
             return;
+        }
+
+        // Emit TaskRetrying for retryable failure types (LLM transient errors).
+        // Note: the task is not actually retried in this code path — this signal
+        // indicates the failure *was* retryable, allowing subscribers to implement
+        // their own retry logic or alerting.
+        if reason == "llm_error" {
+            self.emit_event_with_trace(
+                EventType::TaskRetrying,
+                EventSource::TaskScheduler,
+                EventSeverity::Warning,
+                serde_json::json!({
+                    "task_id": task.id.to_string(),
+                    "agent_id": task.agent_id.to_string(),
+                    "reason": error_message,
+                    "retry_eligible": true,
+                    "action": "failed_without_retry",
+                }),
+                0,
+                Some(task_trace_id),
+            )
+            .await;
         }
 
         self.emit_event_with_trace(
@@ -199,9 +269,25 @@ impl Kernel {
         )
         .await;
 
+        // Read scheduled_job_id before fail() to avoid a second lock acquisition
+        let scheduled_job_id_on_failure = self
+            .background_pool
+            .get_task(&task.id)
+            .await
+            .and_then(|bg| bg.scheduled_job_id);
+
         self.background_pool
             .fail(&task.id, error_message.clone())
             .await;
+
+        // If this was a scheduled task, emit ScheduledTaskFailed
+        if let Some(schedule_id) = scheduled_job_id_on_failure {
+            if let Some(job) = self.schedule_manager.get_job(&schedule_id).await {
+                self.schedule_manager
+                    .emit_task_failed(&job, &error_message)
+                    .await;
+            }
+        }
 
         let failure_summary = format!(
             "Task failed: {}\nError: {}",
@@ -241,8 +327,22 @@ impl Kernel {
 
         // Clean up dependency edges even on failure
         let waiters = self.scheduler.complete_dependency(task.id).await;
-        for waiter_id in waiters {
-            self.scheduler.requeue(&waiter_id).await.ok();
+        for waiter_id in &waiters {
+            self.emit_event_with_trace(
+                EventType::DelegationResponseReceived,
+                EventSource::TaskScheduler,
+                EventSeverity::Info,
+                serde_json::json!({
+                    "parent_task_id": waiter_id.to_string(),
+                    "child_task_id": task.id.to_string(),
+                    "child_agent_id": task.agent_id.to_string(),
+                    "outcome": "failure",
+                }),
+                0,
+                Some(task_trace_id),
+            )
+            .await;
+            self.scheduler.requeue(waiter_id).await.ok();
         }
 
         self.cleanup_task_subscriptions(&task.id).await;

@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // empty' | { read -r f; [[ \"$f\" == *.rs ]] && cargo check --message-format=short 2>&1 | head -20 || true; }"
+          }
+        ]
+      }
+    ]
+  }
+}

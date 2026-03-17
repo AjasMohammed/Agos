@@ -381,6 +381,31 @@ impl Kernel {
                         retrieval_blocks = knowledge_blocks.len(),
                         "Adaptive retrieval complete"
                     );
+                    // Emit MemorySearchFailed if retrieval returned no results for a non-trivial plan
+                    if retrieved.is_empty() {
+                        let chain_depth = task
+                            .trigger_source
+                            .as_ref()
+                            .map(|ts| ts.chain_depth + 1)
+                            .unwrap_or(0);
+                        self.emit_event_with_trace(
+                            EventType::MemorySearchFailed,
+                            EventSource::MemoryArbiter,
+                            EventSeverity::Warning,
+                            serde_json::json!({
+                                "agent_id": task.agent_id.to_string(),
+                                "task_id": task.id.to_string(),
+                                "search_type": "adaptive_retrieval",
+                                "query_count": retrieval_plan.queries.len(),
+                                "query_preview": retrieval_plan.queries.first()
+                                    .map(|q| q.query.chars().take(100).collect::<String>())
+                                    .unwrap_or_default(),
+                            }),
+                            chain_depth,
+                            Some(iteration_trace_id),
+                        )
+                        .await;
+                    }
                 }
                 if let Ok(blocks_context) = self.memory_blocks.blocks_for_context(&task.agent_id) {
                     if !blocks_context.is_empty() {
@@ -455,6 +480,23 @@ impl Kernel {
                         )
                         .await;
                         context_warning_emitted = true;
+
+                        // Emit ContextWindowExhausted at 100%
+                        if utilization >= 1.0 {
+                            self.emit_event_with_trace(
+                                EventType::ContextWindowExhausted,
+                                EventSource::ContextManager,
+                                EventSeverity::Critical,
+                                serde_json::json!({
+                                    "task_id": task.id.to_string(),
+                                    "agent_id": task.agent_id.to_string(),
+                                    "action": "context_window_full",
+                                }),
+                                chain_depth,
+                                Some(iteration_trace_id),
+                            )
+                            .await;
+                        }
                     }
                 }
             }
@@ -802,7 +844,8 @@ impl Kernel {
             }
 
             // Push assistant response into context
-            self.context_manager
+            if let Err(e) = self
+                .context_manager
                 .push_entry(
                     &task.id,
                     ContextEntry {
@@ -818,7 +861,9 @@ impl Kernel {
                     },
                 )
                 .await
-                .ok();
+            {
+                tracing::warn!(task_id = %task.id, error = %e, "Failed to push assistant response to context window");
+            }
 
             if let Err(e) = self
                 .episodic_memory
@@ -1621,10 +1666,32 @@ impl Kernel {
                             );
                             let tainted_result = serde_json::json!({ "output": wrapped });
 
-                            self.context_manager
+                            if let Ok(evicted) = self
+                                .context_manager
                                 .push_tool_result(&task.id, &tool_call.tool_name, &tainted_result)
                                 .await
-                                .ok();
+                            {
+                                if evicted > 0 {
+                                    let chain_depth = task
+                                        .trigger_source
+                                        .as_ref()
+                                        .map(|ts| ts.chain_depth + 1)
+                                        .unwrap_or(0);
+                                    self.emit_event_with_trace(
+                                        EventType::WorkingMemoryEviction,
+                                        EventSource::ContextManager,
+                                        EventSeverity::Info,
+                                        serde_json::json!({
+                                            "task_id": task.id.to_string(),
+                                            "agent_id": task.agent_id.to_string(),
+                                            "entries_evicted": evicted,
+                                        }),
+                                        chain_depth,
+                                        Some(trace_id),
+                                    )
+                                    .await;
+                                }
+                            }
 
                             // Structured memory extraction (non-blocking):
                             // parse typed tool output and write salient facts into semantic memory.
@@ -1755,6 +1822,65 @@ impl Kernel {
                                 Some(trace_id),
                             )
                             .await;
+
+                            // Detect sandbox violations and emit security events
+                            let error_msg = e.to_string().to_lowercase();
+                            if error_msg.contains("sandbox")
+                                || error_msg.contains("seccomp")
+                                || error_msg.contains("syscall denied")
+                            {
+                                self.emit_event_with_trace(
+                                    EventType::SandboxEscapeAttempt,
+                                    EventSource::SecurityEngine,
+                                    EventSeverity::Critical,
+                                    serde_json::json!({
+                                        "task_id": task.id.to_string(),
+                                        "agent_id": task.agent_id.to_string(),
+                                        "tool_name": tool_call.tool_name,
+                                        "violation": e.to_string(),
+                                    }),
+                                    chain_depth,
+                                    Some(trace_id),
+                                )
+                                .await;
+                                self.emit_event_with_trace(
+                                    EventType::ToolSandboxViolation,
+                                    EventSource::ToolRunner,
+                                    EventSeverity::Critical,
+                                    serde_json::json!({
+                                        "task_id": task.id.to_string(),
+                                        "agent_id": task.agent_id.to_string(),
+                                        "tool_name": tool_call.tool_name,
+                                        "violation": e.to_string(),
+                                    }),
+                                    chain_depth,
+                                    Some(trace_id),
+                                )
+                                .await;
+                            }
+
+                            // Detect resource quota violations
+                            if error_msg.contains("resource")
+                                || error_msg.contains("quota")
+                                || error_msg.contains("memory limit")
+                                || error_msg.contains("cpu limit")
+                                || error_msg.contains("oom")
+                            {
+                                self.emit_event_with_trace(
+                                    EventType::ToolResourceQuotaExceeded,
+                                    EventSource::ToolRunner,
+                                    EventSeverity::Warning,
+                                    serde_json::json!({
+                                        "task_id": task.id.to_string(),
+                                        "agent_id": task.agent_id.to_string(),
+                                        "tool_name": tool_call.tool_name,
+                                        "error": e.to_string(),
+                                    }),
+                                    chain_depth,
+                                    Some(trace_id),
+                                )
+                                .await;
+                            }
 
                             let error_result = serde_json::json!({
                                 "error": e.to_string()

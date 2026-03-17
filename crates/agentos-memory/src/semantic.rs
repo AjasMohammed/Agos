@@ -136,24 +136,22 @@ impl SemanticStore {
             AgentOSError::StorageError(format!("Failed to compute embedding: {}", e))
         })?;
 
-        let conn = self.conn.lock().map_err(|_| {
+        let mut conn = self.conn.lock().map_err(|_| {
             AgentOSError::StorageError("Failed to lock semantic db for writing".to_string())
         })?;
 
-        conn.execute("BEGIN TRANSACTION", [])
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+        // Use rusqlite's Transaction so the DB is automatically rolled back on any
+        // early return (including panics), rather than relying on manual ROLLBACK calls.
+        let tx = conn.transaction().map_err(|e| {
+            AgentOSError::StorageError(format!("Failed to begin transaction: {}", e))
+        })?;
 
-        if let Err(e) = conn.execute(
+        tx.execute(
             "INSERT INTO semantic_memory (id, agent_id, key, content, created_at, updated_at, tags)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![mem_id, agent_id_str, key, content, now, now, tags_str],
-        ) {
-            conn.execute("ROLLBACK TRANSACTION", []).ok();
-            return Err(AgentOSError::StorageError(format!(
-                "Insert memory failed: {}",
-                e
-            )));
-        }
+        )
+        .map_err(|e| AgentOSError::StorageError(format!("Insert memory failed: {}", e)))?;
 
         for (i, (chunk_text, embedding_vec)) in chunks.iter().zip(embeddings).enumerate() {
             let chunk_id = Uuid::new_v4().to_string();
@@ -162,21 +160,17 @@ impl SemanticStore {
                 blob.extend_from_slice(&val.to_le_bytes());
             }
 
-            if let Err(e) = conn.execute(
+            tx.execute(
                 "INSERT INTO semantic_chunks (id, memory_id, chunk_index, content, embedding)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![chunk_id, mem_id, i, chunk_text, blob],
-            ) {
-                conn.execute("ROLLBACK TRANSACTION", []).ok();
-                return Err(AgentOSError::StorageError(format!(
-                    "Insert chunk failed: {}",
-                    e
-                )));
-            }
+            )
+            .map_err(|e| AgentOSError::StorageError(format!("Insert chunk failed: {}", e)))?;
         }
 
-        conn.execute("COMMIT TRANSACTION", [])
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+        tx.commit().map_err(|e| {
+            AgentOSError::StorageError(format!("Failed to commit transaction: {}", e))
+        })?;
 
         Ok(mem_id)
     }
@@ -264,25 +258,97 @@ impl SemanticStore {
 
         let use_fts = !fts_ranks.is_empty();
 
-        // Phase 2: Load chunk embeddings — only for FTS candidates, or recent chunks as fallback
-        let sql = if use_fts {
-            // Build a query that loads only the FTS-matched chunks
-            format!(
+        // Row mapper closure shared by both query paths.
+        let map_row = |row: &rusqlite::Row<'_>| {
+            let m_id: String = row.get(0)?;
+            let a_id: Option<String> = row.get(1)?;
+            let key: String = row.get(2)?;
+            let content: String = row.get(3)?;
+            let created_at: String = row.get(4)?;
+            let updated_at: String = row.get(5)?;
+            let tags_str: Option<String> = row.get(6)?;
+
+            let c_id: String = row.get(7)?;
+            let c_index: usize = row.get(8)?;
+            let c_content: String = row.get(9)?;
+            let blob: Vec<u8> = row.get(10)?;
+            let rowid: i64 = row.get(11)?;
+
+            let mut embedding = Vec::with_capacity(blob.len() / 4);
+            for bytes in blob.chunks_exact(4) {
+                embedding.push(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+            }
+
+            let parsed_agent_id =
+                a_id.map(|s| AgentID::from_uuid(Uuid::parse_str(&s).unwrap_or_default()));
+            let parsed_created = chrono::DateTime::parse_from_rfc3339(&created_at)
+                .unwrap_or_else(|_| chrono::Local::now().into())
+                .with_timezone(&Utc);
+            let parsed_updated = chrono::DateTime::parse_from_rfc3339(&updated_at)
+                .unwrap_or_else(|_| chrono::Local::now().into())
+                .with_timezone(&Utc);
+
+            Ok((
+                MemoryEntry {
+                    id: m_id.clone(),
+                    agent_id: parsed_agent_id,
+                    key,
+                    full_content: content,
+                    created_at: parsed_created,
+                    updated_at: parsed_updated,
+                    tags: serde_json::from_str(&tags_str.unwrap_or_default()).unwrap_or_default(),
+                },
+                MemoryChunk {
+                    id: c_id,
+                    memory_id: m_id,
+                    chunk_index: c_index,
+                    content: c_content,
+                },
+                embedding,
+                rowid,
+            ))
+        };
+
+        // Phase 2: Load chunk embeddings — only for FTS candidates, or recent chunks as fallback.
+        //
+        // For the FTS path: build a parameterized IN clause using ?N placeholders so that
+        // rowid values (which come from a prior SQLite FTS5 query, not user input) follow
+        // the same parameterized-query convention as the rest of the codebase.
+        let chunk_rows: Vec<(MemoryEntry, MemoryChunk, Vec<f32>, i64)> = if use_fts {
+            let rowids: Vec<i64> = fts_ranks.keys().copied().collect();
+            // agent_id_str is bound as ?1; rowids are bound as ?2..?N
+            let placeholders = (2..=rowids.len() + 1)
+                .map(|i| format!("?{}", i))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
                 "SELECT m.id, m.agent_id, m.key, m.content, m.created_at, m.updated_at, m.tags,
                         c.id, c.chunk_index, c.content, c.embedding, c.rowid
                  FROM semantic_chunks c
                  JOIN semantic_memory m ON c.memory_id = m.id
                  WHERE c.rowid IN ({})
                    AND (?1 IS NULL OR m.agent_id IS NULL OR m.agent_id = ?1)",
-                fts_ranks
-                    .keys()
-                    .map(|id| id.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
+                placeholders
+            );
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+            let mut bound: Vec<rusqlite::types::Value> = Vec::with_capacity(rowids.len() + 1);
+            bound.push(match &agent_id_str {
+                Some(s) => rusqlite::types::Value::Text(s.clone()),
+                None => rusqlite::types::Value::Null,
+            });
+            for id in &rowids {
+                bound.push(rusqlite::types::Value::Integer(*id));
+            }
+            let rows: Result<_, rusqlite::Error> = stmt
+                .query_map(rusqlite::params_from_iter(bound.iter()), map_row)
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?
+                .collect();
+            rows.map_err(|e| AgentOSError::StorageError(e.to_string()))?
         } else {
-            // Fallback: load most recent chunks (bounded)
-            format!(
+            // Fallback: load most recent chunks (bounded); LIMIT is a constant, not user input.
+            let sql = format!(
                 "SELECT m.id, m.agent_id, m.key, m.content, m.created_at, m.updated_at, m.tags,
                         c.id, c.chunk_index, c.content, c.embedding, c.rowid
                  FROM semantic_chunks c
@@ -291,71 +357,20 @@ impl SemanticStore {
                  ORDER BY c.rowid DESC
                  LIMIT {}",
                 Self::RECENCY_FALLBACK_LIMIT
-            )
+            );
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+            let rows: Result<_, rusqlite::Error> = stmt
+                .query_map(params![agent_id_str], map_row)
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?
+                .collect();
+            rows.map_err(|e| AgentOSError::StorageError(e.to_string()))?
         };
-
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
-
-        let chunk_rows = stmt
-            .query_map(params![agent_id_str], |row| {
-                let m_id: String = row.get(0)?;
-                let a_id: Option<String> = row.get(1)?;
-                let key: String = row.get(2)?;
-                let content: String = row.get(3)?;
-                let created_at: String = row.get(4)?;
-                let updated_at: String = row.get(5)?;
-                let tags_str: Option<String> = row.get(6)?;
-
-                let c_id: String = row.get(7)?;
-                let c_index: usize = row.get(8)?;
-                let c_content: String = row.get(9)?;
-                let blob: Vec<u8> = row.get(10)?;
-                let rowid: i64 = row.get(11)?;
-
-                let mut embedding = Vec::with_capacity(blob.len() / 4);
-                for bytes in blob.chunks_exact(4) {
-                    embedding.push(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
-                }
-
-                let parsed_agent_id =
-                    a_id.map(|s| AgentID::from_uuid(Uuid::parse_str(&s).unwrap_or_default()));
-                let parsed_created = chrono::DateTime::parse_from_rfc3339(&created_at)
-                    .unwrap_or_else(|_| chrono::Local::now().into())
-                    .with_timezone(&Utc);
-                let parsed_updated = chrono::DateTime::parse_from_rfc3339(&updated_at)
-                    .unwrap_or_else(|_| chrono::Local::now().into())
-                    .with_timezone(&Utc);
-
-                Ok((
-                    MemoryEntry {
-                        id: m_id.clone(),
-                        agent_id: parsed_agent_id,
-                        key,
-                        full_content: content,
-                        created_at: parsed_created,
-                        updated_at: parsed_updated,
-                        tags: serde_json::from_str(&tags_str.unwrap_or_default())
-                            .unwrap_or_default(),
-                    },
-                    MemoryChunk {
-                        id: c_id,
-                        memory_id: m_id,
-                        chunk_index: c_index,
-                        content: c_content,
-                    },
-                    embedding,
-                    rowid,
-                ))
-            })
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
 
         // Phase 3: Score chunks and apply RRF fusion
         let mut best_by_memory: HashMap<String, RecallResult> = HashMap::new();
-        for row in chunk_rows {
-            let (entry, chunk, embedding, rowid) =
-                row.map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+        for (entry, chunk, embedding, rowid) in chunk_rows {
             if embedding.len() != self.dimension {
                 continue;
             }

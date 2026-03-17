@@ -199,7 +199,7 @@ When a tool call is classified as `HardApproval` (Level 3):
 1. The kernel creates a `PendingEscalation` with details of the action
 2. The task transitions from `Running` to `Waiting`
 3. The escalation has a 5-minute expiration window
-4. A human operator must approve or deny via `agentctl escalation approve/deny`
+4. A human operator must resolve via `agentctl escalation resolve`
 5. On approval: task resumes from `Waiting` to `Running`
 6. On denial or expiration: task transitions to `Failed`
 
@@ -208,10 +208,10 @@ When a tool call is classified as `HardApproval` (Level 3):
 agentctl escalation list
 
 # Approve an escalation
-agentctl escalation approve <ESCALATION_ID>
+agentctl escalation resolve <ESCALATION_ID> --decision "Approved"
 
 # Deny an escalation
-agentctl escalation deny <ESCALATION_ID>
+agentctl escalation resolve <ESCALATION_ID> --decision "Denied"
 ```
 
 ---

@@ -2,7 +2,9 @@ use crate::agent_registry::AgentRegistry;
 use crate::context::ContextManager;
 use crate::kernel::Kernel;
 use crate::tool_registry::ToolRegistry;
+use agentos_audit::AuditLog;
 use agentos_bus::KernelResponse;
+use agentos_capability::CapabilityEngine;
 use agentos_hal::HardwareAbstractionLayer;
 use agentos_llm::LLMCore;
 use agentos_tools::runner::ToolRunner;
@@ -36,6 +38,25 @@ impl Kernel {
                     version = %definition.version,
                     "Pipeline installed"
                 );
+
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::IntentCompleted,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "action": "pipeline_installed",
+                        "pipeline_name": definition.name,
+                        "pipeline_version": definition.version,
+                        "steps": definition.steps.len(),
+                    }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+
                 KernelResponse::Success {
                     data: Some(serde_json::json!({
                         "name": definition.name,
@@ -50,12 +71,39 @@ impl Kernel {
         }
     }
 
+    /// Resolve the pipeline's governing agent from the provided `agent_name`.
+    /// Returns the agent's `AgentID` or a `KernelResponse::Error`.
+    async fn resolve_pipeline_agent(
+        &self,
+        agent_name: &Option<String>,
+    ) -> Result<AgentID, KernelResponse> {
+        let name = agent_name.as_deref().ok_or_else(|| KernelResponse::Error {
+            message: "Pipeline execution requires --agent <name> to specify the governing agent"
+                .to_string(),
+        })?;
+
+        let registry = self.agent_registry.read().await;
+        let agent = registry
+            .get_by_name(name)
+            .ok_or_else(|| KernelResponse::Error {
+                message: format!("Agent '{}' not found for pipeline execution", name),
+            })?;
+        Ok(agent.id)
+    }
+
     pub(crate) async fn cmd_run_pipeline(
         &self,
         name: String,
         input: String,
         detach: bool,
+        agent_name: Option<String>,
     ) -> KernelResponse {
+        // Resolve the governing agent — required for permission enforcement.
+        let agent_id = match self.resolve_pipeline_agent(&agent_name).await {
+            Ok(id) => id,
+            Err(resp) => return resp,
+        };
+
         let yaml = match self.pipeline_engine.store().get_pipeline_yaml(&name) {
             Ok(y) => y,
             Err(e) => {
@@ -76,6 +124,26 @@ impl Kernel {
 
         let run_id = agentos_types::RunID::new();
 
+        // Audit: pipeline run started
+        self.audit_log(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: agentos_audit::AuditEventType::IntentReceived,
+            agent_id: Some(agent_id),
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({
+                "action": "pipeline_run_started",
+                "pipeline_name": name,
+                "run_id": run_id.to_string(),
+                "detach": detach,
+                "agent_name": agent_name,
+            }),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
+
         if detach {
             let executor = OwnedPipelineExecutor {
                 agent_registry: self.agent_registry.clone(),
@@ -87,7 +155,11 @@ impl Kernel {
                 data_dir: self.data_dir.clone(),
                 context_manager: self.context_manager.clone(),
                 cost_tracker: self.cost_tracker.clone(),
-                agent_id: AgentID::new(),
+                agent_id,
+                capability_engine: self.capability_engine.clone(),
+                injection_scanner: self.injection_scanner.clone(),
+                event_sender: self.event_sender.clone(),
+                audit: self.audit.clone(),
             };
 
             let engine = self.pipeline_engine.clone();
@@ -99,7 +171,7 @@ impl Kernel {
             let bg_task = BackgroundTask {
                 id: task_id,
                 name: format!("pipeline:{}", pipeline_name),
-                agent_name: "pipeline-engine".to_string(),
+                agent_name: agent_name.unwrap_or_else(|| "pipeline-engine".to_string()),
                 task_prompt: format!(
                     "Run pipeline '{}' with input: {}",
                     pipeline_name, input_clone
@@ -109,6 +181,7 @@ impl Kernel {
                 completed_at: None,
                 result: None,
                 detached: true,
+                scheduled_job_id: None,
             };
             bg_pool.register(bg_task).await;
 
@@ -138,7 +211,7 @@ impl Kernel {
         } else {
             let executor = KernelPipelineExecutor {
                 kernel: self,
-                agent_id: AgentID::new(),
+                agent_id,
             };
 
             match self
@@ -231,6 +304,23 @@ impl Kernel {
         match self.pipeline_engine.store().remove_pipeline(&name) {
             Ok(()) => {
                 tracing::info!(pipeline = %name, "Pipeline removed");
+
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::IntentCompleted,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "action": "pipeline_removed",
+                        "pipeline_name": name,
+                    }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+
                 KernelResponse::Success {
                     data: Some(serde_json::json!({ "removed": name })),
                 }
@@ -252,6 +342,8 @@ pub(crate) struct KernelPipelineExecutor<'a> {
 #[async_trait::async_trait]
 impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
     async fn run_agent_task(&self, agent_name: &str, prompt: &str) -> Result<String, AgentOSError> {
+        // Delegate to cmd_run_task which already has full security:
+        // capability token issuance, injection scanning, intent validation, audit logging.
         let response = self
             .kernel
             .cmd_run_task(Some(agent_name.to_string()), prompt.to_string())
@@ -274,12 +366,29 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
         tool_name: &str,
         input: serde_json::Value,
     ) -> Result<String, AgentOSError> {
+        // Resolve the agent's actual permissions from the capability engine.
+        // Fail hard if the agent has no registered permissions — never fall back to empty.
+        let permissions = self
+            .kernel
+            .capability_engine
+            .get_permissions(&self.agent_id)
+            .map_err(|e| AgentOSError::PermissionDenied {
+                resource: "pipeline_tool_execution".into(),
+                operation: format!(
+                    "Agent {} has no registered permissions: {}",
+                    self.agent_id, e
+                ),
+            })?;
+
+        let trace_id = TraceID::new();
+        let task_id = TaskID::new();
+
         let context = ToolExecutionContext {
             data_dir: self.kernel.data_dir.clone(),
-            task_id: TaskID::new(),
-            agent_id: AgentID::new(),
-            trace_id: TraceID::new(),
-            permissions: PermissionSet::new(),
+            task_id,
+            agent_id: self.agent_id,
+            trace_id,
+            permissions,
             vault: Some(std::sync::Arc::new(agentos_vault::ProxyVault::new(
                 self.kernel.vault.clone(),
             ))),
@@ -287,11 +396,69 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
             file_lock_registry: None,
         };
 
+        // Audit: tool execution started
+        self.kernel.audit_log(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id,
+            event_type: agentos_audit::AuditEventType::ToolExecutionStarted,
+            agent_id: Some(self.agent_id),
+            task_id: Some(task_id),
+            tool_id: None,
+            details: serde_json::json!({
+                "tool_name": tool_name,
+                "source": "pipeline",
+            }),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
+
         let result = self
             .kernel
             .tool_runner
             .execute(tool_name, input, context)
-            .await?;
+            .await;
+
+        // Audit: tool execution completed/failed
+        match &result {
+            Ok(_) => {
+                self.kernel.audit_log(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id,
+                    event_type: agentos_audit::AuditEventType::ToolExecutionCompleted,
+                    agent_id: Some(self.agent_id),
+                    task_id: Some(task_id),
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "tool_name": tool_name,
+                        "source": "pipeline",
+                    }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+            }
+            Err(e) => {
+                self.kernel.audit_log(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id,
+                    event_type: agentos_audit::AuditEventType::ToolExecutionFailed,
+                    agent_id: Some(self.agent_id),
+                    task_id: Some(task_id),
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "tool_name": tool_name,
+                        "source": "pipeline",
+                        "error": e.to_string(),
+                    }),
+                    severity: agentos_audit::AuditSeverity::Warn,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+            }
+        }
+
+        let result = result?;
         Ok(serde_json::to_string(&result).unwrap_or_default())
     }
 
@@ -338,6 +505,11 @@ pub(crate) struct OwnedPipelineExecutor {
     pub(crate) context_manager: Arc<ContextManager>,
     pub(crate) cost_tracker: Arc<crate::cost_tracker::CostTracker>,
     pub(crate) agent_id: AgentID,
+    // Security subsystems — required for permission enforcement and audit trail.
+    pub(crate) capability_engine: Arc<CapabilityEngine>,
+    pub(crate) injection_scanner: Arc<crate::injection_scanner::InjectionScanner>,
+    pub(crate) event_sender: tokio::sync::mpsc::Sender<agentos_types::EventMessage>,
+    pub(crate) audit: Arc<AuditLog>,
 }
 
 #[async_trait::async_trait]
@@ -369,6 +541,27 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
         );
 
         let task_id = TaskID::new();
+        let trace_id = TraceID::new();
+
+        // Emit TaskStarted event
+        crate::event_dispatch::emit_signed_event(
+            &self.capability_engine,
+            &self.audit,
+            &self.event_sender,
+            EventType::TaskStarted,
+            EventSource::TaskScheduler,
+            EventSeverity::Info,
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "agent_name": agent_name,
+                "source": "pipeline",
+            }),
+            0,
+            trace_id,
+            Some(agent.id),
+            Some(task_id),
+        );
+
         self.context_manager
             .create_context(task_id, &system_prompt)
             .await;
@@ -390,17 +583,138 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
             .await
             .ok();
 
-        let context = self
-            .context_manager
-            .get_context(&task_id)
-            .await
-            .map_err(|e| AgentOSError::KernelError {
-                reason: format!("Context error: {}", e),
-            })?;
+        let context = match self.context_manager.get_context(&task_id).await {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                self.context_manager.remove_context(&task_id).await;
+                crate::event_dispatch::emit_signed_event(
+                    &self.capability_engine,
+                    &self.audit,
+                    &self.event_sender,
+                    EventType::TaskFailed,
+                    EventSource::TaskScheduler,
+                    EventSeverity::Warning,
+                    serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "agent_name": agent_name,
+                        "source": "pipeline",
+                        "error": e.to_string(),
+                    }),
+                    0,
+                    trace_id,
+                    Some(agent.id),
+                    Some(task_id),
+                );
+                return Err(AgentOSError::KernelError {
+                    reason: format!("Context error: {}", e),
+                });
+            }
+        };
 
-        let inference = llm.infer(&context).await?;
+        let inference = match llm.infer(&context).await {
+            Ok(r) => r,
+            Err(e) => {
+                self.context_manager.remove_context(&task_id).await;
+                crate::event_dispatch::emit_signed_event(
+                    &self.capability_engine,
+                    &self.audit,
+                    &self.event_sender,
+                    EventType::TaskFailed,
+                    EventSource::TaskScheduler,
+                    EventSeverity::Warning,
+                    serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "agent_name": agent_name,
+                        "source": "pipeline",
+                        "error": e.to_string(),
+                    }),
+                    0,
+                    trace_id,
+                    Some(agent.id),
+                    Some(task_id),
+                );
+                return Err(e);
+            }
+        };
+
+        // Scan inference output for injection attempts — block on high-threat matches.
+        let scan_result = self.injection_scanner.scan(&inference.text);
+        if scan_result.is_suspicious
+            && matches!(
+                scan_result.max_threat,
+                Some(crate::injection_scanner::ThreatLevel::High)
+            )
+        {
+            let match_count = scan_result.matches.len();
+
+            if let Err(e) = self.audit.append(agentos_audit::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id,
+                event_type: agentos_audit::AuditEventType::RiskEscalation,
+                agent_id: Some(agent.id),
+                task_id: Some(task_id),
+                tool_id: None,
+                details: serde_json::json!({
+                    "source": "pipeline",
+                    "threat_level": "high",
+                    "matches": match_count,
+                }),
+                severity: agentos_audit::AuditSeverity::Warn,
+                reversible: false,
+                rollback_ref: None,
+            }) {
+                tracing::error!(error = %e, "Failed to write injection scan audit entry");
+            }
+
+            self.context_manager.remove_context(&task_id).await;
+
+            crate::event_dispatch::emit_signed_event(
+                &self.capability_engine,
+                &self.audit,
+                &self.event_sender,
+                EventType::TaskFailed,
+                EventSource::TaskScheduler,
+                EventSeverity::Warning,
+                serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "agent_name": agent_name,
+                    "source": "pipeline",
+                    "error": format!("injection scanner detected {} high-threat pattern(s)", match_count),
+                }),
+                0,
+                trace_id,
+                Some(agent.id),
+                Some(task_id),
+            );
+
+            return Err(AgentOSError::KernelError {
+                reason: format!(
+                    "Pipeline agent task blocked: injection scanner detected {} high-threat pattern(s) in LLM output",
+                    match_count
+                ),
+            });
+        }
 
         self.context_manager.remove_context(&task_id).await;
+
+        // Emit TaskCompleted event
+        crate::event_dispatch::emit_signed_event(
+            &self.capability_engine,
+            &self.audit,
+            &self.event_sender,
+            EventType::TaskCompleted,
+            EventSource::TaskScheduler,
+            EventSeverity::Info,
+            serde_json::json!({
+                "task_id": task_id.to_string(),
+                "agent_name": agent_name,
+                "source": "pipeline",
+            }),
+            0,
+            trace_id,
+            Some(agent.id),
+            Some(task_id),
+        );
 
         Ok(inference.text)
     }
@@ -410,12 +724,28 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
         tool_name: &str,
         input: serde_json::Value,
     ) -> Result<String, AgentOSError> {
+        // Resolve the agent's actual permissions from the capability engine.
+        // Fail hard if the agent has no registered permissions — never fall back to empty.
+        let permissions = self
+            .capability_engine
+            .get_permissions(&self.agent_id)
+            .map_err(|e| AgentOSError::PermissionDenied {
+                resource: "pipeline_tool_execution".into(),
+                operation: format!(
+                    "Agent {} has no registered permissions: {}",
+                    self.agent_id, e
+                ),
+            })?;
+
+        let trace_id = TraceID::new();
+        let task_id = TaskID::new();
+
         let context = ToolExecutionContext {
             data_dir: self.data_dir.clone(),
-            task_id: TaskID::new(),
-            agent_id: AgentID::new(),
-            trace_id: TraceID::new(),
-            permissions: PermissionSet::new(),
+            task_id,
+            agent_id: self.agent_id,
+            trace_id,
+            permissions,
             vault: Some(std::sync::Arc::new(agentos_vault::ProxyVault::new(
                 self.vault.clone(),
             ))),
@@ -423,7 +753,71 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
             file_lock_registry: None,
         };
 
-        let result = self.tool_runner.execute(tool_name, input, context).await?;
+        // Audit: tool execution started
+        if let Err(e) = self.audit.append(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id,
+            event_type: agentos_audit::AuditEventType::ToolExecutionStarted,
+            agent_id: Some(self.agent_id),
+            task_id: Some(task_id),
+            tool_id: None,
+            details: serde_json::json!({
+                "tool_name": tool_name,
+                "source": "pipeline",
+            }),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        }) {
+            tracing::error!(error = %e, "Failed to write tool audit entry");
+        }
+
+        let result = self.tool_runner.execute(tool_name, input, context).await;
+
+        // Audit: tool execution completed/failed
+        match &result {
+            Ok(_) => {
+                if let Err(e) = self.audit.append(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id,
+                    event_type: agentos_audit::AuditEventType::ToolExecutionCompleted,
+                    agent_id: Some(self.agent_id),
+                    task_id: Some(task_id),
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "tool_name": tool_name,
+                        "source": "pipeline",
+                    }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                }) {
+                    tracing::error!(error = %e, "Failed to write tool completion audit entry");
+                }
+            }
+            Err(err) => {
+                if let Err(e) = self.audit.append(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id,
+                    event_type: agentos_audit::AuditEventType::ToolExecutionFailed,
+                    agent_id: Some(self.agent_id),
+                    task_id: Some(task_id),
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "tool_name": tool_name,
+                        "source": "pipeline",
+                        "error": err.to_string(),
+                    }),
+                    severity: agentos_audit::AuditSeverity::Warn,
+                    reversible: false,
+                    rollback_ref: None,
+                }) {
+                    tracing::error!(error = %e, "Failed to write tool failure audit entry");
+                }
+            }
+        }
+
+        let result = result?;
         Ok(serde_json::to_string(&result).unwrap_or_default())
     }
 

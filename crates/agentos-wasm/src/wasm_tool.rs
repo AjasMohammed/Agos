@@ -14,12 +14,42 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
-use wasmtime::{Engine, Linker, Module, Store};
+use wasmtime::{Engine, Linker, Module, ResourceLimiter, Store};
 use wasmtime_wasi::{
     p1::WasiP1Ctx,
     p2::pipe::{MemoryInputPipe, MemoryOutputPipe},
     WasiCtxBuilder,
 };
+
+/// Maximum WASM linear memory per module invocation (256 MiB).
+const MAX_WASM_MEMORY_BYTES: usize = 256 * 1024 * 1024;
+
+/// Store data that embeds the WASI context together with a memory limit guard.
+/// The `ResourceLimiter` impl prevents WASM modules from growing their linear
+/// memory beyond `MAX_WASM_MEMORY_BYTES`, protecting against OOM attacks.
+struct WasiState {
+    ctx: WasiP1Ctx,
+}
+
+impl ResourceLimiter for WasiState {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> anyhow::Result<bool> {
+        Ok(desired <= MAX_WASM_MEMORY_BYTES)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
+    ) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
 
 // ── RAII guard: deletes the output file when dropped ──────────────────────────
 
@@ -131,15 +161,19 @@ impl AgentTool for WasmTool {
             .build_p1();
 
         // 4. Set up Linker and Store.
-        let mut linker: Linker<WasiP1Ctx> = Linker::new(&self.engine);
-        wasmtime_wasi::p0::add_to_linker_async(&mut linker, |cx| cx).map_err(|e| {
-            AgentOSError::ToolExecutionFailed {
+        // Store data is WasiState which wraps WasiP1Ctx and implements ResourceLimiter
+        // to enforce the MAX_WASM_MEMORY_BYTES cap on linear memory growth.
+        let mut linker: Linker<WasiState> = Linker::new(&self.engine);
+        wasmtime_wasi::p0::add_to_linker_async(&mut linker, |state| &mut state.ctx).map_err(
+            |e| AgentOSError::ToolExecutionFailed {
                 tool_name: self.name.clone(),
                 reason: format!("WASI linker setup failed: {}", e),
-            }
-        })?;
+            },
+        )?;
 
-        let mut store = Store::new(&self.engine, wasi_ctx);
+        let mut store = Store::new(&self.engine, WasiState { ctx: wasi_ctx });
+        // Enforce memory limit: prevent WASM modules from allocating beyond MAX_WASM_MEMORY_BYTES.
+        store.limiter(|state| state as &mut dyn ResourceLimiter);
         // Apply CPU time limit via epoch interruption.
         store.set_epoch_deadline(1);
         let engine_clone = Arc::clone(&self.engine);

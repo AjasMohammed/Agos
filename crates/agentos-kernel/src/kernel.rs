@@ -90,11 +90,17 @@ pub struct Kernel {
             tokio::sync::mpsc::Receiver<crate::schedule_manager::ScheduleNotification>,
         >,
     >,
+    /// Receiver for resource arbiter notifications (preemption/deadlock events).
+    pub(crate) arbiter_notification_receiver: Arc<
+        tokio::sync::Mutex<
+            tokio::sync::mpsc::Receiver<crate::resource_arbiter::ArbiterNotification>,
+        >,
+    >,
     /// Per-agent rate limiter: enforces command-rate limits across all connections per agent.
     pub(crate) per_agent_rate_limiter:
         Arc<tokio::sync::Mutex<crate::rate_limit::PerAgentRateLimiter>>,
     pub(crate) data_dir: PathBuf,
-    pub(crate) started_at: chrono::DateTime<chrono::Utc>,
+    pub started_at: chrono::DateTime<chrono::Utc>,
     /// Token used to signal graceful shutdown to all kernel loops.
     pub cancellation_token: CancellationToken,
 }
@@ -123,12 +129,21 @@ impl Kernel {
             "Kernel configuration loaded"
         );
 
-        // Ensure directories exist
+        // Ensure directories exist. The vault directory is created with 0o700 on Unix
+        // so other users on the same host cannot list or access the vault parent directory.
         if let Some(parent) = Path::new(&config.audit.log_path).parent() {
             std::fs::create_dir_all(parent)?;
         }
         if let Some(parent) = Path::new(&config.secrets.vault_path).parent() {
             std::fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(error = %e, path = ?parent, "Failed to set vault directory permissions to 0o700");
+                    });
+            }
         }
         std::fs::create_dir_all(Path::new(&config.tools.core_tools_dir))?;
         std::fs::create_dir_all(Path::new(&config.tools.user_tools_dir))?;
@@ -390,6 +405,10 @@ impl Kernel {
             .set_notification_sender(schedule_notif_sender)
             .await;
 
+        // Create notification channel for resource arbiter (preemption/deadlock events).
+        let (arbiter_notif_sender, arbiter_notif_receiver) =
+            tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
+
         let per_agent_rate_limit = config.kernel.per_agent_rate_limit;
 
         let kernel = Kernel {
@@ -429,7 +448,11 @@ impl Kernel {
             risk_classifier: Arc::new(crate::risk_classifier::RiskClassifier::new()),
             identity_manager,
             injection_scanner: Arc::new(crate::injection_scanner::InjectionScanner::new()),
-            resource_arbiter: Arc::new(crate::resource_arbiter::ResourceArbiter::new()),
+            resource_arbiter: {
+                let mut arbiter = crate::resource_arbiter::ResourceArbiter::new();
+                arbiter.set_arbiter_sender(arbiter_notif_sender);
+                Arc::new(arbiter)
+            },
             snapshot_manager,
             event_bus,
             task_scoped_subscriptions: Arc::new(RwLock::new(HashMap::new())),
@@ -439,6 +462,9 @@ impl Kernel {
             comm_notification_receiver: Arc::new(tokio::sync::Mutex::new(comm_notif_receiver)),
             schedule_notification_receiver: Arc::new(tokio::sync::Mutex::new(
                 schedule_notif_receiver,
+            )),
+            arbiter_notification_receiver: Arc::new(tokio::sync::Mutex::new(
+                arbiter_notif_receiver,
             )),
             per_agent_rate_limiter: Arc::new(tokio::sync::Mutex::new(
                 crate::rate_limit::PerAgentRateLimiter::new(per_agent_rate_limit),
@@ -477,5 +503,100 @@ impl Kernel {
     /// Exposed for integration testing; 0 means no rate-limit state is retained.
     pub async fn rate_limiter_tracked_count(&self) -> usize {
         self.per_agent_rate_limiter.lock().await.tracked_count()
+    }
+
+    /// Public API: Connect a new agent through the kernel command dispatch path.
+    pub async fn api_connect_agent(
+        &self,
+        name: String,
+        provider: LLMProvider,
+        model: String,
+        base_url: Option<String>,
+        roles: Vec<String>,
+    ) -> Result<(), String> {
+        match self
+            .cmd_connect_agent(name, provider, model, base_url, roles)
+            .await
+        {
+            agentos_bus::KernelResponse::Success { .. } => Ok(()),
+            agentos_bus::KernelResponse::Error { message } => Err(message),
+            _ => Err("Unexpected kernel response".to_string()),
+        }
+    }
+
+    /// Public API: Disconnect an agent by ID through the kernel command dispatch path.
+    pub async fn api_disconnect_agent(&self, agent_id: AgentID) -> Result<(), String> {
+        match self.cmd_disconnect_agent(agent_id).await {
+            agentos_bus::KernelResponse::Success { .. } => Ok(()),
+            agentos_bus::KernelResponse::Error { message } => Err(message),
+            _ => Err("Unexpected kernel response".to_string()),
+        }
+    }
+
+    /// Public API: Install a tool from a manifest path through the kernel command dispatch path.
+    pub async fn api_install_tool(&self, manifest_path: String) -> Result<(), String> {
+        match self.cmd_install_tool(manifest_path).await {
+            agentos_bus::KernelResponse::Success { .. } => Ok(()),
+            agentos_bus::KernelResponse::Error { message } => Err(message),
+            _ => Err("Unexpected kernel response".to_string()),
+        }
+    }
+
+    /// Public API: Remove a tool by name through the kernel command dispatch path.
+    pub async fn api_remove_tool(&self, tool_name: String) -> Result<(), String> {
+        match self.cmd_remove_tool(tool_name).await {
+            agentos_bus::KernelResponse::Success { .. } => Ok(()),
+            agentos_bus::KernelResponse::Error { message } => Err(message),
+            _ => Err("Unexpected kernel response".to_string()),
+        }
+    }
+
+    /// Public API: Set a secret through the kernel command dispatch path.
+    ///
+    /// NOTE: `value` is a plain `String`. The caller should zero any `ZeroizingString`
+    /// source before this frame is dropped. A future improvement is to accept
+    /// `ZeroizingString` here and propagate it through `cmd_set_secret`.
+    pub async fn api_set_secret(
+        &self,
+        name: String,
+        value: String,
+        scope: SecretScope,
+    ) -> Result<(), String> {
+        match self.cmd_set_secret(name, value, scope, None).await {
+            agentos_bus::KernelResponse::Success { .. } => Ok(()),
+            agentos_bus::KernelResponse::Error { message } => Err(message),
+            _ => Err("Unexpected kernel response".to_string()),
+        }
+    }
+
+    /// Public API: Revoke a secret through the kernel command dispatch path.
+    pub async fn api_revoke_secret(&self, name: String) -> Result<(), String> {
+        match self.cmd_revoke_secret(name).await {
+            agentos_bus::KernelResponse::Success { .. } => Ok(()),
+            agentos_bus::KernelResponse::Error { message } => Err(message),
+            _ => Err("Unexpected kernel response".to_string()),
+        }
+    }
+
+    /// Execute a pipeline with full security enforcement (agent resolution, permission
+    /// enforcement, injection scanning, audit logging).
+    ///
+    /// Public entry point for non-kernel callers such as the web server. Internally
+    /// delegates to `cmd_run_pipeline` so all security checks are applied identically
+    /// to CLI-initiated runs.
+    pub async fn run_pipeline(
+        &self,
+        name: String,
+        input: String,
+        detach: bool,
+        agent_name: Option<String>,
+    ) -> Result<serde_json::Value, String> {
+        match self.cmd_run_pipeline(name, input, detach, agent_name).await {
+            agentos_bus::KernelResponse::Success { data } => {
+                Ok(data.unwrap_or(serde_json::Value::Null))
+            }
+            agentos_bus::KernelResponse::Error { message } => Err(message),
+            _ => Err("Unexpected kernel response".to_string()),
+        }
     }
 }

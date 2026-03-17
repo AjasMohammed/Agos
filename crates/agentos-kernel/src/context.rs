@@ -58,15 +58,21 @@ impl ContextManager {
     ///
     /// Callers can check `drain_checkpoint_flag()` after pushing to learn if a
     /// snapshot should be taken before continuing.
+    /// Push an entry into a task's context window.
+    ///
+    /// Returns `Ok(evicted)` where `evicted` is the number of entries compressed/evicted
+    /// by token budget enforcement (0 if no eviction occurred).
     pub async fn push_entry(
         &self,
         task_id: &TaskID,
         entry: ContextEntry,
-    ) -> Result<(), AgentOSError> {
+    ) -> Result<usize, AgentOSError> {
         let mut windows = self.windows.write().await;
         match windows.get_mut(task_id) {
             Some(window) => {
+                let pre_count = window.entries.len();
                 window.push(entry);
+                let mut evicted = 0usize;
 
                 // Token budget enforcement
                 if self.token_budget > 0 {
@@ -97,10 +103,36 @@ impl ContextManager {
                     }
                 }
 
-                Ok(())
+                // Eviction happened if final entry count is less than pre_count + 1
+                let expected = pre_count + 1;
+                if window.entries.len() < expected {
+                    evicted = expected - window.entries.len();
+                }
+
+                Ok(evicted)
             }
             None => Err(AgentOSError::TaskNotFound(*task_id)),
         }
+    }
+
+    /// Check if the token budget is fully exhausted (100%) for a task.
+    pub async fn is_budget_exhausted(&self, task_id: &TaskID) -> bool {
+        if self.token_budget == 0 {
+            return false;
+        }
+        let windows = self.windows.read().await;
+        if let Some(window) = windows.get(task_id) {
+            let estimated = window.estimated_tokens();
+            estimated >= self.token_budget
+        } else {
+            false
+        }
+    }
+
+    /// Get the entry count for a task's context window.
+    pub async fn entry_count(&self, task_id: &TaskID) -> usize {
+        let windows = self.windows.read().await;
+        windows.get(task_id).map(|w| w.entries.len()).unwrap_or(0)
     }
 
     /// Returns `true` and clears the `needs_checkpoint` flag if the context
@@ -134,12 +166,14 @@ impl ContextManager {
     ///
     /// Error results get higher importance (0.8) since the agent needs to know
     /// what failed. Success results get moderate importance (0.5) that decays.
+    /// Returns `Ok(evicted_count)` where evicted_count is the number of entries
+    /// compressed/evicted by token budget enforcement (0 if none).
     pub async fn push_tool_result(
         &self,
         task_id: &TaskID,
         tool_name: &str,
         result: &serde_json::Value,
-    ) -> Result<(), AgentOSError> {
+    ) -> Result<usize, AgentOSError> {
         use agentos_tools::sanitize;
 
         let sanitized = sanitize::sanitize_tool_output(tool_name, result);

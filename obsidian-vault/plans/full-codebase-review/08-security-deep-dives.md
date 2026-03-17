@@ -6,7 +6,7 @@ tags:
   - adversarial
   - phase-8
 date: 2026-03-13
-status: planned
+status: complete
 effort: 3h
 priority: critical
 ---
@@ -98,9 +98,33 @@ Per-crate review catches implementation bugs. This phase asks: **"How would an a
 
 ---
 
+## Findings
+
+| File | Line(s) | Severity | Category | Description | Fix Applied |
+|------|---------|----------|----------|-------------|-------------|
+| `crates/agentos-kernel/src/injection_scanner.rs` | `scan()` | CRITICAL | Injection bypass | No Unicode NFKC normalization — attacker can use fullwidth chars (e.g., `ｉｇｎｏｒｅ`) to bypass all regex patterns | Yes — NFKC normalize before pattern matching |
+| `crates/agentos-kernel/src/injection_scanner.rs` | pattern list | CRITICAL | Encoded payload | No standalone base64 block detection — large base64 blobs can encode instructions without keyword prefix | Yes — added `encoded_base64_standalone` pattern (60+ char base64 runs) |
+| `crates/agentos-kernel/src/injection_scanner.rs` | `taint_wrap()` | WARNING | XML injection | `source` attribute interpolated without escaping — a tool name containing `"` could inject additional XML attributes | Yes — HTML-escape `source` (`&amp;`, `&quot;`, `&lt;`, `&gt;`) |
+| `crates/agentos-kernel/src/injection_scanner.rs` | pattern list | WARNING | Incomplete detection | Missing closing XML tag pattern `</system>`, `</admin>` etc. — closing tags alone can confuse LLM context | Yes — added `delimiter_fake_xml_close_tag` pattern |
+| `crates/agentos-vault/src/master_key.rs` | 20 | WARNING | Crypto | Argon2id `parallelism=1` — wastes multi-core hardware and reduces brute-force resistance | Yes — changed to `parallelism=4` (OWASP minimum) |
+| `crates/agentos-capability/src/engine.rs` | `boot()` | WARNING | Error handling | If vault persistence of signing key fails, error is logged but engine continues with new ephemeral key — tokens won't survive restart | INFO/Design — logged at `error!` level; tokens are short-lived by design |
+| `crates/agentos-kernel/src/commands/hal.rs` | all | WARNING | Authorization | HAL approve/deny/revoke commands have no caller authorization check | Deferred — protected by bus-level auth; full token-based HAL auth is spec item #9 |
+
+## Remaining Issues
+
+| Issue | Severity | Notes |
+|-------|----------|-------|
+| HAL command authorization | WARNING | Protected by bus auth today; proper token check deferred to spec #9 |
+| Signing key persistence failure not fatal | INFO | By design — short-lived tokens; error is surfaced in logs |
+
 ## Files Changed
 
-No files changed — read-only review phase.
+| File | Change |
+|------|--------|
+| `crates/agentos-kernel/src/injection_scanner.rs` | NFKC normalization, closing tag + standalone base64 patterns, `taint_wrap` escaping |
+| `crates/agentos-vault/src/master_key.rs` | Argon2id parallelism 1→4 |
+| `Cargo.toml` | Added `unicode-normalization = "0.1"` workspace dep |
+| `crates/agentos-kernel/Cargo.toml` | Added `unicode-normalization` dep |
 
 ## Dependencies
 

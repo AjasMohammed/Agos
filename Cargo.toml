@@ -54,10 +54,10 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # HTTP client (for Ollama adapter)
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 # Error handling
 thiserror = "2"
@@ -101,3 +101,6 @@ rustls-pemfile = "2"
 
 # System info
 sysinfo = "0.33"
+
+# Unicode normalization (for injection scanner homoglyph bypass prevention)
+unicode-normalization = "0.1"

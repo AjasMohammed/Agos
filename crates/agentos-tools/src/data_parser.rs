@@ -31,12 +31,26 @@ impl AgentTool for DataParser {
         payload: serde_json::Value,
         _context: ToolExecutionContext,
     ) -> Result<serde_json::Value, AgentOSError> {
+        const MAX_DATA_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+        const MAX_CSV_ROWS: usize = 50_000;
+
         let data = payload
             .get("data")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
                 AgentOSError::SchemaValidation("data-parser requires 'data' field (string)".into())
             })?;
+
+        if data.len() > MAX_DATA_BYTES {
+            return Err(AgentOSError::ToolExecutionFailed {
+                tool_name: "data-parser".into(),
+                reason: format!(
+                    "Input too large: {} bytes (limit {} bytes)",
+                    data.len(),
+                    MAX_DATA_BYTES
+                ),
+            });
+        }
 
         let format = payload
             .get("format")
@@ -73,6 +87,12 @@ impl AgentTool for DataParser {
 
                 let mut rows = Vec::new();
                 for record in reader.records() {
+                    if rows.len() >= MAX_CSV_ROWS {
+                        return Err(AgentOSError::ToolExecutionFailed {
+                            tool_name: "data-parser".into(),
+                            reason: format!("CSV exceeds maximum row count of {}", MAX_CSV_ROWS),
+                        });
+                    }
                     let record = record.map_err(|e| AgentOSError::ToolExecutionFailed {
                         tool_name: "data-parser".into(),
                         reason: format!("Invalid CSV row: {}", e),

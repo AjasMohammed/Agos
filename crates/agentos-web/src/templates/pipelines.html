@@ -15,22 +15,8 @@
                 <th>Actions</th>
             </tr>
         </thead>
-        <tbody>
-            {% for pipeline in pipelines %}
-            <tr>
-                <td><strong>{{ pipeline.name }}</strong></td>
-                <td>{{ pipeline.version }}</td>
-                <td>{{ pipeline.description|default("-", true) }}</td>
-                <td>{{ pipeline.step_count }}</td>
-                <td>{{ pipeline.installed_at }}</td>
-                <td>
-                    <button class="outline small"
-                            @click="showRun = true; selectedPipeline = '{{ pipeline.name }}'">
-                        Run
-                    </button>
-                </td>
-            </tr>
-            {% endfor %}
+        <tbody hx-get="/pipelines?partial=list" hx-trigger="every 10s" hx-swap="innerHTML">
+            {% include "partials/pipeline_row.html" %}
         </tbody>
     </table>
     </figure>
@@ -41,8 +27,13 @@
                 <button aria-label="Close" rel="prev" @click="showRun = false"></button>
                 <h3>Run Pipeline</h3>
             </header>
-            <form method="post" action="/pipelines/run">
+            <form method="post" action="/pipelines/run" hx-post="/pipelines/run" hx-target="body" hx-push-url="true">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="pipeline_name" :value="selectedPipeline">
+                <label for="agent-name">Agent Name (required)
+                    <input id="agent-name" name="agent_name" required
+                           placeholder="Name of the agent to execute the pipeline">
+                </label>
                 <label for="pipeline-input">Input
                     <textarea id="pipeline-input" name="input" required rows="4"
                               placeholder="Pipeline input..."></textarea>

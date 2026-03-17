@@ -39,12 +39,18 @@ impl AgentMessage {
     /// Canonical bytes to sign: stable JSON encoding of id, from, to, content, and timestamp.
     /// Uses serde_json for deterministic serialization (not Debug, which is unstable across
     /// compiler versions).
+    ///
+    /// # Panics
+    /// Never in practice — `MessageTarget` and `MessageContent` both derive `Serialize`
+    /// with no infallible paths. A panic here would indicate a bug in the type definitions.
     pub fn signing_payload(&self) -> Vec<u8> {
         let canonical = serde_json::json!({
             "id": self.id.to_string(),
             "from": self.from.to_string(),
-            "to": serde_json::to_value(&self.to).unwrap_or(serde_json::Value::Null),
-            "content": serde_json::to_value(&self.content).unwrap_or(serde_json::Value::Null),
+            "to": serde_json::to_value(&self.to)
+                .expect("MessageTarget serialization is infallible"),
+            "content": serde_json::to_value(&self.content)
+                .expect("MessageContent serialization is infallible"),
             "timestamp": self.timestamp.timestamp(),
         });
         canonical.to_string().into_bytes()

@@ -111,22 +111,46 @@ fn to_pascal_case(s: &str) -> String {
 /// Parse a permission string like "fs.data:r" into one or more (resource, PermissionOp) pairs.
 ///
 /// Compound ops like "rw" or "rwx" expand to multiple entries so no permission is silently dropped.
-fn parse_permission(perm: &str) -> Vec<(String, proc_macro2::TokenStream)> {
+/// Returns `Err` with a diagnostic message for unknown op suffixes (e.g. `"fs.data:z"`).
+fn parse_permission(perm: &str) -> Result<Vec<(String, proc_macro2::TokenStream)>, String> {
     let parts: Vec<&str> = perm.splitn(2, ':').collect();
     let resource = parts[0].to_string();
     if parts.len() > 1 {
         match parts[1] {
-            "r" => vec![(resource, quote! { agentos_types::PermissionOp::Read })],
-            "w" => vec![(resource, quote! { agentos_types::PermissionOp::Write })],
-            "x" => vec![(resource, quote! { agentos_types::PermissionOp::Execute })],
-            "rw" | "wr" => vec![
+            "r" => Ok(vec![(
+                resource,
+                quote! { agentos_types::PermissionOp::Read },
+            )]),
+            "w" => Ok(vec![(
+                resource,
+                quote! { agentos_types::PermissionOp::Write },
+            )]),
+            "x" => Ok(vec![(
+                resource,
+                quote! { agentos_types::PermissionOp::Execute },
+            )]),
+            "rw" | "wr" => Ok(vec![
                 (
                     resource.clone(),
                     quote! { agentos_types::PermissionOp::Read },
                 ),
                 (resource, quote! { agentos_types::PermissionOp::Write }),
-            ],
-            "rwx" | "rxw" | "wrx" | "wxr" | "xrw" | "xwr" => vec![
+            ]),
+            "rx" | "xr" => Ok(vec![
+                (
+                    resource.clone(),
+                    quote! { agentos_types::PermissionOp::Read },
+                ),
+                (resource, quote! { agentos_types::PermissionOp::Execute }),
+            ]),
+            "wx" | "xw" => Ok(vec![
+                (
+                    resource.clone(),
+                    quote! { agentos_types::PermissionOp::Write },
+                ),
+                (resource, quote! { agentos_types::PermissionOp::Execute }),
+            ]),
+            "rwx" | "rxw" | "wrx" | "wxr" | "xrw" | "xwr" => Ok(vec![
                 (
                     resource.clone(),
                     quote! { agentos_types::PermissionOp::Read },
@@ -136,11 +160,17 @@ fn parse_permission(perm: &str) -> Vec<(String, proc_macro2::TokenStream)> {
                     quote! { agentos_types::PermissionOp::Write },
                 ),
                 (resource, quote! { agentos_types::PermissionOp::Execute }),
-            ],
-            _ => vec![(resource, quote! { agentos_types::PermissionOp::Read })],
+            ]),
+            other => Err(format!(
+                "unknown permission op '{}' in \"{}\"; expected r, w, x, rw, rx, wx, or rwx",
+                other, perm
+            )),
         }
     } else {
-        vec![(resource, quote! { agentos_types::PermissionOp::Read })]
+        Ok(vec![(
+            resource,
+            quote! { agentos_types::PermissionOp::Read },
+        )])
     }
 }
 
@@ -180,16 +210,28 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     let struct_name_str = to_pascal_case(tool_name);
     let struct_name = format_ident!("{}", struct_name_str);
 
-    // Parse permissions — compound ops like "rw" expand to multiple entries
-    let perm_entries: Vec<_> = attrs
+    // Parse permissions — compound ops like "rw" expand to multiple entries.
+    // Unknown ops produce a compile error rather than silently defaulting to Read.
+    let parsed_perms: Result<Vec<Vec<_>>, String> = attrs
         .permissions
         .iter()
-        .flat_map(|p| parse_permission(p))
-        .map(|(resource, op)| {
-            let resource_lit = LitStr::new(&resource, proc_macro2::Span::call_site());
-            quote! { (#resource_lit.to_string(), #op) }
-        })
+        .map(|p| parse_permission(p))
         .collect();
+    let perm_entries: Vec<_> = match parsed_perms {
+        Ok(nested) => nested
+            .into_iter()
+            .flatten()
+            .map(|(resource, op)| {
+                let resource_lit = LitStr::new(&resource, proc_macro2::Span::call_site());
+                quote! { (#resource_lit.to_string(), #op) }
+            })
+            .collect(),
+        Err(msg) => {
+            return syn::Error::new(proc_macro2::Span::call_site(), msg)
+                .to_compile_error()
+                .into();
+        }
+    };
 
     let expanded = quote! {
         // Keep the original function available

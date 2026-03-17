@@ -7,6 +7,9 @@ context_window_token_budget = 8000
 
 [secrets]
 # Development default path (ephemeral on many systems).
+# WARNING: /tmp is world-listable. For production use a private path such as
+# ~/.agentos/vault/secrets.db or $XDG_DATA_HOME/agentos/vault/secrets.db.
+# The kernel creates parent directories with 0o700 permissions at startup.
 vault_path = "/tmp/agentos/vault/secrets.db"
 
 [audit]

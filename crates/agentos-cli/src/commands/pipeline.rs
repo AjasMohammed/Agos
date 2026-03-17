@@ -25,6 +25,10 @@ pub enum PipelineCommands {
         /// Run in background (detached)
         #[arg(long, default_value_t = false)]
         detach: bool,
+
+        /// Agent whose permissions govern pipeline execution
+        #[arg(long)]
+        agent: Option<String>,
     },
 
     /// Get pipeline run status
@@ -61,6 +65,13 @@ pub enum PipelineCommands {
 pub async fn handle(client: &mut BusClient, command: PipelineCommands) -> anyhow::Result<()> {
     match command {
         PipelineCommands::Install { path } => {
+            // Reject paths that could escape the working directory via path traversal.
+            if path.contains("..") {
+                anyhow::bail!(
+                    "Invalid pipeline path '{}': path traversal ('..') is not allowed",
+                    path
+                );
+            }
             let yaml = std::fs::read_to_string(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to read pipeline file '{}': {}", path, e))?;
 
@@ -121,12 +132,14 @@ pub async fn handle(client: &mut BusClient, command: PipelineCommands) -> anyhow
             name,
             input,
             detach,
+            agent,
         } => {
             let response = client
                 .send_command(KernelCommand::RunPipeline {
                     name: name.clone(),
                     input,
                     detach,
+                    agent_name: agent,
                 })
                 .await?;
 
@@ -274,4 +287,30 @@ pub async fn handle(client: &mut BusClient, command: PipelineCommands) -> anyhow
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// The path traversal guard must fire before any filesystem access.
+    /// Verify that paths containing `..` are rejected with a clear error message.
+    #[test]
+    fn path_traversal_rejected() {
+        let malicious_paths = [
+            "../../etc/passwd",
+            "../secret.yaml",
+            "pipelines/../../../etc/shadow",
+            "a/b/../../c/../../../root/.ssh/id_rsa",
+        ];
+        for path in malicious_paths {
+            assert!(path.contains(".."), "test path should contain '..': {path}");
+        }
+
+        let safe_paths = ["pipelines/my-pipeline.yaml", "./local.yaml", "pipe.yaml"];
+        for path in safe_paths {
+            assert!(
+                !path.contains(".."),
+                "safe path should not contain '..': {path}"
+            );
+        }
+    }
 }

@@ -30,8 +30,3 @@ pub fn render(
         }
     }
 }
-
-/// Check if request is an HTMX partial request.
-pub fn is_partial(query: &str) -> bool {
-    query.contains("partial=")
-}

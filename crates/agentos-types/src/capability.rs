@@ -115,9 +115,18 @@ impl PermissionSet {
 
     /// Check if a resource is explicitly denied.
     pub fn is_denied(&self, resource: &str) -> bool {
-        // Check explicit deny list
+        let is_net = resource.starts_with("net:") || resource.starts_with("network:");
+        // Check explicit deny list. For network resources, compare case-insensitively to
+        // prevent bypass via mixed-case URLs (e.g., deny "net:http://corp/" bypassed by
+        // "net:http://Corp/"). Filesystem paths remain case-sensitive (Linux convention).
         for pattern in &self.deny_entries {
-            if resource == pattern || resource.starts_with(pattern) {
+            if is_net && (pattern.starts_with("net:") || pattern.starts_with("network:")) {
+                let r_lc = resource.to_lowercase();
+                let p_lc = pattern.to_lowercase();
+                if r_lc == p_lc || r_lc.starts_with(&p_lc) {
+                    return true;
+                }
+            } else if resource == pattern || resource.starts_with(pattern) {
                 return true;
             }
         }
@@ -180,8 +189,22 @@ impl PermissionSet {
 
         let now = chrono::Utc::now();
         self.entries.iter().any(|e| {
-            // Exact match or prefix match (grant on "fs:/home/" covers "fs:/home/user/x.txt")
-            let resource_matches = e.resource == resource || resource.starts_with(&e.resource);
+            // Exact match, or prefix match with a path-separator boundary.
+            //
+            // For path-style grants (grant contains '/' but does NOT end with '/'), we require
+            // that the character immediately after the grant prefix in the resource is '/', so
+            // that "fs:/home/user" does NOT match "fs:/home/username".
+            // Grants that already end with '/' (e.g. "fs:/home/user/") or that contain no '/'
+            // (e.g. "net:", "fs.user_data") use plain prefix matching unchanged.
+            let resource_matches = e.resource == resource
+                || (resource.starts_with(e.resource.as_str()) && {
+                    if e.resource.contains('/') && !e.resource.ends_with('/') {
+                        // Require next char to be '/' to avoid partial segment matches
+                        resource.as_bytes().get(e.resource.len()) == Some(&b'/')
+                    } else {
+                        true
+                    }
+                });
             // Expired entries are treated as absent
             let not_expired = e.expires_at.is_none_or(|exp| now < exp);
 
@@ -408,6 +431,31 @@ mod tests {
         assert!(!perms.check("net:http://[fd00::1]/", PermissionOp::Read));
         // Public host starting with "fd" must NOT be blocked
         assert!(perms.check("net:https://fdic.gov/", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_prefix_no_partial_segment_match() {
+        let mut perms = PermissionSet::new();
+        // Grant WITHOUT trailing slash
+        perms.grant("fs:/home/user".into(), true, false, false, None);
+
+        // Exact match must still work
+        assert!(perms.check("fs:/home/user", PermissionOp::Read));
+        // Sub-path with separator must work
+        assert!(perms.check("fs:/home/user/docs/file.txt", PermissionOp::Read));
+        // Partial segment match must be blocked (the bug this test guards against)
+        assert!(!perms.check("fs:/home/username/secret", PermissionOp::Read));
+        assert!(!perms.check("fs:/home/userx", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_prefix_trailing_slash_grant_still_works() {
+        let mut perms = PermissionSet::new();
+        // Standard grant WITH trailing slash — must behave as before
+        perms.grant("fs:/home/user/".into(), true, false, false, None);
+
+        assert!(perms.check("fs:/home/user/docs/file.txt", PermissionOp::Read));
+        assert!(!perms.check("fs:/etc/passwd", PermissionOp::Read));
     }
 
     #[test]

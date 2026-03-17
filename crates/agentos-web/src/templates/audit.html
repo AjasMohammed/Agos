@@ -28,17 +28,7 @@
         </tr>
     </thead>
     <tbody id="audit-body" hx-get="/audit?partial=list" hx-trigger="every 5s" hx-swap="innerHTML">
-        {% for entry in entries %}
-        <tr>
-            <td>{{ entry.timestamp }}</td>
-            <td>{{ entry.event_type }}</td>
-            <td><span class="badge badge-{{ entry.severity|lower }}">{{ entry.severity }}</span></td>
-            <td>{{ entry.agent_id|default("-", true) }}</td>
-            <td>{{ entry.task_id|default("-", true) }}</td>
-            <td>{{ entry.tool_id|default("-", true) }}</td>
-            <td><small>{{ entry.details[:80] }}</small></td>
-        </tr>
-        {% endfor %}
+        {% include "partials/log_line.html" %}
     </tbody>
 </table>
 </figure>

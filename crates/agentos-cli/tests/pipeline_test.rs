@@ -154,6 +154,7 @@ async fn test_pipeline_run_nonexistent_fails() {
             name: "nonexistent".to_string(),
             input: "test".to_string(),
             detach: false,
+            agent_name: None,
         })
         .await
         .unwrap();

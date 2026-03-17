@@ -1,4 +1,5 @@
 use regex::Regex;
+use unicode_normalization::UnicodeNormalization;
 
 /// Severity of a detected injection pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +153,21 @@ impl InjectionScanner {
                 r"(?i)(jailbreak|DAN\s+mode|developer\s+mode|unrestricted\s+mode|no\s+limits\s+mode)",
                 ThreatLevel::High,
             ),
+            // === Closing fake XML tags (Medium) ===
+            // Attackers may close a fake system block to trigger context confusion.
+            pattern(
+                "delimiter_fake_xml_close_tag",
+                r"(?i)<\s*/\s*(system|admin|root|kernel|supervisor|user|assistant)\s*>",
+                ThreatLevel::Medium,
+            ),
+            // === Standalone base64 payload (Medium) ===
+            // Large base64 blobs embedded in content may encode hidden instructions
+            // even without an explicit "decode this" keyword prefix.
+            pattern(
+                "encoded_base64_standalone",
+                r"(?:[A-Za-z0-9+/]{60,}={0,2})",
+                ThreatLevel::Medium,
+            ),
             // === ChatML / special-token delimiter injection (High) ===
             // Models like Llama/Mistral use <|im_start|> / <|im_end|> as special tokens.
             // Injecting these through user-controlled input can hijack role assignments.
@@ -187,11 +203,17 @@ impl InjectionScanner {
     }
 
     /// Scan content for injection patterns.
+    ///
+    /// Content is NFKC-normalized before matching to prevent homoglyph bypass
+    /// attacks that use Unicode lookalike characters to evade regex patterns.
     pub fn scan(&self, content: &str) -> ScanResult {
+        // NFKC normalization collapses visually-identical Unicode characters
+        // (e.g. "ｉｇｎｏｒｅ" → "ignore") so patterns fire on homoglyph variants.
+        let normalized: String = content.nfkc().collect();
         let mut matches = Vec::new();
 
         for pat in &self.patterns {
-            if let Some(m) = pat.regex.find(content) {
+            if let Some(m) = pat.regex.find(&normalized) {
                 matches.push(InjectionMatch {
                     pattern_name: pat.name,
                     threat_level: pat.threat_level,
@@ -218,7 +240,17 @@ impl InjectionScanner {
 
     /// Wrap external content with taint tags for safe context injection.
     /// If the content is suspicious, adds taint metadata.
+    ///
+    /// The `source` attribute is HTML-escaped so that a tool name containing
+    /// `"` or `>` cannot inject additional XML attributes or close the tag.
     pub fn taint_wrap(content: &str, source: &str, scan_result: &ScanResult) -> String {
+        // Escape characters that would break out of the XML attribute context.
+        let escaped_source = source
+            .replace('&', "&amp;")
+            .replace('"', "&quot;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+
         if scan_result.is_suspicious {
             let threat = match scan_result.max_threat {
                 Some(ThreatLevel::High) => "high",
@@ -231,14 +263,14 @@ impl InjectionScanner {
             format!(
                 "<user_data taint=\"{}\" source=\"{}\" patterns=\"{}\">\n{}\n</user_data>",
                 threat,
-                source,
+                escaped_source,
                 pattern_names.join(","),
                 content
             )
         } else {
             format!(
                 "<user_data taint=\"none\" source=\"{}\">\n{}\n</user_data>",
-                source, content
+                escaped_source, content
             )
         }
     }

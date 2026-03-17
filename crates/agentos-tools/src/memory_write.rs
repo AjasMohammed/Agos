@@ -33,12 +33,25 @@ impl AgentTool for MemoryWrite {
         payload: serde_json::Value,
         context: ToolExecutionContext,
     ) -> Result<serde_json::Value, AgentOSError> {
+        const MAX_CONTENT_BYTES: usize = 512 * 1024; // 512 KiB
+
         let content = payload
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
                 AgentOSError::SchemaValidation("memory-write requires 'content' field".into())
             })?;
+
+        if content.len() > MAX_CONTENT_BYTES {
+            return Err(AgentOSError::ToolExecutionFailed {
+                tool_name: "memory-write".into(),
+                reason: format!(
+                    "Content too large: {} bytes (limit {} bytes)",
+                    content.len(),
+                    MAX_CONTENT_BYTES
+                ),
+            });
+        }
 
         let scope = payload
             .get("scope")

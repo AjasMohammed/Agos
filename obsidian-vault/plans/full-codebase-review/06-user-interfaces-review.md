@@ -7,7 +7,7 @@ tags:
   - sdk
   - phase-6
 date: 2026-03-13
-status: planned
+status: complete
 effort: 4h
 priority: high
 ---
@@ -135,9 +135,25 @@ The CLI is the primary user-facing surface — it serializes commands, handles u
 
 ---
 
+## Findings
+
+| File | Line(s) | Severity | Category | Description | Fix Applied |
+|------|---------|----------|----------|-------------|-------------|
+| `crates/agentos-web/src/csrf.rs` | 13 | WARNING | Visibility | `TOKEN_TTL` was `pub` but is referenced from `server.rs` in same crate — should be `pub(crate)` | Yes — changed to `pub(crate)` |
+| `crates/agentos-web/src/server.rs` | `start_with_shutdown` | WARNING | Memory leak | CSRF `DashMap<String,(String,Instant)>` grows unbounded as sessions are abandoned; no sweep task existed | Yes — added tokio sweep task every 30 min evicting entries older than 2×TOKEN_TTL |
+| `crates/agentos-cli/src/commands/secret.rs` | `parse_scope()` | WARNING | Input validation | `agent:` and `tool:` scopes accepted an empty name (e.g. `agent:`) without error | Yes — added empty-name guard with `anyhow::bail!` |
+
+## Remaining Issues
+
+None — all findings remediated.
+
 ## Files Changed
 
-No files changed — read-only review phase.
+| File | Change |
+|------|--------|
+| `crates/agentos-web/src/csrf.rs` | `TOKEN_TTL` visibility `pub` → `pub(crate)` |
+| `crates/agentos-web/src/server.rs` | Added CSRF sweep background task in `start_with_shutdown()` |
+| `crates/agentos-cli/src/commands/secret.rs` | `parse_scope()` empty-name validation |
 
 ## Dependencies
 

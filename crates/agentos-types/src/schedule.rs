@@ -6,6 +6,10 @@ pub struct ScheduledJob {
     pub id: ScheduleID,
     pub name: String,
     pub cron_expression: String,
+    /// IANA timezone name for the cron expression (e.g. "America/New_York", "Europe/London").
+    /// `None` means UTC. Without this field, DST transitions can cause double-fires or misses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
     pub agent_name: String,
     pub task_prompt: String,
     pub permissions: Vec<String>, // permissions scoped to this job
@@ -37,4 +41,8 @@ pub struct BackgroundTask {
     pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
     pub result: Option<serde_json::Value>,
     pub detached: bool, // if true, runs independently
+    /// If this task was launched from a scheduled cron job, stores the job ID
+    /// so task_completion can emit ScheduledTaskCompleted on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_job_id: Option<ScheduleID>,
 }

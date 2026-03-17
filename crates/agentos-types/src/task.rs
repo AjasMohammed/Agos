@@ -53,14 +53,18 @@ impl TaskState {
     /// Returns `true` if transitioning from `self` to `next` is a legal state machine move.
     ///
     /// Legal transitions:
-    /// - Queued   → Running | Cancelled
+    /// - Queued   → Running | Failed | Cancelled
     /// - Running  → Waiting | Complete | Failed | Cancelled
     /// - Waiting  → Running | Failed | Cancelled
     /// - Complete, Failed, Cancelled are terminal — no further transitions allowed.
+    ///
+    /// `Queued → Failed` covers tasks that fail during initialization (e.g. capability
+    /// token generation fails) before ever reaching Running.
     pub fn can_transition_to(self, next: TaskState) -> bool {
         matches!(
             (self, next),
             (TaskState::Queued, TaskState::Running)
+                | (TaskState::Queued, TaskState::Failed)
                 | (TaskState::Queued, TaskState::Cancelled)
                 | (TaskState::Running, TaskState::Waiting)
                 | (TaskState::Running, TaskState::Complete)

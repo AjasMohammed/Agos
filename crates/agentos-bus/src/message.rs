@@ -229,6 +229,8 @@ pub enum KernelCommand {
         name: String,
         input: String,
         detach: bool,
+        /// Agent whose permissions govern pipeline execution. Required.
+        agent_name: Option<String>,
     },
     PipelineStatus {
         name: String,
@@ -349,6 +351,10 @@ impl KernelCommand {
             KernelCommand::SendAgentMessage { from_name, .. } => Some(from_name.clone()),
             KernelCommand::BroadcastToGroup { from_name, .. } => Some(from_name.clone()),
             KernelCommand::EventSubscribe { agent_name, .. } => Some(agent_name.clone()),
+            KernelCommand::RunPipeline {
+                agent_name: Some(name),
+                ..
+            } => Some(name.clone()),
             // DisconnectAgent is intentionally excluded: it is a one-shot cleanup op and its
             // agent_id (UUID) differs from the name-keyed limiter, which would cause a
             // separate entry that never gets evicted, leaking memory.

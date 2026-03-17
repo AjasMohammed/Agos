@@ -33,7 +33,14 @@ impl Kernel {
             }
         };
 
-        let agent = registry.get_by_id(&agent_id).unwrap().clone();
+        let agent = match registry.get_by_id(&agent_id) {
+            Some(a) => a.clone(),
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Agent '{}' not found after routing", agent_id),
+                }
+            }
+        };
         let effective_permissions = registry.compute_effective_permissions(&agent_id);
         drop(registry);
 

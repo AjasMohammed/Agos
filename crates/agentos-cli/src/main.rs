@@ -12,6 +12,7 @@ use commands::{
     identity::IdentityCommands, perm::PermCommands, pipeline::PipelineCommands,
     resource::ResourceCommands, role::RoleCommands, schedule::ScheduleCommands,
     secret::SecretCommands, snapshot::SnapshotCommands, task::TaskCommands, tool::ToolCommands,
+    web::WebCommands,
 };
 
 #[derive(Parser)]
@@ -23,18 +24,14 @@ pub struct Cli {
     pub command: Commands,
 
     /// Path to kernel config file
-    #[arg(long, default_value = "config/default.toml")]
+    #[arg(long, env = "AGENTOS_CONFIG", default_value = "config/default.toml")]
     pub config: String,
 }
 
 #[derive(Subcommand)]
 pub enum Commands {
     /// Boot the AgentOS kernel
-    Start {
-        /// Vault passphrase (will prompt interactively if not provided)
-        #[arg(long)]
-        vault_passphrase: Option<String>,
-    },
+    Start,
 
     /// Manage LLM agents
     Agent {
@@ -140,6 +137,19 @@ pub enum Commands {
         #[command(subcommand)]
         command: HalCommands,
     },
+
+    /// Web UI server
+    Web {
+        #[command(subcommand)]
+        command: WebCommands,
+    },
+
+    /// Check if the kernel health endpoint is responding (used by Docker HEALTHCHECK)
+    Healthz {
+        /// Health server port
+        #[arg(long, default_value_t = 9091)]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -152,13 +162,29 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Start { vault_passphrase } => {
-            cmd_start(&cli.config, vault_passphrase).await?;
+        Commands::Start => {
+            cmd_start(&cli.config).await?;
+        }
+
+        Commands::Web { command } => {
+            let config_path = Path::new(&cli.config);
+            if !config_path.exists() {
+                anyhow::bail!("Config file not found: {}", cli.config);
+            }
+            match command {
+                commands::web::WebCommands::Serve { port, host } => {
+                    commands::web::handle_serve(config_path, &host, port).await?;
+                }
+            }
         }
 
         // Offline tool subcommands run without a kernel connection
         Commands::Tool { command } if commands::tool::is_offline(&command) => {
             commands::tool::handle_offline(command)?;
+        }
+
+        Commands::Healthz { port } => {
+            commands::healthz::handle(port).await?;
         }
 
         other => {
@@ -175,21 +201,18 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_start(config_str: &str, vault_passphrase: Option<String>) -> anyhow::Result<()> {
+async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
     let config_path = Path::new(config_str);
     if !config_path.exists() {
         anyhow::bail!("Config file not found: {}", config_str);
     }
 
-    let passphrase = ZeroizingString::new(match vault_passphrase {
-        Some(p) => p,
-        None => match std::env::var("AGENTOS_VAULT_PASSPHRASE") {
-            Ok(env_pass) if !env_pass.is_empty() => env_pass,
-            _ => {
-                eprint!("Enter vault passphrase: ");
-                rpassword::read_password()?
-            }
-        },
+    let passphrase = ZeroizingString::new(match std::env::var("AGENTOS_VAULT_PASSPHRASE") {
+        Ok(env_pass) if !env_pass.is_empty() => env_pass,
+        _ => {
+            eprint!("Enter vault passphrase: ");
+            rpassword::read_password()?
+        }
     });
 
     println!("🚀 Booting AgentOS kernel...");
@@ -218,7 +241,7 @@ mod tests {
     #[test]
     fn test_cli_parses_start_command() {
         let cli = Cli::try_parse_from(["agentctl", "start"]).unwrap();
-        assert!(matches!(cli.command, Commands::Start { .. }));
+        assert!(matches!(cli.command, Commands::Start));
     }
 
     #[test]
@@ -533,6 +556,39 @@ mod tests {
             } => {
                 assert_eq!(device, "gpu:0");
                 assert_eq!(agent, "worker");
+            }
+            _ => panic!("Wrong command parsed"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_web_serve() {
+        let cli = Cli::try_parse_from([
+            "agentctl", "web", "serve", "--port", "9090", "--host", "0.0.0.0",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Web {
+                command: WebCommands::Serve { port, host, .. },
+            } => {
+                assert_eq!(port, 9090);
+                assert_eq!(host, "0.0.0.0");
+            }
+            _ => panic!("Wrong command parsed"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_web_serve_defaults() {
+        let cli = Cli::try_parse_from(["agentctl", "web", "serve"]).unwrap();
+
+        match cli.command {
+            Commands::Web {
+                command: WebCommands::Serve { port, host, .. },
+            } => {
+                assert_eq!(port, 8080);
+                assert_eq!(host, "127.0.0.1");
             }
             _ => panic!("Wrong command parsed"),
         }

@@ -16,17 +16,7 @@
         </tr>
     </thead>
     <tbody id="task-list" hx-get="/tasks?partial=list" hx-trigger="every 3s" hx-swap="innerHTML">
-        {% for task in tasks %}
-        <tr class="clickable" onclick="window.location='/tasks/{{ task.id }}'">
-            <td><code>{{ task.id[:8] }}</code></td>
-            <td>{{ task.agent_id[:8] }}</td>
-            <td><span class="badge badge-{{ task.state|lower }}">{{ task.state }}</span></td>
-            <td>{{ task.prompt_preview }}</td>
-            <td>{{ task.created_at }}</td>
-            <td>{{ task.tool_calls }}</td>
-            <td>{{ task.tokens_used }}</td>
-        </tr>
-        {% endfor %}
+        {% include "partials/task_row.html" %}
     </tbody>
 </table>
 </figure>

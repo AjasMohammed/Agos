@@ -1,36 +1,47 @@
 # === Builder Stage ===
-FROM rust:1.82-bookworm AS builder
+FROM rust:1.88-slim-bookworm AS builder
+
+# pkg-config + libssl-dev needed by transitive deps (fastembed/hf-hub) that
+# pull in openssl-sys. OPENSSL_STATIC=1 bakes libssl/libcrypto into the binary
+# so the distroless runtime image needs no shared libssl.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV OPENSSL_STATIC=1
 
 WORKDIR /usr/src/agentos
 
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+COPY tools/ tools/
 
 # Build release binary
 RUN cargo build --release --bin agentctl
 
+# Create empty dirs for the runtime stage (distroless has no mkdir)
+RUN mkdir -p runtime-dirs/data runtime-dirs/models runtime-dirs/user-tools runtime-dirs/log
+
 # === Runtime Stage ===
-FROM debian:bookworm-slim
+FROM gcr.io/distroless/cc-debian12
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    libsqlite3-0 \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create non-root user
-RUN useradd --create-home --shell /bin/bash agentos
-
-# Create data directories
-RUN mkdir -p /var/lib/agentos/data \
-             /var/lib/agentos/tools/core \
-             /var/lib/agentos/tools/user \
-             /var/log/agentos \
-    && chown -R agentos:agentos /var/lib/agentos /var/log/agentos
+# distroless/cc-debian12 provides glibc + libgcc — no apt needed.
+# SQLite is statically bundled (rusqlite feature = "bundled").
+# All runtime libs (OpenSSL eliminated via rustls-tls) are self-contained.
 
 # Copy binary from builder
 COPY --from=builder /usr/src/agentos/target/release/agentctl /usr/local/bin/agentctl
+
+# Create writable data directories (distroless has no mkdir/shell).
+# Docker initialises new volumes with the image directory's ownership,
+# so nonroot can write to these paths when volumes are mounted.
+COPY --from=builder --chown=nonroot:nonroot /usr/src/agentos/runtime-dirs/data/ /var/lib/agentos/data/
+COPY --from=builder --chown=nonroot:nonroot /usr/src/agentos/runtime-dirs/models/ /var/lib/agentos/data/models/
+COPY --from=builder --chown=nonroot:nonroot /usr/src/agentos/runtime-dirs/user-tools/ /var/lib/agentos/tools/user/
+COPY --from=builder --chown=nonroot:nonroot /usr/src/agentos/runtime-dirs/log/ /var/log/agentos/
 
 # Copy default config
 COPY config/default.toml /etc/agentos/default.toml
@@ -38,16 +49,19 @@ COPY config/default.toml /etc/agentos/default.toml
 COPY config/docker.toml /etc/agentos/config.toml
 
 # Copy core tool manifests (baked into image, not overwritten by volumes)
-COPY tools/core/ /var/lib/agentos/tools/core/
-RUN chown -R agentos:agentos /var/lib/agentos/tools/core
+COPY --chown=nonroot:nonroot tools/core/ /var/lib/agentos/tools/core/
 
-USER agentos
+# Set default config path so every agentctl command finds it automatically
+ENV AGENTOS_CONFIG=/etc/agentos/config.toml
+
+# Use distroless built-in unprivileged user (uid 65532)
+USER nonroot
 WORKDIR /var/lib/agentos
 
 EXPOSE 9091
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:9091/healthz || exit 1
+    CMD ["/usr/local/bin/agentctl", "healthz"]
 
 ENTRYPOINT ["agentctl"]
-CMD ["start", "--config", "/etc/agentos/config.toml"]
+CMD ["start"]

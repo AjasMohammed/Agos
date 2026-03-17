@@ -33,11 +33,14 @@ pub struct ToolRunner {
 }
 
 impl ToolRunner {
-    pub fn new(data_dir: &Path) -> Self {
+    pub fn new(data_dir: &Path) -> Result<Self, AgentOSError> {
         Self::new_with_model_cache_dir(data_dir, &data_dir.join("models"))
     }
 
-    pub fn new_with_model_cache_dir(data_dir: &Path, model_cache_dir: &Path) -> Self {
+    pub fn new_with_model_cache_dir(
+        data_dir: &Path,
+        model_cache_dir: &Path,
+    ) -> Result<Self, AgentOSError> {
         let mut runner = Self {
             tools: HashMap::new(),
             file_lock_registry: Arc::new(FileLockRegistry::new()),
@@ -52,18 +55,19 @@ impl ToolRunner {
                     cache_dir = %model_cache_dir.display(),
                     "Failed to initialize embedder with configured cache dir; falling back to default cache"
                 );
-                Embedder::new().expect("Failed to initialize embedding model")
+                Embedder::new().map_err(|e| {
+                    AgentOSError::StorageError(format!(
+                        "Failed to initialize embedding model: {}",
+                        e
+                    ))
+                })?
             }
         });
-        let semantic = Arc::new(
-            SemanticStore::open_with_embedder(data_dir, embedder)
-                .expect("Failed to open semantic memory store"),
-        );
-        let episodic =
-            Arc::new(EpisodicStore::open(data_dir).expect("Failed to open episodic memory store"));
+        let semantic = Arc::new(SemanticStore::open_with_embedder(data_dir, embedder)?);
+        let episodic = Arc::new(EpisodicStore::open(data_dir)?);
 
         runner.register_memory_tools(semantic, episodic);
-        runner
+        Ok(runner)
     }
 
     pub fn new_with_shared_memory(

@@ -9,6 +9,11 @@ use agentos_types::AgentOSError;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
+use uuid::Uuid;
+
+/// Maximum bytes to read from sandbox child stdout or stderr.
+/// Prevents child processes from exhausting host memory via large output.
+const MAX_SANDBOX_OUTPUT_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
 
 /// Sandbox executor manages the lifecycle of sandboxed tool processes.
 ///
@@ -65,7 +70,7 @@ impl SandboxExecutor {
         std::fs::create_dir_all(&temp_dir).map_err(|e| AgentOSError::SandboxSpawnFailed {
             reason: format!("Cannot create temp dir: {}", e),
         })?;
-        let request_file = temp_dir.join(format!("{}-{}.json", tool_name, uuid_v4_hex()));
+        let request_file = temp_dir.join(format!("{}-{}.json", tool_name, Uuid::new_v4().simple()));
         std::fs::write(&request_file, exec_request.to_string()).map_err(|e| {
             AgentOSError::SandboxSpawnFailed {
                 reason: format!("Cannot write request file: {}", e),
@@ -207,16 +212,29 @@ impl SandboxExecutor {
         let result = tokio::time::timeout(timeout, async {
             let status = child.wait().await;
 
-            // Read stdout and stderr
-            let mut stdout_buf = String::new();
-            let mut stderr_buf = String::new();
+            // Read stdout and stderr with size caps to prevent memory exhaustion.
+            // A misbehaving child that writes beyond the cap will have its excess
+            // output silently dropped — the exit code still reflects failure.
+            let mut stdout_bytes = Vec::new();
+            let mut stderr_bytes = Vec::new();
 
-            if let Some(mut stdout) = child.stdout.take() {
-                stdout.read_to_string(&mut stdout_buf).await.ok();
+            if let Some(stdout) = child.stdout.take() {
+                stdout
+                    .take(MAX_SANDBOX_OUTPUT_BYTES)
+                    .read_to_end(&mut stdout_bytes)
+                    .await
+                    .ok();
             }
-            if let Some(mut stderr) = child.stderr.take() {
-                stderr.read_to_string(&mut stderr_buf).await.ok();
+            if let Some(stderr) = child.stderr.take() {
+                stderr
+                    .take(MAX_SANDBOX_OUTPUT_BYTES)
+                    .read_to_end(&mut stderr_bytes)
+                    .await
+                    .ok();
             }
+
+            let stdout_buf = String::from_utf8_lossy(&stdout_bytes).into_owned();
+            let stderr_buf = String::from_utf8_lossy(&stderr_bytes).into_owned();
 
             (status, stdout_buf, stderr_buf)
         })
@@ -268,15 +286,25 @@ impl SandboxExecutor {
 
                 child.kill().await.ok();
 
-                // Drain any partial output
-                let mut stdout_buf = String::new();
-                let mut stderr_buf = String::new();
-                if let Some(mut stdout) = child.stdout.take() {
-                    stdout.read_to_string(&mut stdout_buf).await.ok();
+                // Drain any partial output (bounded, same as success path)
+                let mut stdout_bytes = Vec::new();
+                let mut stderr_bytes = Vec::new();
+                if let Some(stdout) = child.stdout.take() {
+                    stdout
+                        .take(MAX_SANDBOX_OUTPUT_BYTES)
+                        .read_to_end(&mut stdout_bytes)
+                        .await
+                        .ok();
                 }
-                if let Some(mut stderr) = child.stderr.take() {
-                    stderr.read_to_string(&mut stderr_buf).await.ok();
+                if let Some(stderr) = child.stderr.take() {
+                    stderr
+                        .take(MAX_SANDBOX_OUTPUT_BYTES)
+                        .read_to_end(&mut stderr_bytes)
+                        .await
+                        .ok();
                 }
+                let _stdout_buf = String::from_utf8_lossy(&stdout_bytes).into_owned();
+                let _stderr_buf = String::from_utf8_lossy(&stderr_bytes).into_owned();
 
                 Err(AgentOSError::SandboxTimeout {
                     tool_name: tool_name.to_string(),
@@ -309,17 +337,6 @@ impl SandboxExecutor {
             ),
         })
     }
-}
-
-/// Generate a simple hex UUID-like string for temp file naming.
-fn uuid_v4_hex() -> String {
-    use std::time::SystemTime;
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let pid = std::process::id();
-    format!("{:x}-{:x}", nanos, pid)
 }
 
 #[cfg(test)]
@@ -383,12 +400,10 @@ mod tests {
     }
 
     #[test]
-    fn test_uuid_v4_hex_unique() {
-        let a = uuid_v4_hex();
-        // Small sleep is not needed since nanos resolution should differ
-        let b = uuid_v4_hex();
-        // They should at least be non-empty
-        assert!(!a.is_empty());
-        assert!(!b.is_empty());
+    fn test_temp_file_name_is_unique() {
+        let a = Uuid::new_v4().simple().to_string();
+        let b = Uuid::new_v4().simple().to_string();
+        assert_ne!(a, b, "Each UUID must be unique");
+        assert_eq!(a.len(), 32, "simple UUID should be 32 hex chars");
     }
 }

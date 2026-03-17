@@ -134,8 +134,19 @@ impl TokenBudget {
         (usable * pct) as usize
     }
 
-    /// Validate that category percentages do not exceed 1.0.
+    /// Validate that category percentages are non-negative and do not exceed 1.0.
     pub fn validate(&self) -> Result<(), String> {
+        for (name, pct) in [
+            ("system_pct", self.system_pct),
+            ("tools_pct", self.tools_pct),
+            ("knowledge_pct", self.knowledge_pct),
+            ("history_pct", self.history_pct),
+            ("task_pct", self.task_pct),
+        ] {
+            if pct < 0.0 {
+                return Err(format!("{name} is negative ({pct:.4}); must be >= 0.0"));
+            }
+        }
         let sum = self.system_pct
             + self.tools_pct
             + self.knowledge_pct
@@ -374,6 +385,20 @@ impl ContextWindow {
                 }
             }
         }
+        // Safety net: Summarize may remove 1 entry and insert 1 summary (net 0) when
+        // non_system_count <= 2, leaving us still at capacity before pushing. Also guards
+        // against any overflow strategy that fails to free space (e.g., all entries pinned).
+        if self.entries.len() >= self.max_entries {
+            if let Some(idx) = self
+                .entries
+                .iter()
+                .position(|e| e.role != ContextRole::System)
+            {
+                self.entries.remove(idx);
+            } else {
+                self.entries.remove(0);
+            }
+        }
         self.entries.push(entry);
     }
 
@@ -496,11 +521,13 @@ impl ContextWindow {
     }
 
     /// Estimate total token count for all active entries (4 chars ≈ 1 token).
+    /// Uses Unicode scalar count (not byte length) so multi-byte UTF-8 chars are
+    /// not over-counted.
     pub fn estimated_tokens(&self) -> usize {
         self.entries
             .iter()
             .filter(|e| e.partition == ContextPartition::Active)
-            .map(|e| e.content.len() / 4 + 1)
+            .map(|e| e.content.chars().count() / 4 + 1)
             .sum()
     }
 }

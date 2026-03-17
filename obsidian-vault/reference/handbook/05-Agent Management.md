@@ -173,19 +173,19 @@ Agents can communicate with each other through the kernel's message bus (`AgentM
 ### Sending a Direct Message
 
 ```bash
-agentctl agent message --from <SENDER> --to <RECIPIENT> "<CONTENT>"
+agentctl agent message --from <SENDER> <RECIPIENT> "<CONTENT>"
 ```
 
-| Flag | Type | Required | Description |
-|------|------|----------|-------------|
+| Flag / Argument | Type | Required | Description |
+|-----------------|------|----------|-------------|
 | `--from` | `String` | Yes | Sender agent name |
-| `--to` | positional | Yes | Recipient agent name |
-| content | positional | Yes | Message content |
+| `to` | positional | Yes | Recipient agent name |
+| `content` | positional | Yes | Message content |
 
 **Example:**
 
 ```bash
-agentctl agent message --from "planner" --to "code-reviewer" "Please review the auth module changes"
+agentctl agent message --from "planner" "code-reviewer" "Please review the auth module changes"
 ```
 
 ### Message Security
@@ -326,13 +326,13 @@ For the full permission model — including capability tokens, deny entries, pat
 
 ```bash
 # Grant an agent file-read permission
-agentctl perm grant --agent "local-dev" --permission "fs.read:r"
+agentctl perm grant local-dev fs.user_data:r
 
 # Grant shell execution
-agentctl perm grant --agent "ops" --permission "shell.exec:x"
+agentctl perm grant ops shell.exec:x
 
 # View an agent's effective permissions
-agentctl perm list --agent "local-dev"
+agentctl perm show local-dev
 ```
 
 ---
@@ -357,7 +357,7 @@ These files are updated on every agent registration, status change, role assignm
 | Connect | `agentctl agent connect --provider ... --model ... --name ...` | Creates profile, generates identity, assigns roles |
 | List | `agentctl agent list` | Shows NAME, PROVIDER, MODEL, ID columns |
 | Disconnect | `agentctl agent disconnect <name>` | Removes from registry, closes inbox |
-| Message | `agentctl agent message --from ... --to ... "..."` | Ed25519-signed, 60s TTL, audit logged |
+| Message | `agentctl agent message --from ... <to> "..."` | Ed25519-signed, 60s TTL, audit logged |
 | View Messages | `agentctl agent messages <agent> --last N` | Shows message history with types |
 | Create Group | `agentctl agent group create <name> --members "a,b,c"` | Named group for broadcast |
 | Broadcast | `agentctl agent broadcast --from ... <group> "..."` | Delivers to all group members except sender |

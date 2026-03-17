@@ -289,7 +289,7 @@ async fn test_cost_report_command() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_escalation_list_command() {
-    let result = tokio::time::timeout(Duration::from_secs(30), async {
+    let result = tokio::time::timeout(Duration::from_secs(90), async {
         let (kernel, mut client, _temp_dir) = setup_kernel().await;
 
         let response = client

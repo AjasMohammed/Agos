@@ -113,7 +113,12 @@ impl TaskRouter {
                     LLMProvider::Ollama => 0,
                 });
 
-                Ok(sorted.last().unwrap().id)
+                Ok(sorted
+                    .last()
+                    .ok_or_else(|| AgentOSError::KernelError {
+                        reason: "Internal routing error: no agents available".to_string(),
+                    })?
+                    .id)
             }
             RoutingStrategy::CostFirst | RoutingStrategy::LatencyFirst => {
                 // Approximate CostFirst/LatencyFirst:
@@ -126,7 +131,12 @@ impl TaskRouter {
                     LLMProvider::OpenAI => 1,
                     LLMProvider::Anthropic => 0,
                 });
-                Ok(sorted.last().unwrap().id)
+                Ok(sorted
+                    .last()
+                    .ok_or_else(|| AgentOSError::KernelError {
+                        reason: "Internal routing error: no agents available".to_string(),
+                    })?
+                    .id)
             }
             RoutingStrategy::RoundRobin => {
                 let idx = self

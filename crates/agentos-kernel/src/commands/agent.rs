@@ -22,7 +22,7 @@ impl Kernel {
         let core: Result<Arc<dyn LLMCore>, String> = match &provider {
             LLMProvider::Ollama => {
                 let host = base_url
-                    .or_else(|| std::env::var("AGENTOS_OLLAMA_HOST").ok())
+                    .or_else(|| std::env::var("AGENTOS_OLLAMA_HOST").ok().filter(|s| !s.trim().is_empty()))
                     .unwrap_or_else(|| self.config.ollama.host.clone());
                 Ok(Arc::new(OllamaCore::new(&host, &model)))
             }
@@ -35,7 +35,7 @@ impl Kernel {
                     Ok(entry) => {
                         let sec = SecretString::new(entry.as_str().to_string());
                         let resolved_base_url = base_url
-                            .or_else(|| std::env::var("AGENTOS_OPENAI_BASE_URL").ok())
+                            .or_else(|| std::env::var("AGENTOS_OPENAI_BASE_URL").ok().filter(|s| !s.trim().is_empty()))
                             .or_else(|| self.config.llm.openai_base_url.clone());
                         if let Some(url) = resolved_base_url {
                             Ok(Arc::new(OpenAICore::with_base_url(sec, model.clone(), url)))
@@ -88,7 +88,7 @@ impl Kernel {
                     },
                 };
                 let url = match base_url
-                    .or_else(|| std::env::var("AGENTOS_LLM_URL").ok())
+                    .or_else(|| std::env::var("AGENTOS_LLM_URL").ok().filter(|s| !s.trim().is_empty()))
                     .or_else(|| self.config.llm.custom_base_url.clone())
                 {
                     Some(url) => url,

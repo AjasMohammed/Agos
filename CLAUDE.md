@@ -1,5 +1,13 @@
 # AgentOS — CLAUDE.md
 
+## General Instructions
+
+- When asked to "continue" or resume work, immediately pick up where you left off without re-reading context or re-analyzing. Do not stall.
+
+## Workflows
+
+- When asked to verify or review code, always use the code review agent (if available) without needing to be reminded. Check for `.claude/skills/` or agent files before asking.
+
 ## Project Overview
 
 AgentOS is a minimalist, LLM-native operating system written in Rust, designed for AI agents rather than humans. Core philosophy:
@@ -81,6 +89,12 @@ cargo fmt --all
 - All security-relevant operations must be logged to `AuditLog`
 - No SQL string interpolation — use rusqlite parameterized queries
 
+### Code Style
+- Prefer using existing model fields and simple approaches. Do not overengineer or introduce new abstractions unless explicitly asked. When the user interrupts, take it as a signal to simplify.
+
+### Language-Specific Notes
+- This is primarily a Rust and Python project. For Rust: use correct enum variant names (check source before guessing), handle all mutex lock sites consistently, and verify type compatibility before editing. For Python/Django: use existing model fields before creating new ones.
+
 ### Module Organization
 - Each crate has a single responsibility; dependency graph flows downward (no circular deps)
 - Re-export public API at crate root (`pub use`)
@@ -89,6 +103,7 @@ cargo fmt --all
 
 ## Testing Patterns
 
+- After applying fixes to Rust code, always run `cargo build`, `cargo test`, `cargo clippy`, and `cargo fmt --check` before reporting completion. Do not consider a task done until all four pass.
 - Use `MockLLMCore` for deterministic LLM responses — never hit real APIs in tests
 - Use `tempfile` crate for filesystem isolation
 - Use `serial_test` for tests that share global state (kernel boot, bus connections)

@@ -5,7 +5,7 @@ tags:
   - config
   - phase-9
 date: 2026-03-13
-status: planned
+status: complete
 effort: 30m
 priority: medium
 ---
@@ -50,9 +50,25 @@ Insecure defaults are a common source of vulnerabilities. If the default config 
 
 ---
 
+## Findings
+
+| File | Line(s) | Severity | Category | Description | Fix Applied |
+|------|---------|----------|----------|-------------|-------------|
+| `config/default.toml` | 13 | WARNING | Security default | `vault_path = "/tmp/agentos/vault/secrets.db"` — `/tmp` is world-listable on multi-user systems; any local process can discover the vault file path | Yes — added security warning comment + kernel creates parent dir with `0o700` permissions |
+| `config/default.toml` | 17 | INFO | Config documentation | `log_path = "/tmp/agentos/data/audit.db"` — same concern as vault, audit DB also in `/tmp` | Documented in config comment |
+
+## Remaining Issues
+
+| Issue | Severity | Notes |
+|-------|----------|-------|
+| Default `/tmp` paths | INFO | Development-safe; production config (`config/production.toml`) should use `~/.agentos/` paths. Kernel now enforces `0o700` on vault dir. |
+
 ## Files Changed
 
-No files changed — read-only review phase.
+| File | Change |
+|------|--------|
+| `config/default.toml` | Security warning comments on `/tmp` vault and audit paths |
+| `crates/agentos-kernel/src/kernel.rs` | Vault parent dir created with `0o700` at boot |
 
 ## Dependencies
 

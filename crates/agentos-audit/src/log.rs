@@ -188,6 +188,7 @@ impl AuditLog {
             CREATE INDEX IF NOT EXISTS idx_audit_trace_id ON audit_log(trace_id);
             CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_log(event_type);
             CREATE INDEX IF NOT EXISTS idx_audit_agent_id ON audit_log(agent_id);
+            CREATE INDEX IF NOT EXISTS idx_audit_task_id ON audit_log(task_id, id);
             ",
         )
         .map_err(|e| AgentOSError::VaultError(format!("AuditLog init failed: {}", e)))?;
@@ -381,15 +382,24 @@ impl AuditLog {
         let mut entries_checked: u64 = 0;
         let mut expected_prev_hash: Option<String> = None;
 
-        // If starting from a non-genesis position, get the preceding entry's hash
+        // If starting from a non-genesis position, get the preceding entry's hash.
+        // A failure here (e.g., DB corruption) must not silently pass: without knowing
+        // the expected prev_hash we cannot validate the chain linkage at the start position.
         if from > 1 {
-            expected_prev_hash = conn
-                .query_row(
+            expected_prev_hash = Some(
+                conn.query_row(
                     "SELECT entry_hash FROM audit_log WHERE id = ?1",
                     params![from - 1],
-                    |row| row.get(0),
+                    |row| row.get::<_, String>(0),
                 )
-                .ok();
+                .map_err(|e| {
+                    AgentOSError::VaultError(format!(
+                        "Cannot verify audit chain: failed to retrieve predecessor hash at id {}: {}",
+                        from - 1,
+                        e
+                    ))
+                })?,
+            );
         }
 
         for row_result in rows {
@@ -471,6 +481,123 @@ impl AuditLog {
             .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
 
         Self::execute_query(&mut stmt, params![limit])
+    }
+
+    /// Query audit entries for a specific task inserted after the given row ID.
+    /// Returns entries ordered by row ID ascending (oldest first), limited to `limit` rows.
+    /// Each entry is paired with its SQLite row ID for monotonic tracking.
+    pub fn query_since_for_task(
+        &self,
+        task_id: &TaskID,
+        after_row_id: i64,
+        limit: u32,
+    ) -> Result<Vec<(i64, AuditEntry)>, AgentOSError> {
+        fn parse_err(msg: String) -> rusqlite::Error {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, msg)),
+            )
+        }
+
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, timestamp, trace_id, event_type, agent_id, task_id, \
+                 tool_id, details, severity, reversible, rollback_ref \
+                 FROM audit_log \
+                 WHERE task_id = ?1 AND id > ?2 \
+                 ORDER BY id ASC \
+                 LIMIT ?3",
+            )
+            .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
+
+        let task_id_str = task_id.to_string();
+        let rows = stmt
+            .query_map(rusqlite::params![task_id_str, after_row_id, limit], |row| {
+                let row_id: i64 = row.get(0)?;
+
+                let timestamp_str: String = row.get(1)?;
+                let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .map_err(|e| parse_err(format!("Invalid timestamp: {}", e)))?;
+
+                let trace_id_str: String = row.get(2)?;
+                let trace_id_uuid = uuid::Uuid::parse_str(&trace_id_str)
+                    .map_err(|e| parse_err(format!("Invalid trace_id UUID: {}", e)))?;
+                let trace_id = TraceID::from_uuid(trace_id_uuid);
+
+                let event_type_str: String = row.get(3)?;
+                let event_type: AuditEventType =
+                    serde_json::from_value(serde_json::Value::String(event_type_str.clone()))
+                        .map_err(|e| {
+                            parse_err(format!("Invalid event_type '{}': {}", event_type_str, e))
+                        })?;
+
+                let agent_id_str: Option<String> = row.get(4)?;
+                let agent_id = agent_id_str
+                    .map(|s| {
+                        uuid::Uuid::parse_str(&s)
+                            .map(AgentID::from_uuid)
+                            .map_err(|e| parse_err(format!("Invalid agent_id UUID: {}", e)))
+                    })
+                    .transpose()?;
+
+                let task_id_col_str: Option<String> = row.get(5)?;
+                let task_id_col = task_id_col_str
+                    .map(|s| {
+                        uuid::Uuid::parse_str(&s)
+                            .map(TaskID::from_uuid)
+                            .map_err(|e| parse_err(format!("Invalid task_id UUID: {}", e)))
+                    })
+                    .transpose()?;
+
+                let tool_id_str: Option<String> = row.get(6)?;
+                let tool_id = tool_id_str
+                    .map(|s| {
+                        uuid::Uuid::parse_str(&s)
+                            .map(ToolID::from_uuid)
+                            .map_err(|e| parse_err(format!("Invalid tool_id UUID: {}", e)))
+                    })
+                    .transpose()?;
+
+                let details_str: String = row.get(7)?;
+                let details: serde_json::Value = serde_json::from_str(&details_str)
+                    .map_err(|e| parse_err(format!("Invalid details JSON: {}", e)))?;
+
+                let severity_str: String = row.get(8)?;
+                let severity: AuditSeverity =
+                    serde_json::from_value(serde_json::Value::String(severity_str.clone()))
+                        .map_err(|e| {
+                            parse_err(format!("Invalid severity '{}': {}", severity_str, e))
+                        })?;
+
+                let reversible_int: i32 = row.get(9).unwrap_or(0);
+                let rollback_ref: Option<String> = row.get(10).unwrap_or(None);
+
+                Ok((
+                    row_id,
+                    AuditEntry {
+                        timestamp,
+                        trace_id,
+                        event_type,
+                        agent_id,
+                        task_id: task_id_col,
+                        tool_id,
+                        details,
+                        severity,
+                        reversible: reversible_int != 0,
+                        rollback_ref,
+                    },
+                ))
+            })
+            .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
+
+        let mut entries = Vec::new();
+        for row_result in rows {
+            entries.push(row_result.map_err(|e| AgentOSError::VaultError(e.to_string()))?);
+        }
+        Ok(entries)
     }
 
     pub fn query_recent_for_agent(
@@ -1003,5 +1130,114 @@ mod tests {
 
         let results = log.query_recent_for_agent(&target_agent, 5).unwrap();
         assert!(results.is_empty());
+    }
+
+    fn make_entry(task_id: Option<TaskID>, idx: usize) -> AuditEntry {
+        AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: AuditEventType::TaskCreated,
+            agent_id: None,
+            task_id,
+            tool_id: None,
+            details: serde_json::json!({ "idx": idx }),
+            severity: AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        }
+    }
+
+    #[test]
+    fn test_query_since_for_task_filters_by_task_id() {
+        let tmp = NamedTempFile::new().unwrap();
+        let log = AuditLog::open(tmp.path()).unwrap();
+        let task_a = TaskID::new();
+        let task_b = TaskID::new();
+
+        for i in 0..10 {
+            log.append(make_entry(Some(task_a), i)).unwrap();
+        }
+        for i in 0..5 {
+            log.append(make_entry(Some(task_b), i)).unwrap();
+        }
+
+        let results = log.query_since_for_task(&task_a, 0, 100).unwrap();
+        assert_eq!(results.len(), 10);
+        assert!(results.iter().all(|(_, e)| e.task_id == Some(task_a)));
+    }
+
+    #[test]
+    fn test_query_since_for_task_pagination() {
+        let tmp = NamedTempFile::new().unwrap();
+        let log = AuditLog::open(tmp.path()).unwrap();
+        let task = TaskID::new();
+
+        for i in 0..5 {
+            log.append(make_entry(Some(task), i)).unwrap();
+        }
+
+        let first = log.query_since_for_task(&task, 0, 100).unwrap();
+        assert_eq!(first.len(), 5);
+
+        let max_id = first.last().unwrap().0;
+        let second = log.query_since_for_task(&task, max_id, 100).unwrap();
+        assert!(second.is_empty(), "no new entries after max_id");
+
+        // Add 2 more entries and verify only those are returned.
+        log.append(make_entry(Some(task), 5)).unwrap();
+        log.append(make_entry(Some(task), 6)).unwrap();
+
+        let third = log.query_since_for_task(&task, max_id, 100).unwrap();
+        assert_eq!(third.len(), 2);
+    }
+
+    #[test]
+    fn test_query_since_for_task_ids_are_monotonically_increasing() {
+        let tmp = NamedTempFile::new().unwrap();
+        let log = AuditLog::open(tmp.path()).unwrap();
+        let task = TaskID::new();
+
+        for i in 0..5 {
+            log.append(make_entry(Some(task), i)).unwrap();
+        }
+
+        let results = log.query_since_for_task(&task, 0, 100).unwrap();
+        assert_eq!(results.len(), 5);
+        let ids: Vec<i64> = results.iter().map(|(id, _)| *id).collect();
+        for window in ids.windows(2) {
+            assert!(window[0] < window[1], "IDs must be strictly increasing");
+        }
+    }
+
+    #[test]
+    fn test_query_since_for_task_empty_when_no_entries() {
+        let tmp = NamedTempFile::new().unwrap();
+        let log = AuditLog::open(tmp.path()).unwrap();
+        let task = TaskID::new();
+        let other = TaskID::new();
+
+        for i in 0..3 {
+            log.append(make_entry(Some(other), i)).unwrap();
+        }
+
+        let results = log.query_since_for_task(&task, 0, 100).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_query_since_for_task_respects_limit() {
+        let tmp = NamedTempFile::new().unwrap();
+        let log = AuditLog::open(tmp.path()).unwrap();
+        let task = TaskID::new();
+
+        for i in 0..10 {
+            log.append(make_entry(Some(task), i)).unwrap();
+        }
+
+        let results = log.query_since_for_task(&task, 0, 3).unwrap();
+        assert_eq!(results.len(), 3);
+        // Should return the first 3 entries (ascending order).
+        assert_eq!(results[0].1.details["idx"], serde_json::json!(0));
+        assert_eq!(results[2].1.details["idx"], serde_json::json!(2));
     }
 }

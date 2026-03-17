@@ -134,13 +134,24 @@ pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::
 }
 
 fn parse_scope(s: &str) -> anyhow::Result<SecretScope> {
+    // NOTE: agent: and tool: scopes are resolved server-side by the kernel using
+    // the scope_raw field — which always accompanies the scope placeholder sent here.
+    // This function validates the format and returns a client-side placeholder only.
     match s {
         "global" => Ok(SecretScope::Global),
         s if s.starts_with("agent:") => {
-            Ok(SecretScope::Global) // simplified for Phase 1
+            let name = &s[6..];
+            if name.is_empty() {
+                anyhow::bail!("agent scope requires a name, e.g. 'agent:worker'");
+            }
+            Ok(SecretScope::Global) // placeholder; kernel resolves via scope_raw
         }
         s if s.starts_with("tool:") => {
-            Ok(SecretScope::Global) // simplified for Phase 1
+            let name = &s[5..];
+            if name.is_empty() {
+                anyhow::bail!("tool scope requires a name, e.g. 'tool:file-reader'");
+            }
+            Ok(SecretScope::Global) // placeholder; kernel resolves via scope_raw
         }
         _ => anyhow::bail!(
             "Invalid scope: '{}'. Use 'global', 'agent:<name>', or 'tool:<name>'",

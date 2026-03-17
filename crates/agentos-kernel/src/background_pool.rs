@@ -58,6 +58,12 @@ impl BackgroundPool {
         self.tasks.read().await.get(task_id).cloned()
     }
 
+    pub async fn set_scheduled_job(&self, task_id: &TaskID, job_id: ScheduleID) {
+        if let Some(task) = self.tasks.write().await.get_mut(task_id) {
+            task.scheduled_job_id = Some(job_id);
+        }
+    }
+
     pub async fn get_by_name(&self, name: &str) -> Option<BackgroundTask> {
         self.tasks
             .read()
@@ -65,6 +71,22 @@ impl BackgroundPool {
             .values()
             .find(|t| t.name == name)
             .cloned()
+    }
+
+    /// Remove terminal (Complete / Failed) tasks that completed more than
+    /// `max_age_secs` seconds ago. Called periodically by the timeout checker
+    /// to prevent unbounded memory growth in long-running kernels.
+    pub async fn evict_terminal(&self, max_age_secs: i64) {
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(max_age_secs);
+        self.tasks.write().await.retain(|_, task| {
+            let is_terminal = matches!(task.state, TaskState::Complete | TaskState::Failed);
+            if is_terminal {
+                if let Some(completed_at) = task.completed_at {
+                    return completed_at > cutoff;
+                }
+            }
+            true
+        });
     }
 }
 

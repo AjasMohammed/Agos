@@ -1,7 +1,7 @@
 use agentos_llm::{calculate_inference_cost, default_pricing_table, ModelPricing, TokenUsage};
 use agentos_types::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use tokio::sync::{broadcast, RwLock};
 
 /// Per-agent cost accumulation state.
@@ -12,8 +12,11 @@ struct AgentCostState {
     cost_micro_usd: AtomicU64,
     /// Tool calls in current period.
     tool_calls: AtomicU64,
-    /// Start of the current budget period.
-    period_start: chrono::DateTime<chrono::Utc>,
+    /// Unix timestamp (seconds) of the start of the current budget period.
+    /// Stored as `AtomicI64` so it can be updated without a write lock on the
+    /// agents map — `compare_exchange` ensures exactly one thread performs the
+    /// daily reset even under concurrent inference calls.
+    period_start_unix: AtomicI64,
     /// Budget configuration.
     budget: AgentBudget,
     /// Agent display name (for reporting).
@@ -86,7 +89,7 @@ impl CostTracker {
             tokens_used: AtomicU64::new(0),
             cost_micro_usd: AtomicU64::new(0),
             tool_calls: AtomicU64::new(0),
-            period_start: chrono::Utc::now(),
+            period_start_unix: AtomicI64::new(chrono::Utc::now().timestamp()),
             budget,
             agent_name,
         };
@@ -151,7 +154,19 @@ impl CostTracker {
     ) -> BudgetCheckResult {
         let pricing = self.get_pricing(provider, model).await;
         let cost = calculate_inference_cost(usage, &pricing);
-        let cost_micro = (cost.total_cost_usd * 1_000_000.0) as u64;
+        // Guard against NaN/Infinity from a malformed pricing table — treat as zero cost.
+        let cost_usd = if cost.total_cost_usd.is_finite() {
+            cost.total_cost_usd
+        } else {
+            tracing::warn!(
+                provider = %provider,
+                model = %model,
+                "Inference cost is non-finite ({}) — recording as zero",
+                cost.total_cost_usd
+            );
+            0.0
+        };
+        let cost_micro = (cost_usd * 1_000_000.0) as u64;
 
         let agents = self.agents.read().await;
         let state = match agents.get(agent_id) {
@@ -159,15 +174,32 @@ impl CostTracker {
             None => return BudgetCheckResult::Ok, // untracked agent
         };
 
-        // Reset counters if we've crossed into a new day
+        // Reset counters if we've crossed into a new budget period (24 hours).
+        //
+        // `period_start_unix` is an AtomicI64 so it can be updated under a read lock.
+        // `compare_exchange` ensures exactly one concurrent caller performs the reset:
+        // the winner atomically advances the period timestamp before zeroing counters,
+        // so losers see the new timestamp and skip the reset.
         let now = chrono::Utc::now();
-        let hours_since_reset = now.signed_duration_since(state.period_start).num_hours();
+        let start_ts = state.period_start_unix.load(Ordering::Relaxed);
+        let hours_since_reset = (now.timestamp() - start_ts) / 3600;
         if hours_since_reset >= 24 {
-            state.tokens_used.store(0, Ordering::Relaxed);
-            state.cost_micro_usd.store(0, Ordering::Relaxed);
-            state.tool_calls.store(0, Ordering::Relaxed);
-            // Note: period_start is not updated here because we hold a read lock.
-            // This is acceptable — the reset will happen again on next call if needed.
+            // Attempt to claim the reset; only the thread that wins the CAS proceeds.
+            if state
+                .period_start_unix
+                .compare_exchange(
+                    start_ts,
+                    now.timestamp(),
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                state.tokens_used.store(0, Ordering::Relaxed);
+                state.cost_micro_usd.store(0, Ordering::Relaxed);
+                state.tool_calls.store(0, Ordering::Relaxed);
+            }
+            // Whether or not we won the CAS, the counters are now in the new period.
         }
 
         // Accumulate
@@ -297,7 +329,11 @@ impl CostTracker {
         Some(CostSnapshot {
             agent_id: *agent_id,
             agent_name: state.agent_name.clone(),
-            period_start: state.period_start,
+            period_start: chrono::DateTime::from_timestamp(
+                state.period_start_unix.load(Ordering::Relaxed),
+                0,
+            )
+            .unwrap_or_default(),
             tokens_used: tokens,
             cost_usd,
             tool_calls: calls,
@@ -339,7 +375,11 @@ impl CostTracker {
                 Some(CostSnapshot {
                     agent_id: *id,
                     agent_name: state.agent_name.clone(),
-                    period_start: state.period_start,
+                    period_start: chrono::DateTime::from_timestamp(
+                        state.period_start_unix.load(Ordering::Relaxed),
+                        0,
+                    )
+                    .unwrap_or_default(),
                     tokens_used: tokens,
                     cost_usd,
                     tool_calls: calls,

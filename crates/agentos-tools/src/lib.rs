@@ -442,7 +442,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_runner_lists_all_built_in_tools() {
         let dir = TempDir::new().unwrap();
-        let runner = ToolRunner::new(dir.path());
+        let runner = ToolRunner::new(dir.path()).unwrap();
         let tools = runner.list_tools();
 
         assert!(

@@ -29,9 +29,13 @@ fn feed_token_fields(mac: &mut HmacSha256, token: &CapabilityToken) {
         mac.update(&[*flag as u8]);
     }
 
-    // Permission entries — length-prefixed resource names + rwx bits + expires_at
-    mac.update(&(token.permissions.entries.len() as u32).to_le_bytes());
-    for entry in &token.permissions.entries {
+    // Permission entries — sorted by resource name for deterministic order regardless of
+    // insertion order. Without sorting, a token reconstructed with entries in a different
+    // order would fail HMAC verification even though it encodes the same permissions.
+    let mut sorted_entries: Vec<_> = token.permissions.entries.iter().collect();
+    sorted_entries.sort_by(|a, b| a.resource.cmp(&b.resource));
+    mac.update(&(sorted_entries.len() as u32).to_le_bytes());
+    for entry in &sorted_entries {
         update_length_prefixed(mac, entry.resource.as_bytes());
         mac.update(&[entry.read as u8, entry.write as u8, entry.execute as u8]);
         // Sign expires_at so time-limited permissions can't be made permanent

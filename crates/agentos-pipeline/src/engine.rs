@@ -42,6 +42,10 @@ impl PipelineEngine {
         &self.store
     }
 
+    pub fn store_arc(&self) -> Arc<PipelineStore> {
+        self.store.clone()
+    }
+
     /// Run a pipeline end-to-end.
     pub async fn run(
         &self,

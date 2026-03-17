@@ -1,8 +1,29 @@
 use crate::kernel::Kernel;
 use agentos_bus::KernelResponse;
 use agentos_types::*;
+use agentos_vault::ZeroizingString;
 
 impl Kernel {
+    /// Emit a SecretsAccessAttempt event for audit trail on every vault operation.
+    async fn emit_secrets_access(&self, action: &str, key: &str, allowed: bool) {
+        self.emit_event(
+            EventType::SecretsAccessAttempt,
+            EventSource::SecretsVault,
+            if allowed {
+                EventSeverity::Info
+            } else {
+                EventSeverity::Warning
+            },
+            serde_json::json!({
+                "action": action,
+                "key": key,
+                "allowed": allowed,
+            }),
+            0,
+        )
+        .await;
+    }
+
     pub(crate) async fn cmd_set_secret(
         &self,
         name: String,
@@ -10,6 +31,9 @@ impl Kernel {
         scope: SecretScope,
         scope_raw: Option<String>,
     ) -> KernelResponse {
+        // Wrap value in ZeroizingString immediately to zero it on scope exit.
+        let value = ZeroizingString::new(value);
+
         // Resolve raw scope string to proper SecretScope using kernel's agent registry.
         // Return an error if the specified agent/tool is not found — silently widening
         // to Global would violate the caller's security intent.
@@ -30,17 +54,24 @@ impl Kernel {
         };
         match self
             .vault
-            .set(&name, &value, SecretOwner::Kernel, resolved_scope)
+            .set(&name, value.as_str(), SecretOwner::Kernel, resolved_scope)
             .await
         {
-            Ok(_) => KernelResponse::Success { data: None },
-            Err(e) => KernelResponse::Error {
-                message: e.to_string(),
-            },
+            Ok(_) => {
+                self.emit_secrets_access("set", &name, true).await;
+                KernelResponse::Success { data: None }
+            }
+            Err(e) => {
+                self.emit_secrets_access("set", &name, false).await;
+                KernelResponse::Error {
+                    message: e.to_string(),
+                }
+            }
         }
     }
 
     pub(crate) async fn cmd_list_secrets(&self) -> KernelResponse {
+        self.emit_secrets_access("list", "*", true).await;
         match self.vault.list().await {
             Ok(list) => KernelResponse::SecretList(list),
             Err(e) => KernelResponse::Error {
@@ -54,20 +85,33 @@ impl Kernel {
         name: String,
         new_value: String,
     ) -> KernelResponse {
-        match self.vault.rotate(&name, &new_value).await {
-            Ok(_) => KernelResponse::Success { data: None },
-            Err(e) => KernelResponse::Error {
-                message: e.to_string(),
-            },
+        let new_value = ZeroizingString::new(new_value);
+        match self.vault.rotate(&name, new_value.as_str()).await {
+            Ok(_) => {
+                self.emit_secrets_access("rotate", &name, true).await;
+                KernelResponse::Success { data: None }
+            }
+            Err(e) => {
+                self.emit_secrets_access("rotate", &name, false).await;
+                KernelResponse::Error {
+                    message: e.to_string(),
+                }
+            }
         }
     }
 
     pub(crate) async fn cmd_revoke_secret(&self, name: String) -> KernelResponse {
         match self.vault.revoke(&name).await {
-            Ok(_) => KernelResponse::Success { data: None },
-            Err(e) => KernelResponse::Error {
-                message: e.to_string(),
-            },
+            Ok(_) => {
+                self.emit_secrets_access("delete", &name, true).await;
+                KernelResponse::Success { data: None }
+            }
+            Err(e) => {
+                self.emit_secrets_access("delete", &name, false).await;
+                KernelResponse::Error {
+                    message: e.to_string(),
+                }
+            }
         }
     }
 

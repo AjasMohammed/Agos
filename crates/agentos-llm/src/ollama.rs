@@ -91,9 +91,17 @@ impl LLMCore for OllamaCore {
             .json(&request)
             .send()
             .await
-            .map_err(|e| AgentOSError::LLMError {
-                provider: "ollama".to_string(),
-                reason: format!("Request failed: {}", e),
+            .map_err(|e| {
+                let mut reason = format!("Request failed: {}", e);
+                let mut source = std::error::Error::source(&e);
+                while let Some(s) = source {
+                    reason += &format!(" -> {}", s);
+                    source = std::error::Error::source(s);
+                }
+                AgentOSError::LLMError {
+                    provider: "ollama".to_string(),
+                    reason,
+                }
             })?;
 
         if !response.status().is_success() {
@@ -192,9 +200,17 @@ impl LLMCore for OllamaCore {
             .json(&request)
             .send()
             .await
-            .map_err(|e| AgentOSError::LLMError {
-                provider: "ollama".to_string(),
-                reason: format!("Request failed: {}", e),
+            .map_err(|e| {
+                let mut reason = format!("Request failed: {}", e);
+                let mut source = std::error::Error::source(&e);
+                while let Some(s) = source {
+                    reason += &format!(" -> {}", s);
+                    source = std::error::Error::source(s);
+                }
+                AgentOSError::LLMError {
+                    provider: "ollama".to_string(),
+                    reason,
+                }
             })?;
 
         if !response.status().is_success() {

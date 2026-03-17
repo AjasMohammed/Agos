@@ -69,6 +69,7 @@ impl Kernel {
                 completed_at: None,
                 result: None,
                 detached,
+                scheduled_job_id: None,
             })
             .await;
 

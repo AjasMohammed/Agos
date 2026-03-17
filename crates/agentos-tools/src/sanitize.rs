@@ -27,8 +27,12 @@ pub fn sanitize_tool_output(tool_name: &str, raw_output: &serde_json::Value) -> 
 /// Truncates output if it exceeds the maximum character budget.
 pub fn truncate_if_needed(output: &str, max_chars: usize) -> String {
     if output.len() > max_chars {
-        // Find a safe truncation point (avoid splitting UTF-8)
-        let truncated = &output[..output.floor_char_boundary(max_chars)];
+        // Find a safe truncation point (avoid splitting UTF-8 multibyte chars)
+        let mut boundary = max_chars;
+        while !output.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        let truncated = &output[..boundary];
         format!(
             "{}\n[TOOL_RESULT_TRUNCATED: output exceeded {} chars]",
             truncated, max_chars

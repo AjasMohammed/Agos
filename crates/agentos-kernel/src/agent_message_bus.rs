@@ -4,6 +4,14 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
+/// Maximum number of pending messages per agent inbox before new sends are rejected.
+/// Prevents unbounded memory growth when a slow or stalled agent accumulates messages.
+const INBOX_CAPACITY: usize = 256;
+
+/// Maximum retained message history entries across all agents.
+/// Oldest entries are discarded when this limit is exceeded.
+const MAX_HISTORY: usize = 10_000;
+
 /// Lightweight notification sent by AgentMessageBus to the kernel.
 /// The kernel converts these into properly HMAC-signed EventMessages with audit trail.
 #[derive(Debug, Clone)]
@@ -14,8 +22,10 @@ pub struct CommNotification {
 }
 
 pub struct AgentMessageBus {
-    /// Per-agent message channels. Each agent has an inbox.
-    inboxes: RwLock<HashMap<AgentID, mpsc::UnboundedSender<AgentMessage>>>,
+    /// Per-agent message channels. Each agent has a bounded inbox.
+    /// Uses a bounded channel (INBOX_CAPACITY) to prevent unbounded memory growth
+    /// when an agent is slow or stalled.
+    inboxes: RwLock<HashMap<AgentID, mpsc::Sender<AgentMessage>>>,
     /// Agent group memberships.
     groups: RwLock<HashMap<GroupID, Vec<AgentID>>>,
     /// Message history for audit and retrieval.
@@ -128,8 +138,10 @@ impl AgentMessageBus {
     }
 
     /// Register an agent's inbox when they connect.
-    pub async fn register_agent(&self, agent_id: AgentID) -> mpsc::UnboundedReceiver<AgentMessage> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    /// Returns a bounded receiver; messages beyond INBOX_CAPACITY will be rejected
+    /// with a MessageDeliveryFailed event rather than accumulating without bound.
+    pub async fn register_agent(&self, agent_id: AgentID) -> mpsc::Receiver<AgentMessage> {
+        let (tx, rx) = mpsc::channel(INBOX_CAPACITY);
         self.inboxes.write().await.insert(agent_id, tx);
         rx
     }
@@ -149,7 +161,20 @@ impl AgentMessageBus {
         }
 
         // Enforce signature verification (Spec §10)
-        self.verify_message_signature(&message).await?;
+        if let Err(e) = self.verify_message_signature(&message).await {
+            // Emit AgentImpersonationAttempt when signature verification fails
+            self.notify(
+                EventType::AgentImpersonationAttempt,
+                EventSeverity::Critical,
+                serde_json::json!({
+                    "claimed_agent_id": message.from.to_string(),
+                    "source": "direct_message",
+                    "reason": e.to_string(),
+                }),
+            )
+            .await;
+            return Err(e);
+        }
 
         let agent_id = match message.to {
             agentos_types::MessageTarget::Direct(id) => id,
@@ -165,8 +190,41 @@ impl AgentMessageBus {
 
         let inboxes = self.inboxes.read().await;
         if let Some(tx) = inboxes.get(&agent_id) {
-            let _ = tx.send(message.clone());
-            self.history.write().await.push(message);
+            match tx.try_send(message.clone()) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    // Inbox is full: the agent is alive but not keeping up.
+                    // Reject the message and emit a delivery-failed event.
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        "Agent inbox full — message rejected (backpressure)"
+                    );
+                    drop(inboxes);
+                    self.notify(
+                        EventType::MessageDeliveryFailed,
+                        EventSeverity::Warning,
+                        serde_json::json!({
+                            "from_agent": from.to_string(),
+                            "to_agent": agent_id.to_string(),
+                            "message_id": msg_id.to_string(),
+                            "reason": "inbox_full",
+                        }),
+                    )
+                    .await;
+                    return Err(AgentOSError::KernelError {
+                        reason: format!("Agent {} inbox is full — message rejected", agent_id),
+                    });
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    // Inbox closed: agent has disconnected but entry not yet cleaned up.
+                    // Log and continue; message is silently dropped (same as pre-bound behavior).
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        "Agent inbox closed (agent disconnected) — message dropped"
+                    );
+                }
+            }
+            self.push_history(message).await;
             self.notify(
                 EventType::DirectMessageReceived,
                 EventSeverity::Info,
@@ -186,6 +244,16 @@ impl AgentMessageBus {
                     "from_agent": from.to_string(),
                     "to_agent": agent_id.to_string(),
                     "error": format!("Agent {} not found", agent_id),
+                }),
+            )
+            .await;
+            self.notify(
+                EventType::AgentUnreachable,
+                EventSeverity::Warning,
+                serde_json::json!({
+                    "unreachable_agent": agent_id.to_string(),
+                    "from_agent": from.to_string(),
+                    "reason": "not_registered",
                 }),
             )
             .await;
@@ -213,6 +281,16 @@ impl AgentMessageBus {
         // Enforce signature verification (Spec §10)
         if let Err(e) = self.verify_message_signature(&message).await {
             self.notify(
+                EventType::AgentImpersonationAttempt,
+                EventSeverity::Critical,
+                serde_json::json!({
+                    "claimed_agent_id": message.from.to_string(),
+                    "source": "broadcast",
+                    "reason": e.to_string(),
+                }),
+            )
+            .await;
+            self.notify(
                 EventType::MessageDeliveryFailed,
                 EventSeverity::Warning,
                 serde_json::json!({
@@ -231,12 +309,29 @@ impl AgentMessageBus {
 
         for (id, tx) in inboxes.iter() {
             if *id != from {
-                let _ = tx.send(message.clone());
-                count += 1;
+                match tx.try_send(message.clone()) {
+                    Ok(()) => count += 1,
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!(
+                            agent_id = %id,
+                            "Broadcast: agent inbox full — message skipped for this recipient"
+                        );
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        // Agent disconnected but inbox entry not yet cleaned up; count as
+                        // recipient anyway (inbox was registered, message logically targeted it).
+                        count += 1;
+                        tracing::debug!(
+                            agent_id = %id,
+                            "Broadcast: agent inbox closed — message dropped for disconnected agent"
+                        );
+                    }
+                }
             }
         }
 
-        self.history.write().await.push(message);
+        drop(inboxes);
+        self.push_history(message).await;
         self.notify(
             EventType::BroadcastReceived,
             EventSeverity::Info,
@@ -276,6 +371,17 @@ impl AgentMessageBus {
         // Enforce signature verification (Spec §10)
         if let Err(e) = self.verify_message_signature(&message).await {
             self.notify(
+                EventType::AgentImpersonationAttempt,
+                EventSeverity::Critical,
+                serde_json::json!({
+                    "claimed_agent_id": message.from.to_string(),
+                    "source": "group_message",
+                    "group_id": group_id.to_string(),
+                    "reason": e.to_string(),
+                }),
+            )
+            .await;
+            self.notify(
                 EventType::MessageDeliveryFailed,
                 EventSeverity::Warning,
                 serde_json::json!({
@@ -304,8 +410,23 @@ impl AgentMessageBus {
         for &id in members {
             if id != from {
                 if let Some(tx) = inboxes.get(&id) {
-                    let _ = tx.send(message.clone());
-                    count += 1;
+                    match tx.try_send(message.clone()) {
+                        Ok(()) => count += 1,
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            tracing::warn!(
+                                agent_id = %id,
+                                "Group send: agent inbox full — message skipped for this recipient"
+                            );
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            // Agent disconnected; count as recipient (inbox was registered).
+                            count += 1;
+                            tracing::debug!(
+                                agent_id = %id,
+                                "Group send: agent inbox closed — message dropped for disconnected agent"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -314,7 +435,7 @@ impl AgentMessageBus {
         drop(inboxes);
         drop(groups);
 
-        self.history.write().await.push(message);
+        self.push_history(message).await;
         self.notify(
             EventType::BroadcastReceived,
             EventSeverity::Info,
@@ -357,14 +478,24 @@ impl AgentMessageBus {
     }
 
     /// Get pending (undelivered) message count for an agent.
+    /// Returns the number of messages queued but not yet consumed by the agent.
     pub async fn pending_count(&self, agent_id: &AgentID) -> usize {
         let inboxes = self.inboxes.read().await;
-        if let Some(_tx) = inboxes.get(agent_id) {
-            // Unbounded channels do not expose pending queue easily,
-            // we'd need to adapt, returning 0 for now
-            return 0; // rx handles consumption immediately if polled
+        if let Some(tx) = inboxes.get(agent_id) {
+            return tx.max_capacity() - tx.capacity();
         }
         0
+    }
+
+    /// Append a message to history, capping total retained entries at MAX_HISTORY.
+    /// Oldest entries are discarded when the cap is exceeded.
+    async fn push_history(&self, message: AgentMessage) {
+        let mut history = self.history.write().await;
+        history.push(message);
+        if history.len() > MAX_HISTORY {
+            let excess = history.len() - MAX_HISTORY;
+            history.drain(0..excess);
+        }
     }
 }
 
@@ -680,6 +811,13 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("not found"));
+
+        let notif2 = notif_rx
+            .try_recv()
+            .expect("should receive AgentUnreachable notification after delivery failure");
+        assert_eq!(notif2.event_type, EventType::AgentUnreachable);
+        assert_eq!(notif2.severity, EventSeverity::Warning);
+        assert_eq!(notif2.payload["reason"].as_str().unwrap(), "not_registered");
     }
 
     #[tokio::test]

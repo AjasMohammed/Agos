@@ -1,9 +1,13 @@
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use tokio_util::sync::CancellationToken;
+
+use crate::auth::AuthToken;
 use crate::router::build_router;
 use crate::state::AppState;
 use crate::templates::build_template_engine;
 use agentos_kernel::Kernel;
-use std::net::SocketAddr;
-use std::sync::Arc;
 
 pub struct WebServer {
     bind_addr: SocketAddr,
@@ -11,17 +15,81 @@ pub struct WebServer {
 }
 
 impl WebServer {
-    pub fn new(bind_addr: SocketAddr, kernel: Arc<Kernel>) -> Self {
-        let templates = Arc::new(build_template_engine());
-        let state = AppState { kernel, templates };
-        Self { bind_addr, state }
+    pub fn new(
+        bind_addr: SocketAddr,
+        kernel: Arc<Kernel>,
+        allowed_tool_dirs: Arc<Vec<std::path::PathBuf>>,
+    ) -> Result<Self, minijinja::Error> {
+        let templates = Arc::new(build_template_engine()?);
+        let state = AppState {
+            kernel,
+            templates,
+            csrf_tokens: Arc::new(dashmap::DashMap::<String, (String, std::time::Instant)>::new()),
+            allowed_tool_dirs,
+        };
+        Ok(Self { bind_addr, state })
     }
 
     pub async fn start(self) -> Result<(), anyhow::Error> {
-        let app = build_router(self.state);
+        let auth_token = self.make_auth_token();
+        let app = build_router(self.state, self.bind_addr, auth_token)?;
         let listener = tokio::net::TcpListener::bind(self.bind_addr).await?;
         tracing::info!("Web UI listening on http://{}", self.bind_addr);
         axum::serve(listener, app).await?;
         Ok(())
     }
+
+    pub async fn start_with_shutdown(
+        self,
+        shutdown: CancellationToken,
+    ) -> Result<(), anyhow::Error> {
+        let auth_token = self.make_auth_token();
+
+        // Periodically evict expired CSRF tokens to prevent unbounded map growth.
+        // Tokens older than 2× TOKEN_TTL are safe to remove.
+        let csrf_tokens = Arc::clone(&self.state.csrf_tokens);
+        let sweep_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let sweep_interval = tokio::time::Duration::from_secs(30 * 60); // every 30 min
+            let max_age = crate::csrf::TOKEN_TTL * 2;
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(sweep_interval) => {
+                        let cutoff = std::time::Instant::now() - max_age;
+                        csrf_tokens.retain(|_, (_, issued_at)| *issued_at > cutoff);
+                    }
+                    _ = sweep_shutdown.cancelled() => break,
+                }
+            }
+        });
+
+        let app = build_router(self.state, self.bind_addr, auth_token)?;
+        let listener = tokio::net::TcpListener::bind(self.bind_addr).await?;
+        tracing::info!("Web UI listening on http://{}", self.bind_addr);
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move { shutdown.cancelled().await })
+            .await?;
+        Ok(())
+    }
+
+    fn make_auth_token(&self) -> AuthToken {
+        let token = generate_auth_token();
+        // Write to stderr so the token is not captured by stdout log aggregators.
+        eprintln!("=== AgentOS Web UI ===");
+        eprintln!("Auth token: {}", token.as_str());
+        eprintln!(
+            "Open http://{}/login and paste the token above to access the UI.",
+            self.bind_addr
+        );
+        AuthToken(Arc::new(token))
+    }
+}
+
+/// Generates a 32-byte cryptographically random token, returned as `Zeroizing<String>`
+/// so the plaintext is cleared from memory when the value is dropped.
+fn generate_auth_token() -> zeroize::Zeroizing<String> {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    zeroize::Zeroizing::new(hex::encode(bytes))
 }

@@ -4,10 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ page_title }} - AgentOS</title>
+    <meta name="csrf-token" content="{{ csrf_token }}">
     <link rel="stylesheet" href="/static/css/pico.min.css">
     <link rel="stylesheet" href="/static/css/app.css">
     <script src="/static/js/htmx.min.js"></script>
     <script src="/static/js/alpine.min.js" defer></script>
+    <script src="/static/js/csrf.js" defer></script>
 </head>
 <body>
     <nav class="container-fluid">

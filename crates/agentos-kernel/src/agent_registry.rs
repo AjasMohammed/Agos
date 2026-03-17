@@ -233,13 +233,35 @@ impl AgentRegistry {
             let roles_file = dir.join("roles.json");
 
             let agents_list: Vec<&AgentProfile> = self.agents.values().collect();
-            if let Ok(json) = serde_json::to_string_pretty(&agents_list) {
-                let _ = fs::write(&agents_file, json);
+            match serde_json::to_string_pretty(&agents_list) {
+                Ok(json) => {
+                    if let Err(e) = fs::write(&agents_file, json) {
+                        tracing::warn!(
+                            path = %agents_file.display(),
+                            error = %e,
+                            "Failed to persist agent registry to disk — in-memory state diverges"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to serialize agent registry");
+                }
             }
 
             let roles_list: Vec<&Role> = self.roles.values().collect();
-            if let Ok(json) = serde_json::to_string_pretty(&roles_list) {
-                let _ = fs::write(&roles_file, json);
+            match serde_json::to_string_pretty(&roles_list) {
+                Ok(json) => {
+                    if let Err(e) = fs::write(&roles_file, json) {
+                        tracing::warn!(
+                            path = %roles_file.display(),
+                            error = %e,
+                            "Failed to persist role registry to disk — in-memory state diverges"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to serialize role registry");
+                }
             }
         }
     }

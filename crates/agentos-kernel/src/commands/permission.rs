@@ -52,9 +52,11 @@ impl Kernel {
             .get_permissions(&agent.id)
             .unwrap_or_default();
         perms.grant(resource, read, write, execute, None);
-        self.capability_engine
-            .update_permissions(&agent.id, perms)
-            .ok();
+        if let Err(e) = self.capability_engine.update_permissions(&agent.id, perms) {
+            return KernelResponse::Error {
+                message: format!("Failed to update permissions: {e}"),
+            };
+        }
 
         self.audit_log(agentos_audit::AuditEntry {
             timestamp: chrono::Utc::now(),
@@ -281,16 +283,21 @@ impl Kernel {
             }
         };
 
-        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_secs as i64);
+        // Use saturating conversion: values > i64::MAX are clamped to a very large timeout
+        // rather than wrapping to a negative number (which would create a past expiry).
+        let expires_secs_i64 = i64::try_from(expires_secs).unwrap_or(i64::MAX / 2);
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_secs_i64);
 
         let mut perms = self
             .capability_engine
             .get_permissions(&agent.id)
             .unwrap_or_default();
         perms.grant(resource.clone(), read, write, execute, Some(expires_at));
-        self.capability_engine
-            .update_permissions(&agent.id, perms)
-            .ok();
+        if let Err(e) = self.capability_engine.update_permissions(&agent.id, perms) {
+            return KernelResponse::Error {
+                message: format!("Failed to update permissions: {e}"),
+            };
+        }
 
         self.audit_log(agentos_audit::AuditEntry {
             timestamp: chrono::Utc::now(),

@@ -7,7 +7,7 @@ tags:
   - quality
   - phase-7
 date: 2026-03-13
-status: planned
+status: complete
 effort: 3h
 priority: high
 ---
@@ -141,9 +141,25 @@ Some bugs are invisible when reviewing code crate-by-crate — they only emerge 
 
 ---
 
+## Findings
+
+| File | Line(s) | Severity | Category | Description | Fix Applied |
+|------|---------|----------|----------|-------------|-------------|
+| `crates/agentos-audit/src/log.rs` | `verify_chain()` | WARNING | Silent failure | If the DB query for a predecessor hash fails (e.g., due to row deletion), `.ok()` silently mapped the error to `None`, allowing a corrupted chain to pass verification | Yes — now propagates `AgentOSError::VaultError` |
+| `crates/agentos-kernel/src/kernel.rs` | boot | WARNING | File permissions | Vault parent directory created with default umask; on shared systems the `/tmp` path is world-listable | Yes — added `set_permissions(0o700)` on parent dir at startup |
+| `config/default.toml` | 13 | INFO | Config documentation | `/tmp` vault path documented without security warning | Yes — added warning comment with production path guidance |
+
+## Remaining Issues
+
+None — all findings remediated.
+
 ## Files Changed
 
-No files changed — read-only review phase.
+| File | Change |
+|------|--------|
+| `crates/agentos-audit/src/log.rs` | `verify_chain()` predecessor hash error propagation |
+| `crates/agentos-kernel/src/kernel.rs` | Vault parent dir `0o700` permissions at boot |
+| `config/default.toml` | Security warning comment on `/tmp` vault path |
 
 ## Dependencies
 

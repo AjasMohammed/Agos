@@ -15,7 +15,9 @@ enum TaskKind {
     ToolLifecycleListener,
     CommNotificationListener,
     ScheduleNotificationListener,
+    ArbiterNotificationListener,
     HealthMonitor,
+    Consolidation,
 }
 
 impl std::fmt::Display for TaskKind {
@@ -29,7 +31,9 @@ impl std::fmt::Display for TaskKind {
             TaskKind::ToolLifecycleListener => write!(f, "ToolLifecycleListener"),
             TaskKind::CommNotificationListener => write!(f, "CommNotificationListener"),
             TaskKind::ScheduleNotificationListener => write!(f, "ScheduleNotificationListener"),
+            TaskKind::ArbiterNotificationListener => write!(f, "ArbiterNotificationListener"),
             TaskKind::HealthMonitor => write!(f, "HealthMonitor"),
+            TaskKind::Consolidation => write!(f, "Consolidation"),
         }
     }
 }
@@ -135,6 +139,13 @@ impl Kernel {
                                         kernel.scheduler.requeue(&waiter_id).await.ok();
                                     }
                                     kernel.cleanup_task_subscriptions(&timed_out.task_id).await;
+                                    // Release context window, intent validator state, and resource
+                                    // locks held by this task — the timeout checker is the terminal
+                                    // authority; execute_task_sync will see the terminal state and
+                                    // skip its own cleanup path for these.
+                                    kernel.context_manager.remove_context(&timed_out.task_id).await;
+                                    kernel.intent_validator.remove_task(&timed_out.task_id).await;
+                                    kernel.resource_arbiter.release_all_for_agent(timed_out.agent_id).await;
                                 }
 
                                 // Sweep expired resource locks (Spec §8)
@@ -315,6 +326,10 @@ impl Kernel {
                                         Duration::from_secs(72 * 3600), // 72h (Spec §5)
                                     );
 
+                                    // Evict terminal background tasks older than 1 hour to
+                                    // prevent unbounded pool growth for long-running kernels.
+                                    kernel.background_pool.evict_terminal(3600).await;
+
                                     // Prune old audit log entries if a rotation limit is set
                                     let max_entries = kernel.config.audit.max_audit_entries;
                                     if max_entries > 0 {
@@ -426,11 +441,75 @@ impl Kernel {
                     TaskKind::ScheduleNotificationListener
                 })
             }
+            TaskKind::ArbiterNotificationListener => {
+                let token = kernel.cancellation_token.clone();
+                join_set.spawn(async move {
+                    let mut rx = kernel.arbiter_notification_receiver.lock().await;
+                    loop {
+                        tokio::select! {
+                            _ = token.cancelled() => break,
+                            notif = rx.recv() => {
+                                match notif {
+                                    Some(n) => kernel.process_arbiter_notification(n).await,
+                                    None => {
+                                        tracing::warn!("Arbiter notification channel closed");
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    TaskKind::ArbiterNotificationListener
+                })
+            }
             TaskKind::HealthMonitor => {
                 let token = kernel.cancellation_token.clone();
                 join_set.spawn(async move {
                     crate::health_monitor::run_health_monitor(kernel, token).await;
                     TaskKind::HealthMonitor
+                })
+            }
+            TaskKind::Consolidation => {
+                let token = kernel.cancellation_token.clone();
+                let engine = kernel.consolidation_engine.clone();
+                join_set.spawn(async move {
+                    // If consolidation is disabled in config, idle until shutdown.
+                    if !engine.is_enabled() {
+                        token.cancelled().await;
+                        return TaskKind::Consolidation;
+                    }
+                    // Defer the first tick by a full period so the kernel finishes
+                    // booting before any consolidation work begins. Using interval_at
+                    // also avoids a spurious immediate tick on supervised restarts.
+                    let start = tokio::time::Instant::now() + Duration::from_secs(1800);
+                    let mut interval = tokio::time::interval_at(start, Duration::from_secs(1800));
+                    // Skip missed ticks — catching up with burst consolidation on a
+                    // busy system would waste resources; next scheduled tick is fine.
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tokio::select! {
+                            _ = token.cancelled() => break,
+                            _ = interval.tick() => {
+                                match engine.run_cycle().await {
+                                    Ok(report) if report.created > 0 => {
+                                        tracing::info!(
+                                            patterns = report.patterns_found,
+                                            created = report.created,
+                                            skipped = report.skipped_existing,
+                                            "Consolidation cycle completed"
+                                        );
+                                    }
+                                    Ok(_) => {
+                                        tracing::debug!("Consolidation cycle: no new procedures");
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "Consolidation cycle failed");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    TaskKind::Consolidation
                 })
             }
         }
@@ -449,9 +528,9 @@ impl Kernel {
 
     /// The main supervised run loop.
     ///
-    /// Spawns 9 core tasks (acceptor, executor, timeout checker, scheduler, event dispatcher,
+    /// Spawns 11 core tasks (acceptor, executor, timeout checker, scheduler, event dispatcher,
     /// tool lifecycle listener, comm notification listener, schedule notification listener,
-    /// health monitor) and monitors them via a JoinSet. If any task
+    /// arbiter notification listener, health monitor, consolidation) and monitors them via a JoinSet. If any task
     /// panics or exits unexpectedly, it is restarted automatically. If a task exceeds
     /// MAX_RESTARTS within RESTART_WINDOW_SECS, the kernel logs a degraded status and shuts
     /// down so the container orchestrator can restart the process cleanly.
@@ -465,7 +544,7 @@ impl Kernel {
         let mut restart_counts: std::collections::HashMap<String, (u32, std::time::Instant)> =
             std::collections::HashMap::new();
 
-        // Spawn all 9 core tasks
+        // Spawn all 11 core tasks
         let all_kinds = [
             TaskKind::Acceptor,
             TaskKind::Executor,
@@ -475,7 +554,9 @@ impl Kernel {
             TaskKind::ToolLifecycleListener,
             TaskKind::CommNotificationListener,
             TaskKind::ScheduleNotificationListener,
+            TaskKind::ArbiterNotificationListener,
             TaskKind::HealthMonitor,
+            TaskKind::Consolidation,
         ];
 
         for kind in &all_kinds {
@@ -530,6 +611,18 @@ impl Kernel {
                             self.clone(),
                         );
                     } else {
+                        self.emit_event(
+                            agentos_types::EventType::KernelSubsystemError,
+                            agentos_types::EventSource::InferenceKernel,
+                            agentos_types::EventSeverity::Critical,
+                            serde_json::json!({
+                                "task_kind": kind.to_string(),
+                                "reason": "restart_budget_exceeded",
+                                "max_restarts": MAX_RESTARTS,
+                            }),
+                            0,
+                        )
+                        .await;
                         tracing::error!(task = %kind, "Task exceeded restart budget, kernel degraded");
                         break;
                     }
@@ -547,7 +640,20 @@ impl Kernel {
                         "unknown_cancelled".to_string()
                     };
 
+                    // Emit ProcessCrashed for panics
                     if join_error.is_panic() {
+                        self.emit_event(
+                            agentos_types::EventType::ProcessCrashed,
+                            agentos_types::EventSource::InferenceKernel,
+                            agentos_types::EventSeverity::Critical,
+                            serde_json::json!({
+                                "task_kind": task_name,
+                                "panic": true,
+                                "error": format!("{:?}", join_error),
+                            }),
+                            0,
+                        )
+                        .await;
                         tracing::error!(task = %task_name, "Kernel task panicked: {:?}", join_error);
                     } else {
                         tracing::error!(task = %task_name, "Kernel task cancelled: {:?}", join_error);
@@ -598,6 +704,18 @@ impl Kernel {
                             }
                         }
                     } else {
+                        self.emit_event(
+                            agentos_types::EventType::KernelSubsystemError,
+                            agentos_types::EventSource::InferenceKernel,
+                            agentos_types::EventSeverity::Critical,
+                            serde_json::json!({
+                                "task_kind": task_name,
+                                "reason": "restart_budget_exceeded",
+                                "max_restarts": MAX_RESTARTS,
+                            }),
+                            0,
+                        )
+                        .await;
                         tracing::error!("Kernel exceeded restart budget, shutting down");
                         break;
                     }
@@ -909,7 +1027,8 @@ impl Kernel {
                 name,
                 input,
                 detach,
-            } => self.cmd_run_pipeline(name, input, detach).await,
+                agent_name,
+            } => self.cmd_run_pipeline(name, input, detach, agent_name).await,
             KernelCommand::PipelineStatus { name: _, run_id } => {
                 self.cmd_pipeline_status(run_id).await
             }
@@ -1085,7 +1204,13 @@ impl Kernel {
                     )
                     .await
                 {
-                    Ok(_) => {}
+                    Ok(task_id) => {
+                        // Link the spawned task to the scheduled job so that
+                        // complete_task_success can emit ScheduledTaskCompleted.
+                        self.background_pool
+                            .set_scheduled_job(&task_id, job.id)
+                            .await;
+                    }
                     Err(agentos_types::AgentOSError::AgentNotFound(_)) => {
                         tracing::warn!(
                             job_name = %job.name,

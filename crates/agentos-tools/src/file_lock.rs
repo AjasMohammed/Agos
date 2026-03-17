@@ -47,7 +47,7 @@ impl FileLockRegistry {
         agent_id: AgentID,
         task_id: TaskID,
     ) -> Result<(), AgentOSError> {
-        let mut locks = self.locks.lock().unwrap();
+        let mut locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
         Self::sweep(&mut locks);
         if let Some(e) = locks.get(path) {
             return Err(AgentOSError::FileLocked {
@@ -73,7 +73,7 @@ impl FileLockRegistry {
     /// Release the lock for `path` if it is held by `agent_id`.
     /// No-op if the lock is not held or held by a different agent.
     pub fn release(&self, path: &PathBuf, agent_id: AgentID) {
-        let mut locks = self.locks.lock().unwrap();
+        let mut locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
         if locks.get(path).map(|e| e.holder_agent_id) == Some(agent_id) {
             locks.remove(path);
         }
@@ -84,7 +84,7 @@ impl FileLockRegistry {
     /// Returns `Ok(())` if the path is free. Returns `Err(FileLocked)` if a
     /// valid (non-expired) lock is held — readers call this before proceeding.
     pub fn check(&self, path: &PathBuf) -> Result<(), AgentOSError> {
-        let mut locks = self.locks.lock().unwrap();
+        let mut locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
         Self::sweep(&mut locks);
         if let Some(e) = locks.get(path) {
             return Err(AgentOSError::FileLocked {

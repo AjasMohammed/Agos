@@ -1,0 +1,70 @@
+/* AgentOS Web UI — custom styles */
+
+/* Clickable table rows */
+.clickable {
+    cursor: pointer;
+}
+.clickable:hover {
+    background-color: var(--table-row-stripped-background-color);
+}
+
+/* Status badges */
+.badge {
+    display: inline-block;
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.25rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.badge-pending,
+.badge-queued {
+    background-color: #ffc107;
+    color: #000;
+}
+
+.badge-running,
+.badge-in-progress {
+    background-color: #17a2b8;
+    color: #fff;
+}
+
+.badge-completed,
+.badge-complete,
+.badge-success {
+    background-color: #28a745;
+    color: #fff;
+}
+
+.badge-failed,
+.badge-error {
+    background-color: #dc3545;
+    color: #fff;
+}
+
+.badge-active {
+    background-color: #28a745;
+    color: #fff;
+}
+
+.badge-inactive,
+.badge-disconnected {
+    background-color: #6c757d;
+    color: #fff;
+}
+
+.badge-critical {
+    background-color: #dc3545;
+    color: #fff;
+}
+
+.badge-warning {
+    background-color: #ffc107;
+    color: #000;
+}
+
+.badge-info {
+    background-color: #17a2b8;
+    color: #fff;
+}

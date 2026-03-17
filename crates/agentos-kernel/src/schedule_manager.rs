@@ -70,10 +70,22 @@ impl ScheduleManager {
             ))
         })?;
 
+        // Reject duplicate names to ensure name-based lookup stays unambiguous.
+        {
+            let jobs = self.jobs.read().await;
+            if jobs.values().any(|j| j.name == name) {
+                return Err(AgentOSError::SchemaValidation(format!(
+                    "Schedule job '{}' already exists",
+                    name
+                )));
+            }
+        }
+
         let job = ScheduledJob {
             id: ScheduleID::new(),
             name,
             cron_expression,
+            timezone: None,
             agent_name,
             task_prompt,
             permissions,
@@ -129,6 +141,10 @@ impl ScheduleManager {
 
     pub async fn list_jobs(&self) -> Vec<ScheduledJob> {
         self.jobs.read().await.values().cloned().collect()
+    }
+
+    pub async fn get_job(&self, id: &ScheduleID) -> Option<ScheduledJob> {
+        self.jobs.read().await.get(id).cloned()
     }
 
     pub async fn get_by_name(&self, name: &str) -> Option<ScheduledJob> {
@@ -198,6 +214,22 @@ impl ScheduleManager {
                 "schedule_name": job.name,
                 "agent_name": job.agent_name,
                 "reason": reason,
+            }),
+        )
+        .await;
+    }
+
+    /// Emit a `ScheduledTaskCompleted` event when a scheduled task completes successfully.
+    /// Called by the kernel after a cron-triggered task succeeds.
+    pub async fn emit_task_completed(&self, job: &ScheduledJob) {
+        self.notify(
+            EventType::ScheduledTaskCompleted,
+            EventSeverity::Info,
+            serde_json::json!({
+                "schedule_id": job.id.to_string(),
+                "schedule_name": job.name,
+                "agent_name": job.agent_name,
+                "completed_at": chrono::Utc::now().to_rfc3339(),
             }),
         )
         .await;
@@ -320,6 +352,7 @@ mod tests {
             id: ScheduleID::new(),
             name: "missed-job".into(),
             cron_expression: "* * * * * *".into(),
+            timezone: None,
             agent_name: "ghost-agent".into(),
             task_prompt: "do stuff".into(),
             permissions: vec![],
@@ -357,6 +390,7 @@ mod tests {
             id: ScheduleID::new(),
             name: "failed-job".into(),
             cron_expression: "* * * * * *".into(),
+            timezone: None,
             agent_name: "worker".into(),
             task_prompt: "process data".into(),
             permissions: vec![],

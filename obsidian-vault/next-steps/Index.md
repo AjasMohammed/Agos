@@ -40,7 +40,7 @@ status: active
 | Concurrent Resource Arbitration | Spec #8 | Done | FIFO locks, DFS deadlock detection, TTL sweep |
 | Hardware Abstraction Layer | Spec #9 | Done | HardwareRegistry with quarantine/approve/deny workflow |
 | Multi-Agent Coordination | Spec #10 | Done | Pipeline + DFS deadlock; A2A TTL expiry enforced |
-| Context / Memory Architecture | Spec #11 | Partial | Token budget + semantic/episodic done; tool discovery, procedural tier, context compilation, retrieval gate pending -- see [[Memory Context Architecture Plan]] |
+| Context / Memory Architecture | Spec #11 | Done | All 8 phases complete: ContextCompiler, ProceduralStore, RetrievalGate, ExtractionEngine, ConsolidationEngine, MemoryBlockStore all implemented and wired — see [[Memory Context Architecture Plan]] |
 | Approval Gates | Spec #12 | Done | Risk taxonomy + blocking escalation + CLI |
 | Split `kernel.rs` | Phase 0.1 | Done | commands/ directory fully modularized |
 | Tool Output Sanitization | Phase 0.2 | Done | taint_wrap in injection_scanner |
@@ -49,7 +49,7 @@ status: active
 | Context Window Intelligence | Phase 3 | Done | SemanticEviction |
 | Task Deadlock Prevention | Phase 4 | Done | TaskDependencyGraph |
 | Memory Auto-Inject | Phase 5.2 | Done | episodic recall at task start |
-| Memory Auto-Write on Completion | Phase 5.1 | Not started | [[05-Episodic Memory Completion]] |
+| Memory Auto-Write on Completion | Phase 5.1 | Done | TaskResult struct, EpisodeType::ToolCall recording, and tool result metadata all implemented in task_executor.rs |
 | Uncertainty & Reasoning Hints | Phase 6 | Done | parse_uncertainty + infer_reasoning_hints implemented |
 | Scratchpad Context Partition | Phase 7 | Done | active_entries() used by all adapters |
 | Spec Enforcement Hardening | Spec #2,4,5,6,8,12 | Done | [[11-Spec Enforcement Hardening]] |
@@ -104,6 +104,21 @@ graph TD
 | 22 | [[19-User Handbook\|Comprehensive user handbook (19 chapters, all CLI commands, all subsystems)]] | ~5d | **High** |
 | 23 | [[20-V1-Release-Fix-Plan\|V1 Release Fix Plan (15 critical fixes across 5 phases)]] | ~10d | **Critical** |
 | 24 | [[21-Future-Improvements\|Future Improvements (18 post-v1 items across 5 categories)]] | ~17d | **Backlog** |
+| 25 | [[22-Unwired Features\|Unwired features: 31 missing event emissions, pipeline security, web UI, stale docs]] | ~5d | **Critical** |
+| 26 | [[23-WebUI Security Fixes\|WebUI security fixes: 6 critical vulns, 8 bugs, 5 arch issues across 8 phases]] | ~5d | **Critical** |
+| 27 | [[audit_report\|Plan Audit Report — gap classification, completion percentages, spec drift analysis]] | — | **Reference** |
+| 28 | [[TODO-consolidation-background-loop\|Wire consolidation engine background loop (30-min periodic run)]] | ~2h | **High** |
+| 29 | [[TODO-template-deduplication\|Deduplicate web templates using MiniJinja include directives]] | ~1h | **Low** |
+| 30 | [[TODO-execute-review\|Execute full codebase review phases 1-2 and 4-10 (60 steps)]] | ~5d | **Critical** |
+| 31 | [[TODO-complete-handbook-chapters\|Complete user handbook chapters 07-19 (13 chapters + index)]] | ~3d | **High** |
+| 32 | [[TODO-release-cutover\|Execute release process: cut v0.1.0 tag from validated commit]] | ~4h | **High** |
+| 33 | [[TODO-update-stale-plan-statuses\|Update stale plan doc status fields (20+ files saying planned when code is done)]] | ~30m | **Medium** |
+| 34 | [[TODO-ci-automation\|Create GitHub Actions CI workflow for fmt/clippy/test gates]] | ~2h | **High** |
+| 35 | [[TODO-update-stale-plan-statuses (memory)\|Update memory context architecture plan statuses (phases 3-8 all complete)]] | ~15m | **Medium** |
+| 36 | [[TODO-update-stale-plan-statuses (webui)\|Update WebUI security fixes plan statuses (all 8 phases complete)]] | ~15m | **Medium** |
+| 37 | [[TODO-update-plan-statuses (unwired)\|Update unwired features plan statuses (phases 01 and 03 complete)]] | ~10m | **Medium** |
+| 38 | [[TODO-close-remaining-gaps\|Close first deployment readiness gaps: fmt fix, status updates, security gate sign-off, v0.1.0 tag]] | ~4h | **High** |
+| 39 | [[TODO-reconcile-review-status\|Reconcile full codebase review status contradiction and execute remaining 9 phases]] | ~5d | **Critical** |
 
 ---
 
@@ -132,7 +147,7 @@ All 9 documented issues are now resolved. All 5 phases of the [[Bug Fixes and De
 
 | # | Issue | Status |
 |---|---|---|
-| 1 | Integration test hang / cancellation token | **Resolved** — 6 tests un-ignored, pass in ~6s with shared model cache |
+| 1 | Integration test hang / cancellation token | **Resolved** -- 6 tests un-ignored, pass in ~6s with shared model cache |
 | 2 | Partition persistence bug | **Resolved** (`set_partition_for_task`) |
 | 3 | LLM adapters `as_entries()` | **Resolved** (all use `active_entries()`) |
 | 4 | Escalation CLI missing | **Resolved** (list/get/resolve wired) |

@@ -42,11 +42,13 @@ impl AgentTool for MemorySearch {
                 AgentOSError::SchemaValidation("memory-search requires 'query' field".into())
             })?;
 
+        const MAX_TOP_K: usize = 100;
         let top_k = payload
             .get("top_k")
             .or_else(|| payload.get("limit"))
             .and_then(|v| v.as_u64())
             .unwrap_or(5) as usize;
+        let top_k = top_k.min(MAX_TOP_K);
 
         let scope = payload
             .get("scope")

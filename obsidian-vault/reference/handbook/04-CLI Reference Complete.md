@@ -51,9 +51,11 @@ All other commands will fail with a connection error if the kernel is not runnin
 
 Starts the kernel process. The kernel loads config, initializes the vault, registers tools, and begins listening on the bus socket. Blocks until Ctrl+C.
 
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--vault-passphrase` | `Option<String>` | — | Vault passphrase. If omitted, reads `AGENTOS_VAULT_PASSPHRASE` env var, then prompts interactively |
+The vault passphrase is resolved from:
+1. `AGENTOS_VAULT_PASSPHRASE` environment variable
+2. Interactive prompt (if env var is not set)
+
+*No additional flags.*
 
 **Example:**
 
@@ -61,10 +63,7 @@ Starts the kernel process. The kernel loads config, initializes the vault, regis
 # Interactive passphrase prompt
 agentctl start
 
-# Non-interactive (CI/scripts)
-agentctl start --vault-passphrase "my-secret"
-
-# Via environment variable
+# Via environment variable (CI/scripts)
 export AGENTOS_VAULT_PASSPHRASE="my-secret"
 agentctl start
 ```

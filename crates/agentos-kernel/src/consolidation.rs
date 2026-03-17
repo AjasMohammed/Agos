@@ -64,6 +64,9 @@ pub struct ConsolidationEngine {
     config: ConsolidationConfig,
     task_completions_since_last: AtomicU64,
     last_run: RwLock<DateTime<Utc>>,
+    /// Serializes concurrent `run_cycle` calls so the background loop and
+    /// `on_task_completed` cannot race on `last_run` / the procedural store.
+    cycle_lock: tokio::sync::Mutex<()>,
 }
 
 impl ConsolidationEngine {
@@ -78,7 +81,12 @@ impl ConsolidationEngine {
             config,
             task_completions_since_last: AtomicU64::new(0),
             last_run: RwLock::new(Utc::now()),
+            cycle_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.config.enabled
     }
 
     pub async fn on_task_completed(&self) {
@@ -106,6 +114,8 @@ impl ConsolidationEngine {
         if !self.config.enabled {
             return Ok(ConsolidationReport::default());
         }
+        // Serialize concurrent callers (background loop + on_task_completed).
+        let _guard = self.cycle_lock.lock().await;
 
         let since = *self.last_run.read().await;
         let episodes = self

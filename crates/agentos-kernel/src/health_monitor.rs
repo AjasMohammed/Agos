@@ -31,8 +31,9 @@ pub async fn run_health_monitor(kernel: Arc<Kernel>, cancellation: CancellationT
     let thresholds = config.thresholds;
     // Build permissions once; they are static for the lifetime of the monitor.
     let permissions = hal_read_permissions();
-    // Track last emission time per event type for debouncing.
-    let mut last_emitted: HashMap<EventType, Instant> = HashMap::new();
+    // Track last emission time per event key for debouncing.
+    // Key is event type name, or "EventType:device_name" for per-device events.
+    let mut last_emitted: HashMap<String, Instant> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -45,35 +46,37 @@ pub async fn run_health_monitor(kernel: Arc<Kernel>, cancellation: CancellationT
 }
 
 /// Build a minimal read-only PermissionSet that allows the kernel to query
-/// the system and GPU HAL drivers internally.
+/// the system, GPU, network, and sensor HAL drivers internally.
 fn hal_read_permissions() -> PermissionSet {
     let mut ps = PermissionSet::new();
-    ps.entries.push(PermissionEntry {
-        resource: "hardware.system".to_string(),
-        read: true,
-        write: false,
-        execute: false,
-        expires_at: None,
-    });
-    ps.entries.push(PermissionEntry {
-        resource: "hardware.gpu".to_string(),
-        read: true,
-        write: false,
-        execute: false,
-        expires_at: None,
-    });
+    for resource in &[
+        "hardware.system",
+        "hardware.gpu",
+        "hardware.network",
+        "hardware.sensor",
+    ] {
+        ps.entries.push(PermissionEntry {
+            resource: resource.to_string(),
+            read: true,
+            write: false,
+            execute: false,
+            expires_at: None,
+        });
+    }
     ps
 }
 
-/// Check whether enough time has elapsed since the last emission of this event type.
+/// Check whether enough time has elapsed since the last emission of the given key.
 /// If so, update the timestamp and return true; otherwise return false.
-fn should_emit(last_emitted: &mut HashMap<EventType, Instant>, event_type: EventType) -> bool {
+/// For single-instance events, pass the event type name (e.g., "CPUSpikeDetected").
+/// For per-device events, pass a compound key (e.g., "GPUAvailable:rtx4090").
+fn should_emit(last_emitted: &mut HashMap<String, Instant>, key: &str) -> bool {
     let now = Instant::now();
     let debounce = Duration::from_secs(DEBOUNCE_INTERVAL_SECS);
-    match last_emitted.get(&event_type) {
+    match last_emitted.get(key) {
         Some(last) if now.duration_since(*last) < debounce => false,
         _ => {
-            last_emitted.insert(event_type, now);
+            last_emitted.insert(key.to_string(), now);
             true
         }
     }
@@ -83,20 +86,20 @@ async fn check_system_health(
     kernel: &Kernel,
     thresholds: &HealthThresholds,
     permissions: &PermissionSet,
-    last_emitted: &mut HashMap<EventType, Instant>,
+    last_emitted: &mut HashMap<String, Instant>,
 ) {
     // ── 1. System snapshot: CPU / memory / disk ─────────────────────────────
-    match kernel
+    let system_snapshot = kernel
         .hal
         .query("system", serde_json::Value::Null, permissions)
-        .await
-    {
+        .await;
+    match &system_snapshot {
         Ok(snapshot) => {
             // CPU
             if let Some(cpu) = snapshot.get("cpu_usage_percent").and_then(|v| v.as_f64()) {
                 let cpu = cpu as f32;
                 if cpu > thresholds.cpu_warning_percent
-                    && should_emit(last_emitted, EventType::CPUSpikeDetected)
+                    && should_emit(last_emitted, "CPUSpikeDetected")
                 {
                     kernel
                         .emit_event(
@@ -125,7 +128,7 @@ async fn check_system_health(
             if mem_total > 0 {
                 let mem_percent = (mem_used as f32 / mem_total as f32) * 100.0;
                 if mem_percent > thresholds.memory_warning_percent
-                    && should_emit(last_emitted, EventType::MemoryPressure)
+                    && should_emit(last_emitted, "MemoryPressure")
                 {
                     kernel
                         .emit_event(
@@ -171,7 +174,7 @@ async fn check_system_health(
                     let used_percent = (used as f32 / total as f32) * 100.0;
 
                     if used_percent > thresholds.disk_critical_percent
-                        && should_emit(last_emitted, EventType::DiskSpaceCritical)
+                        && should_emit(last_emitted, &format!("DiskSpaceCritical:{}", mount))
                     {
                         kernel
                             .emit_event(
@@ -187,7 +190,7 @@ async fn check_system_health(
                             )
                             .await;
                     } else if used_percent > thresholds.disk_warning_percent
-                        && should_emit(last_emitted, EventType::DiskSpaceLow)
+                        && should_emit(last_emitted, &format!("DiskSpaceLow:{}", mount))
                     {
                         kernel
                             .emit_event(
@@ -238,7 +241,7 @@ async fn check_system_health(
 
                 let vram_percent = (vram_used as f32 / vram_total as f32) * 100.0;
                 if vram_percent > thresholds.gpu_vram_warning_percent
-                    && should_emit(last_emitted, EventType::GPUMemoryPressure)
+                    && should_emit(last_emitted, &format!("GPUMemoryPressure:{}", name))
                 {
                     kernel
                         .emit_event(
@@ -255,6 +258,130 @@ async fn check_system_health(
                             0,
                         )
                         .await;
+                }
+
+                // Emit GPUAvailable when a GPU with VRAM is detected — keyed per GPU
+                if should_emit(last_emitted, &format!("GPUAvailable:{}", name)) {
+                    kernel
+                        .emit_event(
+                            EventType::GPUAvailable,
+                            EventSource::HardwareAbstractionLayer,
+                            EventSeverity::Info,
+                            serde_json::json!({
+                                "gpu_name": name,
+                                "vram_total_mb": vram_total,
+                            }),
+                            0,
+                        )
+                        .await;
+                }
+            }
+        }
+    }
+
+    // ── 3. Network interfaces — check for downed interfaces ──────────────────
+    if let Ok(net_json) = kernel
+        .hal
+        .query(
+            "network",
+            serde_json::json!({"action": "list"}),
+            permissions,
+        )
+        .await
+    {
+        if let Some(interfaces) = net_json.get("interfaces").and_then(|n| n.as_array()) {
+            for iface in interfaces {
+                let name = iface
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let is_up = iface.get("is_up").and_then(|v| v.as_bool()).unwrap_or(true);
+                if !is_up && should_emit(last_emitted, &format!("NetworkInterfaceDown:{}", name)) {
+                    kernel
+                        .emit_event(
+                            EventType::NetworkInterfaceDown,
+                            EventSource::HardwareAbstractionLayer,
+                            EventSeverity::Warning,
+                            serde_json::json!({
+                                "interface": name,
+                            }),
+                            0,
+                        )
+                        .await;
+                }
+            }
+        }
+    }
+
+    // ── 4. Container resource quota — check cgroup memory limits ─────────────
+    // Reuse the system snapshot from section 1 instead of querying again.
+    if let Ok(snapshot) = &system_snapshot {
+        if let Some(cgroup) = snapshot.get("cgroup") {
+            let mem_limit = cgroup
+                .get("memory_limit_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let mem_usage = cgroup
+                .get("memory_usage_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if mem_limit > 0 {
+                let usage_pct = (mem_usage as f32 / mem_limit as f32) * 100.0;
+                if usage_pct > 95.0 && should_emit(last_emitted, "ContainerResourceQuotaExceeded") {
+                    kernel
+                        .emit_event(
+                            EventType::ContainerResourceQuotaExceeded,
+                            EventSource::HardwareAbstractionLayer,
+                            EventSeverity::Critical,
+                            serde_json::json!({
+                                "resource": "memory",
+                                "usage_percent": usage_pct,
+                                "limit_bytes": mem_limit,
+                                "usage_bytes": mem_usage,
+                            }),
+                            0,
+                        )
+                        .await;
+                }
+            }
+        }
+    }
+
+    // ── 5. Sensor readings — check for threshold exceedances ─────────────────
+    if let Ok(sensor_json) = kernel
+        .hal
+        .query("sensor", serde_json::json!({"action": "list"}), permissions)
+        .await
+    {
+        if let Some(readings) = sensor_json.get("readings").and_then(|r| r.as_array()) {
+            for reading in readings {
+                let name = reading
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let value = reading.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let threshold = reading.get("threshold").and_then(|v| v.as_f64());
+                if let Some(thresh) = threshold {
+                    if value > thresh
+                        && should_emit(
+                            last_emitted,
+                            &format!("SensorReadingThresholdExceeded:{}", name),
+                        )
+                    {
+                        kernel
+                            .emit_event(
+                                EventType::SensorReadingThresholdExceeded,
+                                EventSource::HardwareAbstractionLayer,
+                                EventSeverity::Warning,
+                                serde_json::json!({
+                                    "sensor_name": name,
+                                    "value": value,
+                                    "threshold": thresh,
+                                }),
+                                0,
+                            )
+                            .await;
+                    }
                 }
             }
         }

@@ -155,6 +155,45 @@ impl Kernel {
         .await;
     }
 
+    /// Process a resource arbiter notification (preemption or deadlock), converting it
+    /// into a properly HMAC-signed EventMessage with audit trail.
+    pub(crate) async fn process_arbiter_notification(
+        &self,
+        notif: crate::resource_arbiter::ArbiterNotification,
+    ) {
+        use crate::resource_arbiter::ArbiterNotification;
+        match notif {
+            ArbiterNotification::Preemption(p) => {
+                self.emit_event(
+                    EventType::TaskPreempted,
+                    EventSource::TaskScheduler,
+                    EventSeverity::Warning,
+                    serde_json::json!({
+                        "preempted_agent": p.preempted_agent.to_string(),
+                        "preempting_agent": p.preempting_agent.to_string(),
+                        "resource_id": p.resource_id,
+                    }),
+                    0,
+                )
+                .await;
+            }
+            ArbiterNotification::Deadlock(d) => {
+                self.emit_event(
+                    EventType::TaskDeadlockDetected,
+                    EventSource::TaskScheduler,
+                    EventSeverity::Critical,
+                    serde_json::json!({
+                        "blocked_agent": d.blocked_agent.to_string(),
+                        "holder_agent": d.holder_agent.to_string(),
+                        "resource_id": d.resource_id,
+                    }),
+                    0,
+                )
+                .await;
+            }
+        }
+    }
+
     /// Process a tool lifecycle notification from ToolRegistry, converting it
     /// into a properly signed EventMessage with audit trail.
     pub(crate) async fn process_tool_lifecycle_event(
@@ -182,6 +221,35 @@ impl Kernel {
                     0,
                 )
                 .await;
+
+                // Emit UnverifiedToolInstalled for non-Core tools
+                if trust_tier != "Core" {
+                    self.emit_event(
+                        EventType::UnverifiedToolInstalled,
+                        EventSource::ToolRunner,
+                        EventSeverity::Warning,
+                        serde_json::json!({
+                            "tool_id": tool_id.to_string(),
+                            "tool_name": tool_name,
+                            "trust_tier": trust_tier,
+                        }),
+                        0,
+                    )
+                    .await;
+                }
+
+                // Emit ToolRegistryUpdated on every install
+                self.emit_event(
+                    EventType::ToolRegistryUpdated,
+                    EventSource::ToolRunner,
+                    EventSeverity::Info,
+                    serde_json::json!({
+                        "action": "installed",
+                        "tool_name": tool_name,
+                    }),
+                    0,
+                )
+                .await;
             }
             ToolLifecycleEvent::Removed { tool_id, tool_name } => {
                 self.emit_event(
@@ -191,6 +259,37 @@ impl Kernel {
                     serde_json::json!({
                         "tool_id": tool_id.to_string(),
                         "tool_name": tool_name,
+                    }),
+                    0,
+                )
+                .await;
+
+                // Emit ToolRegistryUpdated on every removal
+                self.emit_event(
+                    EventType::ToolRegistryUpdated,
+                    EventSource::ToolRunner,
+                    EventSeverity::Info,
+                    serde_json::json!({
+                        "action": "removed",
+                        "tool_name": tool_name,
+                    }),
+                    0,
+                )
+                .await;
+            }
+            ToolLifecycleEvent::ChecksumMismatch {
+                tool_name,
+                expected,
+                actual,
+            } => {
+                self.emit_event(
+                    EventType::ToolChecksumMismatch,
+                    EventSource::ToolRunner,
+                    EventSeverity::Critical,
+                    serde_json::json!({
+                        "tool_name": tool_name,
+                        "expected_checksum": expected,
+                        "actual_checksum": actual,
                     }),
                     0,
                 )

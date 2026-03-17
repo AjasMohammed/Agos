@@ -7,7 +7,7 @@ tags:
   - kernel
   - v3
 date: 2026-03-12
-status: planned
+status: complete
 effort: 18-20d
 priority: critical
 ---
