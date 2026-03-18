@@ -1,5 +1,6 @@
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, KeepAliveStream, Sse};
 use axum::response::{IntoResponse, Response};
 use axum_extra::extract::CookieJar;
@@ -12,6 +13,8 @@ use std::time::Duration;
 #[derive(Deserialize, Default)]
 pub struct ListQuery {
     pub partial: Option<String>,
+    pub search: Option<String>,
+    pub status: Option<String>,
 }
 
 pub async fn list(
@@ -22,6 +25,27 @@ pub async fn list(
     let tasks = state.kernel.scheduler.list_tasks().await;
     let task_rows: Vec<_> = tasks
         .iter()
+        .filter(|t| {
+            if let Some(ref status) = query.status {
+                if !status.is_empty() {
+                    let state_str = format!("{:?}", t.state).to_lowercase();
+                    if !state_str.contains(&status.to_lowercase()) {
+                        return false;
+                    }
+                }
+            }
+            if let Some(ref search) = query.search {
+                if !search.is_empty()
+                    && !t
+                        .prompt_preview
+                        .to_lowercase()
+                        .contains(&search.to_lowercase())
+                {
+                    return false;
+                }
+            }
+            true
+        })
         .map(|t| {
             context! {
                 id => t.id.to_string(),
@@ -31,6 +55,7 @@ pub async fn list(
                 created_at => t.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
                 tool_calls => t.tool_calls,
                 tokens_used => t.tokens_used,
+                priority => t.priority,
             }
         })
         .collect();
@@ -44,10 +69,71 @@ pub async fn list(
 
     let ctx = context! {
         page_title => "Tasks",
+        breadcrumbs => vec![context! { label => "Tasks" }],
         tasks => task_rows,
         csrf_token,
     };
     super::render(&state.templates, "tasks.html", ctx)
+}
+
+pub async fn cancel(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let task_id: agentos_types::TaskID = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "Invalid task ID").into_response();
+        }
+    };
+
+    match state
+        .kernel
+        .scheduler
+        .update_state(&task_id, agentos_types::TaskState::Cancelled)
+        .await
+    {
+        Ok(()) => {
+            if let Some(task) = state.kernel.scheduler.get_task(&task_id).await {
+                let ctx = context! {
+                    tasks => vec![context! {
+                        id => task.id.to_string(),
+                        state => format!("{:?}", task.state),
+                        agent_id => task.agent_id.to_string(),
+                        prompt_preview => task.original_prompt.chars().take(100).collect::<String>(),
+                        created_at => task.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        tool_calls => 0u32,
+                        tokens_used => 0u64,
+                        priority => task.priority,
+                    }],
+                };
+                let mut response = super::render(&state.templates, "partials/task_row.html", ctx);
+                response.headers_mut().insert(
+                    "HX-Trigger",
+                    axum::http::HeaderValue::from_static(
+                        r#"{"showToast":{"message":"Task cancelled","type":"info"}}"#,
+                    ),
+                );
+                return response;
+            }
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            response.headers_mut().insert(
+                "HX-Trigger",
+                axum::http::HeaderValue::from_static(
+                    r#"{"showToast":{"message":"Task cancelled","type":"info"}}"#,
+                ),
+            );
+            response
+        }
+        Err(msg) => {
+            tracing::error!(task = %id, error = %msg, "Failed to cancel task");
+            let mut response = (StatusCode::BAD_REQUEST, "Failed to cancel task").into_response();
+            response.headers_mut().insert(
+                "HX-Trigger",
+                axum::http::HeaderValue::from_static(
+                    r#"{"showToast":{"message":"Failed to cancel task","type":"error"}}"#,
+                ),
+            );
+            response
+        }
+    }
 }
 
 pub async fn detail(
@@ -77,8 +163,13 @@ pub async fn detail(
 
             let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);
 
+            let short_id = task.id.to_string()[..8].to_string();
             let ctx = context! {
                 page_title => format!("Task {}", task.id),
+                breadcrumbs => vec![
+                    context! { label => "Tasks", href => "/tasks" },
+                    context! { label => format!("Task {}", short_id) },
+                ],
                 task_id => task.id.to_string(),
                 state => format!("{:?}", task.state),
                 agent_id => task.agent_id.to_string(),

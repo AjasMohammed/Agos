@@ -615,6 +615,20 @@ impl Kernel {
         }
     }
 
+    /// Public API: Grant a permission to an agent through the kernel command dispatch path.
+    /// Permission format: `resource:rwx` (e.g. `fs.user_data:rw`, `network.outbound:x`).
+    pub async fn api_grant_permission(
+        &self,
+        agent_name: String,
+        permission: String,
+    ) -> Result<(), String> {
+        match self.cmd_grant_permission(agent_name, permission).await {
+            agentos_bus::KernelResponse::Success { .. } => Ok(()),
+            agentos_bus::KernelResponse::Error { message } => Err(message),
+            _ => Err("Unexpected kernel response".to_string()),
+        }
+    }
+
     /// Execute a pipeline with full security enforcement (agent resolution, permission
     /// enforcement, injection scanning, audit logging).
     ///

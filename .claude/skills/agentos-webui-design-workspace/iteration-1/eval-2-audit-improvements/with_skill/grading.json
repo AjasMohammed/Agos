@@ -1,0 +1,36 @@
+{
+  "score": "6/6",
+  "pass_rate": 1.0,
+  "expectations": [
+    {
+      "text": "audit-has-page-header",
+      "passed": true,
+      "evidence": "Found class='page-header' wrapping h1 and meta"
+    },
+    {
+      "text": "filter-bar-has-text-search",
+      "passed": true,
+      "evidence": "Input with hx-trigger='keyup changed delay:300ms' and hx-get='/audit'"
+    },
+    {
+      "text": "log-line-uses-badge-for-severity",
+      "passed": true,
+      "evidence": "badge badge-{{ entry.severity|lower }} on every row"
+    },
+    {
+      "text": "htmx-uses-partial-pattern",
+      "passed": true,
+      "evidence": "hx-vals='{\"partial\": \"list\"}' on filter inputs; ?partial=list on refresh button"
+    },
+    {
+      "text": "no-new-css-framework",
+      "passed": true,
+      "evidence": "No bootstrap/tailwind/CDN references"
+    },
+    {
+      "text": "no-inline-js-filter",
+      "passed": true,
+      "evidence": "No <script> block; filtering done entirely via HTMX server round-trips"
+    }
+  ]
+}

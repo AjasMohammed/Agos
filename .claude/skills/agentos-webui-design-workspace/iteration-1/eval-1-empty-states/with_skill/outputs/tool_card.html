@@ -1,0 +1,23 @@
+{% for tool in tools %}
+<article>
+    <header>
+        <strong>{{ tool.name }}</strong>
+        <span class="badge badge-{{ tool.trust_tier|lower }}">{{ tool.trust_tier }}</span>
+    </header>
+    <p>{{ tool.description }}</p>
+    <p>Permissions: {% for p in tool.permissions %}<code>{{ p }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+    <footer>
+        <small class="muted">v{{ tool.version }}</small>
+        <button class="outline secondary btn-sm"
+                hx-delete="/tools/{{ tool.name }}"
+                hx-confirm="Remove {{ tool.name }}?"
+                hx-target="closest article"
+                hx-swap="outerHTML">Remove</button>
+    </footer>
+</article>
+{% else %}
+<div style="grid-column: 1 / -1; text-align: center; padding: 3rem 1rem;">
+    <p style="font-size: 1.25rem; color: var(--muted-color); margin-bottom: 0.5rem;">No tools installed</p>
+    <p class="muted">Tools extend agent capabilities — file I/O, shell commands, memory, data parsing, and more. Install a tool above to get started.</p>
+</div>
+{% endfor %}

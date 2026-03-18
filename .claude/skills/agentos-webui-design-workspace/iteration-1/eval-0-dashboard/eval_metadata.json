@@ -1,0 +1,13 @@
+{
+  "eval_id": 0,
+  "eval_name": "dashboard-redesign",
+  "prompt": "The dashboard page looks too bare — plain h1, 4-card grid with raw text, basic table. Make it more informative and polished. Stat cards should show real context, audit table should feel like a proper log viewer with status badges. Keep using the existing stack (Pico CSS, HTMX, app.css classes).",
+  "assertions": [
+    {"text": "uses-page-header-class: Output HTML contains class='page-header' or class=\"page-header\" for the title section"},
+    {"text": "uses-badge-class-in-audit-table: Output HTML uses badge or badge-* classes somewhere in the audit table area"},
+    {"text": "has-empty-state-for-audit: Output HTML has a conditional block handling empty audit events ({% else %} or {% if %})"},
+    {"text": "no-new-css-framework: Output HTML does not reference bootstrap, tailwind, bulma, or any CDN link"},
+    {"text": "has-htmx-refresh: Output HTML has hx-trigger with a polling interval (every Xs) for the audit table"},
+    {"text": "uses-pico-vars: Any inline style additions use var(--...) Pico variables rather than raw hex values"}
+  ]
+}

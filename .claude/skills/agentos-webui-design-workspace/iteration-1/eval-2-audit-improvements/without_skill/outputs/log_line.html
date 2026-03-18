@@ -1,0 +1,11 @@
+{% for entry in entries %}
+<tr>
+    <td>{{ entry.timestamp }}</td>
+    <td>{{ entry.event_type }}</td>
+    <td>{{ entry.severity }}</td>
+    <td>{{ entry.agent_id|default("-", true) }}</td>
+    <td>{{ entry.task_id|default("-", true) }}</td>
+    <td>{{ entry.tool_id|default("-", true) }}</td>
+    <td>{{ entry.details }}</td>
+</tr>
+{% endfor %}

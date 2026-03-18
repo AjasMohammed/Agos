@@ -1,0 +1,32 @@
+{% if task_summary.queued > 0 or task_summary.running > 0 or task_summary.completed > 0 or task_summary.failed > 0 %}
+<div class="task-summary-bar">
+    {% if task_summary.queued > 0 %}
+    <div class="task-summary-segment task-queued" title="{{ task_summary.queued }} queued"
+         style="flex: {{ task_summary.queued }}">{{ task_summary.queued }} queued</div>
+    {% endif %}
+    {% if task_summary.running > 0 %}
+    <div class="task-summary-segment task-running" title="{{ task_summary.running }} running"
+         style="flex: {{ task_summary.running }}">{{ task_summary.running }} running</div>
+    {% endif %}
+    {% if task_summary.completed > 0 %}
+    <div class="task-summary-segment task-completed" title="{{ task_summary.completed }} completed"
+         style="flex: {{ task_summary.completed }}">{{ task_summary.completed }} completed</div>
+    {% endif %}
+    {% if task_summary.failed > 0 %}
+    <div class="task-summary-segment task-failed" title="{{ task_summary.failed }} failed"
+         style="flex: {{ task_summary.failed }}">{{ task_summary.failed }} failed</div>
+    {% endif %}
+</div>
+<dl class="detail-list" style="margin-top: 0.75rem; font-size: 0.85rem;">
+    <dt>Queued</dt><dd>{{ task_summary.queued }}</dd>
+    <dt>Running</dt><dd>{{ task_summary.running }}</dd>
+    <dt>Completed</dt><dd>{{ task_summary.completed }}</dd>
+    <dt>Failed</dt><dd>{{ task_summary.failed }}</dd>
+</dl>
+{% else %}
+<div style="text-align: center; padding: 2rem 1rem; color: var(--pico-muted-color);">
+    <p style="font-size: 1.1rem; margin-bottom: 0.5rem;">No tasks yet</p>
+    <p style="font-size: 0.9rem; margin-bottom: 1rem;">Tasks are created when agents process prompts. Submit a task to get started.</p>
+    <a href="/tasks" role="button" class="outline btn-sm">View Tasks</a>
+</div>
+{% endif %}

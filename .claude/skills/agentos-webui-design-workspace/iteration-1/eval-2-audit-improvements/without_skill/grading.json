@@ -1,0 +1,36 @@
+{
+  "score": "1/6",
+  "pass_rate": 0.16666666666666666,
+  "expectations": [
+    {
+      "text": "audit-has-page-header",
+      "passed": false,
+      "evidence": "Plain <h1>Audit Log</h1> with no .page-header wrapper"
+    },
+    {
+      "text": "filter-bar-has-text-search",
+      "passed": false,
+      "evidence": "Text search uses onkeyup='filterTable()' JS, not HTMX keyup trigger"
+    },
+    {
+      "text": "log-line-uses-badge-for-severity",
+      "passed": false,
+      "evidence": "Severity rendered as plain {{ entry.severity }} text, no badge"
+    },
+    {
+      "text": "htmx-uses-partial-pattern",
+      "passed": false,
+      "evidence": "hx-get='/audit' without partial param; JS does client-side filtering"
+    },
+    {
+      "text": "no-new-css-framework",
+      "passed": true,
+      "evidence": "No external framework references"
+    },
+    {
+      "text": "no-inline-js-filter",
+      "passed": false,
+      "evidence": "Contains <script>function filterTable(){...}</script> for client-side filtering"
+    }
+  ]
+}

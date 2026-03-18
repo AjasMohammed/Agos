@@ -53,6 +53,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentos-agent-tester"
+version = "0.1.0"
+dependencies = [
+ "agentos-kernel",
+ "agentos-llm",
+ "agentos-tools",
+ "agentos-types",
+ "agentos-vault",
+ "anyhow",
+ "chrono",
+ "clap",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "agentos-audit"
 version = "0.1.0"
 dependencies = [

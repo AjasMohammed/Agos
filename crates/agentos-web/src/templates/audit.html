@@ -1,21 +1,34 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Audit Log</h1>
+<div class="page-header">
+    <h1>Audit Log</h1>
+    <span class="page-meta">{{ total_count }} entries</span>
+</div>
 
-<p>Total entries: {{ total_count }}</p>
-
-<div class="grid">
-    <div>
-        <input type="text" name="event_type" placeholder="Filter by event type..."
-               hx-get="/audit" hx-target="#audit-body" hx-swap="innerHTML"
-               hx-trigger="keyup changed delay:300ms"
-               hx-include="[name='event_type']"
-               hx-vals='{"partial": "list"}'>
-    </div>
+<div class="filter-bar">
+    <input type="text" name="event_type" placeholder="Filter by event type…"
+           hx-get="/audit" hx-target="#audit-body" hx-swap="innerHTML"
+           hx-trigger="keyup changed delay:300ms"
+           hx-include="[name='event_type'],[name='limit']"
+           hx-vals='{"partial": "list"}'>
+    <select name="limit"
+            hx-get="/audit" hx-target="#audit-body" hx-swap="innerHTML"
+            hx-trigger="change"
+            hx-include="[name='event_type'],[name='limit']"
+            hx-vals='{"partial": "list"}'>
+        <option value="50">50 rows</option>
+        <option value="100">100 rows</option>
+        <option value="500">500 rows</option>
+        <option value="1000">1000 rows</option>
+    </select>
+    <button class="outline secondary btn-sm"
+            hx-get="/audit?partial=list&limit=50"
+            hx-target="#audit-body"
+            hx-swap="innerHTML">Refresh</button>
 </div>
 
 <figure>
-<table>
+<table class="audit-table">
     <thead>
         <tr>
             <th>Timestamp</th>
@@ -27,7 +40,7 @@
             <th>Details</th>
         </tr>
     </thead>
-    <tbody id="audit-body" hx-get="/audit?partial=list" hx-trigger="every 5s" hx-swap="innerHTML">
+    <tbody id="audit-body" hx-get="/audit?partial=list" hx-trigger="every 10s" hx-swap="innerHTML">
         {% include "partials/log_line.html" %}
     </tbody>
 </table>

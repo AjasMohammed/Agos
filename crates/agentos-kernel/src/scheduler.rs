@@ -222,6 +222,7 @@ impl TaskScheduler {
                 created_at: t.created_at,
                 tool_calls: 0,
                 tokens_used: 0,
+                priority: t.priority,
             })
             .collect()
     }

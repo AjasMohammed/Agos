@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="page-header">
+    <div>
+        <h1>Dashboard</h1>
+        <p class="page-meta">AgentOS runtime overview</p>
+    </div>
+    <small class="muted">Auto-refreshes every 5s</small>
+</div>
+
+<div class="grid" hx-get="/?partial=stats" hx-trigger="every 5s" hx-swap="outerHTML">
+    <article>
+        <header>
+            <strong>Kernel</strong>
+            <span class="badge badge-active">Running</span>
+        </header>
+        <dl class="detail-list">
+            <dt>Uptime</dt>
+            <dd>{{ uptime_secs }}s</dd>
+            <dt>Background</dt>
+            <dd>
+                {{ bg_running }}
+                {% if bg_running > 0 %}
+                <span class="badge badge-running">active</span>
+                {% else %}
+                <span class="badge badge-inactive">idle</span>
+                {% endif %}
+            </dd>
+        </dl>
+    </article>
+
+    <article>
+        <header>
+            <strong>Agents</strong>
+            <span class="badge badge-{{ 'active' if agent_count > 0 else 'inactive' }}">
+                {{ agent_count }} connected
+            </span>
+        </header>
+        <p>LLM agents available to process tasks. Each agent runs a configured model via a provider.</p>
+        <footer>
+            <a href="/agents" role="button" class="outline btn-sm">Manage Agents</a>
+        </footer>
+    </article>
+
+    <article>
+        <header>
+            <strong>Tasks</strong>
+            <span class="badge badge-{{ 'running' if active_task_count > 0 else 'inactive' }}">
+                {{ active_task_count }} active
+            </span>
+        </header>
+        <dl class="detail-list">
+            <dt>Active</dt>
+            <dd><strong>{{ active_task_count }}</strong> in progress</dd>
+            <dt>Total</dt>
+            <dd>{{ total_task_count }} all time</dd>
+        </dl>
+        <footer>
+            <a href="/tasks" role="button" class="outline btn-sm">View Tasks</a>
+        </footer>
+    </article>
+
+    <article>
+        <header>
+            <strong>Tools</strong>
+            <span class="badge badge-{{ 'active' if tool_count > 0 else 'inactive' }}">
+                {{ tool_count }} installed
+            </span>
+        </header>
+        <p>Tools extend agent capabilities — file I/O, shell, memory, data parsing, and more.</p>
+        <footer>
+            <a href="/tools" role="button" class="outline btn-sm">Manage Tools</a>
+        </footer>
+    </article>
+</div>
+
+<div class="log-section-header" style="margin-top: 2rem;">
+    <h2>Recent Audit Events</h2>
+    <a href="/audit" class="btn-sm outline">View all &rarr;</a>
+</div>
+
+<figure>
+<table class="audit-table">
+    <thead>
+        <tr>
+            <th>Timestamp</th>
+            <th>Event</th>
+            <th>Severity</th>
+            <th>Agent</th>
+        </tr>
+    </thead>
+    <tbody hx-get="/audit?partial=list&limit=10" hx-trigger="every 10s" hx-swap="innerHTML">
+        {% for entry in recent_audit %}
+        <tr>
+            <td><code class="ts muted">{{ entry.timestamp }}</code></td>
+            <td><code class="event-type">{{ entry.event_type }}</code></td>
+            <td>
+                <span class="badge badge-{{ entry.severity|lower }}">{{ entry.severity }}</span>
+            </td>
+            <td><code class="id-short muted">{{ entry.agent_id|default("—", true) }}</code></td>
+        </tr>
+        {% else %}
+        <tr>
+            <td colspan="4" style="text-align: center; padding: 2rem; color: var(--muted-color);">
+                No audit events yet. Events appear here as agents run tasks.
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</figure>
+
+{% endblock %}

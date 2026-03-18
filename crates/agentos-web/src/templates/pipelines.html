@@ -1,10 +1,15 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Pipeline Manager</h1>
-
 <div x-data="{ showRun: false, selectedPipeline: '' }">
+    <div class="page-header">
+        <div>
+            <h1>Pipeline Manager</h1>
+            <p class="page-meta">{{ pipelines|length }} installed</p>
+        </div>
+    </div>
+
     <figure>
-    <table>
+    <table aria-label="Installed pipelines">
         <thead>
             <tr>
                 <th>Name</th>
@@ -21,24 +26,31 @@
     </table>
     </figure>
 
-    <dialog :open="showRun" @close="showRun = false">
+    {% if pipelines|length == 0 %}
+    {% with icon="⇒", title="No pipelines installed", message="Pipelines define multi-step agent workflows. Install a pipeline to automate complex, sequential agent tasks." %}
+    {% include "partials/empty_state.html" %}
+    {% endwith %}
+    {% endif %}
+
+    <dialog :open="showRun" @close="showRun = false"
+            aria-labelledby="run-pipeline-title" role="dialog">
         <article>
             <header>
-                <button aria-label="Close" rel="prev" @click="showRun = false"></button>
-                <h3>Run Pipeline</h3>
+                <button aria-label="Close dialog" rel="prev" @click="showRun = false"></button>
+                <h3 id="run-pipeline-title">Run Pipeline</h3>
             </header>
             <form method="post" action="/pipelines/run" hx-post="/pipelines/run" hx-target="body" hx-push-url="true">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="pipeline_name" :value="selectedPipeline">
-                <label for="agent-name">Agent Name (required)
-                    <input id="agent-name" name="agent_name" required
+                <label for="agent-name">Agent Name
+                    <input id="agent-name" name="agent_name" required aria-required="true"
                            placeholder="Name of the agent to execute the pipeline">
                 </label>
                 <label for="pipeline-input">Input
-                    <textarea id="pipeline-input" name="input" required rows="4"
-                              placeholder="Pipeline input..."></textarea>
+                    <textarea id="pipeline-input" name="input" required aria-required="true"
+                              rows="4" placeholder="Pipeline input..."></textarea>
                 </label>
-                <button type="submit">Run</button>
+                <button type="submit">Run Pipeline</button>
             </form>
         </article>
     </dialog>

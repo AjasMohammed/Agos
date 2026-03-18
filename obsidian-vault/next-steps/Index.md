@@ -7,13 +7,13 @@ tags:
 aliases:
   - Implementation Dashboard
   - Next Steps Overview
-date: 2026-03-17
+date: 2026-03-18
 status: active
 ---
 
 # AgentOS — Next Steps Master Dashboard
 
-> Comprehensive implementation status as of **2026-03-17**, cross-referenced against [[agos-implementation-spec]] (12-item spec) and [[Feedback Implementation Plan]] (Phases 0--7).
+> Comprehensive implementation status as of **2026-03-18**, cross-referenced against [[agos-implementation-spec]] (12-item spec) and [[Feedback Implementation Plan]] (Phases 0--7).
 
 ---
 
@@ -120,6 +120,8 @@ graph TD
 | 38 | [[TODO-close-remaining-gaps\|Close first deployment readiness gaps: fmt fix, status updates, security gate sign-off, v0.1.0 tag]] | ~4h | **High** |
 | 39 | [[TODO-reconcile-review-status\|Reconcile full codebase review status contradiction and execute remaining 9 phases]] | ~5d | **Critical** |
 | 40 | [[24-Production Stability Fixes\|Production stability fixes: memory retrieval resilience, health monitor consolidation, graceful shutdown, agent identity persistence, boot pre-flight, restart hardening, systemd deployment (7 phases, 9 subtasks)]] | ~8d | **Critical** |
+| 41 | [[25-WebUI Redesign\|WebUI redesign: sidebar layout, enhanced dashboard, task management, audit viewer, SSE real-time updates, UX polish (6 phases)]] | ~12d | **High** |
+| 42 | [[26-LLM Agent Testing\|LLM agent testing harness: real LLM drives AgentOS, 10 scenarios, structured feedback, markdown/JSON reports (5 phases, 5 subtasks)]] | ~12d | **High** |
 
 ---
 

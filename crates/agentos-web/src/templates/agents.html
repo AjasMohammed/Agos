@@ -1,23 +1,31 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Agent Manager</h1>
-
 <div x-data="{ showModal: false }">
-    <button @click="showModal = true">Connect New Agent</button>
+    <div class="page-header">
+        <div>
+            <h1>Agent Manager</h1>
+            <p class="page-meta">{{ agents|length }} connected</p>
+        </div>
+        <button @click="showModal = true">Connect New Agent</button>
+    </div>
 
-    <dialog :open="showModal" @close="showModal = false">
+    <dialog :open="showModal" @close="showModal = false"
+            aria-labelledby="connect-agent-title" role="dialog">
         <article>
             <header>
-                <button aria-label="Close" rel="prev" @click="showModal = false"></button>
-                <h3>Connect Agent</h3>
+                <button aria-label="Close dialog" rel="prev" @click="showModal = false"></button>
+                <h3 id="connect-agent-title">Connect Agent</h3>
             </header>
-            <form method="post" action="/agents" hx-post="/agents" hx-target="#agent-grid" hx-swap="innerHTML">
+            <form method="post" action="/agents" hx-post="/agents" hx-target="#agent-grid" hx-swap="innerHTML"
+                  @htmx:after-request="showModal = false">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <label for="name">Agent Name
-                    <input type="text" id="name" name="name" required>
+                    <input type="text" id="name" name="name" required aria-required="true"
+                           aria-describedby="name-hint" placeholder="e.g. my-agent">
                 </label>
+                <small id="name-hint" class="muted">A unique name for this agent</small>
                 <label for="provider">Provider
-                    <select id="provider" name="provider" required>
+                    <select id="provider" name="provider" required aria-required="true">
                         <option value="ollama">Ollama</option>
                         <option value="openai">OpenAI</option>
                         <option value="anthropic">Anthropic</option>
@@ -25,18 +33,26 @@
                     </select>
                 </label>
                 <label for="model">Model
-                    <input type="text" id="model" name="model" required placeholder="e.g. llama3, gpt-4o">
+                    <input type="text" id="model" name="model" required aria-required="true"
+                           placeholder="e.g. llama3.2, gpt-4o, claude-opus-4-6">
                 </label>
                 <label for="description">Description
-                    <input type="text" id="description" name="description">
+                    <input type="text" id="description" name="description"
+                           placeholder="Optional description">
                 </label>
                 <button type="submit">Connect</button>
             </form>
         </article>
     </dialog>
-</div>
 
-<div id="agent-grid" class="grid" hx-get="/agents?partial=list" hx-trigger="every 5s" hx-swap="innerHTML">
-    {% include "partials/agent_card.html" %}
+    <div id="agent-grid" class="grid" hx-ext="sse" sse-connect="/events/agents" sse-swap="agent-update">
+        {% include "partials/agent_card.html" %}
+    </div>
+
+    {% if agents|length == 0 %}
+    {% with icon="●", title="No agents connected", message="Connect an LLM agent to start processing tasks. Use the button above to get started." %}
+    {% include "partials/empty_state.html" %}
+    {% endwith %}
+    {% endif %}
 </div>
 {% endblock %}

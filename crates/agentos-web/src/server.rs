@@ -35,7 +35,11 @@ impl WebServer {
         let app = build_router(self.state, self.bind_addr, auth_token)?;
         let listener = tokio::net::TcpListener::bind(self.bind_addr).await?;
         tracing::info!("Web UI listening on http://{}", self.bind_addr);
-        axum::serve(listener, app).await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -66,9 +70,12 @@ impl WebServer {
         let app = build_router(self.state, self.bind_addr, auth_token)?;
         let listener = tokio::net::TcpListener::bind(self.bind_addr).await?;
         tracing::info!("Web UI listening on http://{}", self.bind_addr);
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move { shutdown.cancelled().await })
-            .await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move { shutdown.cancelled().await })
+        .await?;
         Ok(())
     }
 

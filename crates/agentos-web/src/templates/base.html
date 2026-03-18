@@ -8,29 +8,103 @@
     <link rel="stylesheet" href="/static/css/pico.min.css">
     <link rel="stylesheet" href="/static/css/app.css">
     <script src="/static/js/htmx.min.js"></script>
+    <script src="/static/js/sse.js" defer></script>
     <script src="/static/js/alpine.min.js" defer></script>
+    <script src="/static/js/app.js" defer></script>
     <script src="/static/js/csrf.js" defer></script>
 </head>
-<body>
-    <nav class="container-fluid">
-        <ul>
-            <li><strong>AgentOS</strong></li>
-        </ul>
-        <ul>
-            <li><a href="/">Dashboard</a></li>
-            <li><a href="/agents">Agents</a></li>
-            <li><a href="/tasks">Tasks</a></li>
-            <li><a href="/tools">Tools</a></li>
-            <li><a href="/secrets">Secrets</a></li>
-            <li><a href="/pipelines">Pipelines</a></li>
-            <li><a href="/audit">Audit</a></li>
-        </ul>
-    </nav>
-    <main class="container">
-        {% block content %}{% endblock %}
-    </main>
-    <footer class="container">
-        <small>AgentOS Web UI</small>
-    </footer>
+<body x-data="{ sidebarOpen: false }" @keydown.escape="sidebarOpen = false">
+    <a href="#main-content" class="skip-link">Skip to main content</a>
+
+    <!-- Keyboard nav initializer (hidden) -->
+    <div x-data="keyboardNav()" x-init="init()" aria-hidden="true" style="display:none"></div>
+
+    <!-- Sidebar -->
+    <aside class="sidebar" :class="{ 'sidebar-open': sidebarOpen }"
+           aria-label="Main navigation" role="navigation">
+        <div class="sidebar-brand">
+            <a href="/"><strong>AgentOS</strong></a>
+        </div>
+        <nav>
+            <ul class="sidebar-nav">
+                <li><a href="/" data-nav="/"><span class="nav-icon" aria-hidden="true">&#9632;</span> Dashboard</a></li>
+                <li><a href="/agents" data-nav="/agents"><span class="nav-icon" aria-hidden="true">&#9679;</span> Agents</a></li>
+                <li><a href="/tasks" data-nav="/tasks"><span class="nav-icon" aria-hidden="true">&#9654;</span> Tasks</a></li>
+                <li><a href="/tools" data-nav="/tools"><span class="nav-icon" aria-hidden="true">&#9881;</span> Tools</a></li>
+                <li><a href="/secrets" data-nav="/secrets"><span class="nav-icon" aria-hidden="true">&#128274;</span> Secrets</a></li>
+                <li><a href="/pipelines" data-nav="/pipelines"><span class="nav-icon" aria-hidden="true">&#8658;</span> Pipelines</a></li>
+                <li><a href="/audit" data-nav="/audit"><span class="nav-icon" aria-hidden="true">&#128196;</span> Audit</a></li>
+            </ul>
+        </nav>
+        <div class="sidebar-footer">
+            <small class="muted">AgentOS Web UI</small>
+        </div>
+    </aside>
+
+    <!-- Sidebar overlay for mobile -->
+    <div class="sidebar-overlay" x-show="sidebarOpen" @click="sidebarOpen = false"
+         x-transition:enter="fade-enter" x-transition:leave="fade-leave"></div>
+
+    <!-- Main wrapper (topbar + content + footer) -->
+    <div class="main-wrapper">
+        <!-- Topbar -->
+        <header class="topbar">
+            <div class="topbar-left">
+                <button class="topbar-hamburger" @click="sidebarOpen = !sidebarOpen"
+                        aria-label="Toggle navigation"
+                        :aria-expanded="sidebarOpen.toString()">
+                    &#9776;
+                </button>
+                {% if breadcrumbs %}
+                <nav aria-label="Breadcrumb" class="breadcrumb-nav">
+                    <ol class="breadcrumb">
+                        {% for crumb in breadcrumbs %}
+                        <li>
+                            {% if crumb.href %}<a href="{{ crumb.href }}">{{ crumb.label }}</a>
+                            {% else %}<span aria-current="page">{{ crumb.label }}</span>{% endif %}
+                        </li>
+                        {% endfor %}
+                    </ol>
+                </nav>
+                {% endif %}
+            </div>
+            <div class="topbar-right" x-data="themeToggle()">
+                <button class="topbar-btn" @click="toggle()"
+                        :title="dark ? 'Switch to light theme' : 'Switch to dark theme'"
+                        aria-label="Toggle theme">
+                    <span x-text="dark ? '&#9788;' : '&#9790;'">&#9790;</span>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main content -->
+        <main id="main-content" class="main-content">
+            {% block content %}{% endblock %}
+        </main>
+
+        <footer class="site-footer">
+            <small class="muted">AgentOS Web UI &mdash; Press <kbd>?</kbd> for keyboard shortcuts</small>
+        </footer>
+    </div>
+
+    <!-- Toast notifications -->
+    {% include "partials/toast_container.html" %}
+
+    <!-- Keyboard shortcuts help modal -->
+    {% include "partials/shortcuts_modal.html" %}
+
+    <script>
+    (function () {
+        var path = window.location.pathname;
+        document.querySelectorAll('[data-nav]').forEach(function (a) {
+            var href = a.getAttribute('data-nav');
+            var active = href === '/' ? path === '/' : path === href || path.startsWith(href + '/');
+            if (active) {
+                a.classList.add('nav-active');
+                a.setAttribute('aria-current', 'page');
+            }
+        });
+    }());
+    </script>
 </body>
 </html>

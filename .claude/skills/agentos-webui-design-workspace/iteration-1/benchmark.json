@@ -1,0 +1,368 @@
+{
+  "metadata": {
+    "skill_name": "agentos-webui-design",
+    "skill_path": "/home/ajas/Desktop/agos/.claude/skills/agentos-webui-design",
+    "executor_model": "claude-sonnet-4-6",
+    "analyzer_model": "claude-sonnet-4-6",
+    "timestamp": "2026-03-18T06:39:37Z",
+    "evals_run": [
+      "dashboard-redesign",
+      "empty-states",
+      "audit-improvements"
+    ],
+    "runs_per_configuration": 1
+  },
+  "runs": [
+    {
+      "eval_id": 0,
+      "eval_name": "dashboard-redesign",
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 6,
+        "failed": 0,
+        "total": 6,
+        "time_seconds": 0,
+        "tokens": 0,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "uses-page-header-class",
+          "passed": true,
+          "evidence": "Found class='page-header' wrapping h1 and meta"
+        },
+        {
+          "text": "uses-badge-class-in-audit-table",
+          "passed": true,
+          "evidence": "badge badge-{{ entry.severity|lower }} on every audit row"
+        },
+        {
+          "text": "has-empty-state-for-audit",
+          "passed": true,
+          "evidence": "{% else %} block with colspan=4 empty state row"
+        },
+        {
+          "text": "no-new-css-framework",
+          "passed": true,
+          "evidence": "No bootstrap/tailwind/CDN references"
+        },
+        {
+          "text": "has-htmx-refresh",
+          "passed": true,
+          "evidence": "hx-trigger='every 10s' on audit tbody"
+        },
+        {
+          "text": "uses-pico-vars",
+          "passed": true,
+          "evidence": "Inline styles use var(--muted-color), no raw hex"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 0,
+      "eval_name": "dashboard-redesign",
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 0.6666666666666666,
+        "passed": 4,
+        "failed": 2,
+        "total": 6,
+        "time_seconds": 0,
+        "tokens": 0,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "uses-page-header-class",
+          "passed": true,
+          "evidence": "Found class='page-header' div with h1 and page-meta"
+        },
+        {
+          "text": "uses-badge-class-in-audit-table",
+          "passed": true,
+          "evidence": "Used explicit if/elif severity mapping to badge-critical/badge-failed/badge-warning/badge-info"
+        },
+        {
+          "text": "has-empty-state-for-audit",
+          "passed": false,
+          "evidence": "No {% else %} block in audit tbody \u2014 empty list shows nothing"
+        },
+        {
+          "text": "no-new-css-framework",
+          "passed": true,
+          "evidence": "No external framework references"
+        },
+        {
+          "text": "has-htmx-refresh",
+          "passed": true,
+          "evidence": "hx-trigger='every 5s' on audit tbody"
+        },
+        {
+          "text": "uses-pico-vars-not-hardcoded",
+          "passed": false,
+          "evidence": "Introduced 12 new CSS classes (.stat-card, .stat-number, etc.) that duplicate what Pico's article/header/footer already provides natively"
+        }
+      ],
+      "notes": [
+        "Created a full .stat-card component system (10+ new CSS classes) when Pico's <article><header><footer> already does this",
+        "The skill specifically prevents this \u2014 use semantic HTML, not custom component CSS",
+        "Missed the empty state for audit table"
+      ]
+    },
+    {
+      "eval_id": 1,
+      "eval_name": "empty-states",
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 5,
+        "failed": 0,
+        "total": 5,
+        "time_seconds": 0,
+        "tokens": 0,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "agent-card-has-empty-state",
+          "passed": true,
+          "evidence": "{% else %} block in for loop with centered empty state div"
+        },
+        {
+          "text": "tool-card-has-empty-state",
+          "passed": true,
+          "evidence": "{% else %} block in tool_card for loop"
+        },
+        {
+          "text": "empty-state-uses-muted-styling",
+          "passed": true,
+          "evidence": "Uses var(--muted-color) and .muted class \u2014 no hardcoded hex"
+        },
+        {
+          "text": "no-button-in-agent-partial-else-block",
+          "passed": true,
+          "evidence": "The {% else %} block has no <button>; Disconnect only in for-loop body"
+        },
+        {
+          "text": "descriptive-empty-text",
+          "passed": true,
+          "evidence": "Mentions 'LLM agent', 'Ollama, OpenAI, Anthropic, or Gemini', 'tasks'"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 1,
+      "eval_name": "empty-states",
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 0.6,
+        "passed": 3,
+        "failed": 2,
+        "total": 5,
+        "time_seconds": 0,
+        "tokens": 0,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "agent-card-has-empty-state",
+          "passed": true,
+          "evidence": "{% else %} block with 'No agents found.'"
+        },
+        {
+          "text": "tool-card-has-empty-state",
+          "passed": true,
+          "evidence": "{% else %} block with 'No tools installed.'"
+        },
+        {
+          "text": "empty-state-uses-muted-styling",
+          "passed": false,
+          "evidence": "Plain <p> with no muted class or Pico color variable"
+        },
+        {
+          "text": "no-button-in-agent-partial-else-block",
+          "passed": true,
+          "evidence": "{% else %} block has no <button>"
+        },
+        {
+          "text": "descriptive-empty-text",
+          "passed": false,
+          "evidence": "'No agents found.' gives no context about what agents are or next steps"
+        }
+      ],
+      "notes": [
+        "Empty states exist but are terse one-liners with no contextual guidance"
+      ]
+    },
+    {
+      "eval_id": 2,
+      "eval_name": "audit-improvements",
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 6,
+        "failed": 0,
+        "total": 6,
+        "time_seconds": 0,
+        "tokens": 0,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "audit-has-page-header",
+          "passed": true,
+          "evidence": "class='page-header' wrapping h1 and page-meta span"
+        },
+        {
+          "text": "filter-bar-has-text-search",
+          "passed": true,
+          "evidence": "input with hx-trigger='keyup changed delay:300ms' and hx-get='/audit'"
+        },
+        {
+          "text": "log-line-uses-badge-for-severity",
+          "passed": true,
+          "evidence": "badge badge-{{ entry.severity|lower }} on every row"
+        },
+        {
+          "text": "htmx-uses-partial-pattern",
+          "passed": true,
+          "evidence": "hx-vals='{\"partial\": \"list\"}' on all filter inputs"
+        },
+        {
+          "text": "no-new-css-framework",
+          "passed": true,
+          "evidence": "No CDN or framework references"
+        },
+        {
+          "text": "no-inline-js-filter",
+          "passed": true,
+          "evidence": "No <script> tag; filtering done via HTMX server round-trips"
+        }
+      ],
+      "notes": [
+        "Added severity dropdown filter \u2014 extends skill pattern correctly"
+      ]
+    },
+    {
+      "eval_id": 2,
+      "eval_name": "audit-improvements",
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 0.167,
+        "passed": 1,
+        "failed": 5,
+        "total": 6,
+        "time_seconds": 0,
+        "tokens": 0,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "audit-has-page-header",
+          "passed": false,
+          "evidence": "Plain <h1> with no .page-header wrapper"
+        },
+        {
+          "text": "filter-bar-has-text-search",
+          "passed": false,
+          "evidence": "Search uses onkeyup='filterTable()' JS \u2014 not HTMX"
+        },
+        {
+          "text": "log-line-uses-badge-for-severity",
+          "passed": false,
+          "evidence": "Severity is plain {{ entry.severity }} text in log_line.html"
+        },
+        {
+          "text": "htmx-uses-partial-pattern",
+          "passed": false,
+          "evidence": "hx-get='/audit' without partial param; client-side JS filters rows"
+        },
+        {
+          "text": "no-new-css-framework",
+          "passed": true,
+          "evidence": "No external framework references"
+        },
+        {
+          "text": "no-inline-js-filter",
+          "passed": false,
+          "evidence": "<script>function filterTable(){...}</script> for client-side DOM filtering"
+        }
+      ],
+      "notes": [
+        "Reverted to client-side JS filtering \u2014 defeats the server-driven HTMX model",
+        "Raw text severity \u2014 lost badge context entirely",
+        "Ignored the ?partial= URL convention used throughout the codebase"
+      ]
+    }
+  ],
+  "run_summary": {
+    "with_skill": {
+      "pass_rate": {
+        "mean": 1.0,
+        "stddev": 0.0,
+        "min": 1.0,
+        "max": 1.0
+      },
+      "time_seconds": {
+        "mean": 0,
+        "stddev": 0,
+        "min": 0,
+        "max": 0
+      },
+      "tokens": {
+        "mean": 0,
+        "stddev": 0,
+        "min": 0,
+        "max": 0
+      }
+    },
+    "without_skill": {
+      "pass_rate": {
+        "mean": 0.4777777777777778,
+        "stddev": 0.18,
+        "min": 0.17,
+        "max": 0.6
+      },
+      "time_seconds": {
+        "mean": 0,
+        "stddev": 0,
+        "min": 0,
+        "max": 0
+      },
+      "tokens": {
+        "mean": 0,
+        "stddev": 0,
+        "min": 0,
+        "max": 0
+      }
+    },
+    "delta": {
+      "pass_rate": "+0.44",
+      "time_seconds": "0",
+      "tokens": "0"
+    }
+  },
+  "notes": [
+    "Eval 0 (dashboard): Real baseline got page-header + badges right but missed empty state and over-engineered with 10+ new CSS classes duplicating Pico's article semantics",
+    "Eval 1 (empty states): Both configs added else blocks, but skill produced contextual descriptions; baseline output generic 'No X found.' text",
+    "Eval 2 (audit): Largest delta \u2014 baseline reverted to inline JS filtering, breaking HTMX model; skill maintained server-side pattern throughout",
+    "The 'no-new-css-framework' assertion passes on both \u2014 not a useful discriminator for this skill",
+    "Most impactful skill guidance: .page-header pattern, badge usage, and HTMX ?partial= convention",
+    "Key skill insight from eval-0: without guidance, agents create custom CSS component systems; the skill correctly prevents this by pointing to Pico's semantic HTML"
+  ]
+}

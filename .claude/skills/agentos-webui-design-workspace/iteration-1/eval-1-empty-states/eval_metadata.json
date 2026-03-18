@@ -1,0 +1,12 @@
+{
+  "eval_id": 1,
+  "eval_name": "empty-states",
+  "prompt": "Add proper empty states to agent_card.html and tool_card.html partials. Empty state should explain what the page is for and hint at next step — but without adding a button inside the partial. Use only the existing stack.",
+  "assertions": [
+    {"text": "agent-card-has-empty-state: agent_card.html has an else block or empty-check with descriptive text"},
+    {"text": "tool-card-has-empty-state: tool_card.html has an else block or empty-check with descriptive text"},
+    {"text": "empty-state-uses-muted-styling: Empty state uses .muted class or var(--muted-color), not hardcoded gray hex"},
+    {"text": "no-button-in-agent-partial: The empty state in agent_card.html does not add a <button> element"},
+    {"text": "descriptive-empty-text: Empty state text is specific and contextual (not just 'No items')"}
+  ]
+}

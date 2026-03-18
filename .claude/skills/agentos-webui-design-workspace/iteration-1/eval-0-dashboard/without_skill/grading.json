@@ -1,0 +1,36 @@
+{
+  "score": "3/6",
+  "pass_rate": 0.5,
+  "expectations": [
+    {
+      "text": "uses-page-header-class",
+      "passed": false,
+      "evidence": "Used plain <h1> with no .page-header wrapper"
+    },
+    {
+      "text": "uses-badge-class-in-audit-table",
+      "passed": false,
+      "evidence": "Severity rendered as plain {{ entry.severity }} text"
+    },
+    {
+      "text": "has-empty-state-for-audit",
+      "passed": false,
+      "evidence": "No {% else %} block \u2014 empty list renders nothing"
+    },
+    {
+      "text": "no-new-css-framework",
+      "passed": true,
+      "evidence": "No external framework references"
+    },
+    {
+      "text": "has-htmx-refresh",
+      "passed": true,
+      "evidence": "Found hx-trigger='every 5s' on tbody"
+    },
+    {
+      "text": "uses-pico-vars",
+      "passed": true,
+      "evidence": "No inline styles at all"
+    }
+  ]
+}

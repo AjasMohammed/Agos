@@ -1,0 +1,26 @@
+{% if agents %}
+<div class="agent-status-grid">
+    {% for agent in agents %}
+    <article class="agent-status-card">
+        <div class="agent-status-header">
+            <strong>{{ agent.name }}</strong>
+            <span class="badge badge-{{ agent.status|lower }}">{{ agent.status }}</span>
+        </div>
+        <div class="agent-status-meta">
+            <small class="muted">{{ agent.provider }} / {{ agent.model }}</small>
+        </div>
+        {% if agent.current_task %}
+        <div class="agent-status-task">
+            <small>Working on <a href="/tasks/{{ agent.current_task }}" class="id-link"><code>{{ agent.current_task[:8] }}</code></a></small>
+        </div>
+        {% endif %}
+    </article>
+    {% endfor %}
+</div>
+{% else %}
+<div style="text-align: center; padding: 2rem 1rem; color: var(--pico-muted-color);">
+    <p style="font-size: 1.1rem; margin-bottom: 0.5rem;">No agents connected</p>
+    <p style="font-size: 0.9rem; margin-bottom: 1rem;">Connect an LLM agent to start processing tasks. Agents appear here once registered.</p>
+    <a href="/agents" role="button" class="outline btn-sm">Connect an Agent</a>
+</div>
+{% endif %}

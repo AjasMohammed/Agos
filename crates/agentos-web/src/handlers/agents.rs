@@ -18,7 +18,7 @@ pub async fn list(
 ) -> Response {
     let registry = state.kernel.agent_registry.read().await;
     let agents: Vec<_> = registry
-        .list_all()
+        .list_online()
         .iter()
         .map(|a| {
             context! {
@@ -45,6 +45,7 @@ pub async fn list(
 
     let ctx = context! {
         page_title => "Agents",
+        breadcrumbs => vec![context! { label => "Agents" }],
         agents,
         csrf_token,
     };
@@ -84,18 +85,32 @@ pub async fn connect(
         .api_connect_agent(form.name.clone(), provider, form.model, None, vec![])
         .await
     {
-        Ok(()) => axum::response::Redirect::to("/agents").into_response(),
+        Ok(()) => {
+            let mut response = axum::response::Redirect::to("/agents").into_response();
+            let trigger = serde_json::json!({
+                "showToast": {"message": format!("Agent '{}' connected", form.name), "type": "success"}
+            })
+            .to_string();
+            if let Ok(hv) = axum::http::HeaderValue::from_str(&trigger) {
+                response.headers_mut().insert("HX-Trigger", hv);
+            }
+            response
+        }
         Err(msg) => {
             tracing::error!(agent = %form.name, error = %msg, "Failed to connect agent");
-            (StatusCode::BAD_REQUEST, "Failed to connect agent").into_response()
+            let mut response = (StatusCode::BAD_REQUEST, "Failed to connect agent").into_response();
+            response.headers_mut().insert(
+                "HX-Trigger",
+                axum::http::HeaderValue::from_static(
+                    r#"{"showToast":{"message":"Failed to connect agent","type":"error"}}"#,
+                ),
+            );
+            response
         }
     }
 }
 
-pub async fn disconnect(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+pub async fn disconnect(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     let agent_id = {
         let registry = state.kernel.agent_registry.read().await;
         registry.get_by_name(&name).map(|a| a.id)
@@ -103,15 +118,31 @@ pub async fn disconnect(
 
     match agent_id {
         Some(id) => match state.kernel.api_disconnect_agent(id).await {
-            Ok(()) => StatusCode::NO_CONTENT,
+            Ok(()) => {
+                let mut response = StatusCode::NO_CONTENT.into_response();
+                response.headers_mut().insert(
+                    "HX-Trigger",
+                    axum::http::HeaderValue::from_static(
+                        r#"{"showToast":{"message":"Agent disconnected","type":"success"}}"#,
+                    ),
+                );
+                response
+            }
             // Agent may have been disconnected by a concurrent request between the
             // read-lock lookup above and the write-lock acquisition inside the kernel.
-            Err(msg) if msg.contains("not found") => StatusCode::NOT_FOUND,
+            Err(msg) if msg.contains("not found") => StatusCode::NOT_FOUND.into_response(),
             Err(msg) => {
                 tracing::error!(agent = %name, error = %msg, "Failed to disconnect agent");
-                StatusCode::INTERNAL_SERVER_ERROR
+                let mut response = StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                response.headers_mut().insert(
+                    "HX-Trigger",
+                    axum::http::HeaderValue::from_static(
+                        r#"{"showToast":{"message":"Failed to disconnect agent","type":"error"}}"#,
+                    ),
+                );
+                response
             }
         },
-        None => StatusCode::NOT_FOUND,
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }

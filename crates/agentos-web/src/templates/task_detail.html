@@ -1,15 +1,29 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Task {{ task_id[:8] }}</h1>
+<div class="page-header">
+    <div>
+        <h1>Task <code class="id-long">{{ task_id[:8] }}</code></h1>
+        <small class="muted">{{ task_id }}</small>
+    </div>
+    <div class="page-header-actions">
+        <span class="badge badge-{{ state|lower }} badge-lg">{{ state }}</span>
+        {% if state == "Running" or state == "Queued" or state == "Waiting" %}
+        <button class="outline secondary btn-sm"
+                hx-post="/tasks/{{ task_id }}/cancel"
+                hx-confirm="Cancel this task?"
+                hx-swap="none">Cancel Task</button>
+        {% endif %}
+    </div>
+</div>
 
 <div class="grid">
     <article>
         <header>Details</header>
-        <dl>
+        <dl class="detail-list">
             <dt>Status</dt>
             <dd><span class="badge badge-{{ state|lower }}">{{ state }}</span></dd>
             <dt>Agent</dt>
-            <dd>{{ agent_id[:8] }}</dd>
+            <dd><code title="{{ agent_id }}">{{ agent_id[:8] }}</code></dd>
             <dt>Priority</dt>
             <dd>{{ priority }}</dd>
             <dt>Created</dt>
@@ -18,25 +32,108 @@
     </article>
     <article>
         <header>Original Prompt</header>
-        <pre>{{ prompt }}</pre>
+        <pre class="prompt-pre">{{ prompt }}</pre>
     </article>
 </div>
 
-<h2>Context Window</h2>
-<div x-data="{ expanded: {} }">
+{% if history %}
+<h2>Context Window <small class="muted">({{ history|length }} messages)</small></h2>
+<div class="context-window">
     {% for msg in history %}
-    <details>
-        <summary><strong>{{ msg.role }}</strong></summary>
-        <pre>{{ msg.content }}</pre>
+    <details class="context-entry">
+        <summary class="context-summary">
+            <span class="role-badge role-{{ msg.role|lower }}">{{ msg.role }}</span>
+            <span class="muted context-preview">{{ msg.content[:80] }}{% if msg.content|length > 80 %}…{% endif %}</span>
+        </summary>
+        <pre class="context-content">{{ msg.content }}</pre>
     </details>
     {% endfor %}
 </div>
+{% endif %}
 
-<h2>Live Log Stream</h2>
-<div id="log-stream"
-     hx-ext="sse"
-     sse-connect="/tasks/{{ task_id }}/logs/stream"
-     sse-swap="message"
-     hx-swap="beforeend">
+<div class="log-section-header">
+    <h2>Live Log Stream <span id="stream-status" class="badge badge-running">connecting…</span></h2>
+    <div class="log-toolbar">
+        <label class="autoscroll-label">
+            <input type="checkbox" id="autoscroll" checked> Auto-scroll
+        </label>
+        <button class="outline secondary btn-sm" onclick="clearLogs()">Clear</button>
+    </div>
 </div>
+<div id="log-terminal" class="log-terminal" role="log" aria-live="polite" aria-label="Task log output"></div>
+
+<script>
+(function () {
+    var terminal = document.getElementById('log-terminal');
+    var statusBadge = document.getElementById('stream-status');
+    var autoscrollCheck = document.getElementById('autoscroll');
+
+    window.clearLogs = function () { terminal.innerHTML = ''; };
+
+    function scrollToBottom() {
+        if (autoscrollCheck.checked) {
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+    }
+
+    function classifyLine(text) {
+        var t = text.toLowerCase();
+        if (t.indexOf('error') !== -1 || t.indexOf('failed') !== -1 || t.indexOf('critical') !== -1 || t.indexOf('panic') !== -1) return 'log-error';
+        if (t.indexOf('warn') !== -1) return 'log-warn';
+        if (t.indexOf('complete') !== -1 || t.indexOf('success') !== -1 || t.indexOf('ok') !== -1) return 'log-success';
+        if (t.indexOf('toolcall') !== -1 || t.indexOf('tool') !== -1) return 'log-tool';
+        return '';
+    }
+
+    function appendLine(text) {
+        if (!text.trim()) return;
+        var line = document.createElement('div');
+        line.className = 'log-line';
+        var cls = classifyLine(text);
+        if (cls) line.classList.add(cls);
+        line.textContent = text;
+        terminal.appendChild(line);
+        scrollToBottom();
+    }
+
+    function appendDivider(text) {
+        var line = document.createElement('div');
+        line.className = 'log-divider';
+        line.textContent = text;
+        terminal.appendChild(line);
+        scrollToBottom();
+    }
+
+    function setStatus(label, badgeClass) {
+        statusBadge.textContent = label;
+        statusBadge.className = 'badge ' + badgeClass;
+    }
+
+    var src = new EventSource('/tasks/{{ task_id }}/logs/stream');
+
+    src.onopen = function () {
+        setStatus('streaming', 'badge-running');
+    };
+
+    src.onmessage = function (event) {
+        var lines = event.data.split('\n');
+        for (var i = 0; i < lines.length; i++) {
+            appendLine(lines[i]);
+        }
+    };
+
+    src.addEventListener('done', function () {
+        setStatus('complete', 'badge-complete');
+        appendDivider('─── stream closed ───');
+        src.close();
+    });
+
+    src.onerror = function () {
+        if (src.readyState === EventSource.CLOSED) return;
+        setStatus('disconnected', 'badge-error');
+        appendDivider('─── connection lost ───');
+        src.close();
+    };
+}());
+</script>
 {% endblock %}

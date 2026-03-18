@@ -1,0 +1,122 @@
+{
+  "skill_name": "agentos-webui-design",
+  "evals": [
+    {
+      "id": 0,
+      "prompt": "The dashboard page at crates/agentos-web/src/templates/dashboard.html looks too bare — it's just a plain h1, a 4-card grid with raw text, and a basic table. Make it more informative and polished. The stat cards should show real context (what the numbers mean, not just raw counts), and the recent audit table should feel more like a proper log viewer with status badges. Keep using the existing stack (Pico CSS, HTMX, app.css classes).",
+      "expected_output": "An improved dashboard.html that: uses .page-header for the title area, shows uptime in a human-friendly format, uses .badge classes on severity/event-type in the audit table, adds an empty state for when there are no audit events, and uses .detail-list or dl for metadata in the stat cards. Should not introduce any new CSS frameworks or inline styles beyond app.css vars.",
+      "files": [
+        "crates/agentos-web/src/templates/dashboard.html",
+        "crates/agentos-web/src/templates/base.html",
+        "crates/agentos-web/static/css/app.css"
+      ],
+      "assertions": [
+        {
+          "name": "uses-page-header-class",
+          "description": "Output HTML contains class='page-header' or class=\"page-header\" for the title section",
+          "check": "grep"
+        },
+        {
+          "name": "uses-badge-class-in-audit-table",
+          "description": "Output HTML uses badge or badge-* classes somewhere in the audit table area",
+          "check": "grep"
+        },
+        {
+          "name": "has-empty-state-for-audit",
+          "description": "Output HTML has a conditional block ({% if %} or {% else %}) handling empty audit events",
+          "check": "grep"
+        },
+        {
+          "name": "no-new-css-framework",
+          "description": "Output HTML does not reference bootstrap, tailwind, bulma, materialize, or any CDN link",
+          "check": "grep_negative"
+        },
+        {
+          "name": "has-htmx-refresh",
+          "description": "Output HTML has hx-trigger with a polling interval (every Xs) for the audit table",
+          "check": "grep"
+        },
+        {
+          "name": "uses-pico-vars-not-hardcoded",
+          "description": "Any inline style additions use var(--...) Pico variables rather than raw hex values like #ffffff",
+          "check": "manual"
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "prompt": "Add proper empty states to the agents page partial (crates/agentos-web/src/templates/partials/agent_card.html) and the tools page partial (crates/agentos-web/src/templates/partials/tool_card.html). Right now if the list is empty, nothing is shown. The empty state should explain what the page is for and give the user a clear next step — but without adding a button in the partial (the button is in the parent template). Use only the existing stack.",
+      "expected_output": "Both partials updated to include a {% else %} or {% if items|length == 0 %} empty state block with centered muted text that explains what the section is for and hints at the action to take. Uses Pico CSS vars for color, no inline styles with hardcoded hex colors.",
+      "files": [
+        "crates/agentos-web/src/templates/partials/agent_card.html",
+        "crates/agentos-web/src/templates/partials/tool_card.html",
+        "crates/agentos-web/static/css/app.css"
+      ],
+      "assertions": [
+        {
+          "name": "agent-card-has-empty-state",
+          "description": "agent_card.html output has an else block or empty-check block with non-empty descriptive text",
+          "check": "grep"
+        },
+        {
+          "name": "tool-card-has-empty-state",
+          "description": "tool_card.html output has an else block or empty-check block with non-empty descriptive text",
+          "check": "grep"
+        },
+        {
+          "name": "empty-state-uses-muted-styling",
+          "description": "Empty state uses .muted class or var(--muted-color) for text color, not hardcoded gray hex",
+          "check": "manual"
+        },
+        {
+          "name": "no-button-in-agent-partial",
+          "description": "The empty state in agent_card.html does not contain a <button> or <a role='button'> element",
+          "check": "grep_negative"
+        },
+        {
+          "name": "descriptive-empty-text",
+          "description": "Empty state text is descriptive and specific (not just 'No items' — mentions agents, LLM, or what to do)",
+          "check": "manual"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "The audit page at crates/agentos-web/src/templates/audit.html and its partial crates/agentos-web/src/templates/partials/log_line.html need improvements. Currently the filter bar is minimal and the table rows show raw text for severity. Make the filter bar more usable (add a text search input that filters by event type text), add severity badges using the existing .badge classes to the log_line partial, and make the overall layout feel intentional with a proper .page-header. Update app.css only if absolutely needed.",
+      "expected_output": "audit.html with a .page-header, an improved .filter-bar with text search using HTMX keyup filtering, and log_line.html updated to show severity as a .badge with the right color class. The HTMX attributes should follow the ?partial=list pattern. No new CSS frameworks.",
+      "files": [
+        "crates/agentos-web/src/templates/audit.html",
+        "crates/agentos-web/src/templates/partials/log_line.html",
+        "crates/agentos-web/src/handlers/audit.rs",
+        "crates/agentos-web/static/css/app.css"
+      ],
+      "assertions": [
+        {
+          "name": "audit-has-page-header",
+          "description": "audit.html output contains page-header class",
+          "check": "grep"
+        },
+        {
+          "name": "filter-bar-has-text-search",
+          "description": "audit.html output has an input[type=text] inside or near the filter-bar with hx-get and hx-trigger containing keyup",
+          "check": "grep"
+        },
+        {
+          "name": "log-line-uses-badge-for-severity",
+          "description": "log_line.html output uses badge and badge-* class for severity column, not plain text",
+          "check": "grep"
+        },
+        {
+          "name": "htmx-uses-partial-pattern",
+          "description": "HTMX get URLs use ?partial= query param pattern",
+          "check": "grep"
+        },
+        {
+          "name": "no-new-css-framework",
+          "description": "Output files do not reference bootstrap, tailwind, or any CDN",
+          "check": "grep_negative"
+        }
+      ]
+    }
+  ]
+}

@@ -1,23 +1,58 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Task Inspector</h1>
+<div class="page-header">
+    <h1>Task Inspector</h1>
+</div>
+
+<div class="filter-bar">
+    <input type="text" name="search" placeholder="Search by prompt..."
+           hx-get="/tasks" hx-target="#task-list" hx-swap="innerHTML"
+           hx-trigger="keyup changed delay:300ms"
+           hx-include="[name='search'],[name='status']"
+           hx-vals='{"partial": "list"}'>
+    <select name="status"
+            hx-get="/tasks" hx-target="#task-list" hx-swap="innerHTML"
+            hx-trigger="change"
+            hx-include="[name='search'],[name='status']"
+            hx-vals='{"partial": "list"}'>
+        <option value="">All Statuses</option>
+        <option value="queued">Queued</option>
+        <option value="running">Running</option>
+        <option value="waiting">Waiting</option>
+        <option value="complete">Complete</option>
+        <option value="failed">Failed</option>
+        <option value="cancelled">Cancelled</option>
+    </select>
+    <button class="outline secondary btn-sm"
+            hx-get="/tasks?partial=list"
+            hx-target="#task-list"
+            hx-swap="innerHTML">Refresh</button>
+</div>
 
 <figure>
-<table>
+<table aria-label="Task list">
     <thead>
         <tr>
             <th>ID</th>
             <th>Agent</th>
             <th>Status</th>
+            <th>Priority</th>
             <th>Prompt</th>
             <th>Created</th>
             <th>Tool Calls</th>
             <th>Tokens</th>
+            <th>Actions</th>
         </tr>
     </thead>
-    <tbody id="task-list" hx-get="/tasks?partial=list" hx-trigger="every 3s" hx-swap="innerHTML">
+    <tbody id="task-list" hx-ext="sse" sse-connect="/events/tasks" sse-swap="task-update">
         {% include "partials/task_row.html" %}
     </tbody>
 </table>
 </figure>
+
+{% if tasks|length == 0 %}
+{% with icon="▶", title="No tasks found", message="Tasks appear here when agents begin work. Submit a prompt to an agent to create a task." %}
+{% include "partials/empty_state.html" %}
+{% endwith %}
+{% endif %}
 {% endblock %}

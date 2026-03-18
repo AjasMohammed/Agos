@@ -1,0 +1,11 @@
+{# Parameters: icon (string), title (string), message (string), action_href (optional), action_label (optional) #}
+<div class="empty-state" role="status">
+    <p class="empty-state-icon" aria-hidden="true">{{ icon }}</p>
+    <p class="empty-state-title">{{ title }}</p>
+    {% if message %}
+    <p class="empty-state-message muted">{{ message }}</p>
+    {% endif %}
+    {% if action_href %}
+    <a href="{{ action_href }}" role="button" class="outline">{{ action_label }}</a>
+    {% endif %}
+</div>

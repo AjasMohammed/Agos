@@ -1,0 +1,8 @@
+<div class="toast-container" x-data="toastStore()" @show-toast.window="addToast($event.detail)">
+    <template x-for="toast in toasts" :key="toast.id">
+        <div class="toast" :class="'toast-' + toast.type" role="alert" aria-live="assertive">
+            <span x-text="toast.message"></span>
+            <button class="toast-close" @click="removeToast(toast.id)" aria-label="Dismiss">&times;</button>
+        </div>
+    </template>
+</div>

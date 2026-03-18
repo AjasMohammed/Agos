@@ -54,6 +54,7 @@ pub async fn list(
     let tool_count = tools.len();
     let ctx = context! {
         page_title => "Tools",
+        breadcrumbs => vec![context! { label => "Tools" }],
         tools,
         tool_count,
         csrf_token,
@@ -160,25 +161,59 @@ pub async fn install(
         .api_install_tool(canonical_path.to_string_lossy().to_string())
         .await
     {
-        Ok(()) => axum::response::Redirect::to("/tools").into_response(),
+        Ok(()) => {
+            let mut response = axum::response::Redirect::to("/tools").into_response();
+            response.headers_mut().insert(
+                "HX-Trigger",
+                axum::http::HeaderValue::from_static(
+                    r#"{"showToast":{"message":"Tool installed successfully","type":"success"}}"#,
+                ),
+            );
+            response
+        }
         Err(msg) => {
             tracing::error!(path = %canonical_path.display(), error = %msg, "Failed to install tool");
-            (
+            let mut response = (
                 StatusCode::BAD_REQUEST,
                 format!("Failed to install tool: {}", msg),
             )
-                .into_response()
+                .into_response();
+            response.headers_mut().insert(
+                "HX-Trigger",
+                axum::http::HeaderValue::from_static(
+                    r#"{"showToast":{"message":"Failed to install tool","type":"error"}}"#,
+                ),
+            );
+            response
         }
     }
 }
 
-pub async fn remove(State(state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
+pub async fn remove(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     match state.kernel.api_remove_tool(name.clone()).await {
-        Ok(()) => StatusCode::NO_CONTENT,
-        Err(msg) if msg.to_lowercase().contains("not found") => StatusCode::NOT_FOUND,
+        Ok(()) => {
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            response.headers_mut().insert(
+                "HX-Trigger",
+                axum::http::HeaderValue::from_static(
+                    r#"{"showToast":{"message":"Tool removed","type":"success"}}"#,
+                ),
+            );
+            response
+        }
+        Err(msg) if msg.to_lowercase().contains("not found") => {
+            StatusCode::NOT_FOUND.into_response()
+        }
         Err(msg) => {
             tracing::error!(tool = %name, error = %msg, "Failed to remove tool");
-            StatusCode::INTERNAL_SERVER_ERROR
+            let mut response = StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            response.headers_mut().insert(
+                "HX-Trigger",
+                axum::http::HeaderValue::from_static(
+                    r#"{"showToast":{"message":"Failed to remove tool","type":"error"}}"#,
+                ),
+            );
+            response
         }
     }
 }

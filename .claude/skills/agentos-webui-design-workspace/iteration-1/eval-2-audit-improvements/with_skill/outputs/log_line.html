@@ -1,0 +1,26 @@
+{% for entry in entries %}
+<tr>
+    <td><code class="ts">{{ entry.timestamp }}</code></td>
+    <td><code class="event-type">{{ entry.event_type }}</code></td>
+    <td><span class="badge badge-{{ entry.severity|lower }}">{{ entry.severity }}</span></td>
+    <td>{% if entry.agent_id %}<code class="id-short" title="{{ entry.agent_id }}">{{ entry.agent_id[:8] }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td>{% if entry.task_id %}<a href="/tasks/{{ entry.task_id }}" class="id-link" title="{{ entry.task_id }}"><code>{{ entry.task_id[:8] }}</code></a>{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td>{% if entry.tool_id %}<code class="id-short" title="{{ entry.tool_id }}">{{ entry.tool_id[:8] }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td class="details-cell">
+        {% if entry.details|length > 120 %}
+        <details>
+            <summary><small class="details-preview">{{ entry.details[:120] }}…</small></summary>
+            <pre class="details-full">{{ entry.details }}</pre>
+        </details>
+        {% else %}
+        <small>{{ entry.details }}</small>
+        {% endif %}
+    </td>
+</tr>
+{% else %}
+<tr>
+    <td colspan="7" style="text-align: center; padding: 2rem; color: var(--muted-color);">
+        No audit events match your filter.
+    </td>
+</tr>
+{% endfor %}

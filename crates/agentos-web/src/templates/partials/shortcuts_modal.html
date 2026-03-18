@@ -1,0 +1,27 @@
+<dialog x-data="{ show: false }" @show-shortcuts.window="show = true" :open="show"
+        @close="show = false" @keydown.escape.window="show = false"
+        aria-labelledby="shortcuts-title" role="dialog">
+    <article style="max-width: 480px;">
+        <header>
+            <button aria-label="Close" rel="prev" @click="show = false"></button>
+            <h3 id="shortcuts-title">Keyboard Shortcuts</h3>
+        </header>
+        <figure>
+        <table>
+            <thead>
+                <tr><th>Key</th><th>Action</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><kbd>g</kbd> then <kbd>d</kbd></td><td>Go to Dashboard</td></tr>
+                <tr><td><kbd>g</kbd> then <kbd>a</kbd></td><td>Go to Agents</td></tr>
+                <tr><td><kbd>g</kbd> then <kbd>t</kbd></td><td>Go to Tasks</td></tr>
+                <tr><td><kbd>g</kbd> then <kbd>o</kbd></td><td>Go to Tools</td></tr>
+                <tr><td><kbd>g</kbd> then <kbd>s</kbd></td><td>Go to Secrets</td></tr>
+                <tr><td><kbd>g</kbd> then <kbd>p</kbd></td><td>Go to Pipelines</td></tr>
+                <tr><td><kbd>g</kbd> then <kbd>l</kbd></td><td>Go to Audit Log</td></tr>
+                <tr><td><kbd>?</kbd></td><td>Show this help</td></tr>
+            </tbody>
+        </table>
+        </figure>
+    </article>
+</dialog>

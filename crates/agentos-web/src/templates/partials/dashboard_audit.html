@@ -1,0 +1,14 @@
+{% for entry in recent_audit %}
+<tr>
+    <td><code class="ts">{{ entry.timestamp }}</code></td>
+    <td><code class="event-type">{{ entry.event_type }}</code></td>
+    <td><span class="badge badge-{{ entry.severity|lower }}">{{ entry.severity }}</span></td>
+    <td>{% if entry.agent_id %}<code class="id-short" title="{{ entry.agent_id }}">{{ entry.agent_id[:8] }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+</tr>
+{% else %}
+<tr>
+    <td colspan="4" style="text-align: center; color: var(--pico-muted-color); padding: 1.5rem;">
+        No recent activity.
+    </td>
+</tr>
+{% endfor %}

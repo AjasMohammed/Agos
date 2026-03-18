@@ -45,6 +45,7 @@ pub async fn list(
 
     let ctx = context! {
         page_title => "Secrets",
+        breadcrumbs => vec![context! { label => "Secrets" }],
         secrets => secret_rows,
         csrf_token,
     };
@@ -120,25 +121,59 @@ pub async fn create(
         .api_set_secret(form.name, secret_value.as_str().to_string(), scope)
         .await
     {
-        Ok(()) => axum::response::Redirect::to("/secrets").into_response(),
+        Ok(()) => {
+            let mut response = axum::response::Redirect::to("/secrets").into_response();
+            response.headers_mut().insert(
+                "HX-Trigger",
+                axum::http::HeaderValue::from_static(
+                    r#"{"showToast":{"message":"Secret saved","type":"success"}}"#,
+                ),
+            );
+            response
+        }
         Err(msg) => {
             tracing::error!(error = %msg, "Failed to create secret");
-            (
+            let mut response = (
                 StatusCode::BAD_REQUEST,
                 format!("Failed to create secret: {}", msg),
             )
-                .into_response()
+                .into_response();
+            response.headers_mut().insert(
+                "HX-Trigger",
+                axum::http::HeaderValue::from_static(
+                    r#"{"showToast":{"message":"Failed to save secret","type":"error"}}"#,
+                ),
+            );
+            response
         }
     }
 }
 
-pub async fn revoke(State(state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
+pub async fn revoke(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     match state.kernel.api_revoke_secret(name.clone()).await {
-        Ok(()) => StatusCode::NO_CONTENT,
-        Err(msg) if msg.to_lowercase().contains("not found") => StatusCode::NOT_FOUND,
+        Ok(()) => {
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            response.headers_mut().insert(
+                "HX-Trigger",
+                axum::http::HeaderValue::from_static(
+                    r#"{"showToast":{"message":"Secret revoked","type":"success"}}"#,
+                ),
+            );
+            response
+        }
+        Err(msg) if msg.to_lowercase().contains("not found") => {
+            StatusCode::NOT_FOUND.into_response()
+        }
         Err(msg) => {
             tracing::warn!(secret = %name, error = %msg, "Failed to revoke secret");
-            StatusCode::INTERNAL_SERVER_ERROR
+            let mut response = StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            response.headers_mut().insert(
+                "HX-Trigger",
+                axum::http::HeaderValue::from_static(
+                    r#"{"showToast":{"message":"Failed to revoke secret","type":"error"}}"#,
+                ),
+            );
+            response
         }
     }
 }

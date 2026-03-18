@@ -18,6 +18,9 @@ target/
 /vault/
 *.db
 *.db-journal
+
+# Test reports (generated, not committed)
+reports/
 *.db-shm
 *.db-wal
 *.sock

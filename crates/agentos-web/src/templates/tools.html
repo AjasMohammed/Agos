@@ -1,40 +1,54 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Tool Manager</h1>
-
 <div x-data="{ showInstall: false }">
-    <div class="grid">
+    <div class="page-header">
         <div>
-            <button @click="showInstall = !showInstall" class="outline">Install Tool</button>
+            <h1>Tool Manager</h1>
+            <p class="page-meta">{{ tool_count }} installed</p>
         </div>
-        <div>
+        <div class="page-header-actions">
             <select hx-get="/tools" hx-target="#tool-grid" hx-swap="innerHTML" name="filter_type"
                     hx-include="[name='filter_type']" hx-params="filter_type,partial"
-                    hx-vals='{"partial": "list"}'>
+                    hx-vals='{"partial": "list"}' aria-label="Filter by type">
                 <option value="">All Types</option>
                 <option value="inline">Inline</option>
                 <option value="wasm">WASM</option>
             </select>
+            <button @click="showInstall = !showInstall" class="outline">Install Tool</button>
         </div>
     </div>
 
     <div x-show="showInstall" x-transition>
         <article>
-            <form method="post" action="/tools" hx-post="/tools">
+            <header>Install Tool from Manifest</header>
+            <form method="post" action="/tools" hx-post="/tools"
+                  @htmx:after-request="showInstall = false">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <label for="manifest_path">Tool Manifest Path (TOML)
                     <input type="text" id="manifest_path" name="manifest_path" required
+                           aria-required="true"
                            placeholder="/path/to/tool.toml">
                 </label>
                 <button type="submit">Install</button>
             </form>
         </article>
     </div>
-</div>
 
-<p>{{ tool_count }} tools installed</p>
+    <div id="tool-grid" class="grid" hx-get="/tools?partial=list" hx-trigger="every 10s" hx-swap="innerHTML">
+        <div class="skeleton" aria-hidden="true">
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+        </div>
+        <div class="htmx-content">
+            {% include "partials/tool_card.html" %}
+        </div>
+    </div>
 
-<div id="tool-grid" class="grid" hx-get="/tools?partial=list" hx-trigger="every 10s" hx-swap="innerHTML">
-    {% include "partials/tool_card.html" %}
+    {% if tools|length == 0 %}
+    {% with icon="⚙", title="No tools installed", message="Install a tool to extend agent capabilities. Tools are loaded from TOML manifests in allowed directories." %}
+    {% include "partials/empty_state.html" %}
+    {% endwith %}
+    {% endif %}
 </div>
 {% endblock %}

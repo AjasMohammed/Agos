@@ -61,11 +61,7 @@ pub async fn list(
                 agent_id => e.agent_id.as_ref().map(|id| id.to_string()),
                 task_id => e.task_id.as_ref().map(|id| id.to_string()),
                 tool_id => e.tool_id.as_ref().map(|id| id.to_string()),
-                details => {
-                    let s = e.details.to_string();
-                    let limit = s.char_indices().nth(80).map(|(i, _)| i).unwrap_or(s.len());
-                    if limit < s.len() { format!("{}…", &s[..limit]) } else { s }
-                },
+                details => e.details.to_string(),
             }
         })
         .collect();
@@ -79,6 +75,7 @@ pub async fn list(
 
     let ctx = context! {
         page_title => "Audit Log",
+        breadcrumbs => vec![context! { label => "Audit Log" }],
         entries => rows,
         total_count,
         csrf_token,

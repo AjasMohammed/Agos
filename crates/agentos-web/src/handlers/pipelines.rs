@@ -51,6 +51,7 @@ pub async fn list(
 
     let ctx = context! {
         page_title => "Pipelines",
+        breadcrumbs => vec![context! { label => "Pipelines" }],
         pipelines => pipeline_rows,
         csrf_token,
     };
@@ -98,11 +99,27 @@ pub async fn run(State(state): State<AppState>, axum::Form(form): axum::Form<Run
             if let Some(run_id) = data.get("id").and_then(|v| v.as_str()) {
                 tracing::info!(run_id = %run_id, pipeline = %form.pipeline_name, "Pipeline started from web UI");
             }
-            axum::response::Redirect::to("/pipelines").into_response()
+            let mut response = axum::response::Redirect::to("/pipelines").into_response();
+            let trigger = serde_json::json!({
+                "showToast": {"message": format!("Pipeline '{}' started", form.pipeline_name), "type": "success"}
+            })
+            .to_string();
+            if let Ok(hv) = axum::http::HeaderValue::from_str(&trigger) {
+                response.headers_mut().insert("HX-Trigger", hv);
+            }
+            response
         }
         Err(e) => {
             tracing::error!(error = %e, pipeline = %form.pipeline_name, "Pipeline run failed");
-            (StatusCode::BAD_REQUEST, "Failed to start pipeline run").into_response()
+            let mut response =
+                (StatusCode::BAD_REQUEST, "Failed to start pipeline run").into_response();
+            response.headers_mut().insert(
+                "HX-Trigger",
+                axum::http::HeaderValue::from_static(
+                    r#"{"showToast":{"message":"Failed to start pipeline","type":"error"}}"#,
+                ),
+            );
+            response
         }
     }
 }

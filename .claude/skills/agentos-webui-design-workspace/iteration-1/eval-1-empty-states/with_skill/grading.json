@@ -1,0 +1,31 @@
+{
+  "score": "5/5",
+  "pass_rate": 1.0,
+  "expectations": [
+    {
+      "text": "agent-card-has-empty-state",
+      "passed": true,
+      "evidence": "Found {% else %} block in agent_card.html for loop"
+    },
+    {
+      "text": "tool-card-has-empty-state",
+      "passed": true,
+      "evidence": "Found {% else %} block in tool_card.html for loop"
+    },
+    {
+      "text": "empty-state-uses-muted-styling",
+      "passed": true,
+      "evidence": "Empty state uses var(--muted-color) and .muted class"
+    },
+    {
+      "text": "no-button-in-agent-partial-else-block",
+      "passed": true,
+      "evidence": "The {% else %} block contains no <button>; Disconnect button is only in the for-loop body (correct)"
+    },
+    {
+      "text": "descriptive-empty-text",
+      "passed": true,
+      "evidence": "Text mentions 'LLM agent', 'Ollama, OpenAI, Anthropic, or Gemini', and tasks \u2014 very specific"
+    }
+  ]
+}

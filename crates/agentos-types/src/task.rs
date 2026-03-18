@@ -100,6 +100,7 @@ pub struct TaskSummary {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub tool_calls: u32,
     pub tokens_used: u64,
+    pub priority: u8,
 }
 
 /// Hints for the scheduler and executor about how to handle task reasoning.

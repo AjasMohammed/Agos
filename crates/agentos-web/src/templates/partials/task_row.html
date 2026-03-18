@@ -1,11 +1,24 @@
 {% for task in tasks %}
-<tr class="clickable" onclick="window.location='/tasks/{{ task.id }}'">
-    <td><code>{{ task.id[:8] }}</code></td>
-    <td>{{ task.agent_id[:8] }}</td>
+<tr class="clickable" onclick="if(!event.target.closest('button'))window.location='/tasks/{{ task.id }}'">
+    <td><code class="id-short" title="{{ task.id }}">{{ task.id[:8] }}</code></td>
+    <td><code class="id-short" title="{{ task.agent_id }}">{{ task.agent_id[:8] }}</code></td>
     <td><span class="badge badge-{{ task.state|lower }}">{{ task.state }}</span></td>
-    <td>{{ task.prompt_preview }}</td>
-    <td>{{ task.created_at }}</td>
+    <td>{{ task.priority }}</td>
+    <td class="prompt-cell" title="{{ task.prompt_preview }}">{{ task.prompt_preview[:60] }}{% if task.prompt_preview|length > 60 %}...{% endif %}</td>
+    <td><code class="ts">{{ task.created_at }}</code></td>
     <td>{{ task.tool_calls }}</td>
     <td>{{ task.tokens_used }}</td>
+    <td>
+        {% if task.state == "Running" or task.state == "Queued" or task.state == "Waiting" %}
+        <button class="outline secondary btn-sm"
+                hx-post="/tasks/{{ task.id }}/cancel"
+                hx-confirm="Cancel this task?"
+                hx-target="closest tr"
+                hx-swap="outerHTML"
+                onclick="event.stopPropagation()">Cancel</button>
+        {% else %}
+        <span class="muted">--</span>
+        {% endif %}
+    </td>
 </tr>
 {% endfor %}

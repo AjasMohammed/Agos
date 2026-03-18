@@ -1,51 +1,58 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Dashboard</h1>
-
-<div class="grid">
-    <article>
-        <header>Kernel Status</header>
-        <p>Uptime: {{ uptime_secs }}s</p>
-        <p>Background tasks: {{ bg_running }}</p>
-    </article>
-    <article>
-        <header>Agents</header>
-        <p><strong>{{ agent_count }}</strong> connected</p>
-        <a href="/agents" role="button" class="outline">Manage</a>
-    </article>
-    <article>
-        <header>Tasks</header>
-        <p><strong>{{ active_task_count }}</strong> active / {{ total_task_count }} total</p>
-        <a href="/tasks" role="button" class="outline">View</a>
-    </article>
-    <article>
-        <header>Tools</header>
-        <p><strong>{{ tool_count }}</strong> installed</p>
-        <a href="/tools" role="button" class="outline">Manage</a>
-    </article>
+<div class="page-header">
+    <h1>Dashboard</h1>
+    <a href="/agents" role="button" class="outline btn-sm">Connect Agent</a>
 </div>
 
-<h2>Recent Audit Events</h2>
-<figure>
-<table>
-    <thead>
-        <tr>
-            <th>Timestamp</th>
-            <th>Event</th>
-            <th>Severity</th>
-            <th>Agent</th>
-        </tr>
-    </thead>
-    <tbody hx-get="/audit?partial=list&limit=10" hx-trigger="every 5s" hx-swap="innerHTML">
-        {% for entry in recent_audit %}
-        <tr>
-            <td>{{ entry.timestamp }}</td>
-            <td>{{ entry.event_type }}</td>
-            <td>{{ entry.severity }}</td>
-            <td>{{ entry.agent_id|default("-", true) }}</td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
-</figure>
+<div hx-ext="sse" sse-connect="/events/dashboard">
+    <section id="dashboard-stats" sse-swap="dashboard-stats">
+        {% include "partials/dashboard_stats.html" %}
+    </section>
+
+    <div class="dashboard-panels">
+        <article>
+            <header>
+                <strong>Agents</strong>
+                <a href="/agents" class="muted" style="margin-left: auto; font-size: 0.85rem;">View all</a>
+            </header>
+            <div id="dashboard-agents" sse-swap="dashboard-agents">
+                {% include "partials/dashboard_agents.html" %}
+            </div>
+        </article>
+
+        <article>
+            <header>
+                <strong>Task Status</strong>
+                <a href="/tasks" class="muted" style="margin-left: auto; font-size: 0.85rem;">View all</a>
+            </header>
+            <div id="dashboard-tasks"
+                 hx-get="/dashboard-tasks" hx-trigger="every 5s" hx-swap="innerHTML">
+                {% include "partials/dashboard_tasks.html" %}
+            </div>
+        </article>
+    </div>
+
+    <article>
+        <header>
+            <strong>Recent Activity</strong>
+            <a href="/audit" class="muted" style="margin-left: auto; font-size: 0.85rem;">View all</a>
+        </header>
+        <figure>
+        <table class="audit-table">
+            <thead>
+                <tr>
+                    <th>Timestamp</th>
+                    <th>Event</th>
+                    <th>Severity</th>
+                    <th>Agent</th>
+                </tr>
+            </thead>
+            <tbody id="dashboard-recent-audit" sse-swap="dashboard-audit">
+                {% include "partials/dashboard_audit.html" %}
+            </tbody>
+        </table>
+        </figure>
+    </article>
+</div>
 {% endblock %}

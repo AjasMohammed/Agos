@@ -12,7 +12,7 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::AuthToken;
-use crate::handlers::{agents, audit, dashboard, pipelines, secrets, tasks, tools};
+use crate::handlers::{agents, audit, dashboard, events, pipelines, secrets, tasks, tools};
 use crate::state::AppState;
 
 /// Middleware that sets security headers on every response.
@@ -94,6 +94,7 @@ pub fn build_router(
         // Tasks
         .route("/tasks", axum::routing::get(tasks::list))
         .route("/tasks/{id}", axum::routing::get(tasks::detail))
+        .route("/tasks/{id}/cancel", axum::routing::post(tasks::cancel))
         .route(
             "/tasks/{id}/logs/stream",
             axum::routing::get(tasks::log_stream),
@@ -113,8 +114,32 @@ pub fn build_router(
         // Pipelines
         .route("/pipelines", axum::routing::get(pipelines::list))
         .route("/pipelines/run", axum::routing::post(pipelines::run))
+        // Dashboard partials
+        .route(
+            "/dashboard-stats",
+            axum::routing::get(dashboard::stats_partial),
+        )
+        .route(
+            "/dashboard-agents",
+            axum::routing::get(dashboard::agents_partial),
+        )
+        .route(
+            "/dashboard-tasks",
+            axum::routing::get(dashboard::tasks_partial),
+        )
+        .route(
+            "/dashboard-recent-audit",
+            axum::routing::get(dashboard::recent_audit_partial),
+        )
         // Audit
         .route("/audit", axum::routing::get(audit::list))
+        // SSE event streams
+        .route(
+            "/events/dashboard",
+            axum::routing::get(events::dashboard_stream),
+        )
+        .route("/events/agents", axum::routing::get(events::agents_stream))
+        .route("/events/tasks", axum::routing::get(events::tasks_stream))
         // Static files (served without auth — bypassed inside require_auth)
         .nest_service(
             "/static",

@@ -50,6 +50,34 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
         "partials/secret_row.html",
         include_str!("templates/partials/secret_row.html"),
     )?;
+    env.add_template(
+        "partials/dashboard_stats.html",
+        include_str!("templates/partials/dashboard_stats.html"),
+    )?;
+    env.add_template(
+        "partials/dashboard_agents.html",
+        include_str!("templates/partials/dashboard_agents.html"),
+    )?;
+    env.add_template(
+        "partials/dashboard_tasks.html",
+        include_str!("templates/partials/dashboard_tasks.html"),
+    )?;
+    env.add_template(
+        "partials/dashboard_audit.html",
+        include_str!("templates/partials/dashboard_audit.html"),
+    )?;
+    env.add_template(
+        "partials/empty_state.html",
+        include_str!("templates/partials/empty_state.html"),
+    )?;
+    env.add_template(
+        "partials/toast_container.html",
+        include_str!("templates/partials/toast_container.html"),
+    )?;
+    env.add_template(
+        "partials/shortcuts_modal.html",
+        include_str!("templates/partials/shortcuts_modal.html"),
+    )?;
 
     Ok(env)
 }

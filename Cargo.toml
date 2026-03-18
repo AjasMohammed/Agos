@@ -17,6 +17,7 @@ members = [
     "crates/agentos-pipeline",
     "crates/agentos-sdk-macros",
     "crates/agentos-sdk",
+    "crates/agentos-agent-tester",
 ]
 
 [workspace.package]

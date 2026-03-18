@@ -1,0 +1,36 @@
+{
+  "score": "6/6",
+  "pass_rate": 1.0,
+  "expectations": [
+    {
+      "text": "uses-page-header-class",
+      "passed": true,
+      "evidence": "Found class='page-header' in page-header div"
+    },
+    {
+      "text": "uses-badge-class-in-audit-table",
+      "passed": true,
+      "evidence": "Found badge badge-{{ entry.severity|lower }} in audit tbody"
+    },
+    {
+      "text": "has-empty-state-for-audit",
+      "passed": true,
+      "evidence": "Found {% else %} block with colspan=4 empty state row"
+    },
+    {
+      "text": "no-new-css-framework",
+      "passed": true,
+      "evidence": "No bootstrap/tailwind/CDN references found"
+    },
+    {
+      "text": "has-htmx-refresh",
+      "passed": true,
+      "evidence": "Found hx-trigger='every 10s' on audit tbody"
+    },
+    {
+      "text": "uses-pico-vars",
+      "passed": true,
+      "evidence": "Inline style uses var(--muted-color), no raw hex"
+    }
+  ]
+}

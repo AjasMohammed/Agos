@@ -36,6 +36,7 @@ status: complete
 | 17 | [[17-WASM Tools Development]] | WASM execution protocol, Rust and Python examples, `#[tool]` SDK macro |
 | 18 | [[18-Advanced Operations]] | HAL, resource locks, snapshots, escalation workflows, agent identity |
 | 19 | [[19-Troubleshooting and FAQ]] | 33+ common errors with solutions, debug logging, health checks, platform notes |
+| 20 | [[20-LLM Agent Testing]] | `agent-tester` binary — LLM-driven scenario testing, feedback protocol, report format, CI integration |
 
 ---
 
@@ -48,6 +49,8 @@ status: complete
 **Operator running a deployment?** See [[04-CLI Reference Complete]], [[16-Configuration Reference]], and [[19-Troubleshooting and FAQ]].
 
 **Developer building agents?** See [[05-Agent Management]], [[06-Task System]], [[07-Tool System]], and [[17-WASM Tools Development]].
+
+**Testing and evaluating AgentOS?** See [[20-LLM Agent Testing]].
 
 **Security reviewer?** See [[08-Security Model]], [[09-Secrets and Vault]], and [[14-Audit Log]].
 
@@ -76,3 +79,4 @@ status: complete
 | WASM Tools | [[17-WASM Tools Development]] | [[07-Tool System]], [[08-Security Model]] |
 | HAL | [[18-Advanced Operations]] | [[03-Architecture Overview]] |
 | Troubleshooting | [[19-Troubleshooting and FAQ]] | [[14-Audit Log]], [[04-CLI Reference Complete]] |
+| LLM Agent Testing | [[20-LLM Agent Testing]] | [[15-LLM Configuration]], [[07-Tool System]], [[08-Security Model]] |

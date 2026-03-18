@@ -1,5 +1,9 @@
 use agentos_types::IntentType;
 use regex::Regex;
+use std::sync::LazyLock;
+
+static JSON_BLOCK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"```json\s*\n([\s\S]*?)\n```").expect("valid regex"));
 
 #[derive(Debug, Clone)]
 pub struct ParsedToolCall {
@@ -11,9 +15,7 @@ pub struct ParsedToolCall {
 /// Parse the LLM's text response for a tool call JSON block.
 /// Looks for ```json ... ``` blocks containing {"tool": "...", "intent_type": "...", "payload": {...}}
 pub fn parse_tool_call(text: &str) -> Option<ParsedToolCall> {
-    let json_block_re = Regex::new(r"```json\s*\n([\s\S]*?)\n```").ok()?;
-
-    for cap in json_block_re.captures_iter(text) {
+    for cap in JSON_BLOCK_RE.captures_iter(text) {
         if let Some(json_str) = cap.get(1) {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str.as_str()) {
                 let Some(intent_type_str) = value.get("intent_type").and_then(|v| v.as_str())

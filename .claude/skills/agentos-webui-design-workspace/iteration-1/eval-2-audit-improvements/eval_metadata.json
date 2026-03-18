@@ -1,0 +1,13 @@
+{
+  "eval_id": 2,
+  "eval_name": "audit-improvements",
+  "prompt": "Improve audit.html and log_line.html. Add a text search input to filter bar, add severity badges using .badge classes to log_line partial, make layout intentional with .page-header. Update app.css only if absolutely needed.",
+  "assertions": [
+    {"text": "audit-has-page-header: audit.html output contains page-header class"},
+    {"text": "filter-bar-has-text-search: audit.html has an input[type=text] with hx-trigger containing keyup in or near filter-bar"},
+    {"text": "log-line-uses-badge-for-severity: log_line.html uses badge and badge-* class for severity, not plain text"},
+    {"text": "htmx-uses-partial-pattern: HTMX get URLs use ?partial= query param or hx-vals with partial key"},
+    {"text": "no-new-css-framework: Output files do not reference bootstrap, tailwind, or any CDN"},
+    {"text": "no-inline-js-filter: Does not use vanilla JS DOM manipulation for filtering instead of HTMX"}
+  ]
+}

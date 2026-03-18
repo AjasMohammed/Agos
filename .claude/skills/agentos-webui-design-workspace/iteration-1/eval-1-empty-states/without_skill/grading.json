@@ -1,0 +1,31 @@
+{
+  "score": "3/5",
+  "pass_rate": 0.6,
+  "expectations": [
+    {
+      "text": "agent-card-has-empty-state",
+      "passed": true,
+      "evidence": "Found {% else %} block \u2014 'No agents found.'"
+    },
+    {
+      "text": "tool-card-has-empty-state",
+      "passed": true,
+      "evidence": "Found {% else %} block \u2014 'No tools installed.'"
+    },
+    {
+      "text": "empty-state-uses-muted-styling",
+      "passed": false,
+      "evidence": "Empty state is plain <p> with no muted class or Pico color var"
+    },
+    {
+      "text": "no-button-in-agent-partial-else-block",
+      "passed": true,
+      "evidence": "The {% else %} block contains no <button>"
+    },
+    {
+      "text": "descriptive-empty-text",
+      "passed": false,
+      "evidence": "'No agents found.' and 'No tools installed.' give no context or next-step guidance"
+    }
+  ]
+}
