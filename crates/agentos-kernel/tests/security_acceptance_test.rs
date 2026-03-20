@@ -110,7 +110,7 @@ async fn scenario_a_reject_unsigned_message() {
 
     let _ = bus.register_agent(agent_a).await;
     let _ = bus.register_agent(agent_b).await;
-    bus.register_pubkey(agent_a, pk).await;
+    bus.register_pubkey_internal(agent_a, pk).await.unwrap();
 
     let now = chrono::Utc::now();
     let unsigned_msg = AgentMessage {
@@ -147,7 +147,7 @@ async fn scenario_b_reject_forged_signature() {
 
     let _ = bus.register_agent(agent_a).await;
     let _ = bus.register_agent(agent_b).await;
-    bus.register_pubkey(agent_a, pk).await;
+    bus.register_pubkey_internal(agent_a, pk).await.unwrap();
 
     let now = chrono::Utc::now();
     let forged_msg = AgentMessage {

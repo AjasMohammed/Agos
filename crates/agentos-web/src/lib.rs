@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod chat_store;
 pub mod csrf;
 pub mod handlers;
 pub mod router;

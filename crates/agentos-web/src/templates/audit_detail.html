@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="page-header">
+    <div>
+        <h1>Audit Entry <code class="id-long">{{ trace_id[:8] }}</code></h1>
+        <p class="page-meta">Trace <code class="audit-trace-id">{{ trace_id }}</code></p>
+    </div>
+    <div class="page-header-actions">
+        <span class="badge badge-{{ severity|lower }} badge-lg">{{ severity }}</span>
+        <a href="/audit" role="button" class="outline secondary btn-sm">← Audit Log</a>
+    </div>
+</div>
+
+{% for entry in entries %}
+<div class="audit-detail-entry">
+
+    {% if entry_count > 1 %}
+    <div class="audit-entry-label">
+        <span class="muted">Event {{ loop.index }} of {{ entry_count }}</span>
+    </div>
+    {% endif %}
+
+    <div class="grid audit-detail-grid">
+
+        <!-- Left column: metadata card -->
+        <article>
+            <header>
+                <code class="audit-event-type-heading">{{ entry.event_type }}</code>
+            </header>
+
+            <dl class="detail-list">
+                <dt>Timestamp</dt>
+                <dd>
+                    <time datetime="{{ entry.timestamp_iso }}" title="{{ entry.timestamp_iso }}">
+                        {{ entry.timestamp }}
+                    </time>
+                </dd>
+
+                <dt>Severity</dt>
+                <dd><span class="badge badge-{{ entry.severity|lower }}">{{ entry.severity }}</span></dd>
+
+                <dt>Trace ID</dt>
+                <dd><code class="audit-trace-id-sm">{{ trace_id }}</code></dd>
+
+                {% if entry.agent_id %}
+                <dt>Agent</dt>
+                <dd>
+                    <code class="audit-uuid" title="{{ entry.agent_id }}">{{ entry.agent_id }}</code>
+                </dd>
+                {% endif %}
+
+                {% if entry.task_id %}
+                <dt>Task</dt>
+                <dd>
+                    <a href="/tasks/{{ entry.task_id }}" class="id-link">
+                        <code class="audit-uuid" title="{{ entry.task_id }}">{{ entry.task_id }}</code>
+                    </a>
+                </dd>
+                {% endif %}
+
+                {% if entry.tool_id %}
+                <dt>Tool</dt>
+                <dd><code class="audit-uuid" title="{{ entry.tool_id }}">{{ entry.tool_id }}</code></dd>
+                {% endif %}
+
+                <dt>Reversible</dt>
+                <dd>
+                    {% if entry.reversible %}
+                    <span class="badge badge-success">Yes</span>
+                    {% else %}
+                    <span class="muted">No</span>
+                    {% endif %}
+                </dd>
+
+                {% if entry.rollback_ref %}
+                <dt>Rollback Ref</dt>
+                <dd><code class="audit-uuid">{{ entry.rollback_ref }}</code></dd>
+                {% endif %}
+            </dl>
+        </article>
+
+        <!-- Right column: details JSON -->
+        <article class="audit-details-card">
+            <header>
+                <span>Details</span>
+                <button class="btn-sm outline secondary audit-copy-btn"
+                        onclick="copyDetails(this)"
+                        data-target="details-{{ loop.index }}">Copy JSON</button>
+            </header>
+            {% if entry.details == "null" or entry.details == "{}" %}
+            <p class="muted" style="font-size: 0.85rem; margin: 0;">No details recorded for this event.</p>
+            {% else %}
+            <pre class="audit-detail-json" id="details-{{ loop.index }}">{{ entry.details }}</pre>
+            {% endif %}
+        </article>
+
+    </div>
+</div>
+{% endfor %}
+
+{% if entry_count == 0 %}
+<div class="empty-state">
+    <div class="empty-state-icon">◎</div>
+    <p class="empty-state-title">Entry not found</p>
+    <p class="empty-state-message muted">No audit entries exist for this trace ID.</p>
+    <a href="/audit" role="button" class="outline">Back to Audit Log</a>
+</div>
+{% endif %}
+
+<script>
+function copyDetails(btn) {
+    var targetId = btn.getAttribute('data-target');
+    var pre = document.getElementById(targetId);
+    if (!pre) return;
+    navigator.clipboard.writeText(pre.textContent).then(function () {
+        var orig = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(function () { btn.textContent = orig; }, 1500);
+    });
+}
+</script>
+
+{% endblock %}

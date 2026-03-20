@@ -73,9 +73,40 @@ pub(crate) fn emit_signed_event(
         tracing::error!(error = %e, "Failed to write audit log entry");
     }
 
-    // Push into the event channel for the EventDispatcher to process
+    // Count before the send attempt — the event has been emitted regardless of delivery.
+    crate::metrics::record_event_emitted();
+
+    // Push into the event channel for the EventDispatcher to process.
     if let Err(e) = event_sender.try_send(event) {
-        tracing::error!(error = %e, "Failed to send event to dispatcher channel (possibly full or closed)");
+        crate::metrics::record_event_dropped();
+        tracing::warn!(
+            error = %e,
+            event_type = ?event_type,
+            "Event channel full — event dropped (increase kernel.events.channel_capacity under load)"
+        );
+        // Write directly to the audit log — never re-emit through the event system
+        // to avoid infinite recursion if the channel is consistently full.
+        if let Err(audit_err) = audit.append(AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id,
+            event_type: AuditEventType::EventChannelFull,
+            agent_id,
+            task_id,
+            tool_id: None,
+            details: serde_json::json!({
+                "dropped_event_type": format!("{:?}", event_type),
+                "error": e.to_string(),
+                "hint": "Increase kernel.events.channel_capacity in config if this recurs",
+            }),
+            severity: AuditSeverity::Warn,
+            reversible: false,
+            rollback_ref: None,
+        }) {
+            tracing::error!(
+                error = %audit_err,
+                "Failed to write EventChannelFull audit entry (double failure: channel full + audit write failed)"
+            );
+        }
     }
 }
 
@@ -301,6 +332,8 @@ impl Kernel {
     /// Process a single event received from the event channel.
     /// Called by the EventDispatcher supervised task.
     pub(crate) async fn process_event(self: &Arc<Self>, event: EventMessage) {
+        crate::metrics::record_event_processed();
+
         // Check chain depth for loop detection
         if event.chain_depth > self.event_bus.max_chain_depth() {
             tracing::warn!(
@@ -329,6 +362,25 @@ impl Kernel {
 
         // Evaluate subscriptions
         let matching_subs = self.event_bus.evaluate_subscriptions(&event).await;
+
+        // For AgentAdded events, exclude the newly added agent from receiving
+        // a notification about its own addition.
+        let matching_subs: Vec<EventSubscription> = if event.event_type == EventType::AgentAdded {
+            if let Some(id_str) = event.payload.get("agent_id").and_then(|v| v.as_str()) {
+                if let Ok(added_id) = id_str.parse::<AgentID>() {
+                    matching_subs
+                        .into_iter()
+                        .filter(|sub| sub.agent_id != added_id)
+                        .collect()
+                } else {
+                    matching_subs
+                }
+            } else {
+                matching_subs
+            }
+        } else {
+            matching_subs
+        };
 
         if matching_subs.is_empty() {
             return;
@@ -469,6 +521,7 @@ impl Kernel {
             history: Vec::new(),
             parent_task: None,
             reasoning_hints: None,
+            max_iterations: None,
             trigger_source: Some(TriggerSource {
                 event_id: event.id,
                 event_type: event.event_type,

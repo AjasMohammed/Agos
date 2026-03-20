@@ -108,70 +108,70 @@ fn to_pascal_case(s: &str) -> String {
         .collect()
 }
 
-/// Parse a permission string like "fs.data:r" into one or more (resource, PermissionOp) pairs.
+/// Parse a permission string like "fs.data:rwq" into one or more (resource, PermissionOp) pairs.
 ///
-/// Compound ops like "rw" or "rwx" expand to multiple entries so no permission is silently dropped.
-/// Returns `Err` with a diagnostic message for unknown op suffixes (e.g. `"fs.data:z"`).
+/// Supported single-char flags: r=Read, w=Write, x=Execute, q=Query, o=Observe.
+/// Named ops "query" and "observe" are also accepted.
+/// Compound ops like "rw", "rwq", etc. expand to multiple entries.
+/// Returns `Err` with a diagnostic for unknown op suffixes (e.g. `"fs.data:z"`).
 fn parse_permission(perm: &str) -> Result<Vec<(String, proc_macro2::TokenStream)>, String> {
     let parts: Vec<&str> = perm.splitn(2, ':').collect();
     let resource = parts[0].to_string();
-    if parts.len() > 1 {
-        match parts[1] {
-            "r" => Ok(vec![(
+    let op_str = if parts.len() > 1 { parts[1] } else { "r" };
+
+    // Handle named ops first
+    match op_str {
+        "query" => {
+            return Ok(vec![(
                 resource,
-                quote! { agentos_types::PermissionOp::Read },
-            )]),
-            "w" => Ok(vec![(
-                resource,
-                quote! { agentos_types::PermissionOp::Write },
-            )]),
-            "x" => Ok(vec![(
-                resource,
-                quote! { agentos_types::PermissionOp::Execute },
-            )]),
-            "rw" | "wr" => Ok(vec![
-                (
-                    resource.clone(),
-                    quote! { agentos_types::PermissionOp::Read },
-                ),
-                (resource, quote! { agentos_types::PermissionOp::Write }),
-            ]),
-            "rx" | "xr" => Ok(vec![
-                (
-                    resource.clone(),
-                    quote! { agentos_types::PermissionOp::Read },
-                ),
-                (resource, quote! { agentos_types::PermissionOp::Execute }),
-            ]),
-            "wx" | "xw" => Ok(vec![
-                (
-                    resource.clone(),
-                    quote! { agentos_types::PermissionOp::Write },
-                ),
-                (resource, quote! { agentos_types::PermissionOp::Execute }),
-            ]),
-            "rwx" | "rxw" | "wrx" | "wxr" | "xrw" | "xwr" => Ok(vec![
-                (
-                    resource.clone(),
-                    quote! { agentos_types::PermissionOp::Read },
-                ),
-                (
-                    resource.clone(),
-                    quote! { agentos_types::PermissionOp::Write },
-                ),
-                (resource, quote! { agentos_types::PermissionOp::Execute }),
-            ]),
-            other => Err(format!(
-                "unknown permission op '{}' in \"{}\"; expected r, w, x, rw, rx, wx, or rwx",
-                other, perm
-            )),
+                quote! { agentos_types::PermissionOp::Query },
+            )])
         }
-    } else {
-        Ok(vec![(
-            resource,
-            quote! { agentos_types::PermissionOp::Read },
-        )])
+        "observe" => {
+            return Ok(vec![(
+                resource,
+                quote! { agentos_types::PermissionOp::Observe },
+            )])
+        }
+        _ => {}
     }
+
+    // Character-based parsing: each char maps to a PermissionOp.
+    // Duplicates are tracked via a HashSet<char> to avoid fragile TokenStream comparison.
+    let mut seen = std::collections::HashSet::<char>::new();
+    let mut ops: Vec<proc_macro2::TokenStream> = Vec::new();
+    for ch in op_str.chars() {
+        if !seen.insert(ch) {
+            continue; // skip duplicate
+        }
+        let op = match ch {
+            'r' => quote! { agentos_types::PermissionOp::Read },
+            'w' => quote! { agentos_types::PermissionOp::Write },
+            'x' => quote! { agentos_types::PermissionOp::Execute },
+            'q' => quote! { agentos_types::PermissionOp::Query },
+            'o' => quote! { agentos_types::PermissionOp::Observe },
+            other => {
+                return Err(format!(
+                    "unknown permission flag '{}' in \"{}\"; expected r, w, x, q, o",
+                    other, perm
+                ))
+            }
+        };
+        ops.push(op);
+    }
+
+    if ops.is_empty() {
+        return Err(format!(
+            "empty permission op in \"{}\"; expected r, w, x, q, or o",
+            perm
+        ));
+    }
+
+    let entries = ops
+        .into_iter()
+        .map(|op| (resource.clone(), op))
+        .collect::<Vec<_>>();
+    Ok(entries)
 }
 
 /// Attribute macro that generates an `AgentTool` implementation from an async function.

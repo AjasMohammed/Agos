@@ -120,7 +120,8 @@ impl ConsolidationEngine {
         let since = *self.last_run.read().await;
         let episodes = self
             .episodic_store
-            .find_successful_episodes(Some(since), self.config.max_episodes_per_cycle)?;
+            .find_successful_episodes(Some(since), self.config.max_episodes_per_cycle)
+            .await?;
         if episodes.len() < self.config.min_pattern_occurrences {
             *self.last_run.write().await = Utc::now();
             self.task_completions_since_last.store(0, Ordering::Relaxed);

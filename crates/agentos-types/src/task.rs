@@ -25,6 +25,10 @@ pub struct AgentTask {
     /// Optional hints about how this task should be reasoned about.
     #[serde(default)]
     pub reasoning_hints: Option<TaskReasoningHints>,
+    /// Optional hard cap for executor iterations. When omitted, the kernel
+    /// chooses a default from config based on task complexity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u32>,
     /// If this task was triggered by an event, records the event provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_source: Option<TriggerSource>,
@@ -43,7 +47,8 @@ pub struct TriggerSource {
 pub enum TaskState {
     Queued,
     Running,
-    Waiting, // waiting on a tool or sub-agent
+    Waiting,   // waiting on a tool or sub-agent
+    Suspended, // suspended due to budget enforcement; can be resumed
     Complete,
     Failed,
     Cancelled,
@@ -53,9 +58,10 @@ impl TaskState {
     /// Returns `true` if transitioning from `self` to `next` is a legal state machine move.
     ///
     /// Legal transitions:
-    /// - Queued   → Running | Failed | Cancelled
-    /// - Running  → Waiting | Complete | Failed | Cancelled
-    /// - Waiting  → Running | Failed | Cancelled
+    /// - Queued     → Running | Failed | Cancelled
+    /// - Running    → Waiting | Suspended | Complete | Failed | Cancelled
+    /// - Waiting    → Running | Failed | Cancelled
+    /// - Suspended  → Running | Cancelled
     /// - Complete, Failed, Cancelled are terminal — no further transitions allowed.
     ///
     /// `Queued → Failed` covers tasks that fail during initialization (e.g. capability
@@ -67,12 +73,15 @@ impl TaskState {
                 | (TaskState::Queued, TaskState::Failed)
                 | (TaskState::Queued, TaskState::Cancelled)
                 | (TaskState::Running, TaskState::Waiting)
+                | (TaskState::Running, TaskState::Suspended)
                 | (TaskState::Running, TaskState::Complete)
                 | (TaskState::Running, TaskState::Failed)
                 | (TaskState::Running, TaskState::Cancelled)
                 | (TaskState::Waiting, TaskState::Running)
                 | (TaskState::Waiting, TaskState::Failed)
                 | (TaskState::Waiting, TaskState::Cancelled)
+                | (TaskState::Suspended, TaskState::Running)
+                | (TaskState::Suspended, TaskState::Cancelled)
         )
     }
 

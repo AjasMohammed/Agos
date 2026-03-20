@@ -1,0 +1,30 @@
+[manifest]
+name        = "agent-self"
+version     = "1.0.0"
+description = "Return a snapshot of the calling agent's own state: current permissions, budget, available tools, active event subscriptions, and running tasks. No special permissions required — every agent can always inspect its own context."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+# No permissions required — reads own context data only.
+permissions = []
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "AgentSelfQuery"
+output = "AgentSelfView"
+
+[input_schema]
+type        = "object"
+description = "No input fields required. Pass an empty object ({}) to retrieve the full self-view."
+properties  = {}
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 8
+max_cpu_ms    = 500
+syscalls      = []

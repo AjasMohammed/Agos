@@ -1,7 +1,9 @@
 use crate::kernel_action::EscalationReason;
+use crate::state_store::KernelStateStore;
 use agentos_types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// What should happen automatically when an escalation expires without human resolution.
@@ -46,7 +48,7 @@ fn default_auto_action() -> AutoAction {
 
 /// Manages escalation requests from agents to human operators.
 ///
-/// Stores pending escalations in memory (backed by audit log for persistence).
+/// Stores pending escalations in memory (optionally backed by SQLite persistence).
 /// Provides list/resolve operations for the CLI (`agentctl escalation list/resolve`).
 ///
 /// Escalations auto-deny after `DEFAULT_ESCALATION_TIMEOUT_SECS` (5 minutes)
@@ -58,16 +60,59 @@ pub struct EscalationManager {
     timeout_secs: i64,
     /// Optional webhook URL: receives HTTP POST on escalation creation.
     notify_url: RwLock<Option<String>>,
+    /// Optional persistence backend for escalation durability across restarts.
+    state_store: Option<Arc<KernelStateStore>>,
 }
 
 impl EscalationManager {
     pub fn new() -> Self {
+        Self::with_state_store(None)
+    }
+
+    pub fn with_state_store(state_store: Option<Arc<KernelStateStore>>) -> Self {
         Self {
             escalations: RwLock::new(Vec::new()),
             next_id: RwLock::new(1),
             timeout_secs: DEFAULT_ESCALATION_TIMEOUT_SECS,
             notify_url: RwLock::new(None),
+            state_store,
         }
+    }
+
+    async fn persist_escalation(&self, escalation: PendingEscalation) {
+        let escalation_id = escalation.id;
+        if let Some(store) = &self.state_store {
+            if let Err(e) = store.upsert_escalation(escalation).await {
+                tracing::error!(
+                    escalation_id,
+                    error = %e,
+                    "Failed to persist escalation state"
+                );
+            }
+        }
+    }
+
+    /// Restore unresolved escalations from SQLite at boot.
+    pub async fn restore_from_store(&self) -> anyhow::Result<usize> {
+        let Some(store) = &self.state_store else {
+            return Ok(0);
+        };
+
+        let unresolved = store.load_unresolved_escalations().await?;
+        let restored = unresolved.len();
+
+        let mut next_id = store.next_escalation_id().await?;
+        if let Some(max_loaded) = unresolved.iter().map(|e| e.id).max() {
+            next_id = next_id.max(max_loaded.saturating_add(1));
+        }
+        if next_id == 0 {
+            next_id = 1;
+        }
+
+        *self.escalations.write().await = unresolved;
+        *self.next_id.write().await = next_id;
+
+        Ok(restored)
     }
 
     /// Set a webhook URL that receives HTTP POST notifications on escalation creation.
@@ -120,7 +165,8 @@ impl EscalationManager {
             resolved_at: None,
         };
 
-        self.escalations.write().await.push(escalation);
+        self.escalations.write().await.push(escalation.clone());
+        self.persist_escalation(escalation).await;
         tracing::info!(
             escalation_id = id,
             task_id = %task_id,
@@ -195,14 +241,16 @@ impl EscalationManager {
     /// Resolve an escalation with a human decision.
     /// Returns the task_id, agent_id, and whether it was blocking.
     pub async fn resolve(&self, id: u64, resolution: String) -> Option<(TaskID, AgentID, bool)> {
+        let mut to_persist = None;
         let mut escalations = self.escalations.write().await;
-        if let Some(esc) = escalations.iter_mut().find(|e| e.id == id && !e.resolved) {
+        let result = if let Some(esc) = escalations.iter_mut().find(|e| e.id == id && !e.resolved) {
             esc.resolved = true;
             esc.resolution = Some(resolution);
             esc.resolved_at = Some(chrono::Utc::now());
             let task_id = esc.task_id;
             let agent_id = esc.agent_id;
             let blocking = esc.blocking;
+            to_persist = Some(esc.clone());
             tracing::info!(
                 escalation_id = id,
                 task_id = %task_id,
@@ -211,7 +259,14 @@ impl EscalationManager {
             Some((task_id, agent_id, blocking))
         } else {
             None
+        };
+        drop(escalations);
+
+        if let Some(escalation) = to_persist {
+            self.persist_escalation(escalation).await;
         }
+
+        result
     }
 
     /// Get escalations for a specific task.
@@ -244,6 +299,7 @@ impl EscalationManager {
         let now = chrono::Utc::now();
         let mut escalations = self.escalations.write().await;
         let mut expired = Vec::new();
+        let mut to_persist = Vec::new();
 
         for esc in escalations.iter_mut() {
             if !esc.resolved && now >= esc.expires_at {
@@ -277,7 +333,13 @@ impl EscalationManager {
                     esc.blocking,
                     esc.auto_action,
                 ));
+                to_persist.push(esc.clone());
             }
+        }
+        drop(escalations);
+
+        for escalation in to_persist {
+            self.persist_escalation(escalation).await;
         }
 
         expired
@@ -321,7 +383,8 @@ impl EscalationManager {
             resolved_at: None,
         };
 
-        self.escalations.write().await.push(escalation);
+        self.escalations.write().await.push(escalation.clone());
+        self.persist_escalation(escalation).await;
         tracing::info!(
             escalation_id = id,
             task_id = %task_id,
@@ -411,6 +474,8 @@ fn validate_webhook_url(url: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_create_and_list_escalation() {
@@ -513,6 +578,7 @@ mod tests {
             next_id: RwLock::new(1),
             timeout_secs: 0, // expire immediately
             notify_url: RwLock::new(None),
+            state_store: None,
         };
 
         let task_id = TaskID::new();
@@ -555,6 +621,7 @@ mod tests {
             next_id: RwLock::new(1),
             timeout_secs: 0, // expire immediately
             notify_url: RwLock::new(None),
+            state_store: None,
         };
 
         let task_id = TaskID::new();
@@ -589,5 +656,82 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("Auto-approved"));
+    }
+
+    #[tokio::test]
+    async fn test_restore_from_store_recovers_unresolved_escalations() {
+        let dir = tempdir().expect("temp dir");
+        let db_path = dir.path().join("kernel_state.db");
+        let store = Arc::new(
+            KernelStateStore::open(db_path)
+                .await
+                .expect("state store should open"),
+        );
+
+        let manager = EscalationManager::with_state_store(Some(store.clone()));
+        let task_id = TaskID::new();
+        let agent_id = AgentID::new();
+
+        let unresolved_id = manager
+            .create_escalation(
+                task_id,
+                agent_id,
+                EscalationReason::AuthorizationRequired,
+                "needs review".to_string(),
+                "approve?".to_string(),
+                vec!["yes".to_string(), "no".to_string()],
+                "high".to_string(),
+                true,
+                TraceID::new(),
+                None,
+            )
+            .await;
+
+        let resolved_id = manager
+            .create_escalation(
+                TaskID::new(),
+                AgentID::new(),
+                EscalationReason::Uncertainty,
+                "second".to_string(),
+                "resolve".to_string(),
+                vec![],
+                "normal".to_string(),
+                false,
+                TraceID::new(),
+                None,
+            )
+            .await;
+        manager
+            .resolve(resolved_id, "approved".to_string())
+            .await
+            .expect("resolution should succeed");
+
+        let restored_manager = EscalationManager::with_state_store(Some(store));
+        let restored = restored_manager
+            .restore_from_store()
+            .await
+            .expect("restore should succeed");
+        assert_eq!(restored, 1, "only unresolved escalation should be restored");
+
+        let pending = restored_manager.list_pending().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, unresolved_id);
+
+        // Ensure next ID continues after previously persisted rows.
+        let next = restored_manager
+            .create_escalation(
+                TaskID::new(),
+                AgentID::new(),
+                EscalationReason::Uncertainty,
+                "new".to_string(),
+                "new".to_string(),
+                vec![],
+                "normal".to_string(),
+                false,
+                TraceID::new(),
+                None,
+            )
+            .await;
+        assert!(next > resolved_id);
     }
 }

@@ -10,8 +10,17 @@ pub enum AgentOSError {
     #[error("Agent not found: {0}")]
     AgentNotFound(String),
 
+    #[error("Public key already registered for agent {agent_id} — re-registration rejected")]
+    PubkeyAlreadyRegistered { agent_id: String },
+
     #[error("Task timed out: {0}")]
     TaskTimeout(TaskID),
+
+    #[error("Budget exceeded for agent {agent_id}: {detail}")]
+    BudgetExceeded { agent_id: String, detail: String },
+
+    #[error("Rate limited: {detail}")]
+    RateLimited { detail: String },
 
     #[error("Kernel is shutting down")]
     KernelShutdown,

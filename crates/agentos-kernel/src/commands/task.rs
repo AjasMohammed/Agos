@@ -89,6 +89,7 @@ impl Kernel {
             history: Vec::new(),
             parent_task: None,
             reasoning_hints,
+            max_iterations: None,
             trigger_source: None,
         };
 
@@ -244,6 +245,7 @@ impl Kernel {
             history: Vec::new(),
             parent_task: Some(parent_task.id),
             reasoning_hints: Some(infer_reasoning_hints(prompt)),
+            max_iterations: None,
             trigger_source: None,
         };
 

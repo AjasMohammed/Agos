@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod audit;
+pub mod chat;
 pub mod dashboard;
 pub mod events;
 pub mod pipelines;

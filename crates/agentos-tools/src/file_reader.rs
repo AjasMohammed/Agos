@@ -1,7 +1,6 @@
 use crate::traits::{AgentTool, ToolExecutionContext};
 use agentos_types::*;
 use async_trait::async_trait;
-use std::path::Path;
 
 /// Maximum file size that file-reader will load into memory (10 MiB).
 const MAX_FILE_READ_BYTES: u64 = 10 * 1024 * 1024;
@@ -47,14 +46,9 @@ impl AgentTool for FileReader {
             .and_then(|v| v.as_str())
             .unwrap_or("read");
 
-        // SECURITY: resolve path relative to data_dir only. Prevent path traversal.
-        let requested_path = Path::new(path_str);
-        let resolved = if requested_path.is_absolute() {
-            let stripped = requested_path.strip_prefix("/").unwrap_or(requested_path);
-            context.data_dir.join(stripped)
-        } else {
-            context.data_dir.join(requested_path)
-        };
+        // SECURITY: resolve path, checking workspace paths before falling back to data_dir.
+        let resolved =
+            crate::traits::resolve_tool_path(path_str, &context.data_dir, &context.workspace_paths);
 
         // Canonicalize to verify containment. For directories that don't exist yet
         // we fall through to a clear error; for existing paths this enforces the boundary.
@@ -76,10 +70,24 @@ impl AgentTool for FileReader {
                     reason: format!("Data directory error: {}", e),
                 })?;
 
-        if !canonical.starts_with(&canonical_data_dir) {
+        let in_workspace = context
+            .workspace_paths
+            .iter()
+            .any(|wp| canonical.starts_with(wp));
+        if !canonical.starts_with(&canonical_data_dir) && !in_workspace {
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
                 operation: format!("Path traversal denied: {}", path_str),
+            });
+        }
+        if in_workspace
+            && !context
+                .permissions
+                .check("fs.workspace", PermissionOp::Read)
+        {
+            return Err(AgentOSError::PermissionDenied {
+                resource: "fs.workspace".into(),
+                operation: format!("Workspace read access denied: {}", path_str),
             });
         }
 

@@ -4,6 +4,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static RETRIEVAL_REFRESH_TOTAL: AtomicU64 = AtomicU64::new(0);
 static RETRIEVAL_REUSE_TOTAL: AtomicU64 = AtomicU64::new(0);
 
+// ── Event channel metrics ──────────────────────────────────────────────────
+// Updated via `record_event_*` helpers and readable via `event_metrics_snapshot`.
+// Prometheus counters are also emitted so the health endpoint picks them up.
+
+static EVENTS_EMITTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENTS_DROPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENTS_PROCESSED_TOTAL: AtomicU64 = AtomicU64::new(0);
+
 /// Record a task being added to the queue.
 pub fn record_task_queued() {
     counter!("agentos_tasks_queued_total").increment(1);
@@ -81,5 +89,33 @@ pub fn retrieval_refresh_snapshot() -> (u64, u64) {
     (
         RETRIEVAL_REFRESH_TOTAL.load(Ordering::Relaxed),
         RETRIEVAL_REUSE_TOTAL.load(Ordering::Relaxed),
+    )
+}
+
+/// Record one event entering the dispatch channel.
+pub fn record_event_emitted() {
+    EVENTS_EMITTED_TOTAL.fetch_add(1, Ordering::Relaxed);
+    counter!("agentos_events_emitted_total").increment(1);
+}
+
+/// Record one event dropped because the dispatch channel was full.
+pub fn record_event_dropped() {
+    EVENTS_DROPPED_TOTAL.fetch_add(1, Ordering::Relaxed);
+    counter!("agentos_events_dropped_total").increment(1);
+}
+
+/// Record one event successfully consumed by the EventDispatcher task.
+pub fn record_event_processed() {
+    EVENTS_PROCESSED_TOTAL.fetch_add(1, Ordering::Relaxed);
+    counter!("agentos_events_processed_total").increment(1);
+}
+
+/// Return a point-in-time snapshot of event channel counters:
+/// `(emitted, dropped, processed)`.
+pub fn event_metrics_snapshot() -> (u64, u64, u64) {
+    (
+        EVENTS_EMITTED_TOTAL.load(Ordering::Relaxed),
+        EVENTS_DROPPED_TOTAL.load(Ordering::Relaxed),
+        EVENTS_PROCESSED_TOTAL.load(Ordering::Relaxed),
     )
 }

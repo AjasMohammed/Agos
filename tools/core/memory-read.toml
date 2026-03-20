@@ -1,0 +1,33 @@
+[manifest]
+name        = "memory-read"
+version     = "1.0.0"
+description = "Fetch a semantic memory entry by exact key (O(1) lookup, no embedding required)"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["memory.semantic:r"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "MemoryReadIntent"
+output = "MemoryReadResult"
+
+[input_schema]
+type = "object"
+required = ["key"]
+
+[input_schema.properties.key]
+type = "string"
+description = "Semantic memory key"
+
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 1000
+syscalls      = []

@@ -22,8 +22,8 @@ When done, include "MEMORY_COMPLETE" in your response."#
                 .to_string(),
         max_turns,
         required_permissions: vec![
-            "memory.semantic".to_string(),
-            "memory.episodic".to_string(),
+            "memory.semantic:rw".to_string(),
+            "memory.episodic:rw".to_string(),
         ],
         goal_keywords: vec!["MEMORY_COMPLETE".to_string()],
     }

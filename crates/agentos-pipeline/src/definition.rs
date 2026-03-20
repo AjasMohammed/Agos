@@ -39,6 +39,14 @@ pub struct PipelineStep {
     /// Max retries — engine re-runs the step up to N times on failure.
     #[serde(default)]
     pub retry_on_failure: Option<u32>,
+    /// Initial backoff delay in milliseconds before the first retry. Doubles each attempt.
+    /// Defaults to 500ms when not set.
+    #[serde(default)]
+    pub retry_backoff_ms: Option<u64>,
+    /// Maximum backoff delay in milliseconds (caps the exponential growth).
+    /// Defaults to 30_000ms when not set.
+    #[serde(default)]
+    pub retry_max_delay_ms: Option<u64>,
     /// What to do when this step fails (after all retries exhausted). Default: Fail (stop pipeline).
     #[serde(default)]
     pub on_failure: OnFailure,

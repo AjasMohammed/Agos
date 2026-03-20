@@ -1,5 +1,6 @@
 use crate::ids::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Strategy for handling context window overflow.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -55,10 +56,19 @@ pub struct ContextEntry {
     /// for backward compatibility with existing push-based entries.
     #[serde(default)]
     pub category: ContextCategory,
+    /// True for synthetic summary entries created by `OverflowStrategy::Summarize`
+    /// or `compress_oldest()`. Summary entries may be evicted even when
+    /// `role == System` so that they do not accumulate without bound.
+    #[serde(default)]
+    pub is_summary: bool,
 }
 
 fn default_importance() -> f32 {
     0.5
+}
+
+fn default_chars_per_token() -> f32 {
+    4.0
 }
 
 /// Context partitions allow agents to maintain a scratchpad that isn't sent to the LLM.
@@ -73,7 +83,7 @@ pub enum ContextPartition {
 
 /// Semantic category of a context entry, used by `ContextCompiler`
 /// to allocate token budgets and enforce position ordering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextCategory {
     /// System prompt, agent identity, standing safety instructions.
@@ -113,6 +123,13 @@ pub struct TokenBudget {
     pub history_pct: f32,
     /// Fraction of usable tokens for current task/user prompt.
     pub task_pct: f32,
+    /// Characters per token ratio used for estimation.
+    ///
+    /// Default 4.0 is a good approximation for English/Latin text.
+    /// For CJK (Chinese/Japanese/Korean) text, use 1.5–2.0 since each
+    /// character typically encodes to 1–2 tokens, not 0.25.
+    #[serde(default = "default_chars_per_token")]
+    pub chars_per_token: f32,
 }
 
 impl TokenBudget {
@@ -164,6 +181,12 @@ impl TokenBudget {
                 self.reserve_pct
             ));
         }
+        if self.chars_per_token < 0.5 || self.chars_per_token > 16.0 {
+            return Err(format!(
+                "chars_per_token {:.2} out of range [0.5, 16.0]",
+                self.chars_per_token
+            ));
+        }
         Ok(())
     }
 }
@@ -178,6 +201,7 @@ impl Default for TokenBudget {
             knowledge_pct: 0.30,
             history_pct: 0.25,
             task_pct: 0.12,
+            chars_per_token: default_chars_per_token(),
         }
     }
 }
@@ -273,6 +297,7 @@ impl ContextWindow {
                     reference_count: 0,
                     partition: ContextPartition::Active,
                     category: ContextCategory::History,
+                    is_summary: true,
                 },
             );
         }
@@ -283,11 +308,13 @@ impl ContextWindow {
         if self.entries.len() >= self.max_entries {
             match &self.overflow_strategy {
                 OverflowStrategy::FifoEviction => {
-                    // Evict oldest non-System entry; if all are System, evict the oldest entry
+                    // Evict oldest non-System entry, or a summary entry (which may be System
+                    // role but is evictable because it was synthetically generated).
+                    // If all remaining entries are pinned system entries, evict the oldest.
                     if let Some(idx) = self
                         .entries
                         .iter()
-                        .position(|e| e.role != ContextRole::System)
+                        .position(|e| e.role != ContextRole::System || e.is_summary)
                     {
                         self.entries.remove(idx);
                     } else {
@@ -295,49 +322,54 @@ impl ContextWindow {
                     }
                 }
                 OverflowStrategy::Summarize => {
-                    // Collect the oldest non-system entries (up to half) and summarize them
-                    let non_system_count = self
+                    // Collect the oldest evictable entries (up to half) and summarize them.
+                    // Evictable = non-System role OR is_summary (synthetic entries with System role
+                    // that can be regenerated). Treating is_summary entries as evictable prevents
+                    // the strategy from degrading to the safety net when summaries have accumulated.
+                    let evictable_count = self
                         .entries
                         .iter()
-                        .filter(|e| e.role != ContextRole::System)
+                        .filter(|e| e.role != ContextRole::System || e.is_summary)
                         .count();
-                    let to_summarize = (non_system_count / 2).max(1);
+                    let to_summarize = (evictable_count / 2).max(1);
 
                     let mut summarized_parts = Vec::new();
                     let mut removed = 0;
                     let mut i = 0;
                     while removed < to_summarize && i < self.entries.len() {
-                        if self.entries[i].role != ContextRole::System {
+                        if self.entries[i].role != ContextRole::System || self.entries[i].is_summary
+                        {
                             let e = self.entries.remove(i);
-                            summarized_parts.push(format!(
-                                "[{}]: {}",
+                            let label = if e.is_summary {
+                                "Summary"
+                            } else {
                                 match e.role {
                                     ContextRole::User => "User",
                                     ContextRole::Assistant => "Assistant",
                                     ContextRole::ToolResult => "ToolResult",
-                                    ContextRole::System => unreachable!(),
-                                },
-                                // Use char-boundary-safe truncation to avoid panics on multi-byte UTF-8
-                                if e.content.chars().count() > 200 {
-                                    format!(
-                                        "{}...",
-                                        e.content.chars().take(200).collect::<String>()
-                                    )
-                                } else {
-                                    e.content
+                                    ContextRole::System => "System",
                                 }
-                            ));
+                            };
+                            // Use char-boundary-safe truncation to avoid panics on multi-byte UTF-8
+                            let snippet = if e.content.chars().count() > 200 {
+                                format!("{}...", e.content.chars().take(200).collect::<String>())
+                            } else {
+                                e.content
+                            };
+                            summarized_parts.push(format!("[{label}]: {snippet}"));
                             removed += 1;
                         } else {
                             i += 1;
                         }
                     }
 
-                    // Insert a summary entry after system entries
+                    // Insert the new summary immediately after all non-evictable System entries
+                    // (i.e., after real System entries but before any remaining summaries or
+                    // non-system entries). This ensures chronological ordering of summaries.
                     let insert_pos = self
                         .entries
                         .iter()
-                        .position(|e| e.role != ContextRole::System)
+                        .position(|e| e.role != ContextRole::System || e.is_summary)
                         .unwrap_or(self.entries.len());
 
                     self.entries.insert(
@@ -356,6 +388,7 @@ impl ContextWindow {
                             reference_count: 0,
                             partition: ContextPartition::default(),
                             category: ContextCategory::History,
+                            is_summary: true,
                         },
                     );
                 }
@@ -385,15 +418,25 @@ impl ContextWindow {
                 }
             }
         }
-        // Safety net: Summarize may remove 1 entry and insert 1 summary (net 0) when
-        // non_system_count <= 2, leaving us still at capacity before pushing. Also guards
-        // against any overflow strategy that fails to free space (e.g., all entries pinned).
+        // Safety net: The overflow strategy may not have freed space (e.g., Summarize
+        // replaces 1 entry with 1 summary, net 0). Guards against any strategy that
+        // fails to free a slot.
+        //
+        // Eviction priority:
+        //   1. Oldest non-pinned non-system non-summary entry — real conversation turns
+        //   2. Oldest summary — synthetic, can survive loss better than real turns
+        //   3. Oldest any entry — last resort
+        //
+        // Summaries are deprioritised here so that freshly-created summaries are not
+        // immediately discarded by this net before the new entry is pushed.
         if self.entries.len() >= self.max_entries {
             if let Some(idx) = self
                 .entries
                 .iter()
-                .position(|e| e.role != ContextRole::System)
+                .position(|e| e.role != ContextRole::System && !e.is_summary)
             {
+                self.entries.remove(idx);
+            } else if let Some(idx) = self.entries.iter().position(|e| e.is_summary) {
                 self.entries.remove(idx);
             } else {
                 self.entries.remove(0);
@@ -423,6 +466,7 @@ impl ContextWindow {
             reference_count: 0,
             partition: ContextPartition::Active,
             category,
+            is_summary: false,
         });
     }
 
@@ -520,15 +564,83 @@ impl ContextWindow {
             .retain(|e| e.role == ContextRole::System || e.pinned);
     }
 
-    /// Estimate total token count for all active entries (4 chars ≈ 1 token).
-    /// Uses Unicode scalar count (not byte length) so multi-byte UTF-8 chars are
+    /// Estimate total token count for all active entries using the default 4 chars ≈ 1 token
+    /// heuristic. Uses Unicode scalar count (not byte length) so multi-byte UTF-8 chars are
     /// not over-counted.
+    ///
+    /// For CJK-heavy content, call `estimated_tokens_with_ratio(1.5)` instead.
     pub fn estimated_tokens(&self) -> usize {
+        self.estimated_tokens_with_ratio(4.0)
+    }
+
+    /// Estimate total token count for all active entries using a configurable ratio.
+    ///
+    /// `chars_per_token` is clamped to `[0.5, 16.0]` to avoid division-by-zero and
+    /// nonsensical values. The typical range:
+    /// - 4.0 — English/Latin text (default)
+    /// - 1.5–2.0 — Chinese/Japanese/Korean text
+    pub fn estimated_tokens_with_ratio(&self, chars_per_token: f32) -> usize {
+        let ratio = chars_per_token.clamp(0.5, 16.0);
         self.entries
             .iter()
             .filter(|e| e.partition == ContextPartition::Active)
-            .map(|e| e.content.chars().count() / 4 + 1)
+            .map(|e| (e.content.chars().count() as f32 / ratio) as usize + 1)
             .sum()
+    }
+
+    /// Token usage per category for all active entries, using the given ratio.
+    pub fn tokens_per_category(&self, chars_per_token: f32) -> HashMap<ContextCategory, usize> {
+        let ratio = chars_per_token.clamp(0.5, 16.0);
+        let mut map: HashMap<ContextCategory, usize> = HashMap::new();
+        for entry in &self.entries {
+            if entry.partition == ContextPartition::Active {
+                let tokens = (entry.content.chars().count() as f32 / ratio) as usize + 1;
+                *map.entry(entry.category).or_default() += tokens;
+            }
+        }
+        map
+    }
+
+    /// Estimated tokens remaining for a specific category given the supplied budget.
+    ///
+    /// Returns `0` if the category is already over budget.
+    pub fn estimated_tokens_remaining(
+        &self,
+        category: ContextCategory,
+        budget: &TokenBudget,
+    ) -> usize {
+        let allocated = budget.tokens_for(category);
+        let used = self
+            .tokens_per_category(budget.chars_per_token)
+            .get(&category)
+            .copied()
+            .unwrap_or(0);
+        allocated.saturating_sub(used)
+    }
+
+    /// Remaining token budget for every category as a map.
+    ///
+    /// Useful for agents that want to know which categories still have headroom
+    /// before the next compile pass.
+    pub fn remaining_budget_summary(
+        &self,
+        budget: &TokenBudget,
+    ) -> HashMap<ContextCategory, usize> {
+        let usage = self.tokens_per_category(budget.chars_per_token);
+        [
+            ContextCategory::System,
+            ContextCategory::Tools,
+            ContextCategory::Knowledge,
+            ContextCategory::History,
+            ContextCategory::Task,
+        ]
+        .iter()
+        .map(|&cat| {
+            let allocated = budget.tokens_for(cat);
+            let used = usage.get(&cat).copied().unwrap_or(0);
+            (cat, allocated.saturating_sub(used))
+        })
+        .collect()
     }
 }
 
@@ -547,6 +659,7 @@ mod tests {
             reference_count: 0,
             partition: ContextPartition::default(),
             category: ContextCategory::default(),
+            is_summary: false,
         }
     }
 
@@ -566,6 +679,7 @@ mod tests {
             reference_count: 0,
             partition: ContextPartition::default(),
             category: ContextCategory::default(),
+            is_summary: false,
         }
     }
 
@@ -709,5 +823,187 @@ mod tests {
             .entries
             .iter()
             .any(|e| e.content == "High importance result"));
+    }
+
+    #[test]
+    fn test_summary_entries_are_evictable_by_fifo() {
+        // FIFO should evict summary entries (role=System, is_summary=true) before
+        // accumulating them without bound.
+        let mut ctx = ContextWindow::new(3);
+        ctx.push(make_entry(ContextRole::System, "Real system prompt"));
+
+        // Manually push a summary entry (simulating what Summarize strategy creates)
+        ctx.entries.push(ContextEntry {
+            role: ContextRole::System,
+            content: "[CONTEXT SUMMARY - 2 earlier messages condensed]\nUser: hi\nAssistant: hello"
+                .to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.3,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
+            is_summary: true,
+        });
+
+        ctx.push(make_entry(ContextRole::User, "New message"));
+
+        // At capacity — FIFO push should evict the summary (is_summary=true), not the real system prompt
+        ctx.push(make_entry(ContextRole::Assistant, "Response"));
+
+        assert_eq!(ctx.entries.len(), 3);
+        // Real system prompt must be preserved
+        assert!(ctx
+            .entries
+            .iter()
+            .any(|e| e.content == "Real system prompt"));
+        // Summary should have been evicted
+        assert!(!ctx.entries.iter().any(|e| e.is_summary));
+    }
+
+    #[test]
+    fn test_estimated_tokens_with_ratio() {
+        let mut ctx = ContextWindow::new(10);
+        // 8 ASCII chars → with ratio 4.0: 8/4 + 1 = 3 tokens
+        ctx.push(make_entry(ContextRole::User, "abcdefgh"));
+
+        let tokens_4 = ctx.estimated_tokens_with_ratio(4.0);
+        assert_eq!(tokens_4, 3, "8 chars / 4.0 + 1 = 3 tokens");
+
+        // With ratio 2.0: 8/2 + 1 = 5 tokens
+        let tokens_2 = ctx.estimated_tokens_with_ratio(2.0);
+        assert_eq!(tokens_2, 5, "8 chars / 2.0 + 1 = 5 tokens");
+
+        // estimated_tokens() defaults to 4.0
+        assert_eq!(ctx.estimated_tokens(), tokens_4);
+    }
+
+    #[test]
+    fn test_tokens_per_category() {
+        let mut ctx = ContextWindow::new(10);
+        ctx.push(ContextEntry {
+            role: ContextRole::System,
+            content: "abcdefgh".to_string(), // 8 chars
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: true,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::System,
+            is_summary: false,
+        });
+        ctx.push(ContextEntry {
+            role: ContextRole::User,
+            content: "abcdefghijkl".to_string(), // 12 chars
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::Task,
+            is_summary: false,
+        });
+
+        let usage = ctx.tokens_per_category(4.0);
+        // System: 8/4 + 1 = 3 tokens
+        assert_eq!(usage.get(&ContextCategory::System).copied().unwrap_or(0), 3);
+        // Task: 12/4 + 1 = 4 tokens
+        assert_eq!(usage.get(&ContextCategory::Task).copied().unwrap_or(0), 4);
+        // History: not present
+        assert_eq!(
+            usage.get(&ContextCategory::History).copied().unwrap_or(0),
+            0
+        );
+    }
+
+    #[test]
+    fn test_estimated_tokens_remaining() {
+        let budget = TokenBudget {
+            total_tokens: 1000,
+            reserve_pct: 0.0, // no reserve, usable = 1000
+            system_pct: 0.10, // 100 tokens for system
+            tools_pct: 0.0,
+            knowledge_pct: 0.0,
+            history_pct: 0.90,
+            task_pct: 0.0,
+            chars_per_token: 4.0,
+        };
+
+        let mut ctx = ContextWindow::new(100);
+        // Push a system entry: 8 chars → 8/4 + 1 = 3 tokens
+        ctx.push(ContextEntry {
+            role: ContextRole::System,
+            content: "abcdefgh".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: true,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::System,
+            is_summary: false,
+        });
+
+        let remaining = ctx.estimated_tokens_remaining(ContextCategory::System, &budget);
+        // Budget for system: 100 tokens, used: 3, remaining: 97
+        assert_eq!(remaining, 97);
+
+        let history_remaining = ctx.estimated_tokens_remaining(ContextCategory::History, &budget);
+        // Budget for history: 900 tokens, used: 0, remaining: 900
+        assert_eq!(history_remaining, 900);
+    }
+
+    #[test]
+    fn test_remaining_budget_summary_all_categories_present() {
+        let ctx = ContextWindow::new(10);
+        let budget = TokenBudget::default();
+        let summary = ctx.remaining_budget_summary(&budget);
+
+        // All 5 categories should be present
+        assert!(summary.contains_key(&ContextCategory::System));
+        assert!(summary.contains_key(&ContextCategory::Tools));
+        assert!(summary.contains_key(&ContextCategory::Knowledge));
+        assert!(summary.contains_key(&ContextCategory::History));
+        assert!(summary.contains_key(&ContextCategory::Task));
+
+        // Empty context → remaining == allocated for each category
+        for cat in [
+            ContextCategory::System,
+            ContextCategory::Tools,
+            ContextCategory::Knowledge,
+            ContextCategory::History,
+            ContextCategory::Task,
+        ] {
+            assert_eq!(
+                summary[&cat],
+                budget.tokens_for(cat),
+                "Empty context should report full remaining budget for {:?}",
+                cat
+            );
+        }
+    }
+
+    #[test]
+    fn test_token_budget_chars_per_token_validation() {
+        let valid = TokenBudget {
+            chars_per_token: 2.0,
+            ..Default::default()
+        };
+        assert!(valid.validate().is_ok());
+
+        let too_low = TokenBudget {
+            chars_per_token: 0.1,
+            ..Default::default()
+        };
+        assert!(too_low.validate().is_err());
+
+        let too_high = TokenBudget {
+            chars_per_token: 20.0,
+            ..Default::default()
+        };
+        assert!(too_high.validate().is_err());
     }
 }

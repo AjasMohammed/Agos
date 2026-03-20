@@ -1,0 +1,45 @@
+[manifest]
+name        = "web-fetch"
+version     = "1.0.0"
+description = "Fetch a URL and return its content as readable text (HTML is auto-converted to plain text). Use 'extract_text: false' to get raw body."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["network.outbound:x"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "WebFetchIntent"
+output = "WebFetchResult"
+
+[input_schema]
+type = "object"
+required = ["url"]
+
+[input_schema.properties.url]
+type = "string"
+format = "uri"
+description = "HTTP or HTTPS URL"
+
+[input_schema.properties.extract_text]
+type = "boolean"
+default = true
+description = "When true, extract text from HTML responses"
+
+[input_schema.properties.max_chars]
+type = "integer"
+default = 32000
+minimum = 1
+maximum = 100000
+description = "Maximum characters returned in content"
+
+[sandbox]
+network       = true
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 35000
+syscalls      = []

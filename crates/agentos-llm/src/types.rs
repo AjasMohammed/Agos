@@ -6,10 +6,28 @@ pub struct InferenceResult {
     pub tokens_used: TokenUsage,
     pub model: String,
     pub duration_ms: u64,
+    /// Structured tool calls emitted by the model, if any.
+    /// Populated by adapters that support native function/tool calling APIs.
+    #[serde(default)]
+    pub tool_calls: Vec<InferenceToolCall>,
     /// Parsed uncertainty declaration from the LLM response, if present.
     /// Populated when the response contains an `[UNCERTAINTY]` block.
     #[serde(default)]
     pub uncertainty: Option<UncertaintyDeclaration>,
+}
+
+/// Structured tool call emitted by an LLM provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InferenceToolCall {
+    /// Provider-native tool call identifier (e.g., OpenAI `call_xxx`), if present.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Tool/function name requested by the model.
+    pub tool_name: String,
+    /// AgentOS intent type string (e.g. read/write/execute/query).
+    pub intent_type: String,
+    /// Parsed JSON arguments for the tool invocation.
+    pub payload: serde_json::Value,
 }
 
 /// Structured declaration of uncertainty from an LLM response.
@@ -136,6 +154,10 @@ pub struct ModelCapabilities {
     pub supports_images: bool,
     pub supports_tool_calling: bool,
     pub supports_json_mode: bool,
+    /// Maximum tokens the model will generate per response.
+    /// Set from config at adapter construction time; 0 means not specified.
+    #[serde(default)]
+    pub max_output_tokens: u64,
 }
 
 /// Health status of an LLM backend, providing richer diagnostics than a bare `bool`.

@@ -19,13 +19,21 @@ impl WebServer {
         bind_addr: SocketAddr,
         kernel: Arc<Kernel>,
         allowed_tool_dirs: Arc<Vec<std::path::PathBuf>>,
-    ) -> Result<Self, minijinja::Error> {
+    ) -> Result<Self, anyhow::Error> {
         let templates = Arc::new(build_template_engine()?);
+
+        let chat_db_path = kernel.data_dir().join("chat.db");
+        let chat_store = Arc::new(
+            crate::chat_store::ChatStore::open(&chat_db_path)
+                .map_err(|e| anyhow::anyhow!("Failed to open chat store: {}", e))?,
+        );
+
         let state = AppState {
             kernel,
             templates,
             csrf_tokens: Arc::new(dashmap::DashMap::<String, (String, std::time::Instant)>::new()),
             allowed_tool_dirs,
+            chat_store,
         };
         Ok(Self { bind_addr, state })
     }

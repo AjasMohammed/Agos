@@ -12,17 +12,26 @@ use tempfile::TempDir;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-// Helper to construct context with optional vault
+// Helper to construct context with optional vault.
+// Grants network.outbound:Execute so the tool's internal permission check
+// passes; individual tests that need SSRF to fire still work because the URL
+// is blocked before any TCP connection is made.
 fn make_context(data_dir: &Path, vault: Option<Arc<ProxyVault>>) -> ToolExecutionContext {
+    let mut permissions = PermissionSet::new();
+    permissions.grant("network.outbound".to_string(), false, false, true, None);
     ToolExecutionContext {
         data_dir: data_dir.to_path_buf(),
         task_id: TaskID::new(),
         agent_id: AgentID::new(),
         trace_id: TraceID::new(),
-        permissions: PermissionSet::new(),
+        permissions,
         vault,
         hal: None,
         file_lock_registry: None,
+        agent_registry: None,
+        task_registry: None,
+        workspace_paths: vec![],
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
     }
 }
 
@@ -67,7 +76,7 @@ async fn test_get_request_returns_json() {
 
     let dir = TempDir::new().unwrap();
     let ctx = make_context(dir.path(), None);
-    let tool = HttpClientTool::new();
+    let tool = HttpClientTool::new().unwrap();
 
     let payload = serde_json::json!({
         "url": format!("{}/api/data", mock_server.uri()),
@@ -89,7 +98,7 @@ async fn test_ssrf_localhost_blocked() {
 
     let dir = TempDir::new().unwrap();
     let ctx = make_context(dir.path(), None);
-    let tool = HttpClientTool::new();
+    let tool = HttpClientTool::new().unwrap();
 
     // Trying to fetch from localhost
     let payload = serde_json::json!({
@@ -122,7 +131,7 @@ async fn test_secret_header_injected_not_returned() {
     let dir = TempDir::new().unwrap();
     let vault = setup_temp_vault(&dir, "MY_ACTUAL_TOKEN", "TOP_SECRET_123").await;
     let ctx = make_context(dir.path(), Some(vault));
-    let tool = HttpClientTool::new();
+    let tool = HttpClientTool::new().unwrap();
 
     let payload = serde_json::json!({
         "url": format!("{}/api/secure", mock_server.uri()),
@@ -158,7 +167,7 @@ async fn test_timeout_respected() {
 
     let dir = TempDir::new().unwrap();
     let ctx = make_context(dir.path(), None);
-    let tool = HttpClientTool::new();
+    let tool = HttpClientTool::new().unwrap();
 
     // Set timeout to 100ms
     let payload = serde_json::json!({
@@ -201,7 +210,7 @@ async fn test_large_response_truncated() {
 
     let dir = TempDir::new().unwrap();
     let ctx = make_context(dir.path(), None);
-    let tool = HttpClientTool::new();
+    let tool = HttpClientTool::new().unwrap();
 
     let payload = serde_json::json!({
         "url": format!("{}/huge", mock_server.uri()),

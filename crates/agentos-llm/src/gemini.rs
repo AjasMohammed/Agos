@@ -1,10 +1,12 @@
+use crate::tool_helpers;
 use crate::traits::LLMCore;
-use crate::types::{InferenceResult, ModelCapabilities, TokenUsage};
+use crate::types::{InferenceResult, InferenceToolCall, ModelCapabilities, TokenUsage};
 use agentos_types::*;
 use async_trait::async_trait;
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
-use serde_json::json;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 /// Gemini API adapter for Google models.
@@ -22,7 +24,7 @@ impl GeminiCore {
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
-                .unwrap_or_default(),
+                .expect("HTTP client TLS initialization failed"),
             api_key,
             model,
             capabilities: ModelCapabilities {
@@ -30,6 +32,7 @@ impl GeminiCore {
                 supports_images: true,
                 supports_tool_calling: true,
                 supports_json_mode: true,
+                max_output_tokens: 0,
             },
         }
     }
@@ -59,11 +62,93 @@ impl GeminiCore {
 
         contents
     }
+
+    fn build_gemini_tools(tools: &[ToolManifest]) -> (Vec<Value>, HashMap<String, String>) {
+        let mut function_declarations = Vec::new();
+        let mut intent_by_tool = HashMap::new();
+        let mut seen_names = HashSet::new();
+
+        for manifest in tools {
+            let tool_name = manifest.manifest.name.trim();
+            if tool_name.is_empty() || !seen_names.insert(tool_name.to_string()) {
+                continue;
+            }
+
+            let intent_type = tool_helpers::infer_intent_type_from_permissions(
+                &manifest.capabilities_required.permissions,
+            );
+            intent_by_tool.insert(tool_name.to_string(), intent_type);
+
+            function_declarations.push(json!({
+                "name": tool_name,
+                "description": manifest.manifest.description,
+                "parameters": tool_helpers::normalize_tool_input_schema(manifest.input_schema.as_ref()),
+            }));
+        }
+
+        (function_declarations, intent_by_tool)
+    }
+
+    fn parse_gemini_tool_calls(
+        parts: &[Value],
+        intent_by_tool: &HashMap<String, String>,
+    ) -> (String, Vec<InferenceToolCall>) {
+        let mut text = String::new();
+        let mut tool_calls = Vec::new();
+
+        for part in parts {
+            if let Some(t) = part.get("text").and_then(Value::as_str) {
+                text.push_str(t);
+            }
+            if let Some(fc) = part.get("functionCall").and_then(Value::as_object) {
+                let Some(tool_name) = fc
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                else {
+                    continue;
+                };
+
+                let payload = tool_helpers::validate_payload_object(
+                    tool_name,
+                    "gemini",
+                    fc.get("args").cloned(),
+                );
+
+                if !tool_helpers::check_payload_size(tool_name, &payload) {
+                    continue;
+                }
+
+                let intent_type = intent_by_tool
+                    .get(tool_name)
+                    .cloned()
+                    .unwrap_or_else(|| "query".to_string());
+
+                tool_calls.push(InferenceToolCall {
+                    id: None, // Gemini does not use tool call IDs
+                    tool_name: tool_name.to_string(),
+                    intent_type,
+                    payload,
+                });
+            }
+        }
+
+        (text, tool_calls)
+    }
 }
 
 #[async_trait]
 impl LLMCore for GeminiCore {
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
+        self.infer_with_tools(context, &[]).await
+    }
+
+    async fn infer_with_tools(
+        &self,
+        context: &ContextWindow,
+        tools: &[ToolManifest],
+    ) -> Result<InferenceResult, AgentOSError> {
         let start_time = Instant::now();
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
@@ -71,6 +156,8 @@ impl LLMCore for GeminiCore {
         );
 
         let contents = self.format_contents(context);
+        let (function_declarations, intent_by_tool) = Self::build_gemini_tools(tools);
+
         let mut body = json!({
             "contents": contents,
         });
@@ -84,6 +171,12 @@ impl LLMCore for GeminiCore {
             body["systemInstruction"] = json!({
                 "parts": [{"text": sys}]
             });
+        }
+
+        if !function_declarations.is_empty() {
+            body["tools"] = json!([{
+                "functionDeclarations": function_declarations
+            }]);
         }
 
         let req = self
@@ -113,18 +206,15 @@ impl LLMCore for GeminiCore {
                 reason: format!("Failed to parse JSON response: {}", e),
             })?;
 
-        let mut text = String::new();
-        if let Some(candidates) = json_resp["candidates"].as_array() {
-            if let Some(first) = candidates.first() {
-                if let Some(parts) = first["content"]["parts"].as_array() {
-                    for part in parts {
-                        if let Some(t) = part["text"].as_str() {
-                            text.push_str(t);
-                        }
-                    }
-                }
-            }
-        }
+        let parts = json_resp["candidates"]
+            .as_array()
+            .and_then(|c| c.first())
+            .and_then(|c| c["content"]["parts"].as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let (text, tool_calls) = Self::parse_gemini_tool_calls(&parts, &intent_by_tool);
+        let text = tool_helpers::append_legacy_blocks(&text, &tool_calls);
 
         let prompt_tokens = json_resp["usageMetadata"]["promptTokenCount"]
             .as_u64()
@@ -145,6 +235,7 @@ impl LLMCore for GeminiCore {
             },
             model: self.model.clone(),
             duration_ms: start_time.elapsed().as_millis() as u64,
+            tool_calls,
             uncertainty: None,
         })
     }
@@ -212,6 +303,7 @@ mod tests {
             reference_count: 0,
             partition: ContextPartition::Active,
             category: ContextCategory::History,
+            is_summary: false,
         });
         ctx.push(ContextEntry {
             role: ContextRole::User,
@@ -223,6 +315,7 @@ mod tests {
             reference_count: 0,
             partition: ContextPartition::Active,
             category: ContextCategory::History,
+            is_summary: false,
         });
         ctx.push(ContextEntry {
             role: ContextRole::Assistant,
@@ -234,6 +327,7 @@ mod tests {
             reference_count: 0,
             partition: ContextPartition::Active,
             category: ContextCategory::History,
+            is_summary: false,
         });
 
         let adapter = GeminiCore::new(SecretString::new("fake".into()), "gemini".into());
@@ -244,5 +338,37 @@ mod tests {
         assert_eq!(contents[0]["parts"][0]["text"], "User");
         assert_eq!(contents[1]["role"], "model");
         assert_eq!(contents[1]["parts"][0]["text"], "Assistant");
+    }
+
+    #[test]
+    fn test_parse_gemini_tool_calls_extracts_function_call() {
+        let mut intent_map = HashMap::new();
+        intent_map.insert("file-reader".to_string(), "read".to_string());
+
+        let parts = vec![
+            json!({"text": "Reading the file now."}),
+            json!({
+                "functionCall": {
+                    "name": "file-reader",
+                    "args": {"path": "test.txt"}
+                }
+            }),
+        ];
+
+        let (text, tool_calls) = GeminiCore::parse_gemini_tool_calls(&parts, &intent_map);
+        assert_eq!(text, "Reading the file now.");
+        assert_eq!(tool_calls.len(), 1);
+        assert!(tool_calls[0].id.is_none());
+        assert_eq!(tool_calls[0].tool_name, "file-reader");
+        assert_eq!(tool_calls[0].intent_type, "read");
+        assert_eq!(tool_calls[0].payload["path"], "test.txt");
+    }
+
+    #[test]
+    fn test_parse_gemini_tool_calls_text_only() {
+        let parts = vec![json!({"text": "Done."})];
+        let (text, tool_calls) = GeminiCore::parse_gemini_tool_calls(&parts, &HashMap::new());
+        assert_eq!(text, "Done.");
+        assert!(tool_calls.is_empty());
     }
 }

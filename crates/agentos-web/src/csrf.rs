@@ -70,12 +70,6 @@ pub async fn csrf_middleware(
         return next.run(request).await;
     }
 
-    // Login GET (renders the form) is exempt; login POST is NOT — an already-authenticated
-    // user re-submitting /login would otherwise skip validation.
-    if path == "/login" && (method == Method::GET || method == Method::HEAD) {
-        return next.run(request).await;
-    }
-
     // Requests without a session cookie are bearer-token API clients.
     // They are not subject to cross-site request forgery via browser form submissions.
     let session_id = match jar.get("agentos_session") {

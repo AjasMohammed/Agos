@@ -12,3 +12,4 @@ async-trait = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tokio-util = { workspace = true }

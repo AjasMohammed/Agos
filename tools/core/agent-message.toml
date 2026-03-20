@@ -1,0 +1,36 @@
+[manifest]
+name        = "agent-message"
+version     = "1.0.0"
+description = "Send a message to another named agent via the AgentMessageBus"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["agent.message:x"]
+
+[capabilities_provided]
+outputs = ["status"]
+
+[intent_schema]
+input  = "AgentMessageIntent"
+output = "AgentMessageResult"
+
+[input_schema]
+type = "object"
+required = ["to", "content"]
+
+[input_schema.properties.to]
+type = "string"
+description = "Target agent name"
+
+[input_schema.properties.content]
+type = "string"
+description = "Message text to send"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 32
+max_cpu_ms    = 2000
+syscalls      = []

@@ -1,0 +1,37 @@
+[manifest]
+name        = "agent-manual"
+version     = "1.0.0"
+description = "Query structured AgentOS documentation: tools, permissions, memory, events, commands, errors. Use {\"section\": \"index\"} to see all sections."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "ManualQuery"
+output = "ManualSection"
+
+[input_schema]
+type = "object"
+required = ["section"]
+
+[input_schema.properties.section]
+type = "string"
+enum = ["index", "tools", "tool-detail", "permissions", "memory", "events", "commands", "errors", "feedback", "agents", "tasks", "procedural"]
+description = "Manual section to return"
+
+[input_schema.properties.name]
+type = "string"
+description = "Tool name required when section is tool-detail"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

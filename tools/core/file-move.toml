@@ -1,0 +1,36 @@
+[manifest]
+name        = "file-move"
+version     = "1.0.0"
+description = "Moves or renames a file within data_dir. Both source and destination must be within data_dir. Acquires write lock on source, creates destination parent directories automatically."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["fs.user_data:w"]
+
+[capabilities_provided]
+outputs = ["status"]
+
+[intent_schema]
+input  = "FileMoveIntent"
+output = "FileMoveResult"
+
+[input_schema]
+type = "object"
+required = ["from", "to"]
+
+[input_schema.properties.from]
+type = "string"
+description = "Source file path"
+
+[input_schema.properties.to]
+type = "string"
+description = "Destination file path"
+
+[sandbox]
+network       = false
+fs_write      = true
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 2000
+syscalls      = []

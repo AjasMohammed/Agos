@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::Extension;
+use axum::extract::{Extension, State};
 use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
@@ -8,6 +8,8 @@ use axum_extra::extract::cookie::{Cookie, SameSite};
 use axum_extra::extract::CookieJar;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
+
+use crate::state::AppState;
 
 /// Shared auth token generated at server startup.
 ///
@@ -85,9 +87,15 @@ pub async fn require_auth(
     (StatusCode::UNAUTHORIZED, "Authentication required").into_response()
 }
 
-/// GET /login — renders a minimal login form.
-pub async fn login_page() -> Response {
-    Html(
+/// GET /login — renders a minimal login form, injecting a CSRF token when a session exists.
+pub async fn login_page(State(state): State<AppState>, jar: CookieJar) -> Response {
+    let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);
+    let csrf_field = if csrf_token.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<input type="hidden" name="_csrf" value="{csrf_token}">"#)
+    };
+    Html(format!(
         r#"<!DOCTYPE html>
 <html><head><title>AgentOS Login</title>
 <link rel="stylesheet" href="/static/css/pico.min.css">
@@ -95,13 +103,14 @@ pub async fn login_page() -> Response {
 <main class="container">
 <h1>AgentOS Web UI</h1>
 <form method="POST" action="/login">
+{csrf_field}
 <label for="token">Auth Token</label>
 <input name="token" id="token" type="password"
        placeholder="Paste the token printed at startup" required>
 <button type="submit">Login</button>
 </form>
-</main></body></html>"#,
-    )
+</main></body></html>"#
+    ))
     .into_response()
 }
 

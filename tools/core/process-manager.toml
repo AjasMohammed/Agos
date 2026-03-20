@@ -1,0 +1,38 @@
+[manifest]
+name        = "process-manager"
+version     = "1.0.0"
+description = "List running processes or terminate a process by PID via the Hardware Abstraction Layer."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["process.list:r", "process.kill:x"]
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "ProcessManagerIntent"
+output = "ProcessManagerResult"
+
+[input_schema]
+type = "object"
+
+[input_schema.properties.action]
+type = "string"
+enum = ["list", "kill"]
+default = "list"
+description = "list returns processes; kill terminates a process"
+
+[input_schema.properties.pid]
+type = "integer"
+minimum = 1
+description = "Target PID required when action=kill"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 32
+max_cpu_ms    = 5000
+syscalls      = []

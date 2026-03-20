@@ -15,6 +15,59 @@ outputs = ["content.text"]
 input  = "MemorySearchIntent"
 output = "MemorySearchResult"
 
+[input_schema]
+type = "object"
+required = ["query"]
+
+[input_schema.properties.query]
+type = "string"
+description = "Natural-language query"
+
+[input_schema.properties.scope]
+type = "string"
+enum = ["semantic", "episodic"]
+default = "semantic"
+description = "Memory tier to search"
+
+[input_schema.properties.top_k]
+type = "integer"
+default = 5
+minimum = 1
+maximum = 100
+description = "Maximum number of results"
+
+[input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 100
+description = "Alias for top_k"
+
+[input_schema.properties.min_score]
+type = "number"
+default = 0.3
+description = "Semantic min score threshold"
+
+[input_schema.properties.global]
+type = "boolean"
+default = false
+description = "Episodic scope only: search across tasks"
+
+[input_schema.properties.task_id]
+type = "string"
+format = "uuid"
+description = "Optional task UUID filter for episodic search"
+
+[input_schema.properties.agent_id]
+type = "string"
+format = "uuid"
+description = "Optional agent UUID filter for episodic global search"
+
+[input_schema.properties.since]
+type = "string"
+format = "date-time"
+description = "Optional RFC3339 timestamp lower bound for episodic global search"
+
+
 [sandbox]
 network       = false
 fs_write      = false

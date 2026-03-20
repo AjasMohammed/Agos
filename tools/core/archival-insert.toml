@@ -15,6 +15,26 @@ outputs = ["content.text"]
 input  = "ArchivalInsertIntent"
 output = "ArchivalInsertResult"
 
+[input_schema]
+type = "object"
+required = ["content"]
+
+[input_schema.properties.content]
+type = "string"
+description = "Document content to insert into archival semantic memory"
+
+[input_schema.properties.key]
+type = "string"
+default = "archival-note"
+description = "Optional semantic key"
+
+[input_schema.properties.tags]
+type = "array"
+description = "Optional tags"
+
+[input_schema.properties.tags.items]
+type = "string"
+
 [sandbox]
 network       = false
 fs_write      = false

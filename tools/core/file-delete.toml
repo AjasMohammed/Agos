@@ -1,0 +1,32 @@
+[manifest]
+name        = "file-delete"
+version     = "1.0.0"
+description = "Deletes a file within data_dir after acquiring an exclusive write lock. Refuses to delete directories. Path traversal is blocked via canonicalize + starts_with check."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["fs.user_data:w"]
+
+[capabilities_provided]
+outputs = ["status"]
+
+[intent_schema]
+input  = "FileDeleteIntent"
+output = "FileDeleteResult"
+
+[input_schema]
+type = "object"
+required = ["path"]
+
+[input_schema.properties.path]
+type = "string"
+description = "Relative file path under data directory"
+
+[sandbox]
+network       = false
+fs_write      = true
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 2000
+syscalls      = []

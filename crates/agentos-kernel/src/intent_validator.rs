@@ -324,8 +324,9 @@ mod tests {
             original_prompt: "test task".to_string(),
             history: Vec::new(),
             parent_task: None,
-            trigger_source: None,
             reasoning_hints: None,
+            max_iterations: None,
+            trigger_source: None,
         }
     }
 

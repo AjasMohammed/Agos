@@ -1,0 +1,31 @@
+[manifest]
+name        = "agent-list"
+version     = "1.0.0"
+description = "List all registered agents with their status. Optional 'status' filter (online/idle/offline). Use to discover available peers before sending agent messages."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["agent.registry:r"]
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "AgentListQuery"
+output = "AgentListResult"
+
+[input_schema]
+type = "object"
+
+[input_schema.properties.status]
+type = "string"
+description = "Optional agent status filter (case-insensitive), e.g. idle or busy"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

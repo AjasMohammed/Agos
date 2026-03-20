@@ -33,6 +33,7 @@ pub mod scheduler;
 pub mod schema_registry;
 pub(crate) mod sd_notify;
 pub mod snapshot;
+pub mod state_store;
 pub mod task_completion;
 pub mod task_executor;
 pub mod tool_call;
@@ -49,5 +50,5 @@ pub use retrieval_gate::{
     IndexType, RetrievalExecutor, RetrievalGate, RetrievalOutcome, RetrievalPlan, RetrievalResult,
 };
 pub use scheduler::TaskScheduler;
-pub use tool_call::{parse_tool_call, ParsedToolCall};
+pub use tool_call::{parse_tool_call, parse_tool_calls, ParsedToolCall, ToolCallRequest};
 pub use tool_registry::ToolRegistry;

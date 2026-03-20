@@ -579,3 +579,466 @@ html, body { margin: 0; padding: 0; height: 100%; }
     from { transform: translateX(100%); opacity: 0; }
     to   { transform: translateX(0);   opacity: 1; }
 }
+
+/* ── Task detail: two-column stream + findings layout ─────── */
+.task-stream-grid {
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    gap: 1rem;
+    align-items: start;
+}
+
+.task-log-col {
+    min-width: 0; /* prevent overflow past grid column */
+}
+
+/* ── Findings panel ──────────────────────────────────────── */
+.findings-panel {
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    background: var(--pico-card-background-color);
+    display: flex;
+    flex-direction: column;
+    max-height: 560px; /* matches log-terminal height */
+}
+
+.findings-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.6rem 0.875rem;
+    border-bottom: 1px solid var(--pico-muted-border-color);
+}
+.findings-header h2 {
+    margin: 0;
+    font-size: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.findings-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.findings-empty {
+    text-align: center;
+    font-size: 0.82rem;
+    padding: 1rem 0.5rem;
+    margin: 0;
+}
+
+/* ── Finding cards ───────────────────────────────────────── */
+.finding-card {
+    border-radius: var(--pico-border-radius);
+    border-left: 3px solid var(--pico-muted-border-color);
+    padding: 0.5rem 0.625rem;
+    margin: 0;
+    font-size: 0.82rem;
+    animation: finding-slide-in 0.2s ease-out;
+}
+.finding-card header { padding: 0; margin-bottom: 0.3rem; background: none; border: none; }
+
+.finding-error   { border-left-color: #dc3545; background: color-mix(in srgb, #dc3545 6%, transparent); }
+.finding-warning,
+.finding-warn    { border-left-color: #ffc107; background: color-mix(in srgb, #ffc107 6%, transparent); }
+.finding-info    { border-left-color: #17a2b8; background: color-mix(in srgb, #17a2b8 6%, transparent); }
+
+.finding-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4rem;
+}
+
+.finding-severity {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.finding-severity-error   { color: #dc3545; }
+.finding-severity-warning,
+.finding-severity-warn    { color: #b38600; }
+.finding-severity-info    { color: #0d7e99; }
+
+.finding-category {
+    font-size: 0.72rem;
+    color: var(--pico-muted-color);
+    text-transform: capitalize;
+    background: var(--pico-table-row-stripped-background-color, #f5f5f5);
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+}
+
+.finding-observation {
+    margin: 0.2rem 0 0.25rem;
+    line-height: 1.4;
+    color: var(--pico-color);
+}
+
+.finding-suggestion,
+.finding-context {
+    display: block;
+    margin-top: 0.2rem;
+    font-size: 0.75rem;
+}
+
+@keyframes finding-slide-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Collapse to single column on smaller screens */
+@media (max-width: 900px) {
+    .task-stream-grid {
+        grid-template-columns: 1fr;
+    }
+    .findings-panel {
+        max-height: 320px;
+    }
+}
+
+/* ── Audit severity badge ────────────────────────────────── */
+.badge-security { background-color: #6f42c1; color: #fff; }
+
+/* ── Chat page layout ────────────────────────────────────── */
+.chat-layout {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    gap: 1rem;
+    align-items: start;
+}
+
+@media (max-width: 768px) {
+    .chat-layout { grid-template-columns: 1fr; }
+}
+
+/* ── Chat sidebar (conversation list) ───────────────────── */
+.chat-sidebar {
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    background: var(--pico-card-background-color);
+    overflow: hidden;
+}
+
+.chat-sidebar-header {
+    padding: 0.6rem 0.875rem;
+    border-bottom: 1px solid var(--pico-muted-border-color);
+    font-size: 0.82rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--pico-muted-color);
+}
+
+.chat-sidebar-empty {
+    padding: 1.25rem;
+    font-size: 0.85rem;
+    text-align: center;
+}
+
+.chat-thread-list {
+    display: flex;
+    flex-direction: column;
+}
+
+.chat-thread-item {
+    display: block;
+    padding: 0.65rem 0.875rem;
+    border-bottom: 1px solid var(--pico-muted-border-color);
+    text-decoration: none;
+    color: var(--pico-color);
+    transition: background 0.12s;
+}
+.chat-thread-item:last-child { border-bottom: none; }
+.chat-thread-item:hover { background: var(--pico-table-row-stripped-background-color); }
+
+.chat-thread-preview {
+    font-size: 0.82rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-bottom: 0.3rem;
+}
+.chat-thread-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.72rem;
+}
+
+/* ── Compose form ────────────────────────────────────────── */
+.chat-compose-form textarea {
+    resize: vertical;
+    font-family: inherit;
+}
+
+/* ── Conversation view ───────────────────────────────────── */
+.chat-conversation-area {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    margin-bottom: 1.5rem;
+}
+
+.chat-row {
+    display: flex;
+    gap: 0.75rem;
+}
+
+/* User message — right aligned */
+.chat-row-user {
+    justify-content: flex-end;
+}
+
+.chat-bubble-user {
+    max-width: 72%;
+}
+
+.chat-bubble-content {
+    background: var(--pico-primary);
+    color: #fff;
+    padding: 0.75rem 1rem;
+    border-radius: 1rem 1rem 0.2rem 1rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+
+.chat-bubble-meta {
+    margin-top: 0.3rem;
+    font-size: 0.72rem;
+    color: var(--pico-muted-color);
+    text-align: right;
+}
+
+/* Agent message — left aligned */
+.chat-row-agent {
+    align-items: flex-start;
+    max-width: 80%;
+}
+
+.chat-agent-avatar {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    background: var(--pico-muted-border-color);
+    color: var(--pico-color);
+    font-weight: 700;
+    font-size: 0.9rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    border: 1px solid var(--pico-muted-border-color);
+}
+
+.chat-agent-column {
+    flex: 1;
+    min-width: 0;
+}
+
+.chat-agent-name {
+    font-size: 0.72rem;
+    margin-bottom: 0.35rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+/* ── Chat activity entries (tool calls, events) ──────────── */
+.chat-activity {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.7rem;
+    border-radius: 0.5rem;
+    font-size: 0.8rem;
+    background: var(--pico-card-background-color);
+    border: 1px solid var(--pico-muted-border-color);
+    margin-bottom: 0.35rem;
+}
+
+.chat-activity-icon {
+    font-size: 0.85rem;
+    flex-shrink: 0;
+}
+
+.chat-activity-label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chat-activity-ts {
+    font-size: 0.7rem;
+    flex-shrink: 0;
+}
+
+.chat-activity-tool .chat-activity-icon { color: #17a2b8; }
+.chat-activity-done .chat-activity-icon { color: #28a745; }
+.chat-activity-error { border-color: #dc354533; background: color-mix(in srgb, #dc3545 5%, transparent); }
+.chat-activity-error .chat-activity-icon { color: #dc3545; }
+.chat-activity-warn { border-color: #ffc10733; background: color-mix(in srgb, #ffc107 5%, transparent); }
+.chat-activity-warn .chat-activity-icon { color: #b38600; }
+
+/* ── Thinking indicator ──────────────────────────────────── */
+.chat-thinking {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.7rem;
+    font-size: 0.8rem;
+}
+
+.chat-thinking-dots {
+    display: flex;
+    gap: 3px;
+    align-items: center;
+}
+
+.chat-thinking-dots span {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--pico-muted-color);
+    animation: thinking-bounce 1.2s ease-in-out infinite;
+}
+.chat-thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+.chat-thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes thinking-bounce {
+    0%, 80%, 100% { transform: scale(0.7); opacity: 0.4; }
+    40%            { transform: scale(1.0); opacity: 1; }
+}
+
+/* ── Done / result banner ────────────────────────────────── */
+.chat-done-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    font-size: 0.85rem;
+    background: var(--pico-card-background-color);
+    border: 1px solid var(--pico-muted-border-color);
+    margin-top: 0.25rem;
+}
+
+.chat-done-icon { font-weight: 700; }
+.chat-done-error { color: #dc3545; }
+.chat-done-warn  { color: #b38600; }
+
+/* ── Reply area ──────────────────────────────────────────── */
+.chat-reply-area { margin-top: 1.5rem; }
+
+/* ── Agent message bubble ────────────────────────────────── */
+.chat-bubble-agent { max-width: 80%; }
+
+.chat-bubble-content-agent {
+    background: var(--pico-card-background-color);
+    color: var(--pico-color);
+    border: 1px solid var(--pico-muted-border-color);
+    padding: 0.75rem 1rem;
+    border-radius: 0.2rem 1rem 1rem 1rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+
+.chat-bubble-meta-left {
+    text-align: left;
+    margin-top: 0.3rem;
+    font-size: 0.72rem;
+    color: var(--pico-muted-color);
+}
+
+/* ── Session list agent label ────────────────────────────── */
+.chat-thread-agent {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--pico-primary);
+    margin-bottom: 0.15rem;
+}
+
+/* ── Audit detail page ───────────────────────────────────── */
+.audit-trace-id {
+    font-size: 0.78rem;
+    letter-spacing: 0.02em;
+    color: var(--pico-muted-color);
+    word-break: break-all;
+}
+
+.audit-trace-id-sm {
+    font-size: 0.72rem;
+    letter-spacing: 0.02em;
+    word-break: break-all;
+}
+
+.audit-uuid {
+    font-size: 0.78rem;
+    letter-spacing: 0.01em;
+    word-break: break-all;
+}
+
+.audit-event-type-heading {
+    font-size: 1rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+}
+
+.audit-detail-grid {
+    grid-template-columns: 1fr 1.4fr;
+    align-items: start;
+    margin-bottom: 1.5rem;
+}
+
+.audit-details-card header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.audit-detail-json {
+    background-color: #0d1117;
+    color: #c9d1d9;
+    font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+    font-size: 0.78rem;
+    line-height: 1.6;
+    padding: 1rem;
+    border-radius: 0.375rem;
+    border: 1px solid #30363d;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 420px;
+    overflow-y: auto;
+    margin: 0;
+}
+
+.audit-copy-btn { margin: 0; }
+
+.audit-entry-label {
+    margin-bottom: 0.5rem;
+    font-size: 0.82rem;
+}
+
+.audit-detail-entry + .audit-detail-entry {
+    margin-top: 2rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--pico-muted-border-color);
+}
+
+@media (max-width: 900px) {
+    .audit-detail-grid {
+        grid-template-columns: 1fr;
+    }
+}

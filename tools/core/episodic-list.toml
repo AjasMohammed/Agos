@@ -1,0 +1,35 @@
+[manifest]
+name        = "episodic-list"
+version     = "1.0.0"
+description = "List recent episodic memory entries for the current task in chronological order"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "EpisodicListIntent"
+output = "EpisodicListResult"
+
+[input_schema]
+type = "object"
+
+[input_schema.properties.limit]
+type = "integer"
+default = 20
+minimum = 1
+maximum = 200
+description = "Maximum entries to return"
+
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 2000
+syscalls      = []

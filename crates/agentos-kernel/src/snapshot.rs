@@ -420,6 +420,7 @@ mod tests {
             reference_count: 0,
             partition: ContextPartition::Active,
             category: ContextCategory::History,
+            is_summary: false,
         }];
 
         // Take snapshot

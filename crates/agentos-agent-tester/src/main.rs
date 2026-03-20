@@ -56,21 +56,18 @@ async fn main() -> anyhow::Result<()> {
 
     // A turn budget of zero would produce zero-turn Incomplete results with no signal.
     if args.max_turns == 0 {
-        return Err(anyhow::anyhow!(
-            "--max-turns must be at least 1 (got 0)"
-        ));
+        return Err(anyhow::anyhow!("--max-turns must be at least 1 (got 0)"));
     }
 
     // At least one run is required to produce meaningful consensus data.
     if args.runs == 0 {
-        return Err(anyhow::anyhow!(
-            "--runs must be at least 1 (got 0)"
-        ));
+        return Err(anyhow::anyhow!("--runs must be at least 1 (got 0)"));
     }
 
     tracing::info!(provider = %args.provider, model = %args.model, "Starting agent-tester");
 
-    let mut harness = TestHarness::boot(&args.provider, &args.model, args.api_key.as_deref()).await?;
+    let mut harness =
+        TestHarness::boot(&args.provider, &args.model, args.api_key.as_deref()).await?;
 
     let selected = if let Some(filter) = &args.scenarios {
         let names: Vec<String> = filter.split(',').map(|s| s.trim().to_string()).collect();

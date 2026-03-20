@@ -55,6 +55,7 @@ impl Kernel {
             history: Vec::new(),
             parent_task: None,
             reasoning_hints: None,
+            max_iterations: None,
             trigger_source: None,
         };
 

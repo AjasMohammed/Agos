@@ -113,6 +113,7 @@ impl AgentTool for MemorySearch {
                 let mut rows = self
                     .episodic
                     .recall_global(query, agent_filter.as_ref(), since, top_k)
+                    .await
                     .map_err(|e| AgentOSError::ToolExecutionFailed {
                         tool_name: "memory-search".into(),
                         reason: format!("Episodic global search failed: {}", e),
@@ -126,6 +127,7 @@ impl AgentTool for MemorySearch {
                 if task_id == context.task_id {
                     self.episodic
                         .recall_task(&task_id, &context.agent_id, query, top_k)
+                        .await
                         .map_err(|e| AgentOSError::ToolExecutionFailed {
                             tool_name: "memory-search".into(),
                             reason: format!("Episodic task search failed: {}", e),
@@ -143,6 +145,7 @@ impl AgentTool for MemorySearch {
 
                     self.episodic
                         .recall_task_with_permission(&task_id, query, top_k)
+                        .await
                         .map_err(|e| AgentOSError::ToolExecutionFailed {
                             tool_name: "memory-search".into(),
                             reason: format!("Episodic cross-task search failed: {}", e),
@@ -151,6 +154,7 @@ impl AgentTool for MemorySearch {
             } else {
                 self.episodic
                     .recall_task(&context.task_id, &context.agent_id, query, top_k)
+                    .await
                     .map_err(|e| AgentOSError::ToolExecutionFailed {
                         tool_name: "memory-search".into(),
                         reason: format!("Episodic task search failed: {}", e),
@@ -161,6 +165,7 @@ impl AgentTool for MemorySearch {
                 .into_iter()
                 .map(|ep| {
                     serde_json::json!({
+                        "id": ep.id,
                         "task_id": ep.task_id.to_string(),
                         "agent_id": ep.agent_id.to_string(),
                         "content": ep.content,
@@ -207,6 +212,7 @@ impl AgentTool for MemorySearch {
                 .into_iter()
                 .map(|r| {
                     serde_json::json!({
+                        "id": r.entry.id,
                         "key": r.entry.key,
                         "content": r.chunk.content,
                         "full_content": r.entry.full_content,

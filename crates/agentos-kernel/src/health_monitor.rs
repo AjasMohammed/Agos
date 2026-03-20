@@ -93,6 +93,8 @@ fn hal_read_permissions() -> PermissionSet {
             read: true,
             write: false,
             execute: false,
+            query: false,
+            observe: false,
             expires_at: None,
         });
     }

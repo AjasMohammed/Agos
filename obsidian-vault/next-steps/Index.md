@@ -122,6 +122,12 @@ graph TD
 | 40 | [[24-Production Stability Fixes\|Production stability fixes: memory retrieval resilience, health monitor consolidation, graceful shutdown, agent identity persistence, boot pre-flight, restart hardening, systemd deployment (7 phases, 9 subtasks)]] | ~8d | **Critical** |
 | 41 | [[25-WebUI Redesign\|WebUI redesign: sidebar layout, enhanced dashboard, task management, audit viewer, SSE real-time updates, UX polish (6 phases)]] | ~12d | **High** |
 | 42 | [[26-LLM Agent Testing\|LLM agent testing harness: real LLM drives AgentOS, 10 scenarios, structured feedback, markdown/JSON reports (5 phases, 5 subtasks)]] | ~12d | **High** |
+| 43 | [[27-Agent Manual Tool\|Agent manual tool: queryable OS documentation for agents (9 sections, 5 subtasks)]] | ~2d | **Complete** |
+| 44 | [[28-Chat Interface\|Chat interface: tool call execution fix, SSE streaming, inline tool activity, task assignment, agent selection (7 phases, 7 subtasks)]] | ~10d | **High** |
+| 45 | [[29-File Operations Expansion\|File operations expansion: file-editor, file-glob, file-grep, file-delete, file-move (5 tools)]] | ~3d | **High** |
+| 46 | [[30-Network Tool Hardening\|Network tool hardening: redirect control, SSE streaming, network-monitor manifest, multipart upload, download-to-file (5 subtasks)]] | ~4h | **Complete** |
+| 47 | [[30-Pure Agentic Workflow Compatibility\|Pure agentic workflow: 9 hidden manifests, 7 new tools (think, datetime, web-fetch, file-diff, agent-list, task-status, task-list), 3 new agent-manual sections (7 subtasks)]] | ~5d | **Complete** |
+| 48 | [[31-Agentic Readiness Fixes\|Agentic readiness fixes: 25 subtasks across 5 phases — autonomy (iterations, parallel tools, schemas, OpenAI), reliability (persistence, async mutex, output limits), security (pubkey, pipeline injection, vault rotation, audit chain), ergonomics (types, events, introspection), polish (scanner, workspace, backoff, cancellation)]] | ~6w | **Critical** |
 
 ---
 

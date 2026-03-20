@@ -1,0 +1,43 @@
+[manifest]
+name        = "task-delegate"
+version     = "1.0.0"
+description = "Delegate a sub-task to a named agent and return immediately (non-blocking). Use task-status to monitor completion."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["agent.message:x"]
+
+[capabilities_provided]
+outputs = ["status"]
+
+[intent_schema]
+input  = "TaskDelegateIntent"
+output = "DelegateResult"
+
+[input_schema]
+type = "object"
+required = ["agent", "task"]
+
+[input_schema.properties.agent]
+type = "string"
+description = "Target agent name"
+
+[input_schema.properties.task]
+type = "string"
+description = "Sub-task prompt for the target agent"
+
+[input_schema.properties.priority]
+type = "integer"
+default = 5
+minimum = 0
+maximum = 255
+description = "Delegated task priority"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

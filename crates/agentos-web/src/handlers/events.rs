@@ -31,7 +31,12 @@ pub async fn dashboard_stream(
                     let total_task_count = tasks.len();
                     let active_task_count = tasks
                         .iter()
-                        .filter(|t| matches!(t.state, TaskState::Running | TaskState::Waiting))
+                        .filter(|t| {
+                            matches!(
+                                t.state,
+                                TaskState::Running | TaskState::Waiting | TaskState::Suspended
+                            )
+                        })
                         .count();
                     let bg_running = kernel.background_pool.list_running().await.len();
                     let uptime_secs = chrono::Utc::now()

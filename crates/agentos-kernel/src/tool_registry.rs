@@ -1,7 +1,7 @@
 use agentos_tools::loader::{load_all_manifests, LoadedManifest};
 use agentos_tools::signing::{verify_manifest_with_crl, RevocationList};
 use agentos_types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tokio::sync::mpsc;
 
@@ -35,6 +35,86 @@ pub struct ToolRegistry {
     crl: RevocationList,
     /// Optional channel for notifying the kernel of tool lifecycle changes.
     lifecycle_sender: Option<mpsc::Sender<ToolLifecycleEvent>>,
+}
+
+fn schema_type_for_prompt(field_schema: &serde_json::Value) -> String {
+    if let Some(type_value) = field_schema.get("type") {
+        if let Some(type_name) = type_value.as_str() {
+            return type_name.to_string();
+        }
+        if let Some(type_arr) = type_value.as_array() {
+            let mut names: Vec<String> = type_arr
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            names.sort();
+            names.dedup();
+            if !names.is_empty() {
+                return names.join("|");
+            }
+        }
+    }
+    if field_schema.get("enum").is_some() {
+        return "enum".to_string();
+    }
+    if field_schema.get("oneOf").is_some() {
+        return "oneOf".to_string();
+    }
+    if field_schema.get("anyOf").is_some() {
+        return "anyOf".to_string();
+    }
+    "any".to_string()
+}
+
+fn compact_input_schema(schema: Option<&serde_json::Value>) -> Option<String> {
+    let schema = schema?;
+    let obj = schema.as_object()?;
+
+    let required: HashSet<String> = obj
+        .get("required")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(properties) = obj.get("properties").and_then(|v| v.as_object()) {
+        let mut names: Vec<&String> = properties.keys().collect();
+        names.sort();
+
+        for name in names.iter().take(8) {
+            if let Some(field_schema) = properties.get(*name) {
+                let type_name = schema_type_for_prompt(field_schema);
+                let opt = if required.contains(name.as_str()) {
+                    ""
+                } else {
+                    "?"
+                };
+                parts.push(format!("{}{}:{}", name, opt, type_name));
+            }
+        }
+        if properties.len() > 8 {
+            parts.push(format!("+{} more", properties.len() - 8));
+        }
+    }
+
+    if parts.is_empty() {
+        if let Some(required_arr) = obj.get("required").and_then(|v| v.as_array()) {
+            if !required_arr.is_empty() {
+                let required_names: Vec<String> = required_arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect();
+                return Some(format!("required {}", required_names.join(",")));
+            }
+        }
+        return Some("object".to_string());
+    }
+
+    Some(format!("{{{}}}", parts.join(", ")))
 }
 
 impl ToolRegistry {
@@ -169,19 +249,86 @@ impl ToolRegistry {
     }
 
     /// Get the list of all tools formatted for the system prompt.
+    ///
+    /// Each tool is rendered as a multi-line block:
+    /// ```text
+    /// ## tool-name
+    /// Description text
+    /// Permissions: perm1, perm2
+    /// Input: {field:type, optional?:type}
+    /// ```
+    /// Blocks are separated by blank lines. Tools without an input schema show a
+    /// fallback directing the agent to `agent-manual tool-detail`.
     pub fn tools_for_prompt(&self) -> String {
-        let mut lines = Vec::new();
-        for tool in self.tools.values() {
-            lines.push(format!(
-                "- {} : {}",
-                tool.manifest.manifest.name, tool.manifest.manifest.description
-            ));
+        let mut sorted_tools: Vec<&RegisteredTool> = self.tools.values().collect();
+        sorted_tools.sort_by(|a, b| a.manifest.manifest.name.cmp(&b.manifest.manifest.name));
+
+        if sorted_tools.is_empty() {
+            return "No tools available.".to_string();
         }
-        if lines.is_empty() {
-            "No tools available.".to_string()
-        } else {
-            lines.join("\n")
+
+        let mut sections: Vec<String> = Vec::new();
+        for tool in sorted_tools {
+            let mut block = Vec::new();
+            block.push(format!("## {}", tool.manifest.manifest.name));
+            block.push(tool.manifest.manifest.description.clone());
+
+            let perms = &tool.manifest.capabilities_required.permissions;
+            if !perms.is_empty() {
+                block.push(format!("Permissions: {}", perms.join(", ")));
+            }
+
+            let input_line = match compact_input_schema(tool.manifest.input_schema.as_ref()) {
+                Some(schema_summary) => format!("Input: {}", schema_summary),
+                None => "Input: (see agent-manual tool-detail)".to_string(),
+            };
+            block.push(input_line);
+
+            sections.push(block.join("\n"));
         }
+        sections.join("\n\n")
+    }
+
+    /// Return all tools whose required permissions include the given capability prefix.
+    ///
+    /// Matches against the resource class hierarchy: the prefix must end at a `.` or `:`
+    /// boundary (or match the entire permission string exactly). This ensures `"fs"` matches
+    /// `"fs.user_data:r"` but not a hypothetical `"fsstats:x"`.
+    ///
+    /// Comparison is case-insensitive. Results are sorted by tool name. An empty prefix
+    /// returns all tools that have at least one permission.
+    ///
+    /// This is useful for agents asking "which tools can write files?" or
+    /// "which tools can access the network?".
+    pub fn search_by_capability(&self, capability_prefix: &str) -> Vec<&RegisteredTool> {
+        let prefix_lower = capability_prefix.to_lowercase();
+        let mut tools: Vec<&RegisteredTool> = self
+            .tools
+            .values()
+            .filter(|t| {
+                t.manifest
+                    .capabilities_required
+                    .permissions
+                    .iter()
+                    .any(|p| {
+                        let p_lower = p.to_lowercase();
+                        if p_lower == prefix_lower {
+                            return true;
+                        }
+                        if p_lower.starts_with(&prefix_lower) {
+                            // Require a segment boundary after the prefix
+                            matches!(
+                                p_lower.as_bytes().get(prefix_lower.len()),
+                                Some(b'.' | b':')
+                            )
+                        } else {
+                            false
+                        }
+                    })
+            })
+            .collect();
+        tools.sort_by(|a, b| a.manifest.manifest.name.cmp(&b.manifest.manifest.name));
+        tools
     }
 }
 
@@ -374,5 +521,208 @@ mod tests {
             }
             _ => panic!("Expected ChecksumMismatch variant, got {:?}", event),
         }
+    }
+
+    #[test]
+    fn tools_for_prompt_includes_compact_schema_summary() {
+        let mut registry = ToolRegistry::new();
+        let mut manifest = make_core_manifest("file-reader");
+        manifest.manifest.description = "Read files".into();
+        manifest.capabilities_required.permissions = vec!["fs.user_data:r".to_string()];
+        manifest.input_schema = Some(serde_json::json!({
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+                "path": { "type": "string" },
+                "offset": { "type": "integer" }
+            }
+        }));
+        registry.register(manifest).unwrap();
+
+        let prompt = registry.tools_for_prompt();
+        assert!(prompt.contains("## file-reader"), "should have ## heading");
+        assert!(prompt.contains("Read files"), "should have description");
+        assert!(
+            prompt.contains("Permissions: fs.user_data:r"),
+            "should have permissions"
+        );
+        assert!(
+            prompt.contains("Input: {offset?:integer, path:string}"),
+            "should have compact schema"
+        );
+    }
+
+    #[test]
+    fn tools_for_prompt_shows_fallback_when_no_schema() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(make_core_manifest("no-schema-tool"))
+            .unwrap();
+
+        let prompt = registry.tools_for_prompt();
+        assert!(
+            prompt.contains("Input: (see agent-manual tool-detail)"),
+            "should fall back when schema is absent"
+        );
+    }
+
+    #[test]
+    fn tools_for_prompt_omits_permissions_line_when_empty() {
+        let mut registry = ToolRegistry::new();
+        // make_core_manifest has empty permissions by default
+        let manifest = make_core_manifest("no-perms-tool");
+        assert!(manifest.capabilities_required.permissions.is_empty());
+        registry.register(manifest).unwrap();
+
+        let prompt = registry.tools_for_prompt();
+        assert!(
+            !prompt.contains("Permissions:"),
+            "should not emit Permissions line when empty"
+        );
+    }
+
+    #[test]
+    fn tools_for_prompt_is_sorted_by_tool_name() {
+        let mut registry = ToolRegistry::new();
+        registry.register(make_core_manifest("zeta")).unwrap();
+        registry.register(make_core_manifest("alpha")).unwrap();
+
+        let prompt = registry.tools_for_prompt();
+        let alpha_pos = prompt.find("## alpha").expect("alpha missing");
+        let zeta_pos = prompt.find("## zeta").expect("zeta missing");
+        assert!(alpha_pos < zeta_pos, "alpha should appear before zeta");
+    }
+
+    #[test]
+    fn tools_for_prompt_returns_no_tools_message_when_empty() {
+        let registry = ToolRegistry::new();
+        assert_eq!(registry.tools_for_prompt(), "No tools available.");
+    }
+
+    #[test]
+    fn search_by_capability_returns_matching_tools() {
+        let mut registry = ToolRegistry::new();
+
+        let mut fs_tool = make_core_manifest("file-reader");
+        fs_tool.capabilities_required.permissions = vec!["fs.user_data:r".to_string()];
+        registry.register(fs_tool).unwrap();
+
+        let mut mem_tool = make_core_manifest("memory-search");
+        mem_tool.capabilities_required.permissions = vec!["memory.semantic:r".to_string()];
+        registry.register(mem_tool).unwrap();
+
+        let mut net_tool = make_core_manifest("http-client");
+        net_tool.capabilities_required.permissions = vec!["network.outbound:x".to_string()];
+        registry.register(net_tool).unwrap();
+
+        let fs_results = registry.search_by_capability("fs");
+        assert_eq!(fs_results.len(), 1);
+        assert_eq!(fs_results[0].manifest.manifest.name, "file-reader");
+
+        let mem_results = registry.search_by_capability("memory");
+        assert_eq!(mem_results.len(), 1);
+        assert_eq!(mem_results[0].manifest.manifest.name, "memory-search");
+
+        let none_results = registry.search_by_capability("vault");
+        assert!(none_results.is_empty());
+    }
+
+    #[test]
+    fn search_by_capability_is_case_insensitive() {
+        let mut registry = ToolRegistry::new();
+        let mut tool = make_core_manifest("fs-tool");
+        tool.capabilities_required.permissions = vec!["fs.user_data:r".to_string()];
+        registry.register(tool).unwrap();
+
+        assert_eq!(registry.search_by_capability("FS").len(), 1);
+        assert_eq!(registry.search_by_capability("Fs").len(), 1);
+        assert_eq!(registry.search_by_capability("fs").len(), 1);
+    }
+
+    #[test]
+    fn search_by_capability_results_sorted_by_name() {
+        let mut registry = ToolRegistry::new();
+
+        let mut tool_z = make_core_manifest("zeta-reader");
+        tool_z.capabilities_required.permissions = vec!["fs.user_data:r".to_string()];
+        registry.register(tool_z).unwrap();
+
+        let mut tool_a = make_core_manifest("alpha-reader");
+        tool_a.capabilities_required.permissions = vec!["fs.user_data:r".to_string()];
+        registry.register(tool_a).unwrap();
+
+        let results = registry.search_by_capability("fs");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].manifest.manifest.name, "alpha-reader");
+        assert_eq!(results[1].manifest.manifest.name, "zeta-reader");
+    }
+
+    #[test]
+    fn search_by_capability_boundary_aware() {
+        let mut registry = ToolRegistry::new();
+        let mut tool = make_core_manifest("mem-tool");
+        tool.capabilities_required.permissions = vec!["memory.semantic:r".to_string()];
+        registry.register(tool).unwrap();
+
+        // "memory" matches at the `.` boundary
+        assert_eq!(registry.search_by_capability("memory").len(), 1);
+        // "mem" is a raw prefix of "memory.semantic:r" but does not end at `.` or `:`,
+        // so boundary-aware matching rejects it
+        assert_eq!(registry.search_by_capability("mem").len(), 0);
+        // unrelated prefix never matches
+        assert_eq!(registry.search_by_capability("net").len(), 0);
+        // exact full match also works
+        assert_eq!(registry.search_by_capability("memory.semantic:r").len(), 1);
+    }
+
+    #[test]
+    fn search_by_capability_does_not_match_partial_segment() {
+        let mut registry = ToolRegistry::new();
+        let mut tool = make_core_manifest("fsstats-tool");
+        // permission starts with "fs" but the segment is "fsstats", not "fs"
+        tool.capabilities_required.permissions = vec!["fsstats.read:r".to_string()];
+        registry.register(tool).unwrap();
+
+        // "fs" must not match "fsstats.read:r" because "s" follows, not "." or ":"
+        assert_eq!(registry.search_by_capability("fs").len(), 0);
+        // The full first segment matches
+        assert_eq!(registry.search_by_capability("fsstats").len(), 1);
+    }
+
+    #[test]
+    fn search_by_capability_multi_permission_tool() {
+        let mut registry = ToolRegistry::new();
+        let mut tool = make_core_manifest("hybrid-tool");
+        tool.capabilities_required.permissions = vec![
+            "fs.user_data:r".to_string(),
+            "memory.semantic:w".to_string(),
+        ];
+        registry.register(tool).unwrap();
+
+        // Tool appears in results for both capability prefixes
+        let fs_results = registry.search_by_capability("fs");
+        assert_eq!(fs_results.len(), 1);
+        assert_eq!(fs_results[0].manifest.manifest.name, "hybrid-tool");
+
+        let mem_results = registry.search_by_capability("memory");
+        assert_eq!(mem_results.len(), 1);
+        assert_eq!(mem_results[0].manifest.manifest.name, "hybrid-tool");
+    }
+
+    #[test]
+    fn tools_for_prompt_multiple_permissions_joined() {
+        let mut registry = ToolRegistry::new();
+        let mut manifest = make_core_manifest("multi-perm-tool");
+        manifest.capabilities_required.permissions = vec![
+            "fs.user_data:r".to_string(),
+            "memory.semantic:w".to_string(),
+        ];
+        registry.register(manifest).unwrap();
+
+        let prompt = registry.tools_for_prompt();
+        assert!(
+            prompt.contains("Permissions: fs.user_data:r, memory.semantic:w"),
+            "multiple permissions should be joined with ', '"
+        );
     }
 }

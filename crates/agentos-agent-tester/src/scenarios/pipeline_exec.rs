@@ -38,8 +38,8 @@ When done, include "PIPELINE_COMPLETE" in your response."#
         initial_user_message: "Begin the pipeline test. Note that pipeline operations use the kernel API, not tools. Describe what you would do and provide feedback on the pipeline system design.".to_string(),
         max_turns,
         required_permissions: vec![
-            "fs.user_data".to_string(),
-            "pipeline.execute".to_string(),
+            "fs.user_data:rw".to_string(),
+            "pipeline.execute:x".to_string(),
         ],
         goal_keywords: vec!["PIPELINE_COMPLETE".to_string()],
     }

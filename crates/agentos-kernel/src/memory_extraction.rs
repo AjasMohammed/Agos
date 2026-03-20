@@ -315,7 +315,7 @@ impl MemoryExtractionEngine {
                     existing_id,
                     new_fact,
                 } => {
-                    self.semantic_store.delete(&existing_id)?;
+                    self.semantic_store.delete(&existing_id).await?;
                     let tag_refs = new_fact.tags.iter().map(|s| s.as_str()).collect::<Vec<_>>();
                     self.semantic_store
                         .write(

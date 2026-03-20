@@ -12,6 +12,7 @@ use agentos_types::*;
 use agentos_vault::ZeroizingString;
 use secrecy::SecretString;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use crate::auto_feedback;
 use crate::feedback::{parse_feedback, FeedbackCollector};
@@ -49,6 +50,10 @@ fn shared_model_cache_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-model-cache")
 }
 
+fn project_core_tools_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/core")
+}
+
 fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
     KernelConfig {
         kernel: KernelSettings {
@@ -56,8 +61,17 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             default_task_timeout_secs: 60,
             context_window_max_entries: CTX_MAX_ENTRIES,
             context_window_token_budget: 0,
+            state_db_path: temp_dir
+                .path()
+                .join("kernel_state.db")
+                .to_string_lossy()
+                .to_string(),
+            task_limits: Default::default(),
+            tool_calls: Default::default(),
+            tool_execution: Default::default(),
             health_port: 0,
             per_agent_rate_limit: 0,
+            events: Default::default(),
         },
         routing: Default::default(),
         secrets: SecretsSettings {
@@ -74,6 +88,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
                 .to_string_lossy()
                 .to_string(),
             max_audit_entries: 0,
+            verify_last_n_entries: 0,
         },
         tools: ToolsSettings {
             core_tools_dir: temp_dir
@@ -88,6 +103,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
                 .to_string(),
             data_dir: temp_dir.path().join("data").to_string_lossy().to_string(),
             crl_path: None,
+            workspace: Default::default(),
         },
         bus: BusSettings {
             socket_path: temp_dir
@@ -201,6 +217,7 @@ fn push_assistant_response(
         reference_count: 0,
         partition: ContextPartition::Active,
         category: ContextCategory::History,
+        is_summary: false,
     });
     goal_met
 }
@@ -222,6 +239,22 @@ impl TestHarness {
         tokio::fs::create_dir_all(temp_dir.path().join("vault")).await?;
         tokio::fs::create_dir_all(temp_dir.path().join("tools/core")).await?;
         tokio::fs::create_dir_all(temp_dir.path().join("tools/user")).await?;
+
+        // Copy real tool manifests from the project's tools/core directory into the
+        // temp dir so the kernel has actual tools to register during tests.
+        let src_tools = project_core_tools_dir();
+        if src_tools.is_dir() {
+            let dst_tools = temp_dir.path().join("tools/core");
+            let mut entries = tokio::fs::read_dir(&src_tools).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                    let file_name = entry.file_name();
+                    tokio::fs::copy(&path, dst_tools.join(&file_name)).await?;
+                }
+            }
+        }
+
         // Ensure the shared model cache directory exists before kernel boot.
         tokio::fs::create_dir_all(shared_model_cache_dir()).await?;
 
@@ -369,7 +402,8 @@ impl TestHarness {
         let mut feedback_count: usize = 0;
         let mut turn_metrics: Vec<TurnMetrics> = Vec::new();
 
-        let mut ctx = ContextWindow::with_strategy(CTX_MAX_ENTRIES, OverflowStrategy::SemanticEviction);
+        let mut ctx =
+            ContextWindow::with_strategy(CTX_MAX_ENTRIES, OverflowStrategy::SemanticEviction);
 
         ctx.push(ContextEntry {
             role: ContextRole::System,
@@ -381,6 +415,7 @@ impl TestHarness {
             reference_count: 0,
             partition: ContextPartition::Active,
             category: ContextCategory::System,
+            is_summary: false,
         });
 
         ctx.push(ContextEntry {
@@ -393,6 +428,7 @@ impl TestHarness {
             reference_count: 0,
             partition: ContextPartition::Active,
             category: ContextCategory::System,
+            is_summary: false,
         });
 
         let tool_descriptions = self.get_tool_descriptions().await;
@@ -406,6 +442,7 @@ impl TestHarness {
             reference_count: 0,
             partition: ContextPartition::Active,
             category: ContextCategory::Tools,
+            is_summary: false,
         });
 
         ctx.push(ContextEntry {
@@ -418,6 +455,7 @@ impl TestHarness {
             reference_count: 0,
             partition: ContextPartition::Active,
             category: ContextCategory::Task,
+            is_summary: false,
         });
 
         let failed_perms = self.grant_permissions(&scenario.required_permissions).await;
@@ -527,6 +565,7 @@ impl TestHarness {
                     reference_count: 0,
                     partition: ContextPartition::Active,
                     category: ContextCategory::History,
+                    is_summary: false,
                 });
 
                 if goal_met {
@@ -565,6 +604,7 @@ impl TestHarness {
                     reference_count: 0,
                     partition: ContextPartition::Active,
                     category: ContextCategory::Task,
+                    is_summary: false,
                 });
             }
         }
@@ -649,6 +689,10 @@ Your agent name is: {}"#,
             vault: None,
             hal: None,
             file_lock_registry: None,
+            agent_registry: None,
+            task_registry: None,
+            workspace_paths: vec![],
+            cancellation_token: CancellationToken::new(),
         };
 
         self.kernel

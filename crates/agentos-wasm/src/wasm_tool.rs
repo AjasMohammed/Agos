@@ -268,5 +268,11 @@ fn parse_permission(perm: &str) -> Vec<(String, PermissionOp)> {
     if ops.contains('x') {
         result.push((resource.clone(), PermissionOp::Execute));
     }
+    if ops.contains('q') {
+        result.push((resource.clone(), PermissionOp::Query));
+    }
+    if ops.contains('o') {
+        result.push((resource.clone(), PermissionOp::Observe));
+    }
     result
 }

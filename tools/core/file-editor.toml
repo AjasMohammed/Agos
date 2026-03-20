@@ -1,0 +1,49 @@
+[manifest]
+name        = "file-editor"
+version     = "1.0.0"
+description = "Applies exact string replacements to a file within data_dir. Acquires an exclusive write lock for the full read-modify-write cycle. Each edit must match exactly once — errors if old_text is not found or is ambiguous."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["fs.user_data:w"]
+
+[capabilities_provided]
+outputs = ["status"]
+
+[intent_schema]
+input  = "FileEditIntent"
+output = "FileEditResult"
+
+[input_schema]
+type = "object"
+required = ["path", "edits"]
+
+[input_schema.properties.path]
+type = "string"
+description = "Relative file path under data directory"
+
+[input_schema.properties.edits]
+type = "array"
+minItems = 1
+description = "Ordered text replacement operations"
+
+[input_schema.properties.edits.items]
+type = "object"
+required = ["old_text", "new_text"]
+
+[input_schema.properties.edits.items.properties.old_text]
+type = "string"
+description = "Unique text to replace"
+
+[input_schema.properties.edits.items.properties.new_text]
+type = "string"
+description = "Replacement text"
+
+[sandbox]
+network       = false
+fs_write      = true
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 5000
+syscalls      = []

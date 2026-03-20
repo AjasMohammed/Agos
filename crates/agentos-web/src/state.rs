@@ -1,3 +1,4 @@
+use crate::chat_store::ChatStore;
 use agentos_kernel::Kernel;
 use dashmap::DashMap;
 use minijinja::Environment;
@@ -19,4 +20,6 @@ pub struct AppState {
     /// Pre-canonicalized directories from which tool manifest files may be loaded.
     /// Paths are resolved at startup so handler comparisons are O(1) in-memory.
     pub allowed_tool_dirs: Arc<Vec<PathBuf>>,
+    /// Persistent chat session store (separate from the task scheduler).
+    pub chat_store: Arc<ChatStore>,
 }

@@ -1,0 +1,33 @@
+[manifest]
+name        = "task-status"
+version     = "1.0.0"
+description = "Query the status and timestamps of a task by ID. Returns 'found: false' if the task does not exist. Use after task-delegate to check if a delegated task has completed."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["task.query:r"]
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "TaskStatusQuery"
+output = "TaskStatusResult"
+
+[input_schema]
+type = "object"
+required = ["task_id"]
+
+[input_schema.properties.task_id]
+type = "string"
+format = "uuid"
+description = "Task UUID"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

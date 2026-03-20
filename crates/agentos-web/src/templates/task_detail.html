@@ -51,24 +51,53 @@
 </div>
 {% endif %}
 
-<div class="log-section-header">
-    <h2>Live Log Stream <span id="stream-status" class="badge badge-running">connecting…</span></h2>
-    <div class="log-toolbar">
-        <label class="autoscroll-label">
-            <input type="checkbox" id="autoscroll" checked> Auto-scroll
-        </label>
-        <button class="outline secondary btn-sm" onclick="clearLogs()">Clear</button>
+<div class="task-stream-grid">
+    <div class="task-log-col">
+        <div class="log-section-header">
+            <h2>Live Log Stream <span id="stream-status" class="badge badge-running">connecting…</span></h2>
+            <div class="log-toolbar">
+                <label class="autoscroll-label">
+                    <input type="checkbox" id="autoscroll" checked> Auto-scroll
+                </label>
+                <button class="outline secondary btn-sm" onclick="clearLogs()">Clear</button>
+            </div>
+        </div>
+        <div id="log-terminal" class="log-terminal" role="log" aria-live="polite" aria-label="Task log output"></div>
+    </div>
+
+    <div class="findings-panel" id="findings-panel">
+        <div class="findings-header">
+            <h2>Findings <span id="findings-count" class="badge badge-info">0</span></h2>
+            <button class="outline secondary btn-sm" onclick="clearFindings()">Clear</button>
+        </div>
+        <div id="findings-list" class="findings-list" role="log" aria-live="polite" aria-label="Agent findings">
+            <p class="findings-empty muted" id="findings-empty">No findings yet — findings emitted by the agent will appear here in real-time.</p>
+        </div>
     </div>
 </div>
-<div id="log-terminal" class="log-terminal" role="log" aria-live="polite" aria-label="Task log output"></div>
 
 <script>
 (function () {
     var terminal = document.getElementById('log-terminal');
     var statusBadge = document.getElementById('stream-status');
     var autoscrollCheck = document.getElementById('autoscroll');
+    var findingsList = document.getElementById('findings-list');
+    var findingsCount = document.getElementById('findings-count');
+    var findingsEmpty = document.getElementById('findings-empty');
+    var count = 0;
 
     window.clearLogs = function () { terminal.innerHTML = ''; };
+    window.clearFindings = function () {
+        findingsList.innerHTML = '';
+        count = 0;
+        findingsCount.textContent = '0';
+        var empty = document.createElement('p');
+        empty.className = 'findings-empty muted';
+        empty.id = 'findings-empty';
+        empty.textContent = 'No findings yet — findings emitted by the agent will appear here in real-time.';
+        findingsList.appendChild(empty);
+        findingsEmpty = empty;
+    };
 
     function scrollToBottom() {
         if (autoscrollCheck.checked) {
@@ -109,6 +138,60 @@
         statusBadge.className = 'badge ' + badgeClass;
     }
 
+    var SEVERITY_ICON = { error: '✕', warning: '⚠', warn: '⚠', info: 'ℹ' };
+    var CATEGORY_LABEL = { usability: 'Usability', correctness: 'Correctness', ergonomics: 'Ergonomics', security: 'Security', performance: 'Performance' };
+
+    function addFinding(f) {
+        if (findingsEmpty) {
+            findingsEmpty.remove();
+            findingsEmpty = null;
+        }
+        count++;
+        findingsCount.textContent = count;
+
+        var sev = (f.severity || 'info').toLowerCase();
+        var cat = (f.category || '').toLowerCase();
+
+        var card = document.createElement('article');
+        card.className = 'finding-card finding-' + sev;
+
+        var header = document.createElement('header');
+        header.className = 'finding-card-header';
+
+        var sevSpan = document.createElement('span');
+        sevSpan.className = 'finding-severity finding-severity-' + sev;
+        sevSpan.textContent = (SEVERITY_ICON[sev] || '·') + ' ' + sev;
+
+        var catSpan = document.createElement('span');
+        catSpan.className = 'finding-category';
+        catSpan.textContent = CATEGORY_LABEL[cat] || cat;
+
+        header.appendChild(sevSpan);
+        header.appendChild(catSpan);
+        card.appendChild(header);
+
+        var obs = document.createElement('p');
+        obs.className = 'finding-observation';
+        obs.textContent = f.observation || '';
+        card.appendChild(obs);
+
+        if (f.suggestion) {
+            var sug = document.createElement('small');
+            sug.className = 'finding-suggestion muted';
+            sug.textContent = '→ ' + f.suggestion;
+            card.appendChild(sug);
+        }
+
+        if (f.context) {
+            var ctx = document.createElement('small');
+            ctx.className = 'finding-context muted';
+            ctx.textContent = f.context;
+            card.appendChild(ctx);
+        }
+
+        findingsList.prepend(card);
+    }
+
     var src = new EventSource('/tasks/{{ task_id }}/logs/stream');
 
     src.onopen = function () {
@@ -121,6 +204,15 @@
             appendLine(lines[i]);
         }
     };
+
+    src.addEventListener('finding', function (event) {
+        try {
+            var f = JSON.parse(event.data);
+            addFinding(f);
+        } catch (e) {
+            appendLine('[finding parse error] ' + event.data);
+        }
+    });
 
     src.addEventListener('done', function () {
         setStatus('complete', 'badge-complete');

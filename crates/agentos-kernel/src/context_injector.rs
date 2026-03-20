@@ -46,6 +46,7 @@ impl Kernel {
                     reference_count: 0,
                     partition: ContextPartition::default(),
                     category: ContextCategory::Task,
+                    is_summary: false,
                 },
             )
             .await
@@ -62,6 +63,7 @@ impl Kernel {
                 metadata: None,
                 trace_id: task_trace_id,
             })
+            .await
         {
             tracing::warn!(task_id = %task.id, error = %e, "Failed to record episodic memory");
         }

@@ -116,7 +116,9 @@ impl SemanticStore {
         })
     }
 
-    /// Write a memory entry - automatically chunks and computes embeddings via `fastembed`
+    /// Write a memory entry - automatically chunks and computes embeddings via `fastembed`.
+    /// The SQLite write is offloaded to a blocking thread pool via `spawn_blocking` so it
+    /// does not block the async runtime under concurrent agent load.
     pub async fn write(
         &self,
         key: &str,
@@ -128,51 +130,58 @@ impl SemanticStore {
         let agent_id_str = agent_id.map(|id| id.as_uuid().to_string());
         let tags_str = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
         let now = Utc::now().to_rfc3339();
+        let key_owned = key.to_owned();
+        let content_owned = content.to_owned();
+        let embedder = self.embedder.clone();
+        let db = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            // Embedding is CPU-intensive; run it here on the blocking thread pool
+            // so async worker threads are not blocked by ONNX model inference.
+            let chunks = Embedder::chunk_text(&content_owned, 2000, 200);
+            let chunks_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
+            let embeddings = embedder.embed(&chunks_refs).map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to compute embedding: {}", e))
+            })?;
+            let mut conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock semantic db for writing".to_string())
+            })?;
 
-        let chunks = Embedder::chunk_text(content, 2000, 200);
-        let chunks_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
-
-        let embeddings = self.embedder.embed(&chunks_refs).map_err(|e| {
-            AgentOSError::StorageError(format!("Failed to compute embedding: {}", e))
-        })?;
-
-        let mut conn = self.conn.lock().map_err(|_| {
-            AgentOSError::StorageError("Failed to lock semantic db for writing".to_string())
-        })?;
-
-        // Use rusqlite's Transaction so the DB is automatically rolled back on any
-        // early return (including panics), rather than relying on manual ROLLBACK calls.
-        let tx = conn.transaction().map_err(|e| {
-            AgentOSError::StorageError(format!("Failed to begin transaction: {}", e))
-        })?;
-
-        tx.execute(
-            "INSERT INTO semantic_memory (id, agent_id, key, content, created_at, updated_at, tags)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![mem_id, agent_id_str, key, content, now, now, tags_str],
-        )
-        .map_err(|e| AgentOSError::StorageError(format!("Insert memory failed: {}", e)))?;
-
-        for (i, (chunk_text, embedding_vec)) in chunks.iter().zip(embeddings).enumerate() {
-            let chunk_id = Uuid::new_v4().to_string();
-            let mut blob = Vec::with_capacity(embedding_vec.len() * 4);
-            for val in embedding_vec {
-                blob.extend_from_slice(&val.to_le_bytes());
-            }
+            // Use rusqlite's Transaction so the DB is automatically rolled back on any
+            // early return (including panics), rather than relying on manual ROLLBACK calls.
+            let tx = conn.transaction().map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to begin transaction: {}", e))
+            })?;
 
             tx.execute(
-                "INSERT INTO semantic_chunks (id, memory_id, chunk_index, content, embedding)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![chunk_id, mem_id, i, chunk_text, blob],
+                "INSERT INTO semantic_memory (id, agent_id, key, content, created_at, updated_at, tags)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![mem_id, agent_id_str, key_owned, content_owned, now, now, tags_str],
             )
-            .map_err(|e| AgentOSError::StorageError(format!("Insert chunk failed: {}", e)))?;
-        }
+            .map_err(|e| AgentOSError::StorageError(format!("Insert memory failed: {}", e)))?;
 
-        tx.commit().map_err(|e| {
-            AgentOSError::StorageError(format!("Failed to commit transaction: {}", e))
-        })?;
+            for (i, (chunk_text, embedding_vec)) in chunks.iter().zip(embeddings).enumerate() {
+                let chunk_id = Uuid::new_v4().to_string();
+                let mut blob = Vec::with_capacity(embedding_vec.len() * 4);
+                for val in embedding_vec {
+                    blob.extend_from_slice(&val.to_le_bytes());
+                }
 
-        Ok(mem_id)
+                tx.execute(
+                    "INSERT INTO semantic_chunks (id, memory_id, chunk_index, content, embedding)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![chunk_id, &mem_id, i, chunk_text, blob],
+                )
+                .map_err(|e| AgentOSError::StorageError(format!("Insert chunk failed: {}", e)))?;
+            }
+
+            tx.commit().map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to commit transaction: {}", e))
+            })?;
+
+            Ok(mem_id)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Write task panicked: {}", e)))?
     }
 
     /// Maximum candidate chunks to load for cosine similarity when FTS5 pre-filter is used.
@@ -190,6 +199,8 @@ impl SemanticStore {
     ///
     /// If FTS5 finds no matches (e.g., query uses synonyms not in the text), falls back
     /// to loading the most recent chunks (bounded to RECENCY_FALLBACK_LIMIT).
+    ///
+    /// The SQLite operations are offloaded via `spawn_blocking`.
     pub async fn search(
         &self,
         query: &str,
@@ -208,217 +219,223 @@ impl SemanticStore {
             return Ok(Vec::new());
         }
 
-        let query_embedding = self
-            .embedder
-            .embed(&[query])
-            .map_err(|e| AgentOSError::StorageError(format!("Query embed error: {}", e)))?
-            .pop()
-            .ok_or_else(|| {
-                AgentOSError::StorageError("Query embedding returned empty result".to_string())
+        let agent_id_str = agent_id.map(|id| id.as_uuid().to_string());
+        let query_owned = query.to_owned();
+        let dimension = self.dimension;
+        let embedder = self.embedder.clone();
+        let db = self.conn.clone();
+
+        tokio::task::spawn_blocking(move || {
+            // Embedding is CPU-intensive; run it here on the blocking thread pool
+            // so async worker threads are not blocked by ONNX model inference.
+            let query_embedding = embedder
+                .embed(&[query_owned.as_str()])
+                .map_err(|e| AgentOSError::StorageError(format!("Query embed error: {}", e)))?
+                .pop()
+                .ok_or_else(|| {
+                    AgentOSError::StorageError("Query embedding returned empty result".to_string())
+                })?;
+
+            if query_embedding.len() != dimension {
+                return Err(AgentOSError::StorageError(format!(
+                    "Query embedding dimension mismatch: expected {}, got {}",
+                    dimension,
+                    query_embedding.len()
+                )));
+            }
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock semantic db for search".to_string())
             })?;
 
-        if query_embedding.len() != self.dimension {
-            return Err(AgentOSError::StorageError(format!(
-                "Query embedding dimension mismatch: expected {}, got {}",
-                self.dimension,
-                query_embedding.len()
-            )));
-        }
-
-        let conn = self.conn.lock().map_err(|_| {
-            AgentOSError::StorageError("Failed to lock semantic db for search".to_string())
-        })?;
-
-        let agent_id_str = agent_id.map(|id| id.as_uuid().to_string());
-
-        // Phase 1: FTS5 pre-filter — find candidate chunk rowids by text relevance
-        // Sanitize query to prevent FTS5 operator injection (*, OR, NOT, NEAR, etc.)
-        let sanitized_query = format!("\"{}\"", query.replace('"', "\"\""));
-        let fts_ranks: HashMap<i64, f32> = {
-            let mut fts_map = HashMap::new();
-            // FTS5 MATCH can fail on certain query syntax; fall back gracefully
-            if let Ok(mut fts_stmt) = conn.prepare(
-                "SELECT rowid, rank FROM semantic_fts WHERE semantic_fts MATCH ?1 ORDER BY rank LIMIT ?2",
-            ) {
-                if let Ok(rows) = fts_stmt.query_map(
-                    params![sanitized_query, Self::FTS_CANDIDATE_LIMIT as i64],
-                    |row| {
-                        let rowid: i64 = row.get(0)?;
-                        let rank: f64 = row.get(1)?;
-                        Ok((rowid, rank as f32))
-                    },
+            // Phase 1: FTS5 pre-filter — find candidate chunk rowids by text relevance
+            // Sanitize query to prevent FTS5 operator injection (*, OR, NOT, NEAR, etc.)
+            let sanitized_query = format!("\"{}\"", query_owned.replace('"', "\"\""));
+            let fts_ranks: HashMap<i64, f32> = {
+                let mut fts_map = HashMap::new();
+                // FTS5 MATCH can fail on certain query syntax; fall back gracefully
+                if let Ok(mut fts_stmt) = conn.prepare(
+                    "SELECT rowid, rank FROM semantic_fts WHERE semantic_fts MATCH ?1 ORDER BY rank LIMIT ?2",
                 ) {
-                    for row in rows.flatten() {
-                        fts_map.insert(row.0, row.1);
+                    if let Ok(rows) = fts_stmt.query_map(
+                        params![sanitized_query, SemanticStore::FTS_CANDIDATE_LIMIT as i64],
+                        |row| {
+                            let rowid: i64 = row.get(0)?;
+                            let rank: f64 = row.get(1)?;
+                            Ok((rowid, rank as f32))
+                        },
+                    ) {
+                        for row in rows.flatten() {
+                            fts_map.insert(row.0, row.1);
+                        }
                     }
                 }
-            }
-            fts_map
-        };
-
-        let use_fts = !fts_ranks.is_empty();
-
-        // Row mapper closure shared by both query paths.
-        let map_row = |row: &rusqlite::Row<'_>| {
-            let m_id: String = row.get(0)?;
-            let a_id: Option<String> = row.get(1)?;
-            let key: String = row.get(2)?;
-            let content: String = row.get(3)?;
-            let created_at: String = row.get(4)?;
-            let updated_at: String = row.get(5)?;
-            let tags_str: Option<String> = row.get(6)?;
-
-            let c_id: String = row.get(7)?;
-            let c_index: usize = row.get(8)?;
-            let c_content: String = row.get(9)?;
-            let blob: Vec<u8> = row.get(10)?;
-            let rowid: i64 = row.get(11)?;
-
-            let mut embedding = Vec::with_capacity(blob.len() / 4);
-            for bytes in blob.chunks_exact(4) {
-                embedding.push(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
-            }
-
-            let parsed_agent_id =
-                a_id.map(|s| AgentID::from_uuid(Uuid::parse_str(&s).unwrap_or_default()));
-            let parsed_created = chrono::DateTime::parse_from_rfc3339(&created_at)
-                .unwrap_or_else(|_| chrono::Local::now().into())
-                .with_timezone(&Utc);
-            let parsed_updated = chrono::DateTime::parse_from_rfc3339(&updated_at)
-                .unwrap_or_else(|_| chrono::Local::now().into())
-                .with_timezone(&Utc);
-
-            Ok((
-                MemoryEntry {
-                    id: m_id.clone(),
-                    agent_id: parsed_agent_id,
-                    key,
-                    full_content: content,
-                    created_at: parsed_created,
-                    updated_at: parsed_updated,
-                    tags: serde_json::from_str(&tags_str.unwrap_or_default()).unwrap_or_default(),
-                },
-                MemoryChunk {
-                    id: c_id,
-                    memory_id: m_id,
-                    chunk_index: c_index,
-                    content: c_content,
-                },
-                embedding,
-                rowid,
-            ))
-        };
-
-        // Phase 2: Load chunk embeddings — only for FTS candidates, or recent chunks as fallback.
-        //
-        // For the FTS path: build a parameterized IN clause using ?N placeholders so that
-        // rowid values (which come from a prior SQLite FTS5 query, not user input) follow
-        // the same parameterized-query convention as the rest of the codebase.
-        let chunk_rows: Vec<(MemoryEntry, MemoryChunk, Vec<f32>, i64)> = if use_fts {
-            let rowids: Vec<i64> = fts_ranks.keys().copied().collect();
-            // agent_id_str is bound as ?1; rowids are bound as ?2..?N
-            let placeholders = (2..=rowids.len() + 1)
-                .map(|i| format!("?{}", i))
-                .collect::<Vec<_>>()
-                .join(",");
-            let sql = format!(
-                "SELECT m.id, m.agent_id, m.key, m.content, m.created_at, m.updated_at, m.tags,
-                        c.id, c.chunk_index, c.content, c.embedding, c.rowid
-                 FROM semantic_chunks c
-                 JOIN semantic_memory m ON c.memory_id = m.id
-                 WHERE c.rowid IN ({})
-                   AND (?1 IS NULL OR m.agent_id IS NULL OR m.agent_id = ?1)",
-                placeholders
-            );
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
-            let mut bound: Vec<rusqlite::types::Value> = Vec::with_capacity(rowids.len() + 1);
-            bound.push(match &agent_id_str {
-                Some(s) => rusqlite::types::Value::Text(s.clone()),
-                None => rusqlite::types::Value::Null,
-            });
-            for id in &rowids {
-                bound.push(rusqlite::types::Value::Integer(*id));
-            }
-            let rows: Result<_, rusqlite::Error> = stmt
-                .query_map(rusqlite::params_from_iter(bound.iter()), map_row)
-                .map_err(|e| AgentOSError::StorageError(e.to_string()))?
-                .collect();
-            rows.map_err(|e| AgentOSError::StorageError(e.to_string()))?
-        } else {
-            // Fallback: load most recent chunks (bounded); LIMIT is a constant, not user input.
-            let sql = format!(
-                "SELECT m.id, m.agent_id, m.key, m.content, m.created_at, m.updated_at, m.tags,
-                        c.id, c.chunk_index, c.content, c.embedding, c.rowid
-                 FROM semantic_chunks c
-                 JOIN semantic_memory m ON c.memory_id = m.id
-                 WHERE (?1 IS NULL OR m.agent_id IS NULL OR m.agent_id = ?1)
-                 ORDER BY c.rowid DESC
-                 LIMIT {}",
-                Self::RECENCY_FALLBACK_LIMIT
-            );
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
-            let rows: Result<_, rusqlite::Error> = stmt
-                .query_map(params![agent_id_str], map_row)
-                .map_err(|e| AgentOSError::StorageError(e.to_string()))?
-                .collect();
-            rows.map_err(|e| AgentOSError::StorageError(e.to_string()))?
-        };
-
-        // Phase 3: Score chunks and apply RRF fusion
-        let mut best_by_memory: HashMap<String, RecallResult> = HashMap::new();
-        for (entry, chunk, embedding, rowid) in chunk_rows {
-            if embedding.len() != self.dimension {
-                continue;
-            }
-
-            let semantic_score = Self::cosine_similarity(&query_embedding, &embedding);
-            if semantic_score < min_score {
-                continue;
-            }
-
-            // FTS score (negative rank from FTS5 — more negative = better match)
-            let fts_score = fts_ranks.get(&rowid).map(|r| -r).unwrap_or(0.0);
-
-            // RRF: combine semantic rank and FTS rank
-            // We approximate rank positions by score ordering within this result set
-            let rrf_score = if use_fts && fts_score > 0.0 {
-                // Weighted combination: semantic similarity + FTS relevance bonus
-                let fts_normalized = fts_score / (fts_score + Self::RRF_K);
-                0.7 * semantic_score + 0.3 * fts_normalized
-            } else {
-                semantic_score
+                fts_map
             };
 
-            let candidate = RecallResult {
-                entry: entry.clone(),
-                chunk,
-                semantic_score,
-                fts_score,
-                rrf_score,
-            };
+            let use_fts = !fts_ranks.is_empty();
 
-            match best_by_memory.get_mut(&entry.id) {
-                Some(existing) if rrf_score > existing.rrf_score => *existing = candidate,
-                None => {
-                    best_by_memory.insert(entry.id, candidate);
+            // Row mapper closure shared by both query paths.
+            let map_row = |row: &rusqlite::Row<'_>| {
+                let m_id: String = row.get(0)?;
+                let a_id: Option<String> = row.get(1)?;
+                let key: String = row.get(2)?;
+                let content: String = row.get(3)?;
+                let created_at: String = row.get(4)?;
+                let updated_at: String = row.get(5)?;
+                let tags_str: Option<String> = row.get(6)?;
+
+                let c_id: String = row.get(7)?;
+                let c_index: usize = row.get(8)?;
+                let c_content: String = row.get(9)?;
+                let blob: Vec<u8> = row.get(10)?;
+                let rowid: i64 = row.get(11)?;
+
+                let mut embedding = Vec::with_capacity(blob.len() / 4);
+                for bytes in blob.chunks_exact(4) {
+                    embedding.push(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
                 }
-                _ => {}
+
+                let parsed_agent_id =
+                    a_id.map(|s| AgentID::from_uuid(Uuid::parse_str(&s).unwrap_or_default()));
+                let parsed_created = chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .unwrap_or_else(|_| chrono::Local::now().into())
+                    .with_timezone(&Utc);
+                let parsed_updated = chrono::DateTime::parse_from_rfc3339(&updated_at)
+                    .unwrap_or_else(|_| chrono::Local::now().into())
+                    .with_timezone(&Utc);
+
+                Ok((
+                    MemoryEntry {
+                        id: m_id.clone(),
+                        agent_id: parsed_agent_id,
+                        key,
+                        full_content: content,
+                        created_at: parsed_created,
+                        updated_at: parsed_updated,
+                        tags: serde_json::from_str(&tags_str.unwrap_or_default()).unwrap_or_default(),
+                    },
+                    MemoryChunk {
+                        id: c_id,
+                        memory_id: m_id,
+                        chunk_index: c_index,
+                        content: c_content,
+                    },
+                    embedding,
+                    rowid,
+                ))
+            };
+
+            // Phase 2: Load chunk embeddings — only for FTS candidates, or recent chunks as fallback.
+            //
+            // For the FTS path: build a parameterized IN clause using ?N placeholders so that
+            // rowid values (which come from a prior SQLite FTS5 query, not user input) follow
+            // the same parameterized-query convention as the rest of the codebase.
+            let chunk_rows: Vec<(MemoryEntry, MemoryChunk, Vec<f32>, i64)> = if use_fts {
+                let rowids: Vec<i64> = fts_ranks.keys().copied().collect();
+                // agent_id_str is bound as ?1; rowids are bound as ?2..?N
+                let placeholders = (2..=rowids.len() + 1)
+                    .map(|i| format!("?{}", i))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "SELECT m.id, m.agent_id, m.key, m.content, m.created_at, m.updated_at, m.tags,
+                            c.id, c.chunk_index, c.content, c.embedding, c.rowid
+                     FROM semantic_chunks c
+                     JOIN semantic_memory m ON c.memory_id = m.id
+                     WHERE c.rowid IN ({})
+                       AND (?1 IS NULL OR m.agent_id IS NULL OR m.agent_id = ?1)",
+                    placeholders
+                );
+                let mut stmt = conn
+                    .prepare(&sql)
+                    .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+                let mut bound: Vec<rusqlite::types::Value> = Vec::with_capacity(rowids.len() + 1);
+                bound.push(match &agent_id_str {
+                    Some(s) => rusqlite::types::Value::Text(s.clone()),
+                    None => rusqlite::types::Value::Null,
+                });
+                for id in &rowids {
+                    bound.push(rusqlite::types::Value::Integer(*id));
+                }
+                let rows: Result<_, rusqlite::Error> = stmt
+                    .query_map(rusqlite::params_from_iter(bound.iter()), map_row)
+                    .map_err(|e| AgentOSError::StorageError(e.to_string()))?
+                    .collect();
+                rows.map_err(|e| AgentOSError::StorageError(e.to_string()))?
+            } else {
+                // Fallback: load most recent chunks (bounded); LIMIT is a constant, not user input.
+                let sql = format!(
+                    "SELECT m.id, m.agent_id, m.key, m.content, m.created_at, m.updated_at, m.tags,
+                            c.id, c.chunk_index, c.content, c.embedding, c.rowid
+                     FROM semantic_chunks c
+                     JOIN semantic_memory m ON c.memory_id = m.id
+                     WHERE (?1 IS NULL OR m.agent_id IS NULL OR m.agent_id = ?1)
+                     ORDER BY c.rowid DESC
+                     LIMIT {}",
+                    SemanticStore::RECENCY_FALLBACK_LIMIT
+                );
+                let mut stmt = conn
+                    .prepare(&sql)
+                    .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+                let rows: Result<_, rusqlite::Error> = stmt
+                    .query_map(params![agent_id_str], map_row)
+                    .map_err(|e| AgentOSError::StorageError(e.to_string()))?
+                    .collect();
+                rows.map_err(|e| AgentOSError::StorageError(e.to_string()))?
+            };
+
+            // Phase 3: Score chunks and apply RRF fusion
+            let mut best_by_memory: HashMap<String, RecallResult> = HashMap::new();
+            for (entry, chunk, embedding, rowid) in chunk_rows {
+                if embedding.len() != dimension {
+                    continue;
+                }
+
+                let semantic_score = SemanticStore::cosine_similarity(&query_embedding, &embedding);
+                if semantic_score < min_score {
+                    continue;
+                }
+
+                // FTS score (negative rank from FTS5 — more negative = better match)
+                let fts_score = fts_ranks.get(&rowid).map(|r| -r).unwrap_or(0.0);
+
+                // RRF: combine semantic rank and FTS rank
+                let rrf_score = if use_fts && fts_score > 0.0 {
+                    let fts_normalized = fts_score / (fts_score + SemanticStore::RRF_K);
+                    0.7 * semantic_score + 0.3 * fts_normalized
+                } else {
+                    semantic_score
+                };
+
+                let candidate = RecallResult {
+                    entry: entry.clone(),
+                    chunk,
+                    semantic_score,
+                    fts_score,
+                    rrf_score,
+                };
+
+                match best_by_memory.get_mut(&entry.id) {
+                    Some(existing) if rrf_score > existing.rrf_score => *existing = candidate,
+                    None => {
+                        best_by_memory.insert(entry.id, candidate);
+                    }
+                    _ => {}
+                }
             }
-        }
 
-        let mut results: Vec<RecallResult> = best_by_memory.into_values().collect();
-        results.sort_by(|a, b| {
-            b.rrf_score
-                .partial_cmp(&a.rrf_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        results.truncate(top_k);
+            let mut results: Vec<RecallResult> = best_by_memory.into_values().collect();
+            results.sort_by(|a, b| {
+                b.rrf_score
+                    .partial_cmp(&a.rrf_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            results.truncate(top_k);
 
-        Ok(results)
+            Ok(results)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Search task panicked: {}", e)))?
     }
 
     /// Compatibility wrapper for existing callers.
@@ -431,121 +448,161 @@ impl SemanticStore {
         self.search(query, agent_id, top_k, 0.0).await
     }
 
-    /// Exact key lookup.
-    pub fn get_by_key(&self, key: &str) -> Result<Option<MemoryEntry>, AgentOSError> {
-        let conn = self.conn.lock().map_err(|_| {
-            AgentOSError::StorageError("Failed to lock semantic db for get_by_key".to_string())
-        })?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, agent_id, key, content, created_at, updated_at, tags
-                 FROM semantic_memory WHERE key = ?1",
-            )
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+    /// Exact key lookup. Offloads SQLite read to the blocking thread pool.
+    pub async fn get_by_key(&self, key: &str) -> Result<Option<MemoryEntry>, AgentOSError> {
+        let db = self.conn.clone();
+        let key_owned = key.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock semantic db for get_by_key".to_string())
+            })?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, agent_id, key, content, created_at, updated_at, tags
+                     FROM semantic_memory WHERE key = ?1",
+                )
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
 
-        let mut rows = stmt
-            .query_map(params![key], |row| {
-                let id: String = row.get(0)?;
-                let agent_id_str: Option<String> = row.get(1)?;
-                let key: String = row.get(2)?;
-                let content: String = row.get(3)?;
-                let created_at: String = row.get(4)?;
-                let updated_at: String = row.get(5)?;
-                let tags_str: Option<String> = row.get(6)?;
+            let mut rows = stmt
+                .query_map(params![key_owned], |row| {
+                    let id: String = row.get(0)?;
+                    let agent_id_str: Option<String> = row.get(1)?;
+                    let key: String = row.get(2)?;
+                    let content: String = row.get(3)?;
+                    let created_at: String = row.get(4)?;
+                    let updated_at: String = row.get(5)?;
+                    let tags_str: Option<String> = row.get(6)?;
 
-                Ok(MemoryEntry {
-                    id,
-                    agent_id: agent_id_str
-                        .map(|s| AgentID::from_uuid(Uuid::parse_str(&s).unwrap_or_default())),
-                    key,
-                    full_content: content,
-                    created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
-                        .unwrap_or_else(|_| chrono::Local::now().into())
-                        .with_timezone(&Utc),
-                    updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
-                        .unwrap_or_else(|_| chrono::Local::now().into())
-                        .with_timezone(&Utc),
-                    tags: serde_json::from_str(&tags_str.unwrap_or_default()).unwrap_or_default(),
+                    Ok(MemoryEntry {
+                        id,
+                        agent_id: agent_id_str
+                            .map(|s| AgentID::from_uuid(Uuid::parse_str(&s).unwrap_or_default())),
+                        key,
+                        full_content: content,
+                        created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                            .unwrap_or_else(|_| chrono::Local::now().into())
+                            .with_timezone(&Utc),
+                        updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
+                            .unwrap_or_else(|_| chrono::Local::now().into())
+                            .with_timezone(&Utc),
+                        tags: serde_json::from_str(&tags_str.unwrap_or_default())
+                            .unwrap_or_default(),
+                    })
                 })
-            })
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
 
-        match rows.next() {
-            Some(Ok(entry)) => Ok(Some(entry)),
-            Some(Err(e)) => Err(AgentOSError::StorageError(e.to_string())),
-            None => Ok(None),
-        }
+            match rows.next() {
+                Some(Ok(entry)) => Ok(Some(entry)),
+                Some(Err(e)) => Err(AgentOSError::StorageError(e.to_string())),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("get_by_key task panicked: {}", e)))?
     }
 
     /// Delete a memory entry and its chunks by ID (transactional).
-    pub fn delete(&self, id: &str) -> Result<(), AgentOSError> {
-        let mut conn = self.conn.lock().map_err(|_| {
-            AgentOSError::StorageError("Failed to lock semantic db for delete".to_string())
-        })?;
+    /// Offloads SQLite work to the blocking thread pool.
+    pub async fn delete(&self, id: &str) -> Result<(), AgentOSError> {
+        let db = self.conn.clone();
+        let id_owned = id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock semantic db for delete".to_string())
+            })?;
 
-        let tx = conn.transaction().map_err(|e| {
-            AgentOSError::StorageError(format!("Failed to start transaction: {}", e))
-        })?;
+            let tx = conn.transaction().map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to start transaction: {}", e))
+            })?;
 
-        tx.execute(
-            "DELETE FROM semantic_chunks WHERE memory_id = ?1",
-            params![id],
-        )
-        .map_err(|e| AgentOSError::StorageError(format!("Failed to delete chunks: {}", e)))?;
+            tx.execute(
+                "DELETE FROM semantic_chunks WHERE memory_id = ?1",
+                params![id_owned],
+            )
+            .map_err(|e| AgentOSError::StorageError(format!("Failed to delete chunks: {}", e)))?;
 
-        let deleted = tx
-            .execute("DELETE FROM semantic_memory WHERE id = ?1", params![id])
-            .map_err(|e| AgentOSError::StorageError(format!("Failed to delete memory: {}", e)))?;
+            let deleted = tx
+                .execute(
+                    "DELETE FROM semantic_memory WHERE id = ?1",
+                    params![id_owned],
+                )
+                .map_err(|e| {
+                    AgentOSError::StorageError(format!("Failed to delete memory: {}", e))
+                })?;
 
-        if deleted == 0 {
-            return Err(AgentOSError::StorageError(format!(
-                "Memory entry '{}' not found",
-                id
-            )));
-        }
+            if deleted == 0 {
+                return Err(AgentOSError::StorageError(format!(
+                    "Memory entry '{}' not found",
+                    id_owned
+                )));
+            }
 
-        tx.commit()
-            .map_err(|e| AgentOSError::StorageError(format!("Failed to commit delete: {}", e)))?;
+            tx.commit().map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to commit delete: {}", e))
+            })?;
 
-        Ok(())
+            Ok(())
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Delete task panicked: {}", e)))?
     }
 
     /// Delete memory entries older than `max_age` and return the number deleted.
     ///
     /// This is the archival sweep for Tier 3 persistent memory (Spec §11).
     /// Entries whose `updated_at` timestamp is older than `max_age` ago are removed.
-    pub fn sweep_old_entries(&self, max_age: std::time::Duration) -> Result<usize, AgentOSError> {
+    /// Offloads SQLite work to the blocking thread pool.
+    pub async fn sweep_old_entries(
+        &self,
+        max_age: std::time::Duration,
+    ) -> Result<usize, AgentOSError> {
         let chrono_age = chrono::Duration::from_std(max_age)
             .map_err(|e| AgentOSError::StorageError(format!("Invalid max_age duration: {}", e)))?;
         let cutoff = (Utc::now() - chrono_age).to_rfc3339();
+        let db = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock semantic db for sweep".to_string())
+            })?;
 
-        let conn = self.conn.lock().map_err(|_| {
-            AgentOSError::StorageError("Failed to lock semantic db for sweep".to_string())
-        })?;
+            let tx = conn.transaction().map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to begin sweep transaction: {}", e))
+            })?;
 
-        // Delete chunks first (FK cascade should handle this, but be explicit)
-        conn.execute(
-            "DELETE FROM semantic_chunks WHERE memory_id IN (SELECT id FROM semantic_memory WHERE updated_at < ?1)",
-            params![cutoff],
-        )
-        .map_err(|e| AgentOSError::StorageError(format!("Failed to sweep old chunks: {}", e)))?;
-
-        let deleted = conn
-            .execute(
-                "DELETE FROM semantic_memory WHERE updated_at < ?1",
+            // Delete chunks first (FK cascade should handle this, but be explicit)
+            tx.execute(
+                "DELETE FROM semantic_chunks WHERE memory_id IN (SELECT id FROM semantic_memory WHERE updated_at < ?1)",
                 params![cutoff],
             )
             .map_err(|e| {
-                AgentOSError::StorageError(format!("Failed to sweep old entries: {}", e))
+                AgentOSError::StorageError(format!("Failed to sweep old chunks: {}", e))
             })?;
 
-        Ok(deleted)
+            let deleted = tx
+                .execute(
+                    "DELETE FROM semantic_memory WHERE updated_at < ?1",
+                    params![cutoff],
+                )
+                .map_err(|e| {
+                    AgentOSError::StorageError(format!("Failed to sweep old entries: {}", e))
+                })?;
+
+            tx.commit().map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to commit sweep transaction: {}", e))
+            })?;
+
+            Ok(deleted)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Sweep task panicked: {}", e)))?
     }
 
     /// Export all memory entries as newline-delimited JSON (JSONL) to the given writer.
     ///
     /// Each line is a JSON object with fields: id, agent_id, key, content, created_at,
     /// updated_at, tags. This enables Tier 3 archival export (Spec §11).
+    ///
+    /// Note: This is a synchronous batch utility. Do not call from hot-path async code.
     pub fn export_jsonl<W: std::io::Write>(&self, writer: &mut W) -> Result<usize, AgentOSError> {
         let conn = self.conn.lock().map_err(|_| {
             AgentOSError::StorageError("Failed to lock semantic db for export".to_string())
@@ -649,6 +706,27 @@ impl SemanticStore {
             count += 1;
         }
         Ok(count)
+    }
+
+    /// Count entries, optionally scoped to an agent. Offloads to the blocking thread pool.
+    pub async fn count(&self, agent_id: Option<&AgentID>) -> Result<usize, AgentOSError> {
+        let db = self.conn.clone();
+        let agent_id_str = agent_id.map(|id| id.as_uuid().to_string());
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock semantic db for count".to_string())
+            })?;
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM semantic_memory WHERE (?1 IS NULL OR agent_id IS NULL OR agent_id = ?1)",
+                    params![agent_id_str],
+                    |row| row.get(0),
+                )
+                .map_err(|e| AgentOSError::StorageError(format!("Count query failed: {}", e)))?;
+            Ok(count as usize)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Count task panicked: {}", e)))?
     }
 
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {

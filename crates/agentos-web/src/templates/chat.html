@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="page-header">
+    <div>
+        <h1>Chat</h1>
+        <p class="page-meta">{{ sessions|length }} session{% if sessions|length != 1 %}s{% endif %}</p>
+    </div>
+</div>
+
+<div class="chat-layout">
+
+    <!-- Left: session list -->
+    <aside class="chat-sidebar">
+        <div class="chat-sidebar-header"><strong>Sessions</strong></div>
+        {% if sessions|length == 0 %}
+        <div class="chat-sidebar-empty muted">
+            <p>No sessions yet.</p>
+            <p>Start a conversation.</p>
+        </div>
+        {% else %}
+        <nav class="chat-thread-list">
+            {% for s in sessions %}
+            <a href="/chat/{{ s.id }}" class="chat-thread-item">
+                <div class="chat-thread-agent">{{ s.agent_name }}</div>
+                {% if s.preview %}
+                <div class="chat-thread-preview muted">{{ s.preview }}</div>
+                {% endif %}
+                <div class="chat-thread-meta">
+                    <small class="muted">{{ s.updated_at }}</small>
+                </div>
+            </a>
+            {% endfor %}
+        </nav>
+        {% endif %}
+    </aside>
+
+    <!-- Right: new conversation form -->
+    <main class="chat-compose-area">
+        <article>
+            <header>New Conversation</header>
+
+            {% if agents|length == 0 %}
+            <div class="empty-state" style="padding: 2rem 0;">
+                <div class="empty-state-icon" aria-hidden="true">○</div>
+                <p class="empty-state-title">No agents online</p>
+                <p class="empty-state-message muted">
+                    Connect an agent on the <a href="/agents">Agents</a> page before starting a chat.
+                    Once an agent is online you can talk to it directly here — responses are streamed
+                    back in real time without creating a task.
+                </p>
+            </div>
+            {% else %}
+            <form method="post" action="/chat/new" class="chat-compose-form">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+
+                <label for="agent_name">Agent
+                    <select id="agent_name" name="agent_name" required>
+                        {% for agent in agents %}
+                        <option value="{{ agent.name }}">{{ agent.name }} — {{ agent.model }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+
+                <label for="message">Message
+                    <textarea id="message" name="message" rows="5" required
+                              placeholder="Ask the agent anything…"></textarea>
+                </label>
+
+                <div style="display: flex; justify-content: flex-end;">
+                    <button type="submit">Send →</button>
+                </div>
+            </form>
+            {% endif %}
+        </article>
+    </main>
+
+</div>
+
+{% endblock %}
