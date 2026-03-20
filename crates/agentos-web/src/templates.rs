@@ -24,6 +24,15 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
     env.add_template("secrets.html", include_str!("templates/secrets.html"))?;
     env.add_template("pipelines.html", include_str!("templates/pipelines.html"))?;
     env.add_template("audit.html", include_str!("templates/audit.html"))?;
+    env.add_template(
+        "audit_detail.html",
+        include_str!("templates/audit_detail.html"),
+    )?;
+    env.add_template("chat.html", include_str!("templates/chat.html"))?;
+    env.add_template(
+        "chat_conversation.html",
+        include_str!("templates/chat_conversation.html"),
+    )?;
 
     // Partials
     env.add_template(

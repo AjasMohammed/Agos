@@ -1,7 +1,7 @@
 [manifest]
 name        = "data-parser"
 version     = "1.0.0"
-description = "Parse structured data formats (JSON, CSV, TOML, Markdown) and return structured content"
+description = "Parse and re-serialize structured data (JSON, CSV, TSV, TOML, YAML, XML, JSONL, Markdown) with dot-path queries, pagination, type coercion, and full 8↔8 cross-format conversion"
 author      = "agentos-core"
 trust_tier  = "core"
 
@@ -14,6 +14,44 @@ outputs = ["content.structured"]
 [intent_schema]
 input  = "DataParseIntent"
 output = "ParsedData"
+
+[input_schema]
+type = "object"
+required = ["data", "format"]
+
+[input_schema.properties.data]
+type = "string"
+description = "Input data string to parse"
+
+[input_schema.properties.format]
+type = "string"
+enum = ["json", "csv", "tsv", "toml", "yaml", "yml", "xml", "jsonl", "ndjson", "markdown", "md"]
+description = "Input format"
+
+[input_schema.properties.infer_types]
+type = "boolean"
+default = false
+description = "When true, infer scalar types for CSV/TSV"
+
+[input_schema.properties.query]
+type = "string"
+description = "Optional query path into parsed output"
+
+[input_schema.properties.offset]
+type = "integer"
+default = 0
+minimum = 0
+description = "Pagination offset"
+
+[input_schema.properties.limit]
+type = "integer"
+minimum = 1
+description = "Pagination limit"
+
+[input_schema.properties.output_format]
+type = "string"
+enum = ["json", "yaml", "toml", "csv", "tsv", "jsonl", "xml", "markdown"]
+description = "Optional output re-serialization format"
 
 [sandbox]
 network       = false

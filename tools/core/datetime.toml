@@ -1,0 +1,28 @@
+[manifest]
+name        = "datetime"
+version     = "1.0.0"
+description = "Return the current UTC date and time as ISO 8601, unix timestamp (seconds and milliseconds), and human-readable date/time strings."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "DatetimeQuery"
+output = "DatetimeResult"
+
+[input_schema]
+type = "object"
+description = "No input required"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 4
+max_cpu_ms    = 100
+syscalls      = []

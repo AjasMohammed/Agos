@@ -1,0 +1,33 @@
+[manifest]
+name        = "procedure-delete"
+version     = "1.0.0"
+description = "Delete a procedure from procedural memory by ID"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["memory.procedural:w"]
+
+[capabilities_provided]
+outputs = ["status"]
+
+[intent_schema]
+input  = "ProcedureDeleteIntent"
+output = "DeleteResult"
+
+[input_schema]
+type = "object"
+required = ["id"]
+
+[input_schema.properties.id]
+type = "string"
+description = "Procedure id"
+
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 2000
+syscalls      = []

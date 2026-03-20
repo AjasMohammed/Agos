@@ -39,6 +39,32 @@ pub enum IntentType {
     Unsubscribe,
 }
 
+impl IntentType {
+    /// Map an `IntentType` to the `PermissionOp` used for capability checking.
+    ///
+    /// Canonical mapping between the intent protocol and the permission model:
+    /// - `Query` / `Subscribe` / `Unsubscribe` → `PermissionOp::Query`
+    /// - `Observe`                               → `PermissionOp::Observe`
+    /// - `Delegate` / `Escalate`                → `PermissionOp::Execute`
+    /// - `Message` / `Broadcast`                → `PermissionOp::Write`
+    /// - `Read` / `Write` / `Execute`           → direct 1:1 mapping
+    pub fn to_permission_op(self) -> crate::capability::PermissionOp {
+        use crate::capability::PermissionOp;
+        match self {
+            IntentType::Read => PermissionOp::Read,
+            IntentType::Write => PermissionOp::Write,
+            IntentType::Execute => PermissionOp::Execute,
+            IntentType::Query => PermissionOp::Query,
+            IntentType::Observe => PermissionOp::Observe,
+            IntentType::Subscribe => PermissionOp::Query,
+            IntentType::Unsubscribe => PermissionOp::Query,
+            IntentType::Delegate => PermissionOp::Execute,
+            IntentType::Message => PermissionOp::Write,
+            IntentType::Broadcast => PermissionOp::Write,
+            IntentType::Escalate => PermissionOp::Execute,
+        }
+    }
+}
 /// Where the intent is directed.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum IntentTarget {
@@ -50,12 +76,31 @@ pub enum IntentTarget {
 }
 
 /// Hardware resource categories accessible via the HAL.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HardwareResource {
     System,
     Process,
     Network,
     LogReader,
+    Gpu,
+    Storage,
+    Sensor,
+}
+
+impl HardwareResource {
+    /// Returns the HAL driver name for this resource, used to dispatch to the correct driver.
+    pub fn as_driver_name(&self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Process => "process",
+            Self::Network => "network",
+            Self::LogReader => "log",
+            Self::Gpu => "gpu",
+            Self::Storage => "storage",
+            Self::Sensor => "sensor",
+        }
+    }
 }
 
 /// The payload of an intent — schema-validated data.
@@ -150,4 +195,53 @@ pub enum ActionRiskLevel {
     HardApproval,
     /// Level 4: Forbidden — kernel hard-blocks, no override possible.
     Forbidden,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::PermissionOp;
+
+    #[test]
+    fn test_to_permission_op_direct_mappings() {
+        assert_eq!(IntentType::Read.to_permission_op(), PermissionOp::Read);
+        assert_eq!(IntentType::Write.to_permission_op(), PermissionOp::Write);
+        assert_eq!(
+            IntentType::Execute.to_permission_op(),
+            PermissionOp::Execute
+        );
+        assert_eq!(IntentType::Query.to_permission_op(), PermissionOp::Query);
+        assert_eq!(
+            IntentType::Observe.to_permission_op(),
+            PermissionOp::Observe
+        );
+    }
+
+    #[test]
+    fn test_to_permission_op_derived_mappings() {
+        // Subscribe and Unsubscribe are read-only interrogation — map to Query
+        assert_eq!(
+            IntentType::Subscribe.to_permission_op(),
+            PermissionOp::Query
+        );
+        assert_eq!(
+            IntentType::Unsubscribe.to_permission_op(),
+            PermissionOp::Query
+        );
+        // Delegate and Escalate launch sub-work — map to Execute
+        assert_eq!(
+            IntentType::Delegate.to_permission_op(),
+            PermissionOp::Execute
+        );
+        assert_eq!(
+            IntentType::Escalate.to_permission_op(),
+            PermissionOp::Execute
+        );
+        // Message and Broadcast produce side-effects — map to Write
+        assert_eq!(IntentType::Message.to_permission_op(), PermissionOp::Write);
+        assert_eq!(
+            IntentType::Broadcast.to_permission_op(),
+            PermissionOp::Write
+        );
+    }
 }

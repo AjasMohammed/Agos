@@ -1,0 +1,39 @@
+[manifest]
+name        = "memory-delete"
+version     = "1.0.0"
+description = "Delete a memory entry by ID from semantic or episodic memory"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["memory.semantic:w", "memory.episodic:w"]
+
+[capabilities_provided]
+outputs = ["status"]
+
+[intent_schema]
+input  = "MemoryDeleteIntent"
+output = "DeleteResult"
+
+[input_schema]
+type = "object"
+required = ["id"]
+
+[input_schema.properties.scope]
+type = "string"
+enum = ["semantic", "episodic"]
+default = "semantic"
+description = "Target memory tier"
+
+[input_schema.properties.id]
+type = ["string", "integer"]
+description = "Semantic id (string) or episodic id (integer), depending on scope"
+
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 2000
+syscalls      = []

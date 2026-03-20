@@ -43,7 +43,9 @@ impl Kernel {
                     "iterations": result.iterations,
                 })),
                 trace_id: &task_trace_id,
-            }) {
+            })
+            .await
+        {
             Ok(_) => {
                 self.emit_event_with_trace(
                     EventType::EpisodicMemoryWritten,
@@ -166,12 +168,42 @@ impl Kernel {
     ) {
         let error_message = error.to_string();
         let (reason, severity, is_pause) = Self::classify_task_failure(&error_message);
-        let task_is_waiting = self
-            .scheduler
-            .get_task(&task.id)
-            .await
-            .map(|t| t.state == TaskState::Waiting)
-            .unwrap_or(false);
+        let task_state = self.scheduler.get_task(&task.id).await.map(|t| t.state);
+        let task_is_waiting = matches!(task_state, Some(TaskState::Waiting));
+        let task_is_suspended = matches!(task_state, Some(TaskState::Suspended));
+
+        // Suspended tasks have already had their state set to Suspended by the executor.
+        // Record episodic memory and return — do NOT transition to Failed.
+        if task_is_suspended {
+            tracing::info!(
+                task_id = %task.id,
+                "Task suspended due to budget enforcement: {}",
+                error_message
+            );
+            if let Err(err) = self
+                .episodic_memory
+                .record(agentos_memory::EpisodeRecordInput {
+                    task_id: &task.id,
+                    agent_id: &task.agent_id,
+                    entry_type: agentos_memory::EpisodeType::SystemEvent,
+                    content: &format!(
+                        "Task suspended: {}\nReason: {}",
+                        task.original_prompt, error_message
+                    ),
+                    summary: Some("Task suspended due to budget enforcement"),
+                    metadata: Some(serde_json::json!({
+                        "outcome": "suspended",
+                        "reason": error_message,
+                    })),
+                    trace_id: &task_trace_id,
+                })
+                .await
+            {
+                tracing::warn!(task_id = %task.id, error = %err, "Failed to record suspended task state");
+            }
+            self.cleanup_task_subscriptions(&task.id).await;
+            return;
+        }
 
         if is_pause || task_is_waiting {
             tracing::info!(
@@ -196,6 +228,7 @@ impl Kernel {
                     })),
                     trace_id: &task_trace_id,
                 })
+                .await
             {
                 tracing::warn!(task_id = %task.id, error = %err, "Failed to record paused task state");
             }
@@ -303,7 +336,9 @@ impl Kernel {
                 summary: Some("Task failed"),
                 metadata: Some(serde_json::json!({ "outcome": "failure", "error": error_message })),
                 trace_id: &task_trace_id,
-            }) {
+            })
+            .await
+        {
             Ok(_) => {
                 self.emit_event_with_trace(
                     EventType::EpisodicMemoryWritten,

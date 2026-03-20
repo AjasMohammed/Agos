@@ -1,13 +1,13 @@
 use crate::event_bus::{parse_event_type_filter, parse_subscription_priority};
 use crate::injection_scanner::ThreatLevel;
 use crate::kernel::Kernel;
-use crate::tool_call::parse_tool_call;
 use agentos_sandbox::SandboxConfig;
 use agentos_sandbox::SandboxExecutor;
 use agentos_tools::traits::ToolExecutionContext;
 use agentos_types::*;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::task::JoinSet;
 
 /// Result of synchronous task execution, carrying data needed by the outer
 /// `execute_task()` method for enriched episodic memory recording.
@@ -25,6 +25,9 @@ impl Kernel {
         if lower.starts_with("task paused:") {
             return ("task_paused", EventSeverity::Warning, true);
         }
+        if lower.starts_with("task suspended:") {
+            return ("task_suspended", EventSeverity::Warning, true);
+        }
         if lower.contains("llm error") {
             return ("llm_error", EventSeverity::Warning, false);
         }
@@ -35,6 +38,28 @@ impl Kernel {
             return ("max_iterations", EventSeverity::Warning, false);
         }
         ("task_error", EventSeverity::Warning, false)
+    }
+
+    fn resolve_task_max_iterations(
+        task: &AgentTask,
+        task_limits: &crate::config::TaskLimitsConfig,
+    ) -> u32 {
+        let resolved = if let Some(max_iterations) = task.max_iterations {
+            max_iterations
+        } else {
+            match task
+                .reasoning_hints
+                .as_ref()
+                .map(|hints| hints.estimated_complexity)
+                .unwrap_or(ComplexityLevel::Low)
+            {
+                ComplexityLevel::Low => task_limits.max_iterations_low,
+                ComplexityLevel::Medium => task_limits.max_iterations_medium,
+                ComplexityLevel::High => task_limits.max_iterations_high,
+            }
+        };
+        // Ensure at least 1 iteration to avoid silent no-ops.
+        resolved.max(1)
     }
 
     async fn register_task_subscription(&self, task_id: TaskID, subscription_id: SubscriptionID) {
@@ -305,6 +330,822 @@ impl Kernel {
             .map_err(|e| format!("{}", e))
     }
 
+    async fn execute_parallel_tool_calls(
+        &self,
+        task: &AgentTask,
+        task_trace_id: &TraceID,
+        iteration: u32,
+        mut tool_calls: Vec<crate::tool_call::ParsedToolCall>,
+        tool_call_count: &mut u32,
+        refresh_knowledge_blocks: &mut bool,
+    ) -> Result<(), anyhow::Error> {
+        struct PreparedParallelToolCall {
+            order: usize,
+            tool_call: crate::tool_call::ParsedToolCall,
+            trace_id: TraceID,
+            snapshot_ref: Option<String>,
+            tool_payload_preview: String,
+            sandbox_config: Option<SandboxConfig>,
+        }
+
+        struct ParallelToolOutcome {
+            order: usize,
+            tool_call: crate::tool_call::ParsedToolCall,
+            trace_id: TraceID,
+            snapshot_ref: Option<String>,
+            tool_payload_preview: String,
+            duration_ms: u64,
+            result: Result<serde_json::Value, AgentOSError>,
+        }
+
+        let max_parallel = self.config.kernel.tool_calls.max_parallel.max(1);
+        if tool_calls.len() > max_parallel {
+            tracing::warn!(
+                task_id = %task.id,
+                requested = tool_calls.len(),
+                max_parallel,
+                "Truncating parsed tool calls to max_parallel limit"
+            );
+            let skipped_calls: Vec<_> = tool_calls.drain(max_parallel..).collect();
+            for skipped in skipped_calls {
+                let error_result = serde_json::json!({
+                    "error": format!(
+                        "Skipped tool call because max_parallel limit ({}) was reached",
+                        max_parallel
+                    )
+                });
+                self.context_manager
+                    .push_tool_result(&task.id, &skipped.tool_name, &error_result)
+                    .await
+                    .ok();
+            }
+        }
+
+        // Tracks a HardLimitExceeded hit during the preparation loop so we can
+        // handle it (Suspend or Kill) after the loop exits.
+        let mut batch_budget_exceeded: Option<(BudgetAction, String)> = None;
+
+        let mut prepared = Vec::new();
+        for (order, tool_call) in tool_calls.into_iter().enumerate() {
+            let trace_id = TraceID::new();
+
+            tracing::info!(
+                task_id = %task.id,
+                tool = %tool_call.tool_name,
+                intent = ?tool_call.intent_type,
+                "Task parsed tool call (parallel batch)"
+            );
+
+            // Explicitly gate by registered tool identity first.
+            let chain_depth = task
+                .trigger_source
+                .as_ref()
+                .map(|ts| ts.chain_depth + 1)
+                .unwrap_or(0);
+
+            let requested_tool_id = {
+                let registry = self.tool_registry.read().await;
+                match registry.get_by_name(&tool_call.tool_name) {
+                    Some(tool) => tool.id,
+                    None => {
+                        self.audit_log(agentos_audit::AuditEntry {
+                            timestamp: chrono::Utc::now(),
+                            trace_id,
+                            event_type: agentos_audit::AuditEventType::PermissionDenied,
+                            agent_id: Some(task.agent_id),
+                            task_id: Some(task.id),
+                            tool_id: None,
+                            details: serde_json::json!({
+                                "tool": tool_call.tool_name,
+                                "reason": "tool_not_registered",
+                                "context": "parallel_batch",
+                            }),
+                            severity: agentos_audit::AuditSeverity::Security,
+                            reversible: false,
+                            rollback_ref: None,
+                        });
+                        self.emit_event_with_trace(
+                            EventType::UnauthorizedToolAccess,
+                            EventSource::SecurityEngine,
+                            EventSeverity::Warning,
+                            serde_json::json!({
+                                "task_id": task.id.to_string(),
+                                "agent_id": task.agent_id.to_string(),
+                                "requested_tool": tool_call.tool_name,
+                                "agent_allowed_tools": [],
+                                "failure_reason": "tool_not_registered",
+                                "action_taken": "blocked",
+                                "context": "parallel_batch",
+                            }),
+                            chain_depth,
+                            Some(trace_id),
+                        )
+                        .await;
+                        let error_result = serde_json::json!({
+                            "error": format!("Unknown tool requested: {}", tool_call.tool_name)
+                        });
+                        self.context_manager
+                            .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                            .await
+                            .ok();
+                        continue;
+                    }
+                }
+            };
+
+            if !task.capability_token.allowed_tools.is_empty()
+                && !task
+                    .capability_token
+                    .allowed_tools
+                    .contains(&requested_tool_id)
+            {
+                let allowed_tool_names = {
+                    let registry = self.tool_registry.read().await;
+                    task.capability_token
+                        .allowed_tools
+                        .iter()
+                        .map(|tool_id| {
+                            registry
+                                .get_by_id(tool_id)
+                                .map(|tool| tool.manifest.manifest.name.clone())
+                                .unwrap_or_else(|| tool_id.to_string())
+                        })
+                        .collect::<Vec<_>>()
+                };
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id,
+                    event_type: agentos_audit::AuditEventType::PermissionDenied,
+                    agent_id: Some(task.agent_id),
+                    task_id: Some(task.id),
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "tool": tool_call.tool_name,
+                        "reason": "tool_not_allowed_by_capability_token",
+                        "agent_allowed_tools": allowed_tool_names.clone(),
+                        "context": "parallel_batch",
+                    }),
+                    severity: agentos_audit::AuditSeverity::Security,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                self.emit_event_with_trace(
+                    EventType::UnauthorizedToolAccess,
+                    EventSource::SecurityEngine,
+                    EventSeverity::Critical,
+                    serde_json::json!({
+                        "task_id": task.id.to_string(),
+                        "agent_id": task.agent_id.to_string(),
+                        "requested_tool": tool_call.tool_name,
+                        "agent_allowed_tools": allowed_tool_names,
+                        "failure_reason": "tool_not_allowed_by_capability_token",
+                        "action_taken": "blocked",
+                        "context": "parallel_batch",
+                    }),
+                    chain_depth,
+                    Some(trace_id),
+                )
+                .await;
+                let error_result = serde_json::json!({
+                    "error": format!("Unauthorized tool access blocked: {}", tool_call.tool_name)
+                });
+                self.context_manager
+                    .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                    .await
+                    .ok();
+                continue;
+            }
+
+            match self
+                .validate_tool_call_full(task, &tool_call, trace_id)
+                .await
+            {
+                Err(denial_reason) => {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        tool = %tool_call.tool_name,
+                        reason = %denial_reason,
+                        "Parallel tool-call validation denied"
+                    );
+                    let error_result = serde_json::json!({
+                        "error": format!("Permission denied: {}", denial_reason)
+                    });
+                    self.context_manager
+                        .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                        .await
+                        .ok();
+                    continue;
+                }
+                Ok(IntentCoherenceResult::Rejected { reason }) => {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        tool = %tool_call.tool_name,
+                        reason = %reason,
+                        "Parallel tool-call coherence rejected"
+                    );
+                    let error_result = serde_json::json!({
+                        "error": format!("Coherence check failed: {}", reason)
+                    });
+                    self.context_manager
+                        .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                        .await
+                        .ok();
+                    continue;
+                }
+                Ok(IntentCoherenceResult::Suspicious { .. } | IntentCoherenceResult::Approved) => {}
+            }
+
+            if matches!(
+                tool_call.intent_type,
+                IntentType::Subscribe | IntentType::Unsubscribe
+            ) {
+                self.intent_validator
+                    .record_tool_call(&task.id, &tool_call)
+                    .await;
+                *tool_call_count += 1;
+                let dynamic_result = self
+                    .handle_dynamic_event_subscription_intent(task, &tool_call, trace_id)
+                    .await;
+                let context_result = match dynamic_result {
+                    Ok(value) => value,
+                    Err(err) => serde_json::json!({ "error": err }),
+                };
+                self.context_manager
+                    .push_tool_result(&task.id, &tool_call.tool_name, &context_result)
+                    .await
+                    .ok();
+                continue;
+            }
+
+            // Check budget BEFORE incrementing counters so we don't count calls
+            // that never execute.
+            let tool_budget = self.cost_tracker.record_tool_call(&task.agent_id).await;
+            if let crate::cost_tracker::BudgetCheckResult::HardLimitExceeded { resource, action } =
+                &tool_budget
+            {
+                tracing::error!(
+                    "Task {} agent {} tool call budget EXCEEDED: {} — action: {:?}",
+                    task.id,
+                    task.agent_id,
+                    resource,
+                    action
+                );
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id,
+                    event_type: agentos_audit::AuditEventType::BudgetExceeded,
+                    agent_id: Some(task.agent_id),
+                    task_id: Some(task.id),
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "resource": resource,
+                        "action": format!("{:?}", action),
+                        "context": "parallel_batch",
+                    }),
+                    severity: agentos_audit::AuditSeverity::Security,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                let error_result = serde_json::json!({
+                    "error": "Tool call budget exceeded"
+                });
+                self.context_manager
+                    .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                    .await
+                    .ok();
+                batch_budget_exceeded = Some((*action, resource.clone()));
+                break;
+            }
+
+            self.intent_validator
+                .record_tool_call(&task.id, &tool_call)
+                .await;
+            *tool_call_count += 1;
+
+            let resource_hint = tool_call
+                .payload
+                .get("path")
+                .or_else(|| tool_call.payload.get("target"))
+                .or_else(|| tool_call.payload.get("file"))
+                .and_then(|v| v.as_str());
+            let risk_level = self.risk_classifier.classify(
+                tool_call.intent_type,
+                &tool_call.tool_name,
+                resource_hint,
+            );
+            match risk_level {
+                ActionRiskLevel::Forbidden => {
+                    let error_result = serde_json::json!({
+                        "error": "Action forbidden by security policy"
+                    });
+                    self.context_manager
+                        .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                        .await
+                        .ok();
+                    continue;
+                }
+                ActionRiskLevel::HardApproval => {
+                    let waiting_result = serde_json::json!({
+                        "status": "awaiting_approval",
+                        "message": "This action requires human approval and was skipped from the parallel batch."
+                    });
+                    self.context_manager
+                        .push_tool_result(&task.id, &tool_call.tool_name, &waiting_result)
+                        .await
+                        .ok();
+                    continue;
+                }
+                ActionRiskLevel::SoftApproval
+                | ActionRiskLevel::Notify
+                | ActionRiskLevel::Autonomous => {}
+            }
+
+            self.audit_log(agentos_audit::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id,
+                event_type: agentos_audit::AuditEventType::ToolExecutionStarted,
+                agent_id: Some(task.agent_id),
+                task_id: Some(task.id),
+                tool_id: None,
+                details: serde_json::json!({ "tool": tool_call.tool_name }),
+                severity: agentos_audit::AuditSeverity::Info,
+                reversible: false,
+                rollback_ref: None,
+            });
+
+            let snapshot_ref = if tool_call.intent_type == IntentType::Write
+                || tool_call.intent_type == IntentType::Execute
+            {
+                self.take_snapshot(&task.id, &tool_call.tool_name, Some(&tool_call.payload))
+                    .await
+            } else {
+                None
+            };
+            let tool_payload_preview = Self::truncate_for_prompt_payload(
+                &serde_json::to_string(&tool_call.payload).unwrap_or_default(),
+                600,
+            );
+            let sandbox_config = {
+                let registry = self.tool_registry.read().await;
+                registry
+                    .get_by_name(&tool_call.tool_name)
+                    .map(|t| SandboxConfig::from_manifest(&t.manifest.sandbox))
+            };
+
+            prepared.push(PreparedParallelToolCall {
+                order,
+                tool_call,
+                trace_id,
+                snapshot_ref,
+                tool_payload_preview,
+                sandbox_config,
+            });
+        }
+
+        // Enforce budget action after the preparation loop.
+        if let Some((action, resource)) = batch_budget_exceeded {
+            self.context_manager.remove_context(&task.id).await;
+            self.intent_validator.remove_task(&task.id).await;
+            if action == BudgetAction::Suspend {
+                match self
+                    .scheduler
+                    .update_state_if_not_terminal(&task.id, TaskState::Suspended)
+                    .await
+                {
+                    Ok(true) => {
+                        self.emit_event_with_trace(
+                            EventType::TaskSuspended,
+                            EventSource::TaskScheduler,
+                            EventSeverity::Warning,
+                            serde_json::json!({
+                                "task_id": task.id.to_string(),
+                                "agent_id": task.agent_id.to_string(),
+                                "resource": resource,
+                                "reason": "budget_tool_call_limit_suspend_parallel",
+                            }),
+                            0,
+                            Some(*task_trace_id),
+                        )
+                        .await;
+                        anyhow::bail!(
+                            "task suspended: tool call budget hard limit reached: {}",
+                            resource
+                        );
+                    }
+                    Ok(false) => {
+                        tracing::warn!(
+                            task_id = %task.id,
+                            "Budget suspension (parallel batch): task already terminal"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            task_id = %task.id,
+                            error = %e,
+                            "Failed to set task to Suspended during parallel batch budget enforcement"
+                        );
+                    }
+                }
+            }
+            return Err(anyhow::Error::new(AgentOSError::BudgetExceeded {
+                agent_id: task.agent_id.to_string(),
+                detail: format!("tool call hard limit exceeded: {}", resource),
+            }));
+        }
+
+        if prepared.is_empty() {
+            return Ok(());
+        }
+
+        let agent_snapshot = {
+            let registry = self.agent_registry.read().await;
+            let agents: Vec<AgentSummary> = registry
+                .list_all()
+                .into_iter()
+                .map(|p| AgentSummary {
+                    id: p.id,
+                    name: p.name.clone(),
+                    status: format!("{:?}", p.status).to_lowercase(),
+                    registered_at: p.created_at,
+                })
+                .collect();
+            AgentRegistrySnapshot::new(agents)
+        };
+        let task_snapshot = self.scheduler.snapshot_tasks().await;
+        let agent_snapshot_ref: Arc<dyn AgentRegistryQuery> = Arc::new(agent_snapshot);
+        let task_snapshot_ref: Arc<dyn TaskQuery> = Arc::new(task_snapshot);
+
+        let fallback_timeout_secs = self.config.kernel.tool_execution.default_timeout_seconds;
+        let mut join_set = JoinSet::new();
+        for call in prepared {
+            let tool_runner = self.tool_runner.clone();
+            let sandbox = self.sandbox.clone();
+            let data_dir = self.data_dir.clone();
+            let workspace_paths = self.workspace_paths.clone();
+            let task_id = task.id;
+            let agent_id = task.agent_id;
+            let trace_id = call.trace_id;
+            let permissions = task.capability_token.permissions.clone();
+            let vault = self.vault.clone();
+            let hal = self.hal.clone();
+            let agent_registry = agent_snapshot_ref.clone();
+            let task_registry = task_snapshot_ref.clone();
+            let order = call.order;
+            let snapshot_ref = call.snapshot_ref;
+            let tool_payload_preview = call.tool_payload_preview;
+            let tool_call = call.tool_call;
+            let sandbox_config = call.sandbox_config;
+            let tool_cancellation = self.cancellation_token.child_token();
+
+            self.emit_event_with_trace(
+                EventType::ToolCallStarted,
+                EventSource::ToolRunner,
+                EventSeverity::Info,
+                serde_json::json!({
+                    "tool_name": tool_call.tool_name,
+                    "task_id": task.id.to_string(),
+                    "agent_id": task.agent_id.to_string(),
+                }),
+                task.trigger_source
+                    .as_ref()
+                    .map(|ts| ts.chain_depth + 1)
+                    .unwrap_or(0),
+                Some(trace_id),
+            )
+            .await;
+
+            join_set.spawn(async move {
+                let exec_context = ToolExecutionContext {
+                    data_dir,
+                    task_id,
+                    agent_id,
+                    trace_id,
+                    permissions,
+                    vault: Some(Arc::new(agentos_vault::ProxyVault::new(vault))),
+                    hal: Some(hal),
+                    // ToolRunner::execute() always overrides this with the shared registry.
+                    file_lock_registry: None,
+                    agent_registry: Some(agent_registry),
+                    task_registry: Some(task_registry),
+                    workspace_paths,
+                    cancellation_token: tool_cancellation,
+                };
+
+                let tool_start = std::time::Instant::now();
+                let payload = tool_call.payload.clone();
+                let result = if let Some(config) = sandbox_config {
+                    let timeout = Duration::from_millis(config.max_cpu_ms.max(5000));
+                    match sandbox
+                        .spawn(&tool_call.tool_name, payload, &config, timeout)
+                        .await
+                    {
+                        Ok(sandbox_result) => SandboxExecutor::parse_result(&sandbox_result),
+                        Err(e) => {
+                            tracing::error!(
+                                tool = %tool_call.tool_name,
+                                error = %e,
+                                "Sandbox spawn failed — refusing unsandboxed execution"
+                            );
+                            Err(e)
+                        }
+                    }
+                } else {
+                    let execute_fut =
+                        tool_runner.execute(&tool_call.tool_name, payload, exec_context);
+                    match tokio::time::timeout(
+                        Duration::from_secs(fallback_timeout_secs),
+                        execute_fut,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            tracing::warn!(
+                                tool = %tool_call.tool_name,
+                                timeout_secs = fallback_timeout_secs,
+                                "In-process tool call timed out"
+                            );
+                            Err(agentos_types::AgentOSError::ToolExecutionFailed {
+                                tool_name: tool_call.tool_name.clone(),
+                                reason: format!("timed out after {}s", fallback_timeout_secs),
+                            })
+                        }
+                    }
+                };
+
+                ParallelToolOutcome {
+                    order,
+                    tool_call,
+                    trace_id,
+                    snapshot_ref,
+                    tool_payload_preview,
+                    duration_ms: tool_start.elapsed().as_millis() as u64,
+                    result,
+                }
+            });
+        }
+
+        let mut outcomes: Vec<ParallelToolOutcome> = Vec::new();
+        while let Some(joined) = join_set.join_next().await {
+            match joined {
+                Ok(outcome) => outcomes.push(outcome),
+                Err(error) => {
+                    tracing::error!(
+                        task_id = %task.id,
+                        error = %error,
+                        "Parallel tool call task join failed"
+                    );
+                }
+            }
+        }
+        outcomes.sort_by_key(|o| o.order);
+
+        for outcome in outcomes {
+            match outcome.result {
+                Ok(result) => {
+                    let memory_mutating_tool = matches!(
+                        outcome.tool_call.tool_name.as_str(),
+                        "memory-write" | "archival-insert"
+                    );
+                    if memory_mutating_tool {
+                        *refresh_knowledge_blocks = true;
+                    }
+                    crate::metrics::record_tool_execution(
+                        &outcome.tool_call.tool_name,
+                        outcome.duration_ms,
+                        true,
+                    );
+                    self.audit_log(agentos_audit::AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        trace_id: outcome.trace_id,
+                        event_type: agentos_audit::AuditEventType::ToolExecutionCompleted,
+                        agent_id: Some(task.agent_id),
+                        task_id: Some(task.id),
+                        tool_id: None,
+                        details: serde_json::json!({ "tool": outcome.tool_call.tool_name }),
+                        severity: agentos_audit::AuditSeverity::Info,
+                        reversible: outcome.snapshot_ref.is_some(),
+                        rollback_ref: outcome.snapshot_ref.clone(),
+                    });
+                    {
+                        let chain_depth = task
+                            .trigger_source
+                            .as_ref()
+                            .map(|ts| ts.chain_depth + 1)
+                            .unwrap_or(0);
+                        self.emit_event_with_trace(
+                            EventType::ToolCallCompleted,
+                            EventSource::ToolRunner,
+                            EventSeverity::Info,
+                            serde_json::json!({
+                                "tool_name": outcome.tool_call.tool_name,
+                                "task_id": task.id.to_string(),
+                                "agent_id": task.agent_id.to_string(),
+                                "duration_ms": outcome.duration_ms,
+                            }),
+                            chain_depth,
+                            Some(outcome.trace_id),
+                        )
+                        .await;
+                    }
+
+                    let context_result = if let Some(action) =
+                        crate::kernel_action::KernelAction::from_tool_result(&result)
+                    {
+                        let memory_mutating_action = matches!(
+                            &action,
+                            crate::kernel_action::KernelAction::MemoryBlockWrite { .. }
+                                | crate::kernel_action::KernelAction::MemoryBlockDelete { .. }
+                        );
+                        let action_result = self
+                            .dispatch_kernel_action(task, action, outcome.trace_id)
+                            .await;
+                        if memory_mutating_action {
+                            *refresh_knowledge_blocks = true;
+                        }
+                        action_result.result
+                    } else {
+                        result
+                    };
+
+                    let result_str = Self::maybe_truncate_output(
+                        context_result.to_string(),
+                        self.config.kernel.tool_execution.max_output_bytes,
+                        &outcome.tool_call.tool_name,
+                    );
+                    let scan = self.injection_scanner.scan(&result_str);
+                    if scan.is_suspicious {
+                        let threat_level = scan
+                            .max_threat
+                            .as_ref()
+                            .map(|t| format!("{:?}", t))
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let severity = match scan.max_threat {
+                            Some(ThreatLevel::High) => EventSeverity::Critical,
+                            Some(ThreatLevel::Medium) => EventSeverity::Warning,
+                            Some(ThreatLevel::Low) | None => EventSeverity::Info,
+                        };
+                        let chain_depth = task
+                            .trigger_source
+                            .as_ref()
+                            .map(|ts| ts.chain_depth + 1)
+                            .unwrap_or(0);
+                        self.emit_event_with_trace(
+                            EventType::PromptInjectionAttempt,
+                            EventSource::SecurityEngine,
+                            severity,
+                            serde_json::json!({
+                                "task_id": task.id.to_string(),
+                                "agent_id": task.agent_id.to_string(),
+                                "source": "tool_output",
+                                "tool_name": outcome.tool_call.tool_name,
+                                "threat_level": threat_level,
+                                "pattern_count": scan.matches.len(),
+                                "patterns": scan.matches.iter().map(|m| m.pattern_name).collect::<Vec<_>>(),
+                                "agent_intent_payload": outcome.tool_payload_preview,
+                                "suspicious_content": Self::truncate_for_prompt_payload(&result_str, 600),
+                                "preceding_tool_result": Self::truncate_for_prompt_payload(&result_str, 600),
+                            }),
+                            chain_depth,
+                            Some(*task_trace_id),
+                        )
+                        .await;
+                    }
+                    if scan.max_threat == Some(ThreatLevel::High) {
+                        let blocked = serde_json::json!({
+                            "error": "Tool output blocked due to high-confidence injection patterns"
+                        });
+                        self.context_manager
+                            .push_tool_result(&task.id, &outcome.tool_call.tool_name, &blocked)
+                            .await
+                            .ok();
+                        continue;
+                    }
+
+                    let source = format!("tool:{}", outcome.tool_call.tool_name);
+                    let wrapped = crate::injection_scanner::InjectionScanner::taint_wrap(
+                        &result_str,
+                        &source,
+                        &scan,
+                    );
+                    let tainted_result = serde_json::json!({ "output": wrapped });
+                    self.context_manager
+                        .push_tool_result(&task.id, &outcome.tool_call.tool_name, &tainted_result)
+                        .await
+                        .ok();
+
+                    if let Err(e) = self
+                        .episodic_memory
+                        .record(agentos_memory::EpisodeRecordInput {
+                            task_id: &task.id,
+                            agent_id: &task.agent_id,
+                            entry_type: agentos_memory::EpisodeType::ToolResult,
+                            content: &context_result.to_string(),
+                            summary: Some(&format!(
+                                "Tool '{}' succeeded (parallel batch)",
+                                outcome.tool_call.tool_name
+                            )),
+                            metadata: Some(serde_json::json!({
+                                "tool": outcome.tool_call.tool_name,
+                                "success": true,
+                                "iteration": iteration,
+                                "parallel_batch": true,
+                            })),
+                            trace_id: &outcome.trace_id,
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            task_id = %task.id,
+                            error = %e,
+                            "Failed to record episodic memory for parallel tool result"
+                        );
+                    }
+                }
+                Err(e) => {
+                    crate::metrics::record_tool_execution(
+                        &outcome.tool_call.tool_name,
+                        outcome.duration_ms,
+                        false,
+                    );
+                    self.audit_log(agentos_audit::AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        trace_id: outcome.trace_id,
+                        event_type: agentos_audit::AuditEventType::ToolExecutionFailed,
+                        agent_id: Some(task.agent_id),
+                        task_id: Some(task.id),
+                        tool_id: None,
+                        details: serde_json::json!({
+                            "tool": outcome.tool_call.tool_name,
+                            "error": e.to_string(),
+                        }),
+                        severity: agentos_audit::AuditSeverity::Error,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
+                    let chain_depth = task
+                        .trigger_source
+                        .as_ref()
+                        .map(|ts| ts.chain_depth + 1)
+                        .unwrap_or(0);
+                    self.emit_event_with_trace(
+                        EventType::ToolExecutionFailed,
+                        EventSource::ToolRunner,
+                        EventSeverity::Warning,
+                        serde_json::json!({
+                            "task_id": task.id.to_string(),
+                            "agent_id": task.agent_id.to_string(),
+                            "tool_name": outcome.tool_call.tool_name,
+                            "error": e.to_string(),
+                        }),
+                        chain_depth,
+                        Some(outcome.trace_id),
+                    )
+                    .await;
+
+                    let error_result = serde_json::json!({
+                        "error": e.to_string()
+                    });
+                    self.context_manager
+                        .push_tool_result(&task.id, &outcome.tool_call.tool_name, &error_result)
+                        .await
+                        .ok();
+
+                    if let Err(record_err) = self
+                        .episodic_memory
+                        .record(agentos_memory::EpisodeRecordInput {
+                            task_id: &task.id,
+                            agent_id: &task.agent_id,
+                            entry_type: agentos_memory::EpisodeType::ToolResult,
+                            content: &error_result.to_string(),
+                            summary: Some(&format!(
+                                "Tool '{}' failed (parallel batch): {}",
+                                outcome.tool_call.tool_name, e
+                            )),
+                            metadata: Some(serde_json::json!({
+                                "tool": outcome.tool_call.tool_name,
+                                "success": false,
+                                "iteration": iteration,
+                                "parallel_batch": true,
+                                "error": e.to_string(),
+                            })),
+                            trace_id: &outcome.trace_id,
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            task_id = %task.id,
+                            error = %record_err,
+                            "Failed to record episodic memory for failed parallel tool result"
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Execute a single task synchronously: assemble context, call LLM, process tool calls, repeat.
     pub(crate) async fn execute_task_sync(
         &self,
@@ -344,8 +1185,30 @@ impl Kernel {
         let (system_prompt, tools_desc, agent_directory, retrieval_plan) =
             self.setup_task_context(task, task_trace_id).await?;
 
+        // Build the structured tool manifest list once per task so adapters that
+        // support native function calling (e.g. OpenAI) can receive schema metadata.
+        let llm_tool_manifests: Vec<ToolManifest> = {
+            let registry = self.tool_registry.read().await;
+            let mut manifests = if task.capability_token.allowed_tools.is_empty() {
+                registry
+                    .list_all()
+                    .into_iter()
+                    .map(|tool| tool.manifest.clone())
+                    .collect::<Vec<_>>()
+            } else {
+                task.capability_token
+                    .allowed_tools
+                    .iter()
+                    .filter_map(|tool_id| registry.get_by_id(tool_id).map(|t| t.manifest.clone()))
+                    .collect::<Vec<_>>()
+            };
+            manifests.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
+            manifests
+        };
+
         // 3. Agent loop: LLM → parse → tool call → push result → repeat
-        let max_iterations = 10;
+        let max_iterations =
+            Self::resolve_task_max_iterations(task, &self.config.kernel.task_limits);
         let mut final_answer = String::new();
         let mut tool_call_count: u32 = 0;
         let mut completed_iterations: u32 = 0;
@@ -354,7 +1217,7 @@ impl Kernel {
         let mut context_warning_emitted = false;
 
         for iteration in 0..max_iterations {
-            completed_iterations = iteration as u32 + 1;
+            completed_iterations = iteration + 1;
             let iteration_trace_id = TraceID::new();
             let raw_context = match self.context_manager.get_context(&task.id).await {
                 Ok(ctx) => ctx,
@@ -595,15 +1458,59 @@ impl Kernel {
                 });
                 self.context_manager.remove_context(&task.id).await;
                 self.intent_validator.remove_task(&task.id).await;
-                anyhow::bail!(
-                    "Budget hard limit exceeded (pre-inference check): {}",
-                    resource
-                );
+                if action == BudgetAction::Suspend {
+                    match self
+                        .scheduler
+                        .update_state_if_not_terminal(&task.id, TaskState::Suspended)
+                        .await
+                    {
+                        Ok(true) => {
+                            self.emit_event_with_trace(
+                                EventType::TaskSuspended,
+                                EventSource::TaskScheduler,
+                                EventSeverity::Warning,
+                                serde_json::json!({
+                                    "task_id": task.id.to_string(),
+                                    "agent_id": task.agent_id.to_string(),
+                                    "resource": resource,
+                                    "reason": "budget_hard_limit_suspend_pre_inference",
+                                }),
+                                0,
+                                Some(iteration_trace_id),
+                            )
+                            .await;
+                            anyhow::bail!(
+                                "task suspended: budget hard limit reached: {}",
+                                resource
+                            );
+                        }
+                        Ok(false) => {
+                            tracing::warn!(
+                                task_id = %task.id,
+                                "Budget suspension (pre-inference): task already terminal"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                task_id = %task.id,
+                                error = %e,
+                                "Failed to set task to Suspended during pre-inference budget enforcement"
+                            );
+                        }
+                    }
+                }
+                return Err(anyhow::Error::new(AgentOSError::BudgetExceeded {
+                    agent_id: task.agent_id.to_string(),
+                    detail: format!("hard limit exceeded (pre-inference): {}", resource),
+                }));
             }
 
             tracing::info!("Task {} iteration {}: calling LLM", task.id, iteration);
 
-            let inference = match current_llm.infer(&compiled_context).await {
+            let inference = match current_llm
+                .infer_with_tools(&compiled_context, &llm_tool_manifests)
+                .await
+            {
                 Ok(mut result) => {
                     // Parse uncertainty declarations from the LLM response
                     if result.uncertainty.is_none() {
@@ -694,6 +1601,23 @@ impl Kernel {
                         reversible: false,
                         rollback_ref: None,
                     });
+                    self.emit_event_with_trace(
+                        EventType::BudgetWarning,
+                        EventSource::InferenceKernel,
+                        EventSeverity::Warning,
+                        serde_json::json!({
+                            "task_id": task.id.to_string(),
+                            "agent_id": task.agent_id.to_string(),
+                            "resource": resource,
+                            "usage_pct": current_pct,
+                        }),
+                        task.trigger_source
+                            .as_ref()
+                            .map(|ts| ts.chain_depth + 1)
+                            .unwrap_or(0),
+                        Some(iteration_trace_id),
+                    )
+                    .await;
                 }
                 crate::cost_tracker::BudgetCheckResult::PauseRequired {
                     resource,
@@ -722,6 +1646,24 @@ impl Kernel {
                         reversible: false,
                         rollback_ref: None,
                     });
+                    self.emit_event_with_trace(
+                        EventType::BudgetExhausted,
+                        EventSource::InferenceKernel,
+                        EventSeverity::Warning,
+                        serde_json::json!({
+                            "task_id": task.id.to_string(),
+                            "agent_id": task.agent_id.to_string(),
+                            "resource": resource,
+                            "action": "pause",
+                            "usage_pct": current_pct,
+                        }),
+                        task.trigger_source
+                            .as_ref()
+                            .map(|ts| ts.chain_depth + 1)
+                            .unwrap_or(0),
+                        Some(iteration_trace_id),
+                    )
+                    .await;
                     self.context_manager.remove_context(&task.id).await;
                     self.intent_validator.remove_task(&task.id).await;
                     anyhow::bail!(
@@ -757,9 +1699,70 @@ impl Kernel {
                         reversible: false,
                         rollback_ref: None,
                     });
+                    self.emit_event_with_trace(
+                        EventType::BudgetExhausted,
+                        EventSource::InferenceKernel,
+                        EventSeverity::Critical,
+                        serde_json::json!({
+                            "task_id": task.id.to_string(),
+                            "agent_id": task.agent_id.to_string(),
+                            "resource": resource,
+                            "action": format!("{:?}", action),
+                        }),
+                        task.trigger_source
+                            .as_ref()
+                            .map(|ts| ts.chain_depth + 1)
+                            .unwrap_or(0),
+                        Some(iteration_trace_id),
+                    )
+                    .await;
                     self.context_manager.remove_context(&task.id).await;
                     self.intent_validator.remove_task(&task.id).await;
-                    anyhow::bail!("Budget hard limit exceeded: {}", resource);
+                    if *action == BudgetAction::Suspend {
+                        match self
+                            .scheduler
+                            .update_state_if_not_terminal(&task.id, TaskState::Suspended)
+                            .await
+                        {
+                            Ok(true) => {
+                                self.emit_event_with_trace(
+                                    EventType::TaskSuspended,
+                                    EventSource::TaskScheduler,
+                                    EventSeverity::Warning,
+                                    serde_json::json!({
+                                        "task_id": task.id.to_string(),
+                                        "agent_id": task.agent_id.to_string(),
+                                        "resource": resource,
+                                        "reason": "budget_hard_limit_suspend",
+                                    }),
+                                    0,
+                                    Some(iteration_trace_id),
+                                )
+                                .await;
+                                anyhow::bail!(
+                                    "task suspended: budget hard limit reached: {}",
+                                    resource
+                                );
+                            }
+                            Ok(false) => {
+                                tracing::warn!(
+                                    task_id = %task.id,
+                                    "Budget suspension (post-inference): task already terminal"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    task_id = %task.id,
+                                    error = %e,
+                                    "Failed to set task to Suspended during post-inference budget enforcement"
+                                );
+                            }
+                        }
+                    }
+                    return Err(anyhow::Error::new(AgentOSError::BudgetExceeded {
+                        agent_id: task.agent_id.to_string(),
+                        detail: format!("hard limit exceeded: {}", resource),
+                    }));
                 }
                 crate::cost_tracker::BudgetCheckResult::ModelDowngradeRecommended {
                     downgrade_to,
@@ -883,6 +1886,7 @@ impl Kernel {
                         reference_count: 0,
                         partition: ContextPartition::default(),
                         category: ContextCategory::History,
+                        is_summary: false,
                     },
                 )
                 .await
@@ -904,12 +1908,69 @@ impl Kernel {
                     metadata: None,
                     trace_id: &iteration_trace_id,
                 })
+                .await
             {
                 tracing::warn!(task_id = %task.id, error = %e, "Failed to record episodic memory");
             }
 
-            // Check for tool call
-            match parse_tool_call(&inference.text) {
+            // Capture any [FEEDBACK]...[/FEEDBACK] blocks emitted by the agent and
+            // record each as a TestFindingCaptured audit event so the web UI can
+            // surface them in real-time via the task log SSE stream.
+            for finding in extract_feedback_blocks(&inference.text) {
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::TestFindingCaptured,
+                    agent_id: Some(task.agent_id),
+                    task_id: Some(task.id),
+                    tool_id: None,
+                    details: finding,
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+            }
+
+            // Prefer structured tool calls from the LLM adapter when available.
+            // This avoids the fragile text→JSON→re-parse round-trip and lets
+            // providers that support native tool calling work reliably.
+            let parsed_tool_calls = if !inference.tool_calls.is_empty() {
+                inference
+                    .tool_calls
+                    .iter()
+                    .map(|tc| crate::tool_call::ToolCallRequest {
+                        tool_name: tc.tool_name.clone(),
+                        intent_type: crate::tool_call::parse_intent_type(&tc.intent_type)
+                            .unwrap_or(IntentType::Query),
+                        payload: tc.payload.clone(),
+                    })
+                    .collect()
+            } else {
+                crate::tool_call::parse_tool_calls(&inference.text)
+            };
+            if parsed_tool_calls.len() > 1 {
+                if self.config.kernel.tool_calls.allow_parallel {
+                    self.execute_parallel_tool_calls(
+                        task,
+                        task_trace_id,
+                        iteration,
+                        parsed_tool_calls,
+                        &mut tool_call_count,
+                        &mut refresh_knowledge_blocks,
+                    )
+                    .await?;
+                    continue;
+                } else {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        total_calls = parsed_tool_calls.len(),
+                        "Parallel tool calls disabled; executing only the first call"
+                    );
+                }
+            }
+
+            // Check for a single tool call (reuse already-parsed result)
+            match parsed_tool_calls.into_iter().next() {
                 Some(tool_call) => {
                     tracing::info!(
                         "Task {} tool call: {} ({:?})",
@@ -1236,7 +2297,51 @@ impl Kernel {
                         });
                         self.context_manager.remove_context(&task.id).await;
                         self.intent_validator.remove_task(&task.id).await;
-                        anyhow::bail!("Tool call budget exceeded");
+                        if *action == BudgetAction::Suspend {
+                            match self
+                                .scheduler
+                                .update_state_if_not_terminal(&task.id, TaskState::Suspended)
+                                .await
+                            {
+                                Ok(true) => {
+                                    self.emit_event_with_trace(
+                                        EventType::TaskSuspended,
+                                        EventSource::TaskScheduler,
+                                        EventSeverity::Warning,
+                                        serde_json::json!({
+                                            "task_id": task.id.to_string(),
+                                            "agent_id": task.agent_id.to_string(),
+                                            "resource": resource,
+                                            "reason": "budget_tool_call_limit_suspend",
+                                        }),
+                                        0,
+                                        Some(trace_id),
+                                    )
+                                    .await;
+                                    anyhow::bail!(
+                                        "task suspended: tool call budget hard limit reached: {}",
+                                        resource
+                                    );
+                                }
+                                Ok(false) => {
+                                    tracing::warn!(
+                                        task_id = %task.id,
+                                        "Budget suspension (tool-call): task already terminal"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        task_id = %task.id,
+                                        error = %e,
+                                        "Failed to set task to Suspended during tool-call budget enforcement"
+                                    );
+                                }
+                            }
+                        }
+                        return Err(anyhow::Error::new(AgentOSError::BudgetExceeded {
+                            agent_id: task.agent_id.to_string(),
+                            detail: format!("tool call hard limit exceeded: {}", resource),
+                        }));
                     }
 
                     // --- Risk classification gate ---
@@ -1431,27 +2536,28 @@ impl Kernel {
                         rollback_ref: None,
                     });
 
-                    if let Err(e) =
-                        self.episodic_memory
-                            .record(agentos_memory::EpisodeRecordInput {
-                                task_id: &task.id,
-                                agent_id: &task.agent_id,
-                                entry_type: agentos_memory::EpisodeType::ToolCall,
-                                content: &format!(
-                                    "Tool: {} Payload: {}",
-                                    tool_call.tool_name, tool_call.payload
-                                ),
-                                summary: Some(&format!(
-                                    "Called tool: {} ({:?})",
-                                    tool_call.tool_name, tool_call.intent_type
-                                )),
-                                metadata: Some(serde_json::json!({
-                                    "tool": tool_call.tool_name,
-                                    "intent_type": format!("{:?}", tool_call.intent_type),
-                                    "iteration": iteration,
-                                })),
-                                trace_id: &trace_id,
-                            })
+                    if let Err(e) = self
+                        .episodic_memory
+                        .record(agentos_memory::EpisodeRecordInput {
+                            task_id: &task.id,
+                            agent_id: &task.agent_id,
+                            entry_type: agentos_memory::EpisodeType::ToolCall,
+                            content: &format!(
+                                "Tool: {} Payload: {}",
+                                tool_call.tool_name, tool_call.payload
+                            ),
+                            summary: Some(&format!(
+                                "Called tool: {} ({:?})",
+                                tool_call.tool_name, tool_call.intent_type
+                            )),
+                            metadata: Some(serde_json::json!({
+                                "tool": tool_call.tool_name,
+                                "intent_type": format!("{:?}", tool_call.intent_type),
+                                "iteration": iteration,
+                            })),
+                            trace_id: &trace_id,
+                        })
+                        .await
                     {
                         tracing::warn!(task_id = %task.id, error = %e, "Failed to record episodic memory");
                     }
@@ -1466,6 +2572,23 @@ impl Kernel {
                         None
                     };
 
+                    // Build lightweight snapshots for agent-list / task-status / task-list tools.
+                    let agent_snapshot = {
+                        let registry = self.agent_registry.read().await;
+                        let agents: Vec<AgentSummary> = registry
+                            .list_all()
+                            .into_iter()
+                            .map(|p| AgentSummary {
+                                id: p.id,
+                                name: p.name.clone(),
+                                status: format!("{:?}", p.status).to_lowercase(),
+                                registered_at: p.created_at,
+                            })
+                            .collect();
+                        AgentRegistrySnapshot::new(agents)
+                    };
+                    let task_snapshot = self.scheduler.snapshot_tasks().await;
+
                     let exec_context = ToolExecutionContext {
                         data_dir: self.data_dir.clone(),
                         task_id: task.id,
@@ -1478,11 +2601,34 @@ impl Kernel {
                         hal: Some(self.hal.clone()),
                         // ToolRunner::execute() always overrides this with the shared registry.
                         file_lock_registry: None,
+                        agent_registry: Some(
+                            Arc::new(agent_snapshot) as Arc<dyn AgentRegistryQuery>
+                        ),
+                        task_registry: Some(Arc::new(task_snapshot) as Arc<dyn TaskQuery>),
+                        workspace_paths: self.workspace_paths.clone(),
+                        cancellation_token: self.cancellation_token.child_token(),
                     };
                     let tool_payload_preview = Self::truncate_for_prompt_payload(
                         &serde_json::to_string(&tool_call.payload).unwrap_or_default(),
                         600,
                     );
+
+                    self.emit_event_with_trace(
+                        EventType::ToolCallStarted,
+                        EventSource::ToolRunner,
+                        EventSeverity::Info,
+                        serde_json::json!({
+                            "tool_name": tool_call.tool_name,
+                            "task_id": task.id.to_string(),
+                            "agent_id": task.agent_id.to_string(),
+                        }),
+                        task.trigger_source
+                            .as_ref()
+                            .map(|ts| ts.chain_depth + 1)
+                            .unwrap_or(0),
+                        Some(trace_id),
+                    )
+                    .await;
 
                     let tool_start = std::time::Instant::now();
                     let tool_result = {
@@ -1518,9 +2664,31 @@ impl Kernel {
                                 }
                             }
                         } else {
-                            self.tool_runner
-                                .execute(&tool_call.tool_name, tool_call.payload, exec_context)
-                                .await
+                            let timeout_secs =
+                                self.config.kernel.tool_execution.default_timeout_seconds;
+                            match tokio::time::timeout(
+                                Duration::from_secs(timeout_secs),
+                                self.tool_runner.execute(
+                                    &tool_call.tool_name,
+                                    tool_call.payload,
+                                    exec_context,
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(_) => {
+                                    tracing::warn!(
+                                        tool = %tool_call.tool_name,
+                                        timeout_secs,
+                                        "In-process tool call timed out"
+                                    );
+                                    Err(agentos_types::AgentOSError::ToolExecutionFailed {
+                                        tool_name: tool_call.tool_name.clone(),
+                                        reason: format!("timed out after {}s", timeout_secs),
+                                    })
+                                }
+                            }
                         }
                     };
 
@@ -1547,6 +2715,27 @@ impl Kernel {
                                 reversible: snapshot_ref.is_some(),
                                 rollback_ref: snapshot_ref.clone(),
                             });
+                            {
+                                let chain_depth = task
+                                    .trigger_source
+                                    .as_ref()
+                                    .map(|ts| ts.chain_depth + 1)
+                                    .unwrap_or(0);
+                                self.emit_event_with_trace(
+                                    EventType::ToolCallCompleted,
+                                    EventSource::ToolRunner,
+                                    EventSeverity::Info,
+                                    serde_json::json!({
+                                        "tool_name": tool_call.tool_name,
+                                        "task_id": task.id.to_string(),
+                                        "agent_id": task.agent_id.to_string(),
+                                        "duration_ms": tool_start.elapsed().as_millis() as u64,
+                                    }),
+                                    chain_depth,
+                                    Some(trace_id),
+                                )
+                                .await;
+                            }
 
                             // Intercept kernel actions from tool results
                             let context_result = if let Some(action) =
@@ -1573,7 +2762,11 @@ impl Kernel {
                             };
 
                             // --- Injection scan on tool output ---
-                            let result_str = context_result.to_string();
+                            let result_str = Self::maybe_truncate_output(
+                                context_result.to_string(),
+                                self.config.kernel.tool_execution.max_output_bytes,
+                                &tool_call.tool_name,
+                            );
                             let scan = self.injection_scanner.scan(&result_str);
                             if scan.is_suspicious {
                                 let pattern_names: Vec<&str> =
@@ -1787,24 +2980,25 @@ impl Kernel {
                                     .await;
                             }
 
-                            if let Err(e) =
-                                self.episodic_memory
-                                    .record(agentos_memory::EpisodeRecordInput {
-                                        task_id: &task.id,
-                                        agent_id: &task.agent_id,
-                                        entry_type: agentos_memory::EpisodeType::ToolResult,
-                                        content: &context_result.to_string(),
-                                        summary: Some(&format!(
-                                            "Tool '{}' succeeded",
-                                            tool_call.tool_name
-                                        )),
-                                        metadata: Some(serde_json::json!({
-                                            "tool": tool_call.tool_name,
-                                            "success": true,
-                                            "iteration": iteration,
-                                        })),
-                                        trace_id: &trace_id,
-                                    })
+                            if let Err(e) = self
+                                .episodic_memory
+                                .record(agentos_memory::EpisodeRecordInput {
+                                    task_id: &task.id,
+                                    agent_id: &task.agent_id,
+                                    entry_type: agentos_memory::EpisodeType::ToolResult,
+                                    content: &context_result.to_string(),
+                                    summary: Some(&format!(
+                                        "Tool '{}' succeeded",
+                                        tool_call.tool_name
+                                    )),
+                                    metadata: Some(serde_json::json!({
+                                        "tool": tool_call.tool_name,
+                                        "success": true,
+                                        "iteration": iteration,
+                                    })),
+                                    trace_id: &trace_id,
+                                })
+                                .await
                             {
                                 tracing::warn!(task_id = %task.id, error = %e, "Failed to record episodic memory");
                             }
@@ -1915,25 +3109,26 @@ impl Kernel {
                                 .await
                                 .ok();
 
-                            if let Err(record_err) =
-                                self.episodic_memory
-                                    .record(agentos_memory::EpisodeRecordInput {
-                                        task_id: &task.id,
-                                        agent_id: &task.agent_id,
-                                        entry_type: agentos_memory::EpisodeType::ToolResult,
-                                        content: &error_result.to_string(),
-                                        summary: Some(&format!(
-                                            "Tool '{}' failed: {}",
-                                            tool_call.tool_name, e
-                                        )),
-                                        metadata: Some(serde_json::json!({
-                                            "tool": tool_call.tool_name,
-                                            "success": false,
-                                            "iteration": iteration,
-                                            "error": e.to_string(),
-                                        })),
-                                        trace_id: &trace_id,
-                                    })
+                            if let Err(record_err) = self
+                                .episodic_memory
+                                .record(agentos_memory::EpisodeRecordInput {
+                                    task_id: &task.id,
+                                    agent_id: &task.agent_id,
+                                    entry_type: agentos_memory::EpisodeType::ToolResult,
+                                    content: &error_result.to_string(),
+                                    summary: Some(&format!(
+                                        "Tool '{}' failed: {}",
+                                        tool_call.tool_name, e
+                                    )),
+                                    metadata: Some(serde_json::json!({
+                                        "tool": tool_call.tool_name,
+                                        "success": false,
+                                        "iteration": iteration,
+                                        "error": e.to_string(),
+                                    })),
+                                    trace_id: &trace_id,
+                                })
+                                .await
                             {
                                 tracing::warn!(task_id = %task.id, error = %record_err, "Failed to record episodic memory");
                             }
@@ -1949,7 +3144,7 @@ impl Kernel {
         }
 
         if final_answer.is_empty() {
-            if completed_iterations >= max_iterations as u32 {
+            if completed_iterations >= max_iterations {
                 anyhow::bail!("Max iterations exceeded without producing final answer");
             }
             anyhow::bail!("Task ended without producing final answer");
@@ -2083,11 +3278,63 @@ impl Kernel {
     pub(crate) fn truncate_for_prompt_payload(input: &str, max_chars: usize) -> String {
         input.chars().take(max_chars).collect()
     }
+
+    /// Truncate tool output before it enters the context window.
+    ///
+    /// Only the size injected into the agent's context is capped — the tool ran
+    /// to completion and the task loop continues unchanged. The truncation marker
+    /// tells the agent it received partial output so it can request smaller chunks
+    /// or use a different approach. This never terminates an agentic workflow.
+    pub(crate) fn maybe_truncate_output(s: String, max_bytes: usize, tool_name: &str) -> String {
+        if s.len() <= max_bytes {
+            return s;
+        }
+        let original_len = s.len();
+        // Truncate at a char boundary at or before max_bytes.
+        let truncated: String = s
+            .char_indices()
+            .take_while(|(idx, _)| *idx < max_bytes)
+            .map(|(_, c)| c)
+            .collect();
+        tracing::warn!(
+            tool = %tool_name,
+            original_bytes = original_len,
+            limit_bytes = max_bytes,
+            "Tool output truncated before context injection"
+        );
+        format!(
+            "{} [TRUNCATED: output was {} bytes, limit {} bytes — request smaller data or use pagination]",
+            truncated, original_len, max_bytes
+        )
+    }
+}
+
+/// Parse `[FEEDBACK]...[/FEEDBACK]` blocks from an LLM response.
+/// Each block must contain a valid JSON object. Malformed blocks are silently skipped.
+/// Used to surface structured agent feedback as `TestFindingCaptured` audit events.
+fn extract_feedback_blocks(text: &str) -> Vec<serde_json::Value> {
+    let mut results = Vec::new();
+    let mut search_from = 0;
+    while let Some(start) = text[search_from..].find("[FEEDBACK]") {
+        let abs_start = search_from + start + "[FEEDBACK]".len();
+        if let Some(end_offset) = text[abs_start..].find("[/FEEDBACK]") {
+            let block = text[abs_start..abs_start + end_offset].trim();
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(block) {
+                results.push(val);
+            }
+            search_from = abs_start + end_offset + "[/FEEDBACK]".len();
+        } else {
+            break;
+        }
+    }
+    results
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+    use std::time::Duration;
 
     #[test]
     fn classify_failure_marks_paused_tasks() {
@@ -2105,5 +3352,145 @@ mod tests {
         assert_eq!(reason, "max_iterations");
         assert_eq!(severity, EventSeverity::Warning);
         assert!(!is_pause);
+    }
+
+    fn make_task(complexity: Option<ComplexityLevel>, max_iterations: Option<u32>) -> AgentTask {
+        AgentTask {
+            id: TaskID::new(),
+            state: TaskState::Queued,
+            agent_id: AgentID::new(),
+            capability_token: CapabilityToken {
+                task_id: TaskID::new(),
+                agent_id: AgentID::new(),
+                allowed_tools: BTreeSet::new(),
+                allowed_intents: BTreeSet::new(),
+                permissions: PermissionSet::new(),
+                issued_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now(),
+                signature: Vec::new(),
+            },
+            assigned_llm: None,
+            priority: 5,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            timeout: Duration::from_secs(60),
+            original_prompt: "test".to_string(),
+            history: Vec::new(),
+            parent_task: None,
+            reasoning_hints: complexity.map(|estimated_complexity| TaskReasoningHints {
+                estimated_complexity,
+                preferred_turns: None,
+                preemption_sensitivity: PreemptionLevel::Normal,
+            }),
+            max_iterations,
+            trigger_source: None,
+        }
+    }
+
+    #[test]
+    fn resolve_task_max_iterations_uses_per_task_override() {
+        let limits = crate::config::TaskLimitsConfig {
+            max_iterations_low: 10,
+            max_iterations_medium: 25,
+            max_iterations_high: 50,
+        };
+        let task = make_task(Some(ComplexityLevel::High), Some(7));
+
+        assert_eq!(Kernel::resolve_task_max_iterations(&task, &limits), 7);
+    }
+
+    #[test]
+    fn resolve_task_max_iterations_uses_complexity_defaults() {
+        let limits = crate::config::TaskLimitsConfig {
+            max_iterations_low: 9,
+            max_iterations_medium: 21,
+            max_iterations_high: 55,
+        };
+
+        assert_eq!(
+            Kernel::resolve_task_max_iterations(
+                &make_task(Some(ComplexityLevel::Low), None),
+                &limits
+            ),
+            9
+        );
+        assert_eq!(
+            Kernel::resolve_task_max_iterations(
+                &make_task(Some(ComplexityLevel::Medium), None),
+                &limits
+            ),
+            21
+        );
+        assert_eq!(
+            Kernel::resolve_task_max_iterations(
+                &make_task(Some(ComplexityLevel::High), None),
+                &limits
+            ),
+            55
+        );
+    }
+
+    #[test]
+    fn resolve_task_max_iterations_defaults_to_low_without_hints() {
+        let limits = crate::config::TaskLimitsConfig {
+            max_iterations_low: 12,
+            max_iterations_medium: 24,
+            max_iterations_high: 48,
+        };
+
+        assert_eq!(
+            Kernel::resolve_task_max_iterations(&make_task(None, None), &limits),
+            12
+        );
+    }
+
+    #[test]
+    fn resolve_task_max_iterations_clamps_zero_to_one() {
+        let limits = crate::config::TaskLimitsConfig {
+            max_iterations_low: 0,
+            max_iterations_medium: 25,
+            max_iterations_high: 50,
+        };
+        // Zero in config should be clamped to 1.
+        assert_eq!(
+            Kernel::resolve_task_max_iterations(&make_task(None, None), &limits),
+            1
+        );
+        // Zero as per-task override should also be clamped to 1.
+        assert_eq!(
+            Kernel::resolve_task_max_iterations(
+                &make_task(Some(ComplexityLevel::High), Some(0)),
+                &limits
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn maybe_truncate_output_passes_through_small_output() {
+        let s = "hello world".to_string();
+        let result = Kernel::maybe_truncate_output(s.clone(), 1024, "test-tool");
+        assert_eq!(result, s);
+    }
+
+    #[test]
+    fn maybe_truncate_output_truncates_large_output() {
+        let s = "x".repeat(512 * 1024); // 512 KiB
+        let limit = 256 * 1024; // 256 KiB
+        let result = Kernel::maybe_truncate_output(s, limit, "big-tool");
+        assert!(result.len() > limit); // includes the marker suffix
+        assert!(result.contains("[TRUNCATED:"));
+        assert!(result.contains("524288 bytes")); // original size
+        assert!(result.contains("262144 bytes")); // limit
+                                                  // Actual content prefix must be exactly at the limit
+        let content_len = result.find(" [TRUNCATED:").unwrap();
+        assert_eq!(content_len, limit);
+    }
+
+    #[test]
+    fn maybe_truncate_output_handles_exact_limit() {
+        let s = "a".repeat(256);
+        let result = Kernel::maybe_truncate_output(s.clone(), 256, "tool");
+        assert_eq!(result, s); // no truncation at exact limit
     }
 }

@@ -356,26 +356,24 @@ impl RetrievalExecutor {
                     let top_k = query.top_k as u32;
                     let aid = agent_id.copied();
                     handles.push(tokio::spawn(async move {
-                        let result = tokio::task::spawn_blocking(move || {
-                            store.search_events(&q, None, aid.as_ref(), top_k)
-                        })
-                        .await;
-                        match result {
-                            Ok(Ok(episodes)) => Ok(episodes
-                                .into_iter()
-                                .map(|ep| RetrievalResult {
-                                    source: IndexType::Episodic,
-                                    content: ep.summary.unwrap_or(ep.content),
-                                    score: 0.5,
-                                    metadata: Some(serde_json::json!({
-                                        "episode_type": ep.entry_type.as_str(),
-                                        "timestamp": ep.timestamp.to_rfc3339(),
-                                    })),
-                                })
-                                .collect()),
-                            Ok(Err(e)) => Err(format!("episodic search failed: {e}")),
-                            Err(e) => Err(format!("episodic search task panicked: {e}")),
-                        }
+                        store
+                            .search_events(&q, None, aid.as_ref(), top_k)
+                            .await
+                            .map(|episodes| {
+                                episodes
+                                    .into_iter()
+                                    .map(|ep| RetrievalResult {
+                                        source: IndexType::Episodic,
+                                        content: ep.summary.unwrap_or(ep.content),
+                                        score: 0.5,
+                                        metadata: Some(serde_json::json!({
+                                            "episode_type": ep.entry_type.as_str(),
+                                            "timestamp": ep.timestamp.to_rfc3339(),
+                                        })),
+                                    })
+                                    .collect()
+                            })
+                            .map_err(|e| format!("episodic search failed: {e}"))
                     }));
                 }
                 IndexType::Procedural => {

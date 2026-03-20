@@ -4,6 +4,11 @@ default_task_timeout_secs = 120
 context_window_max_entries = 200
 context_window_token_budget = 16000
 health_port = 9091
+state_db_path = "/var/lib/agentos/data/kernel_state.db"
+
+[kernel.tool_calls]
+allow_parallel = true
+max_parallel = 5
 
 [secrets]
 vault_path = "/var/lib/agentos/vault/secrets.db"
@@ -12,6 +17,8 @@ vault_path = "/var/lib/agentos/vault/secrets.db"
 log_path = "/var/lib/agentos/data/audit.db"
 # Retain at most 500,000 entries; older rows pruned on each 10-minute sweep.
 max_audit_entries = 500000
+# Verify the last 1000 entries on startup. Set to 0 for a full-chain scan (slow at 500k).
+verify_last_n_entries = 1000
 
 [tools]
 core_tools_dir = "/var/lib/agentos/tools/core"
@@ -33,6 +40,10 @@ custom_base_url = "https://llm-gateway.internal/v1"
 openai_base_url = "https://api.openai.com/v1"
 anthropic_base_url = "https://api.anthropic.com/v1"
 gemini_base_url = "https://generativelanguage.googleapis.com/v1beta"
+# AGENTOS_LLM_MAX_TOKENS overrides this when set.
+max_tokens = 8192
+# AGENTOS_OLLAMA_CONTEXT_WINDOW overrides this when set.
+ollama_context_window = 32768
 
 [memory]
 model_cache_dir = "/var/lib/agentos/data/models"

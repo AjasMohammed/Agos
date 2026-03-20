@@ -15,6 +15,20 @@ outputs = ["content.text"]
 input  = "ArchivalSearchIntent"
 output = "ArchivalSearchResult"
 
+[input_schema]
+type = "object"
+required = ["query"]
+
+[input_schema.properties.query]
+type = "string"
+description = "Natural-language search query"
+
+[input_schema.properties.top_k]
+type = "integer"
+default = 5
+minimum = 1
+description = "Maximum number of results"
+
 [sandbox]
 network       = false
 fs_write      = false

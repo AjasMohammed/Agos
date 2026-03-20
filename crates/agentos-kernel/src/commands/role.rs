@@ -85,16 +85,23 @@ impl Kernel {
             }
         };
 
-        let (resource, read, write, execute) = match Self::parse_permission(&permission) {
-            Some(p) => p,
-            None => {
-                return KernelResponse::Error {
-                    message: format!("Invalid permission '{}'", permission),
+        let (resource, read, write, execute, query, observe) =
+            match Self::parse_permission(&permission) {
+                Some(p) => p,
+                None => {
+                    return KernelResponse::Error {
+                        message: format!("Invalid permission '{}'", permission),
+                    }
                 }
-            }
-        };
+            };
 
-        perms.grant(resource, read, write, execute, None);
+        perms.grant(resource.clone(), read, write, execute, None);
+        if query {
+            perms.grant_op(resource.clone(), PermissionOp::Query, None);
+        }
+        if observe {
+            perms.grant_op(resource, PermissionOp::Observe, None);
+        }
         if let Err(e) = registry.update_role_permissions(&role_name, perms) {
             return KernelResponse::Error { message: e };
         }
@@ -130,16 +137,23 @@ impl Kernel {
             }
         };
 
-        let (resource, read, write, execute) = match Self::parse_permission(&permission) {
-            Some(p) => p,
-            None => {
-                return KernelResponse::Error {
-                    message: format!("Invalid permission '{}'", permission),
+        let (resource, read, write, execute, query, observe) =
+            match Self::parse_permission(&permission) {
+                Some(p) => p,
+                None => {
+                    return KernelResponse::Error {
+                        message: format!("Invalid permission '{}'", permission),
+                    }
                 }
-            }
-        };
+            };
 
         perms.revoke(&resource, read, write, execute);
+        if query {
+            perms.revoke_op(&resource, PermissionOp::Query);
+        }
+        if observe {
+            perms.revoke_op(&resource, PermissionOp::Observe);
+        }
         if let Err(e) = registry.update_role_permissions(&role_name, perms) {
             return KernelResponse::Error { message: e };
         }

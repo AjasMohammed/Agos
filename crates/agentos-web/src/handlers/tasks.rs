@@ -218,7 +218,7 @@ pub async fn log_stream(
                 None => {
                     // Previous iteration saw terminal state; send closing event.
                     return Some((
-                        Ok(Event::default().event("done").data("stream closed")),
+                        vec![Ok(Event::default().event("done").data("stream closed"))],
                         None,
                     ));
                 }
@@ -255,39 +255,50 @@ pub async fn log_stream(
                 }
             };
 
-            if !entries.is_empty() {
-                let max_id = entries.last().map(|(id, _)| *id).unwrap_or(last_seen_id);
-                let data: Vec<String> = entries
-                    .iter()
-                    .map(|(_, e)| {
-                        format!(
-                            "[{}] {:?} - {}",
-                            e.timestamp.format("%H:%M:%S"),
-                            e.event_type,
-                            e.details
-                        )
-                    })
-                    .collect();
-                let next_state = if is_terminal { None } else { Some(max_id) };
-                Some((
-                    Ok(Event::default()
-                        .data(data.join("\n"))
-                        .id(max_id.to_string())),
-                    next_state,
-                ))
-            } else if is_terminal {
-                Some((
-                    Ok(Event::default().event("done").data("stream closed")),
-                    None,
-                ))
-            } else {
-                Some((
-                    Ok(Event::default().comment("keepalive")),
-                    Some(last_seen_id),
-                ))
+            let max_id = entries.last().map(|(id, _)| *id).unwrap_or(last_seen_id);
+            let next_state = if is_terminal { None } else { Some(max_id) };
+
+            if entries.is_empty() {
+                let event = if is_terminal {
+                    Event::default().event("done").data("stream closed")
+                } else {
+                    Event::default().comment("keepalive")
+                };
+                return Some((vec![Ok(event)], next_state));
             }
+
+            let mut events: Vec<Result<Event, Infallible>> = Vec::new();
+            let mut log_lines: Vec<String> = Vec::new();
+
+            for (_, entry) in &entries {
+                if entry.event_type == agentos_audit::AuditEventType::TestFindingCaptured {
+                    events.push(Ok(Event::default()
+                        .event("finding")
+                        .data(entry.details.to_string())));
+                } else {
+                    log_lines.push(format!(
+                        "[{}] {:?} - {}",
+                        entry.timestamp.format("%H:%M:%S"),
+                        entry.event_type,
+                        entry.details
+                    ));
+                }
+            }
+
+            if !log_lines.is_empty() {
+                events.push(Ok(Event::default()
+                    .data(log_lines.join("\n"))
+                    .id(max_id.to_string())));
+            }
+
+            if is_terminal {
+                events.push(Ok(Event::default().event("done").data("stream closed")));
+            }
+
+            Some((events, next_state))
         }
-    });
+    })
+    .flat_map(stream::iter);
 
     Sse::new(stream.boxed()).keep_alive(KeepAlive::default())
 }

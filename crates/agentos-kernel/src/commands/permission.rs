@@ -3,7 +3,10 @@ use agentos_bus::KernelResponse;
 use agentos_types::*;
 
 impl Kernel {
-    pub(crate) fn parse_permission(perm: &str) -> Option<(String, bool, bool, bool)> {
+    /// Parse a permission string like `"fs.data:rwq"` into individual op flags.
+    ///
+    /// Supported flag characters: r=Read, w=Write, x=Execute, q=Query, o=Observe.
+    pub(crate) fn parse_permission(perm: &str) -> Option<(String, bool, bool, bool, bool, bool)> {
         let parts: Vec<&str> = perm.splitn(2, ':').collect();
         if parts.len() != 2 {
             return None;
@@ -13,10 +16,12 @@ impl Kernel {
         let read = flags.contains('r');
         let write = flags.contains('w');
         let execute = flags.contains('x');
-        if !read && !write && !execute {
+        let query = flags.contains('q');
+        let observe = flags.contains('o');
+        if !read && !write && !execute && !query && !observe {
             return None;
         }
-        Some((resource, read, write, execute))
+        Some((resource, read, write, execute, query, observe))
     }
 
     pub(crate) async fn cmd_grant_permission(
@@ -24,7 +29,20 @@ impl Kernel {
         agent_name: String,
         permission: String,
     ) -> KernelResponse {
-        let registry = self.agent_registry.read().await;
+        let (resource, read, write, execute, query, observe) =
+            match Self::parse_permission(&permission) {
+                Some(p) => p,
+                None => {
+                    return KernelResponse::Error {
+                        message: format!(
+                    "Invalid permission '{}'. Expected format: resource:BITS (r,w,x,q,o e.g. fs.user_data:rw, memory.semantic:rq)",
+                    permission
+                ),
+                    }
+                }
+            };
+
+        let mut registry = self.agent_registry.write().await;
         let agent = match registry.get_by_name(&agent_name) {
             Some(a) => a.clone(),
             None => {
@@ -33,30 +51,21 @@ impl Kernel {
                 }
             }
         };
-        drop(registry);
 
-        let (resource, read, write, execute) = match Self::parse_permission(&permission) {
-            Some(p) => p,
-            None => {
-                return KernelResponse::Error {
-                    message: format!(
-                    "Invalid permission '{}'. Expected format: resource:rwx (e.g. fs.user_data:rw)",
-                    permission
-                ),
-                }
-            }
-        };
-
-        let mut perms = self
-            .capability_engine
-            .get_permissions(&agent.id)
-            .unwrap_or_default();
-        perms.grant(resource, read, write, execute, None);
-        if let Err(e) = self.capability_engine.update_permissions(&agent.id, perms) {
+        let mut perms = agent.permissions.clone();
+        perms.grant(resource.clone(), read, write, execute, None);
+        if query {
+            perms.grant_op(resource.clone(), PermissionOp::Query, None);
+        }
+        if observe {
+            perms.grant_op(resource.clone(), PermissionOp::Observe, None);
+        }
+        if let Err(e) = registry.update_agent_permissions(&agent.id, perms) {
             return KernelResponse::Error {
                 message: format!("Failed to update permissions: {e}"),
             };
         }
+        drop(registry);
 
         self.audit_log(agentos_audit::AuditEntry {
             timestamp: chrono::Utc::now(),
@@ -93,7 +102,20 @@ impl Kernel {
         agent_name: String,
         permission: String,
     ) -> KernelResponse {
-        let registry = self.agent_registry.read().await;
+        let (resource, read, write, execute, query, observe) =
+            match Self::parse_permission(&permission) {
+                Some(p) => p,
+                None => {
+                    return KernelResponse::Error {
+                        message: format!(
+                    "Invalid permission '{}'. Expected format: resource:BITS (r,w,x,q,o e.g. fs.user_data:rw, memory.semantic:rq)",
+                    permission
+                ),
+                    }
+                }
+            };
+
+        let mut registry = self.agent_registry.write().await;
         let agent = match registry.get_by_name(&agent_name) {
             Some(a) => a.clone(),
             None => {
@@ -102,28 +124,17 @@ impl Kernel {
                 }
             }
         };
-        drop(registry);
 
-        let (resource, read, write, execute) = match Self::parse_permission(&permission) {
-            Some(p) => p,
-            None => {
-                return KernelResponse::Error {
-                    message: format!(
-                    "Invalid permission '{}'. Expected format: resource:rwx (e.g. fs.user_data:rw)",
-                    permission
-                ),
-                }
-            }
-        };
-
-        let mut perms = self
-            .capability_engine
-            .get_permissions(&agent.id)
-            .unwrap_or_default();
+        let mut perms = agent.permissions.clone();
         perms.revoke(&resource, read, write, execute);
-        self.capability_engine
-            .update_permissions(&agent.id, perms)
-            .ok();
+        if query {
+            perms.revoke_op(&resource, PermissionOp::Query);
+        }
+        if observe {
+            perms.revoke_op(&resource, PermissionOp::Observe);
+        }
+        registry.update_agent_permissions(&agent.id, perms).ok();
+        drop(registry);
 
         self.audit_log(agentos_audit::AuditEntry {
             timestamp: chrono::Utc::now(),
@@ -158,19 +169,14 @@ impl Kernel {
     pub(crate) async fn cmd_show_permissions(&self, agent_name: String) -> KernelResponse {
         let registry = self.agent_registry.read().await;
         let agent = match registry.get_by_name(&agent_name) {
-            Some(a) => a.clone(),
+            Some(a) => a.id,
             None => {
                 return KernelResponse::Error {
                     message: format!("Agent '{}' not found", agent_name),
                 }
             }
         };
-        drop(registry);
-
-        let perms = self
-            .capability_engine
-            .get_permissions(&agent.id)
-            .unwrap_or_default();
+        let perms = registry.compute_effective_permissions(&agent);
         KernelResponse::Permissions(perms)
     }
 
@@ -182,8 +188,14 @@ impl Kernel {
     ) -> KernelResponse {
         let mut perms = PermissionSet::new();
         for p in permissions_strs {
-            if let Some((res, r, w, x)) = Self::parse_permission(&p) {
-                perms.grant(res, r, w, x, None);
+            if let Some((res, r, w, x, q, o)) = Self::parse_permission(&p) {
+                perms.grant(res.clone(), r, w, x, None);
+                if q {
+                    perms.grant_op(res.clone(), PermissionOp::Query, None);
+                }
+                if o {
+                    perms.grant_op(res, PermissionOp::Observe, None);
+                }
             } else {
                 return KernelResponse::Error {
                     message: format!("Invalid permission '{}'", p),
@@ -217,17 +229,6 @@ impl Kernel {
         agent_name: String,
         profile_name: String,
     ) -> KernelResponse {
-        let registry = self.agent_registry.read().await;
-        let agent_id = match registry.get_by_name(&agent_name) {
-            Some(a) => a.id,
-            None => {
-                return KernelResponse::Error {
-                    message: format!("Agent '{}' not found", agent_name),
-                }
-            }
-        };
-        drop(registry);
-
         let profile = match self.profile_manager.get(&profile_name) {
             Some(p) => p,
             None => {
@@ -237,23 +238,40 @@ impl Kernel {
             }
         };
 
-        let mut current_perms = self
-            .capability_engine
-            .get_permissions(&agent_id)
-            .unwrap_or_default();
-        for entry in profile.permissions.entries() {
-            current_perms.grant(
-                entry.resource.clone(),
-                entry.read,
-                entry.write,
-                entry.execute,
-                entry.expires_at,
-            );
-        }
+        let mut registry = self.agent_registry.write().await;
+        let agent = match registry.get_by_name(&agent_name) {
+            Some(a) => a.clone(),
+            None => {
+                return KernelResponse::Error {
+                    message: format!("Agent '{}' not found", agent_name),
+                }
+            }
+        };
 
-        self.capability_engine
-            .update_permissions(&agent_id, current_perms)
-            .ok();
+        let mut current_perms = agent.permissions.clone();
+        for entry in profile.permissions.entries() {
+            current_perms.grant_entry(entry);
+        }
+        if let Err(e) = registry.update_agent_permissions(&agent.id, current_perms) {
+            return KernelResponse::Error {
+                message: format!("Failed to update permissions: {e}"),
+            };
+        }
+        drop(registry);
+
+        self.audit_log(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: agentos_audit::AuditEventType::PermissionGranted,
+            agent_id: Some(agent.id),
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({ "profile_name": profile_name, "agent_name": agent_name }),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
+
         KernelResponse::Success { data: None }
     }
 
@@ -263,7 +281,22 @@ impl Kernel {
         permission: String,
         expires_secs: u64,
     ) -> KernelResponse {
-        let registry = self.agent_registry.read().await;
+        let (resource, read, write, execute, query, observe) =
+            match Self::parse_permission(&permission) {
+                Some(p) => p,
+                None => {
+                    return KernelResponse::Error {
+                        message: "Invalid permission".to_string(),
+                    }
+                }
+            };
+
+        // Use saturating conversion: values > i64::MAX are clamped to a very large timeout
+        // rather than wrapping to a negative number (which would create a past expiry).
+        let expires_secs_i64 = i64::try_from(expires_secs).unwrap_or(i64::MAX / 2);
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_secs_i64);
+
+        let mut registry = self.agent_registry.write().await;
         let agent = match registry.get_by_name(&agent_name) {
             Some(a) => a.clone(),
             None => {
@@ -272,32 +305,21 @@ impl Kernel {
                 }
             }
         };
-        drop(registry);
 
-        let (resource, read, write, execute) = match Self::parse_permission(&permission) {
-            Some(p) => p,
-            None => {
-                return KernelResponse::Error {
-                    message: "Invalid permission".to_string(),
-                }
-            }
-        };
-
-        // Use saturating conversion: values > i64::MAX are clamped to a very large timeout
-        // rather than wrapping to a negative number (which would create a past expiry).
-        let expires_secs_i64 = i64::try_from(expires_secs).unwrap_or(i64::MAX / 2);
-        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_secs_i64);
-
-        let mut perms = self
-            .capability_engine
-            .get_permissions(&agent.id)
-            .unwrap_or_default();
+        let mut perms = agent.permissions.clone();
         perms.grant(resource.clone(), read, write, execute, Some(expires_at));
-        if let Err(e) = self.capability_engine.update_permissions(&agent.id, perms) {
+        if query {
+            perms.grant_op(resource.clone(), PermissionOp::Query, Some(expires_at));
+        }
+        if observe {
+            perms.grant_op(resource.clone(), PermissionOp::Observe, Some(expires_at));
+        }
+        if let Err(e) = registry.update_agent_permissions(&agent.id, perms) {
             return KernelResponse::Error {
                 message: format!("Failed to update permissions: {e}"),
             };
         }
+        drop(registry);
 
         self.audit_log(agentos_audit::AuditEntry {
             timestamp: chrono::Utc::now(),

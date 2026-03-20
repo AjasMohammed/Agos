@@ -15,6 +15,10 @@ outputs = ["content.text"]
 input  = "MemoryBlockListIntent"
 output = "MemoryBlockListResult"
 
+[input_schema]
+type = "object"
+description = "No input required"
+
 [sandbox]
 network       = false
 fs_write      = false

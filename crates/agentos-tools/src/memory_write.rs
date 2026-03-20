@@ -80,6 +80,7 @@ impl AgentTool for MemoryWrite {
                     metadata: None,
                     trace_id: &context.trace_id,
                 })
+                .await
                 .map_err(|e| AgentOSError::ToolExecutionFailed {
                     tool_name: "memory-write".into(),
                     reason: format!("Episodic write failed: {}", e),

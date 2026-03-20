@@ -201,6 +201,11 @@ impl SecretsVault {
             .map_err(|e| AgentOSError::VaultError(format!("Failed to insert secret: {}", e)))?;
         }
 
+        // If this is an upsert that replaces an existing secret, revoke any
+        // outstanding proxy tokens so agents cannot redeem handles issued
+        // against the old value.
+        self.revoke_proxy_tokens_for_secret(name).await;
+
         do_audit_log(
             &self.audit,
             AuditEntry {
@@ -349,6 +354,9 @@ impl SecretsVault {
                 .map_err(|e| AgentOSError::VaultError(format!("Failed to revoke secret: {}", e)))?;
         }
 
+        // Immediately revoke any outstanding proxy tokens for the deleted secret.
+        self.revoke_proxy_tokens_for_secret(name).await;
+
         do_audit_log(
             &self.audit,
             AuditEntry {
@@ -411,6 +419,10 @@ impl SecretsVault {
             )
             .map_err(|e| AgentOSError::VaultError(format!("Failed to rotate secret: {}", e)))?;
         }
+
+        // Immediately revoke any outstanding proxy tokens that still point at
+        // the old secret value so agents cannot redeem stale handles.
+        self.revoke_proxy_tokens_for_secret(name).await;
 
         do_audit_log(
             &self.audit,
@@ -543,6 +555,14 @@ impl SecretsVault {
             ));
         }
 
+        // Defense-in-depth: reject resolution during emergency lockdown even
+        // for tokens that were removed from the map before lockdown() cleared it.
+        if self.locked_down.load(Ordering::SeqCst) {
+            return Err(AgentOSError::VaultError(
+                "Vault is in emergency lockdown — proxy token resolution denied".to_string(),
+            ));
+        }
+
         let entry = {
             let mut tokens = self.proxy_tokens.lock().await;
             tokens.remove(handle).ok_or_else(|| {
@@ -555,6 +575,50 @@ impl SecretsVault {
         }
 
         self.get(&entry.secret_name).await
+    }
+
+    /// Revoke all outstanding proxy tokens that reference `secret_name`.
+    /// Returns the number of tokens invalidated.
+    /// Called internally after a secret is written, rotated, or deleted to
+    /// close the race window where an agent could still redeem a stale token.
+    ///
+    /// Safety note: the proxy token map is intentionally in-memory only, so a
+    /// process crash always purges all tokens — providing crash-safety for free.
+    /// If the token store is ever moved to a persistent backend, the DB write
+    /// and token purge must be made atomic inside a single transaction.
+    async fn revoke_proxy_tokens_for_secret(&self, secret_name: &str) -> usize {
+        // Release the token lock before calling do_audit_log to avoid holding
+        // the async mutex across a blocking std::sync::Mutex acquisition inside
+        // the audit layer.
+        let revoked = {
+            let mut tokens = self.proxy_tokens.lock().await;
+            let before = tokens.len();
+            tokens.retain(|_, entry| entry.secret_name != secret_name);
+            before - tokens.len()
+        };
+
+        if revoked > 0 {
+            do_audit_log(
+                &self.audit,
+                AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: AuditEventType::ProxyTokensRevoked,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "secret_name": secret_name,
+                        "revoked_count": revoked,
+                    }),
+                    severity: AuditSeverity::Security,
+                    reversible: false,
+                    rollback_ref: None,
+                },
+            );
+        }
+
+        revoked
     }
 
     /// Remove all proxy tokens whose TTL has passed (call periodically).
@@ -930,6 +994,168 @@ mod tests {
             AgentOSError::SecretNotFound(name) => assert_eq!(name, "nonexistent-key"),
             other => panic!("Expected SecretNotFound, got: {:?}", other),
         }
+    }
+
+    /// rotate() must immediately invalidate any outstanding proxy tokens for
+    /// the rotated secret so an agent cannot redeem a stale handle.
+    #[tokio::test]
+    async fn test_rotate_invalidates_outstanding_proxy_tokens() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir);
+        let agent_id = agentos_types::AgentID::new();
+
+        vault
+            .set(
+                "MY_KEY",
+                "old-value",
+                SecretOwner::Kernel,
+                SecretScope::Global,
+            )
+            .await
+            .unwrap();
+
+        // Issue a proxy token before rotation.
+        let handle = vault
+            .issue_proxy_token("MY_KEY", 60, agent_id)
+            .await
+            .unwrap();
+
+        // Rotate the secret.
+        vault.rotate("MY_KEY", "new-value").await.unwrap();
+
+        // The previously issued handle must now be invalid.
+        let err = vault
+            .resolve_proxy(&handle)
+            .await
+            .err()
+            .expect("Proxy token must be invalidated after secret rotation");
+        assert!(
+            err.to_string().contains("Unknown or already-used"),
+            "Error should indicate the token is unknown/revoked"
+        );
+    }
+
+    /// revoke() must immediately invalidate any outstanding proxy tokens for
+    /// the deleted secret so an agent cannot redeem a handle after deletion.
+    #[tokio::test]
+    async fn test_delete_invalidates_outstanding_proxy_tokens() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir);
+        let agent_id = agentos_types::AgentID::new();
+
+        vault
+            .set(
+                "MY_KEY",
+                "some-value",
+                SecretOwner::Kernel,
+                SecretScope::Global,
+            )
+            .await
+            .unwrap();
+
+        // Issue a proxy token before deletion.
+        let handle = vault
+            .issue_proxy_token("MY_KEY", 60, agent_id)
+            .await
+            .unwrap();
+
+        // Delete the secret.
+        vault.revoke("MY_KEY").await.unwrap();
+
+        // The previously issued handle must now be invalid.
+        let err = vault
+            .resolve_proxy(&handle)
+            .await
+            .err()
+            .expect("Proxy token must be invalidated after secret deletion");
+        assert!(
+            err.to_string().contains("Unknown or already-used"),
+            "Error should indicate the token is unknown/revoked"
+        );
+    }
+
+    /// set() that overwrites an existing secret must also invalidate outstanding
+    /// proxy tokens so agents cannot redeem handles issued against the old value.
+    #[tokio::test]
+    async fn test_set_overwrite_invalidates_outstanding_proxy_tokens() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir);
+        let agent_id = agentos_types::AgentID::new();
+
+        vault
+            .set(
+                "API_KEY",
+                "old-value",
+                SecretOwner::Kernel,
+                SecretScope::Global,
+            )
+            .await
+            .unwrap();
+
+        let handle = vault
+            .issue_proxy_token("API_KEY", 60, agent_id)
+            .await
+            .unwrap();
+
+        // Overwrite via set() (upsert path).
+        vault
+            .set(
+                "API_KEY",
+                "new-value",
+                SecretOwner::Kernel,
+                SecretScope::Global,
+            )
+            .await
+            .unwrap();
+
+        let err = vault
+            .resolve_proxy(&handle)
+            .await
+            .err()
+            .expect("Proxy token must be invalidated after set() overwrite");
+        assert!(
+            err.to_string().contains("Unknown or already-used"),
+            "Error should indicate the token is unknown/revoked"
+        );
+    }
+
+    /// Rotating one secret must not disturb proxy tokens for unrelated secrets.
+    #[tokio::test]
+    async fn test_rotate_only_invalidates_tokens_for_that_secret() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir);
+        let agent_id = agentos_types::AgentID::new();
+
+        vault
+            .set("KEY_A", "value-a", SecretOwner::Kernel, SecretScope::Global)
+            .await
+            .unwrap();
+        vault
+            .set("KEY_B", "value-b", SecretOwner::Kernel, SecretScope::Global)
+            .await
+            .unwrap();
+
+        let handle_a = vault
+            .issue_proxy_token("KEY_A", 60, agent_id)
+            .await
+            .unwrap();
+        let handle_b = vault
+            .issue_proxy_token("KEY_B", 60, agent_id)
+            .await
+            .unwrap();
+
+        // Rotate only KEY_A.
+        vault.rotate("KEY_A", "new-value-a").await.unwrap();
+
+        // handle_a must be revoked.
+        assert!(
+            vault.resolve_proxy(&handle_a).await.is_err(),
+            "Token for rotated secret must be revoked"
+        );
+
+        // handle_b must still be valid.
+        let val = vault.resolve_proxy(&handle_b).await.unwrap();
+        assert_eq!(val.as_str(), "value-b", "Unrelated token must remain valid");
     }
 
     /// list() must never expose Kernel-scoped secrets.

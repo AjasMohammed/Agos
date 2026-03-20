@@ -21,7 +21,7 @@ When done, include "FILE_IO_COMPLETE" in your response."#
         initial_user_message: "Start the file I/O test. Write a test file, then read it back."
             .to_string(),
         max_turns,
-        required_permissions: vec!["fs.user_data".to_string()],
+        required_permissions: vec!["fs.user_data:rw".to_string()],
         goal_keywords: vec!["FILE_IO_COMPLETE".to_string()],
     }
 }

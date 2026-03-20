@@ -1,0 +1,28 @@
+[manifest]
+name        = "hardware-info"
+version     = "1.0.0"
+description = "Return hardware capabilities: CPU, memory, GPU, and disk capacity via the Hardware Abstraction Layer."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["hardware.system:r"]
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "HardwareInfoQuery"
+output = "HardwareInfoResult"
+
+[input_schema]
+type = "object"
+description = "No input required"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 2000
+syscalls      = []

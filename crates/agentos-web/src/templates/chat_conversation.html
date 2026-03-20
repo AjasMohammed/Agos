@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="page-header">
+    <div>
+        <h1>Chat <code class="id-long">{{ session_id[:8] }}</code></h1>
+        <p class="page-meta">with <strong>{{ agent_name }}</strong></p>
+    </div>
+    <a href="/chat" role="button" class="outline secondary btn-sm">← Chat</a>
+</div>
+
+<div id="chat-messages-list" class="chat-conversation-area">
+
+    {% if messages|length == 0 %}
+    <p class="muted" style="text-align:center; padding: 3rem 0;">No messages yet.</p>
+    {% else %}
+
+    {% for msg in messages %}
+
+    {% if msg.role == "user" %}
+    <div class="chat-row chat-row-user">
+        <div class="chat-bubble chat-bubble-user">
+            <div class="chat-bubble-content">{{ msg.content }}</div>
+            <div class="chat-bubble-meta">You &middot; {{ msg.created_at }}</div>
+        </div>
+    </div>
+
+    {% else %}
+    <div class="chat-row chat-row-agent">
+        <div class="chat-agent-avatar" aria-hidden="true">{{ agent_name[:1]|upper }}</div>
+        <div class="chat-agent-column">
+            <div class="chat-agent-name muted">{{ agent_name }}</div>
+            <div class="chat-bubble chat-bubble-agent">
+                <div class="chat-bubble-content-agent">{{ msg.content }}</div>
+                <div class="chat-bubble-meta chat-bubble-meta-left">{{ msg.created_at }}</div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% endfor %}
+    {% endif %}
+
+</div>
+
+<!-- Reply form — HTMX appends the partial response to #chat-messages-list -->
+<div class="chat-reply-area">
+    <form hx-post="/chat/{{ session_id }}/send"
+          hx-target="#chat-messages-list"
+          hx-swap="beforeend"
+          hx-on::after-request="if(event.detail.successful) this.reset()"
+          class="chat-compose-form">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <label for="reply-message">Continue the conversation
+            <textarea id="reply-message" name="message" rows="3"
+                      placeholder="Reply to {{ agent_name }}…"></textarea>
+        </label>
+        <div style="display: flex; justify-content: flex-end;">
+            <button type="submit">Send →</button>
+        </div>
+    </form>
+</div>
+
+{% endblock %}

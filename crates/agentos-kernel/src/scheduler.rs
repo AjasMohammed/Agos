@@ -1,6 +1,8 @@
+use crate::state_store::KernelStateStore;
 use agentos_types::*;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
 #[derive(Debug, Clone)]
@@ -18,6 +20,8 @@ pub struct TaskScheduler {
     tasks: RwLock<HashMap<TaskID, AgentTask>>,
     /// Dependency graph for deadlock prevention.
     dependency_graph: RwLock<TaskDependencyGraph>,
+    /// Optional persistence backend for crash-safe task state restoration.
+    state_store: Option<Arc<KernelStateStore>>,
 }
 
 #[derive(Eq, PartialEq)]
@@ -97,16 +101,120 @@ impl TaskDependencyGraph {
 
 impl TaskScheduler {
     pub fn new(_max_concurrent: usize) -> Self {
+        Self::with_state_store(_max_concurrent, None)
+    }
+
+    pub fn with_state_store(
+        _max_concurrent: usize,
+        state_store: Option<Arc<KernelStateStore>>,
+    ) -> Self {
         Self {
             queue: Mutex::new(BinaryHeap::new()),
             tasks: RwLock::new(HashMap::new()),
             dependency_graph: RwLock::new(TaskDependencyGraph::new()),
+            state_store,
         }
+    }
+
+    async fn persist_task_snapshot(&self, task: AgentTask) {
+        let task_id = task.id;
+        if let Some(store) = &self.state_store {
+            if let Err(e) = store.upsert_scheduler_task(task).await {
+                tracing::error!(
+                    task_id = %task_id,
+                    error = %e,
+                    "Failed to persist scheduler task state"
+                );
+            }
+        }
+    }
+
+    /// Restore non-terminal task state from SQLite at boot.
+    ///
+    /// Behavior:
+    /// - `Queued` tasks are re-queued.
+    /// - `Running` tasks are normalized to `Queued` and re-queued.
+    /// - `Waiting` tasks are restored in the task map but remain paused.
+    pub async fn restore_from_store(&self) -> anyhow::Result<usize> {
+        let Some(store) = &self.state_store else {
+            return Ok(0);
+        };
+
+        let persisted = store.load_non_terminal_scheduler_tasks().await?;
+        if persisted.is_empty() {
+            return Ok(0);
+        }
+
+        let mut restored_count = 0usize;
+        let mut normalized_to_queued = Vec::new();
+
+        let mut tasks = self.tasks.write().await;
+        let mut queue = self.queue.lock().await;
+
+        for mut task in persisted {
+            if matches!(
+                task.state,
+                TaskState::Complete | TaskState::Failed | TaskState::Cancelled
+            ) {
+                continue;
+            }
+
+            if task.state == TaskState::Running {
+                task.state = TaskState::Queued;
+                task.started_at = None;
+                normalized_to_queued.push(task.clone());
+            }
+
+            if task.state == TaskState::Queued {
+                queue.push(PrioritizedTask {
+                    priority: task.priority,
+                    created_at: task.created_at,
+                    task_id: task.id,
+                });
+            }
+
+            tasks.insert(task.id, task);
+            restored_count = restored_count.saturating_add(1);
+        }
+
+        drop(queue);
+        drop(tasks);
+
+        // Persist normalized state transitions (running -> queued) after lock release.
+        for task in normalized_to_queued {
+            self.persist_task_snapshot(task).await;
+        }
+
+        Ok(restored_count)
+    }
+
+    /// Return a snapshot of all tasks for use in `task-status` / `task-list` tools.
+    pub async fn snapshot_tasks(&self) -> TaskSnapshot {
+        let tasks = self.tasks.read().await;
+        let summaries: Vec<TaskIntrospectionSummary> = tasks
+            .values()
+            .map(|t| TaskIntrospectionSummary {
+                id: t.id,
+                agent_id: t.agent_id,
+                description: {
+                    let boundary = t.original_prompt.char_indices().nth(100).map(|(i, _)| i);
+                    match boundary {
+                        Some(b) => format!("{}...", &t.original_prompt[..b]),
+                        None => t.original_prompt.clone(),
+                    }
+                },
+                status: format!("{:?}", t.state).to_lowercase(),
+                created_at: t.created_at,
+                started_at: t.started_at,
+            })
+            .collect();
+        TaskSnapshot::new(summaries)
     }
 
     /// Enqueue a new task. Returns the TaskID.
     pub async fn enqueue(&self, task: AgentTask) -> TaskID {
         let task_id = task.id;
+        let task_snapshot = task.clone();
         let prioritized = PrioritizedTask {
             priority: task.priority,
             created_at: task.created_at,
@@ -114,6 +222,7 @@ impl TaskScheduler {
         };
         self.tasks.write().await.insert(task_id, task);
         self.queue.lock().await.push(prioritized);
+        self.persist_task_snapshot(task_snapshot).await;
         task_id
     }
 
@@ -121,7 +230,9 @@ impl TaskScheduler {
     /// Used by synchronous execution paths that run outside the background loop.
     pub async fn register_external(&self, task: AgentTask) -> TaskID {
         let task_id = task.id;
+        let task_snapshot = task.clone();
         self.tasks.write().await.insert(task_id, task);
+        self.persist_task_snapshot(task_snapshot).await;
         task_id
     }
 
@@ -159,8 +270,10 @@ impl TaskScheduler {
             created_at: task.created_at,
             task_id: *task_id,
         };
+        let snapshot = task.clone();
         drop(tasks);
         self.queue.lock().await.push(prioritized);
+        self.persist_task_snapshot(snapshot).await;
         Ok(())
     }
 
@@ -170,14 +283,18 @@ impl TaskScheduler {
         task_id: &TaskID,
         state: TaskState,
     ) -> Result<(), AgentOSError> {
-        let mut tasks = self.tasks.write().await;
-        match tasks.get_mut(task_id) {
-            Some(task) => {
-                task.state = state;
-                Ok(())
+        let snapshot = {
+            let mut tasks = self.tasks.write().await;
+            match tasks.get_mut(task_id) {
+                Some(task) => {
+                    task.state = state;
+                    task.clone()
+                }
+                None => return Err(AgentOSError::TaskNotFound(*task_id)),
             }
-            None => Err(AgentOSError::TaskNotFound(*task_id)),
-        }
+        };
+        self.persist_task_snapshot(snapshot).await;
+        Ok(())
     }
 
     /// Update a task state only if the current state is not terminal.
@@ -187,20 +304,24 @@ impl TaskScheduler {
         task_id: &TaskID,
         state: TaskState,
     ) -> Result<bool, AgentOSError> {
-        let mut tasks = self.tasks.write().await;
-        match tasks.get_mut(task_id) {
-            Some(task) => {
-                if matches!(
-                    task.state,
-                    TaskState::Complete | TaskState::Failed | TaskState::Cancelled
-                ) {
-                    return Ok(false);
+        let snapshot = {
+            let mut tasks = self.tasks.write().await;
+            match tasks.get_mut(task_id) {
+                Some(task) => {
+                    if matches!(
+                        task.state,
+                        TaskState::Complete | TaskState::Failed | TaskState::Cancelled
+                    ) {
+                        return Ok(false);
+                    }
+                    task.state = state;
+                    task.clone()
                 }
-                task.state = state;
-                Ok(true)
+                None => return Err(AgentOSError::TaskNotFound(*task_id)),
             }
-            None => Err(AgentOSError::TaskNotFound(*task_id)),
-        }
+        };
+        self.persist_task_snapshot(snapshot).await;
+        Ok(true)
     }
 
     /// Get a task by ID.
@@ -239,19 +360,24 @@ impl TaskScheduler {
 
     /// Set `started_at` timestamp on a task (when it transitions to Running).
     pub async fn mark_started(&self, task_id: &TaskID) -> Result<(), AgentOSError> {
-        let mut tasks = self.tasks.write().await;
-        match tasks.get_mut(task_id) {
-            Some(task) => {
-                task.started_at = Some(chrono::Utc::now());
-                Ok(())
+        let snapshot = {
+            let mut tasks = self.tasks.write().await;
+            match tasks.get_mut(task_id) {
+                Some(task) => {
+                    task.started_at = Some(chrono::Utc::now());
+                    task.clone()
+                }
+                None => return Err(AgentOSError::TaskNotFound(*task_id)),
             }
-            None => Err(AgentOSError::TaskNotFound(*task_id)),
-        }
+        };
+        self.persist_task_snapshot(snapshot).await;
+        Ok(())
     }
 
     /// Check for timed-out tasks and mark them as Failed.
     pub async fn check_timeouts(&self) -> Vec<TimedOutTask> {
         let mut timed_out = Vec::new();
+        let mut changed_tasks = Vec::new();
         let mut tasks = self.tasks.write().await;
         let now = chrono::Utc::now();
         for task in tasks.values_mut() {
@@ -274,6 +400,7 @@ impl TaskScheduler {
 
                 if elapsed > effective_timeout {
                     task.state = TaskState::Failed;
+                    changed_tasks.push(task.clone());
                     timed_out.push(TimedOutTask {
                         task_id: task.id,
                         agent_id: task.agent_id,
@@ -283,6 +410,12 @@ impl TaskScheduler {
                 }
             }
         }
+        drop(tasks);
+
+        for task in changed_tasks {
+            self.persist_task_snapshot(task).await;
+        }
+
         timed_out
     }
 
@@ -328,7 +461,9 @@ impl TaskScheduler {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+    use std::sync::Arc;
     use std::time::Duration;
+    use tempfile::tempdir;
 
     fn make_task(priority: u8, prompt: &str) -> AgentTask {
         AgentTask {
@@ -354,6 +489,7 @@ mod tests {
             history: Vec::new(),
             parent_task: None,
             reasoning_hints: None,
+            max_iterations: None,
             trigger_source: None,
         }
     }
@@ -588,5 +724,70 @@ mod tests {
 
         let after = scheduler.get_task(&task_id).await.unwrap();
         assert!(after.started_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_restore_from_store_recovers_non_terminal_tasks() {
+        let dir = tempdir().expect("temp dir");
+        let db_path = dir.path().join("kernel_state.db");
+        let store = Arc::new(
+            KernelStateStore::open(db_path)
+                .await
+                .expect("state store should open"),
+        );
+
+        // Seed persisted state.
+        let scheduler = TaskScheduler::with_state_store(10, Some(store.clone()));
+        let queued_task = make_task(7, "queued");
+        let queued_id = queued_task.id;
+        scheduler.enqueue(queued_task).await;
+
+        let running_task = make_task(6, "running");
+        let running_id = running_task.id;
+        scheduler.enqueue(running_task).await;
+        scheduler
+            .update_state(&running_id, TaskState::Running)
+            .await
+            .unwrap();
+        scheduler.mark_started(&running_id).await.unwrap();
+
+        let waiting_task = make_task(5, "waiting");
+        let waiting_id = waiting_task.id;
+        scheduler.enqueue(waiting_task).await;
+        scheduler
+            .update_state(&waiting_id, TaskState::Waiting)
+            .await
+            .unwrap();
+
+        // Simulate restart by creating a fresh scheduler on the same DB.
+        let restored = TaskScheduler::with_state_store(10, Some(store));
+        let restored_count = restored
+            .restore_from_store()
+            .await
+            .expect("restore should succeed");
+        assert_eq!(restored_count, 3);
+
+        let restored_running = restored.get_task(&running_id).await.unwrap();
+        assert_eq!(
+            restored_running.state,
+            TaskState::Queued,
+            "running task should be normalized to queued on restore"
+        );
+
+        let restored_waiting = restored.get_task(&waiting_id).await.unwrap();
+        assert_eq!(
+            restored_waiting.state,
+            TaskState::Waiting,
+            "waiting task should remain paused after restore"
+        );
+
+        // Waiting task should not be dequeued for execution.
+        let first = restored.dequeue().await.expect("first task");
+        let second = restored.dequeue().await.expect("second task");
+        let dequeued = [first.id, second.id];
+        assert!(dequeued.contains(&queued_id));
+        assert!(dequeued.contains(&running_id));
+        assert_ne!(first.id, waiting_id);
+        assert_ne!(second.id, waiting_id);
     }
 }

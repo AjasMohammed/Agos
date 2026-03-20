@@ -1236,7 +1236,10 @@ Take appropriate action, report findings, escalate if needed, or acknowledge sil
                 task.agent_id == *agent_id
                     && matches!(
                         task.state,
-                        TaskState::Queued | TaskState::Running | TaskState::Waiting
+                        TaskState::Queued
+                            | TaskState::Running
+                            | TaskState::Waiting
+                            | TaskState::Suspended
                     )
             })
             .count()
@@ -1252,7 +1255,10 @@ Take appropriate action, report findings, escalate if needed, or acknowledge sil
                 task.agent_id == *agent_id
                     && matches!(
                         task.state,
-                        TaskState::Queued | TaskState::Running | TaskState::Waiting
+                        TaskState::Queued
+                            | TaskState::Running
+                            | TaskState::Waiting
+                            | TaskState::Suspended
                     )
             })
             .collect::<Vec<_>>();

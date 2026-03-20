@@ -1,10 +1,13 @@
 use agentos_types::*;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 
 /// Inputs gathered by the task executor before compilation.
 ///
 /// The compiler does not access kernel subsystems directly -- the caller
 /// (task_executor) is responsible for fetching tool descriptions, episodic
 /// recall, and the raw history from `ContextManager::get_context()`.
+#[derive(Clone)]
 pub struct CompilationInputs {
     /// Core system prompt: agent identity, safety instructions, response format.
     pub system_prompt: String,
@@ -56,10 +59,18 @@ impl ContextCompiler {
     /// An oversized system prompt cannot evict history entries.
     pub fn compile(&self, inputs: CompilationInputs) -> ContextWindow {
         let mut window = ContextWindow::new(self.budget.total_tokens);
+        let cpt = self.budget.chars_per_token;
+
+        // Deduplication set: track content hashes to skip identical entries within a
+        // single compile pass. This prevents repeated retrieval paths from inflating
+        // knowledge or history with redundant content.
+        let mut seen_hashes: HashSet<u64> = HashSet::new();
 
         // 1. SYSTEM -- first position (primacy effect)
         let system_budget = self.budget.tokens_for(ContextCategory::System);
-        let system_content = Self::truncate_to_token_budget(&inputs.system_prompt, system_budget);
+        let system_content =
+            Self::truncate_to_token_budget(&inputs.system_prompt, system_budget, cpt);
+        seen_hashes.insert(Self::content_hash(&system_content));
         window.push_categorized(
             ContextRole::System,
             system_content,
@@ -75,7 +86,8 @@ impl ContextCompiler {
         } else {
             format!("{}\n\n{}", inputs.tool_descriptions, inputs.agent_directory)
         };
-        let tools_content = Self::truncate_to_token_budget(&tools_combined, tools_budget);
+        let tools_content = Self::truncate_to_token_budget(&tools_combined, tools_budget, cpt);
+        seen_hashes.insert(Self::content_hash(&tools_content));
         window.push_categorized(
             ContextRole::System,
             tools_content,
@@ -87,38 +99,47 @@ impl ContextCompiler {
         // 3. KNOWLEDGE -- retrieved memories, episodic recall
         let knowledge_budget = self.budget.tokens_for(ContextCategory::Knowledge);
         let knowledge_entries =
-            Self::fit_strings_to_budget(&inputs.knowledge_blocks, knowledge_budget);
+            Self::fit_strings_to_budget(&inputs.knowledge_blocks, knowledge_budget, cpt);
         for block in knowledge_entries {
-            window.push_categorized(
-                ContextRole::System,
-                block,
-                ContextCategory::Knowledge,
-                0.7, // moderate importance -- can be evicted if needed
-                false,
-            );
+            let h = Self::content_hash(&block);
+            if seen_hashes.insert(h) {
+                window.push_categorized(
+                    ContextRole::System,
+                    block,
+                    ContextCategory::Knowledge,
+                    0.7, // moderate importance -- can be evicted if needed
+                    false,
+                );
+            }
         }
 
         // 4. HISTORY -- conversation turns (most recent first)
         let history_budget = self.budget.tokens_for(ContextCategory::History);
-        let history_entries = Self::fit_history_to_budget(&inputs.history, history_budget);
+        let history_entries = Self::fit_history_to_budget(&inputs.history, history_budget, cpt);
         for entry in history_entries {
-            // Preserve the original entry's role and metadata but tag with History category
-            window.entries.push(ContextEntry {
-                role: entry.role,
-                content: entry.content,
-                timestamp: entry.timestamp,
-                metadata: entry.metadata,
-                importance: entry.importance,
-                pinned: entry.pinned,
-                reference_count: entry.reference_count,
-                partition: ContextPartition::Active,
-                category: ContextCategory::History,
-            });
+            let h = Self::content_hash_with_role(Some(entry.role), &entry.content);
+            if seen_hashes.insert(h) {
+                // Preserve the original entry's role and metadata but tag with History category
+                window.entries.push(ContextEntry {
+                    role: entry.role,
+                    content: entry.content,
+                    timestamp: entry.timestamp,
+                    metadata: entry.metadata,
+                    importance: entry.importance,
+                    pinned: entry.pinned,
+                    reference_count: entry.reference_count,
+                    partition: ContextPartition::Active,
+                    category: ContextCategory::History,
+                    is_summary: entry.is_summary,
+                });
+            }
         }
 
         // 5. TASK -- current user prompt (last position = recency effect)
         let task_budget = self.budget.tokens_for(ContextCategory::Task);
-        let task_content = Self::truncate_to_token_budget(&inputs.task_prompt, task_budget);
+        let task_content = Self::truncate_to_token_budget(&inputs.task_prompt, task_budget, cpt);
+        // Do not dedup the task prompt — it is always inserted even if identical to a history
+        // entry (e.g., single-turn tasks where prompt == first history entry).
         window.push_categorized(
             ContextRole::User,
             task_content,
@@ -130,17 +151,44 @@ impl ContextCompiler {
         window
     }
 
+    /// Compute a non-cryptographic 64-bit hash of a string for deduplication.
+    ///
+    /// Uses the standard library's `DefaultHasher`, which is fast and sufficient
+    /// for content dedup within a single compile pass. Not suitable for security use.
+    fn content_hash(s: &str) -> u64 {
+        Self::content_hash_with_role(None, s)
+    }
+
+    /// Hash content together with its role so that two entries with identical text
+    /// but different roles (e.g. User vs ToolResult) are not treated as duplicates.
+    fn content_hash_with_role(role: Option<ContextRole>, s: &str) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if let Some(r) = role {
+            std::mem::discriminant(&r).hash(&mut hasher);
+        }
+        s.hash(&mut hasher);
+        hasher.finish()
+    }
+
     /// Truncate a string to fit within a token budget.
-    /// Uses the same 4 chars ~ 1 token heuristic as `ContextWindow::estimated_tokens()`.
-    fn truncate_to_token_budget(text: &str, max_tokens: usize) -> String {
-        let max_chars = max_tokens.saturating_mul(4);
-        if text.len() <= max_chars {
+    ///
+    /// Uses the supplied `chars_per_token` ratio so that the token estimate
+    /// matches the one used by `ContextWindow::estimated_tokens_with_ratio()`.
+    /// Comparison is done on char count (not byte length) for correctness with
+    /// multi-byte UTF-8 characters.
+    fn truncate_to_token_budget(text: &str, max_tokens: usize, chars_per_token: f32) -> String {
+        let ratio = chars_per_token.clamp(0.5, 16.0);
+        // Subtract 1 token worth of chars to account for the +1 overhead that
+        // `estimated_tokens_with_ratio()` adds per entry, keeping truncation and
+        // estimation consistent so the entry fits within its budget after estimation.
+        let max_chars = (max_tokens.saturating_sub(1) as f32 * ratio) as usize;
+        if text.chars().count() <= max_chars {
             text.to_string()
         } else {
-            // Find the last valid char boundary at or before max_chars
+            // Find the last valid char boundary at or before max_chars chars in
             let truncation_point = text
                 .char_indices()
-                .take_while(|&(i, _)| i < max_chars)
+                .take(max_chars)
                 .last()
                 .map(|(i, c)| i + c.len_utf8())
                 .unwrap_or(0);
@@ -152,16 +200,26 @@ impl ContextCompiler {
 
     /// Select strings from a list that fit within the token budget.
     /// Preserves order. Stops adding when the next entry would exceed budget.
-    fn fit_strings_to_budget(entries: &[String], max_tokens: usize) -> Vec<String> {
-        let max_chars = max_tokens.saturating_mul(4);
+    /// The first entry is truncated if it alone exceeds the budget.
+    fn fit_strings_to_budget(
+        entries: &[String],
+        max_tokens: usize,
+        chars_per_token: f32,
+    ) -> Vec<String> {
+        let ratio = chars_per_token.clamp(0.5, 16.0);
+        let max_chars = (max_tokens as f32 * ratio) as usize;
         let mut result = Vec::new();
-        let mut used_chars = 0;
+        let mut used_chars = 0usize;
         for entry in entries {
-            let entry_chars = entry.len();
+            let entry_chars = entry.chars().count();
             if used_chars + entry_chars > max_chars {
                 // If this is the first entry and it's too large, truncate it
                 if result.is_empty() {
-                    result.push(Self::truncate_to_token_budget(entry, max_tokens));
+                    result.push(Self::truncate_to_token_budget(
+                        entry,
+                        max_tokens,
+                        chars_per_token,
+                    ));
                 }
                 break;
             }
@@ -177,15 +235,20 @@ impl ContextCompiler {
     /// the budget is exhausted. Pinned entries are always included (they count
     /// against budget but are never skipped). The result is returned in
     /// chronological order (oldest first).
-    fn fit_history_to_budget(entries: &[ContextEntry], max_tokens: usize) -> Vec<ContextEntry> {
-        let max_chars = max_tokens.saturating_mul(4);
+    fn fit_history_to_budget(
+        entries: &[ContextEntry],
+        max_tokens: usize,
+        chars_per_token: f32,
+    ) -> Vec<ContextEntry> {
+        let ratio = chars_per_token.clamp(0.5, 16.0);
+        let max_chars = (max_tokens as f32 * ratio) as usize;
         let mut selected: Vec<ContextEntry> = Vec::new();
-        let mut used_chars = 0;
+        let mut used_chars = 0usize;
 
         // First pass: collect all pinned entries (they must be included)
         for entry in entries {
             if entry.pinned {
-                used_chars += entry.content.len();
+                used_chars += entry.content.chars().count();
                 selected.push(entry.clone());
             }
         }
@@ -195,7 +258,7 @@ impl ContextCompiler {
             if entry.pinned {
                 continue; // already included
             }
-            let entry_chars = entry.content.len();
+            let entry_chars = entry.content.chars().count();
             if used_chars + entry_chars > max_chars {
                 continue; // skip entries that don't fit
             }
@@ -208,11 +271,11 @@ impl ContextCompiler {
         selected
     }
 
-    /// Estimate the token count of a string (4 chars ~ 1 token).
-    /// Matches `ContextWindow::estimated_tokens()` heuristic.
+    /// Estimate the token count of a string using the configurable ratio.
     #[allow(dead_code)]
-    fn estimate_tokens(text: &str) -> usize {
-        text.len() / 4 + 1
+    fn estimate_tokens(text: &str, chars_per_token: f32) -> usize {
+        let ratio = chars_per_token.clamp(0.5, 16.0);
+        (text.chars().count() as f32 / ratio) as usize + 1
     }
 }
 
@@ -234,6 +297,7 @@ mod tests {
             reference_count: 0,
             partition: ContextPartition::Active,
             category: ContextCategory::History,
+            is_summary: false,
         }
     }
 
@@ -596,6 +660,7 @@ mod tests {
             knowledge_pct: 0.30,
             history_pct: 0.25,
             task_pct: 0.12,
+            chars_per_token: 4.0,
         };
         assert_eq!(budget.tokens_for(ContextCategory::System), 11_250);
         assert_eq!(budget.tokens_for(ContextCategory::Tools), 13_500);
@@ -607,7 +672,7 @@ mod tests {
     #[test]
     fn test_truncate_to_token_budget_preserves_char_boundaries() {
         let text = "Hello world! ".to_string() + &"\u{1F600}".repeat(100);
-        let truncated = ContextCompiler::truncate_to_token_budget(&text, 5);
+        let truncated = ContextCompiler::truncate_to_token_budget(&text, 5, 4.0);
         assert!(truncated.len() < text.len());
         assert!(truncated.is_char_boundary(truncated.len()));
     }
@@ -631,5 +696,135 @@ mod tests {
         assert_eq!(history[0].role, ContextRole::User);
         assert_eq!(history[1].role, ContextRole::Assistant);
         assert_eq!(history[2].role, ContextRole::ToolResult);
+    }
+
+    #[test]
+    fn test_compile_deduplicates_knowledge_blocks() {
+        let compiler = ContextCompiler::new(TokenBudget::default());
+        let duplicate_block = "[RECALL]\nSame fact appears twice\n[/RECALL]".to_string();
+        let window = compiler.compile(CompilationInputs {
+            knowledge_blocks: vec![duplicate_block.clone(), duplicate_block.clone()],
+            ..default_inputs()
+        });
+
+        let knowledge_count = window
+            .entries
+            .iter()
+            .filter(|e| e.category == ContextCategory::Knowledge)
+            .count();
+        assert_eq!(
+            knowledge_count, 1,
+            "Duplicate knowledge blocks should be deduplicated to a single entry"
+        );
+    }
+
+    #[test]
+    fn test_compile_deduplicates_history_entries() {
+        let compiler = ContextCompiler::new(TokenBudget::default());
+        // Two history entries with identical content
+        let mut e1 = make_history_entry(ContextRole::User, "repeated message", false);
+        let mut e2 = make_history_entry(ContextRole::User, "repeated message", false);
+        // Slightly different timestamps so both pass budget checks
+        e1.timestamp = chrono::Utc::now();
+        e2.timestamp = chrono::Utc::now() + chrono::Duration::milliseconds(100);
+
+        let window = compiler.compile(CompilationInputs {
+            history: vec![e1, e2],
+            ..default_inputs()
+        });
+
+        let history_with_repeated: Vec<&ContextEntry> = window
+            .entries
+            .iter()
+            .filter(|e| e.category == ContextCategory::History && e.content == "repeated message")
+            .collect();
+        assert_eq!(
+            history_with_repeated.len(),
+            1,
+            "Duplicate history entries should be deduplicated"
+        );
+    }
+
+    #[test]
+    fn test_truncate_uses_chars_per_token_ratio() {
+        // With ratio 2.0 and max_tokens 5, max_chars = 10
+        let text = "abcdefghijklmnop"; // 16 chars
+        let truncated = ContextCompiler::truncate_to_token_budget(text, 5, 2.0);
+        // Should be truncated to 10 chars + marker
+        assert!(
+            truncated.contains("[...truncated to fit token budget]"),
+            "Should contain truncation marker"
+        );
+        // The content before truncation marker should be <= 10 chars
+        let content_before = truncated.split('\n').next().unwrap_or("");
+        assert!(
+            content_before.chars().count() <= 10,
+            "Content before marker should be within 10 chars (got {})",
+            content_before.chars().count()
+        );
+    }
+
+    #[test]
+    fn test_cjk_chars_per_token_fits_more_tokens() {
+        // For CJK text (chars_per_token = 1.0), each char is 1 token.
+        // With budget of 5 tokens, we should fit exactly 5 CJK chars.
+        let cjk_text = "你好世界测试"; // 6 chars, 1 char ≈ 1 token
+        let truncated = ContextCompiler::truncate_to_token_budget(cjk_text, 5, 1.0);
+        assert!(
+            truncated.contains("[...truncated to fit token budget]"),
+            "6 CJK chars should be truncated for 5-token budget with ratio 1.0"
+        );
+
+        // With ratio 4.0 (treating CJK same as Latin), 6 chars → 1.5 tokens → fits fine
+        let not_truncated = ContextCompiler::truncate_to_token_budget(cjk_text, 5, 4.0);
+        assert!(
+            !not_truncated.contains("[...truncated"),
+            "6 CJK chars should NOT be truncated with Latin ratio 4.0 for 5-token budget"
+        );
+    }
+
+    #[test]
+    fn test_chars_per_token_config_flows_into_compile() {
+        // A budget with a very small chars_per_token (aggressive estimation) should cause
+        // more truncation than the default.
+        let tight_budget = TokenBudget {
+            total_tokens: 1_000,
+            chars_per_token: 1.0, // every char = 1 token
+            ..Default::default()
+        };
+        let default_budget = TokenBudget {
+            total_tokens: 1_000,
+            chars_per_token: 4.0,
+            ..Default::default()
+        };
+
+        // Create a moderately long system prompt
+        let long_prompt = "a".repeat(200);
+        let inputs = CompilationInputs {
+            system_prompt: long_prompt,
+            ..default_inputs()
+        };
+
+        let tight_compiler = ContextCompiler::new(tight_budget);
+        let default_compiler = ContextCompiler::new(default_budget);
+
+        let tight_window = tight_compiler.compile(inputs.clone());
+        let default_window = default_compiler.compile(inputs);
+
+        let tight_system = tight_window
+            .entries
+            .iter()
+            .find(|e| e.category == ContextCategory::System)
+            .expect("System entry must exist");
+        let default_system = default_window
+            .entries
+            .iter()
+            .find(|e| e.category == ContextCategory::System)
+            .expect("System entry must exist");
+
+        assert!(
+            tight_system.content.len() <= default_system.content.len(),
+            "Tighter chars_per_token should produce equal or shorter system content"
+        );
     }
 }

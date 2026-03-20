@@ -1,0 +1,79 @@
+[manifest]
+name        = "procedure-create"
+version     = "1.0.0"
+description = "Save a learned procedure or SOP to procedural memory for future reuse"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["memory.procedural:w"]
+
+[capabilities_provided]
+outputs = ["status"]
+
+[intent_schema]
+input  = "ProcedureCreateIntent"
+output = "CreateResult"
+
+[input_schema]
+type = "object"
+required = ["name", "description", "steps"]
+
+[input_schema.properties.name]
+type = "string"
+description = "Procedure name"
+
+[input_schema.properties.description]
+type = "string"
+description = "What the procedure accomplishes"
+
+[input_schema.properties.steps]
+type = "array"
+minItems = 1
+description = "Ordered procedure steps"
+
+[input_schema.properties.steps.items]
+type = "object"
+required = ["action"]
+
+[input_schema.properties.steps.items.properties.action]
+type = "string"
+description = "Instruction for this step"
+
+[input_schema.properties.steps.items.properties.tool]
+type = "string"
+description = "Optional recommended tool name"
+
+[input_schema.properties.steps.items.properties.expected_outcome]
+type = "string"
+description = "Optional expected result"
+
+[input_schema.properties.preconditions]
+type = "array"
+description = "Optional preconditions"
+
+[input_schema.properties.preconditions.items]
+type = "string"
+
+[input_schema.properties.postconditions]
+type = "array"
+description = "Optional postconditions"
+
+[input_schema.properties.postconditions.items]
+type = "string"
+
+[input_schema.properties.tags]
+type = "array"
+description = "Optional tags"
+
+[input_schema.properties.tags.items]
+type = "string"
+
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 512
+max_cpu_ms    = 5000
+syscalls      = []

@@ -10,36 +10,63 @@ pub struct OllamaCore {
     client: Client,
     host: String,
     model: String,
+    /// Context window size sent to Ollama as `num_ctx`. Configurable via `llm.ollama_context_window`.
+    context_window: u32,
     capabilities: ModelCapabilities,
 }
 
 impl OllamaCore {
+    /// Default context window size. Many modern Ollama models support 32K+.
+    pub const DEFAULT_CONTEXT_WINDOW: u32 = 32768;
+
     pub fn new(host: &str, model: &str) -> Self {
         Self {
             client: Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
-                .unwrap_or_default(),
+                .expect("HTTP client TLS initialization failed"),
             host: host.to_string(),
             model: model.to_string(),
+            context_window: Self::DEFAULT_CONTEXT_WINDOW,
             capabilities: ModelCapabilities {
-                context_window_tokens: 8192,
+                context_window_tokens: Self::DEFAULT_CONTEXT_WINDOW as u64,
                 supports_images: false,
                 supports_tool_calling: false,
                 supports_json_mode: true,
+                max_output_tokens: 0,
             },
         }
+    }
+
+    /// Override the context window size reported to callers and sent to Ollama as `num_ctx`.
+    ///
+    /// Call this after construction to apply a value from kernel config
+    /// (`llm.ollama_context_window`). Panics if `tokens` is zero.
+    pub fn with_context_window(mut self, tokens: u32) -> Self {
+        assert!(
+            tokens > 0,
+            "context_window tokens must be greater than zero"
+        );
+        self.context_window = tokens;
+        self.capabilities.context_window_tokens = tokens as u64;
+        self
     }
 }
 
 // --- Ollama REST API types (private) ---
 
 #[derive(Debug, Serialize)]
+struct OllamaOptions {
+    num_ctx: u32,
+}
+
+#[derive(Debug, Serialize)]
 struct OllamaChatRequest {
     model: String,
     messages: Vec<OllamaChatMessage>,
     stream: bool,
+    options: OllamaOptions,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -83,6 +110,9 @@ impl LLMCore for OllamaCore {
             model: self.model.clone(),
             messages,
             stream: false,
+            options: OllamaOptions {
+                num_ctx: self.context_window,
+            },
         };
 
         let response = self
@@ -131,6 +161,7 @@ impl LLMCore for OllamaCore {
             },
             model: self.model.clone(),
             duration_ms,
+            tool_calls: Vec::new(),
             uncertainty: None,
         })
     }
@@ -192,6 +223,9 @@ impl LLMCore for OllamaCore {
             model: self.model.clone(),
             messages,
             stream: true,
+            options: OllamaOptions {
+                num_ctx: self.context_window,
+            },
         };
 
         let response = self
@@ -263,6 +297,7 @@ impl LLMCore for OllamaCore {
             },
             model: self.model.clone(),
             duration_ms: start.elapsed().as_millis() as u64,
+            tool_calls: Vec::new(),
             uncertainty: None,
         };
         let _ = tx.send(InferenceEvent::Done(result)).await;
@@ -295,6 +330,7 @@ mod tests {
             reference_count: 0,
             partition: ContextPartition::default(),
             category: ContextCategory::History,
+            is_summary: false,
         });
         ctx.push(ContextEntry {
             role: ContextRole::User,
@@ -306,12 +342,37 @@ mod tests {
             reference_count: 0,
             partition: ContextPartition::default(),
             category: ContextCategory::History,
+            is_summary: false,
         });
 
         let entries = ctx.as_entries();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].role, ContextRole::System);
         assert_eq!(entries[1].role, ContextRole::User);
+    }
+
+    #[test]
+    fn test_default_context_window() {
+        let adapter = OllamaCore::new("http://localhost:11434", "llama3.2");
+        assert_eq!(adapter.context_window, OllamaCore::DEFAULT_CONTEXT_WINDOW);
+        assert_eq!(
+            adapter.capabilities().context_window_tokens,
+            OllamaCore::DEFAULT_CONTEXT_WINDOW as u64
+        );
+    }
+
+    #[test]
+    fn test_with_context_window_updates_field_and_capabilities() {
+        let adapter =
+            OllamaCore::new("http://localhost:11434", "llama3.2").with_context_window(131072);
+        assert_eq!(adapter.context_window, 131072);
+        assert_eq!(adapter.capabilities().context_window_tokens, 131072);
+    }
+
+    #[test]
+    #[should_panic(expected = "context_window tokens must be greater than zero")]
+    fn test_with_context_window_rejects_zero() {
+        let _ = OllamaCore::new("http://localhost:11434", "llama3.2").with_context_window(0);
     }
 
     #[tokio::test]
@@ -341,6 +402,7 @@ mod tests {
             reference_count: 0,
             partition: ContextPartition::default(),
             category: ContextCategory::History,
+            is_summary: false,
         });
 
         let result = ollama.infer(&ctx).await.unwrap();

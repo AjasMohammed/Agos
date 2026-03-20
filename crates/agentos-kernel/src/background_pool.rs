@@ -79,7 +79,10 @@ impl BackgroundPool {
     pub async fn evict_terminal(&self, max_age_secs: i64) {
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(max_age_secs);
         self.tasks.write().await.retain(|_, task| {
-            let is_terminal = matches!(task.state, TaskState::Complete | TaskState::Failed);
+            let is_terminal = matches!(
+                task.state,
+                TaskState::Complete | TaskState::Failed | TaskState::Cancelled
+            );
             if is_terminal {
                 if let Some(completed_at) = task.completed_at {
                     return completed_at > cutoff;

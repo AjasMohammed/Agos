@@ -1,8 +1,17 @@
+use crate::agent_list::AgentListTool;
 use crate::agent_message::AgentMessageTool;
 use crate::archival_insert::ArchivalInsert;
 use crate::archival_search::ArchivalSearch;
 use crate::data_parser::DataParser;
+use crate::datetime::DatetimeTool;
+use crate::episodic_list::EpisodicList;
+use crate::file_delete::FileDelete;
+use crate::file_diff::FileDiff;
+use crate::file_editor::FileEditor;
+use crate::file_glob::FileGlob;
+use crate::file_grep::FileGrep;
 use crate::file_lock::FileLockRegistry;
+use crate::file_move::FileMove;
 use crate::file_reader::FileReader;
 use crate::file_writer::FileWriter;
 use crate::hardware_info::HardwareInfoTool;
@@ -12,15 +21,26 @@ use crate::memory_block_delete::MemoryBlockDeleteTool;
 use crate::memory_block_list::MemoryBlockListTool;
 use crate::memory_block_read::MemoryBlockReadTool;
 use crate::memory_block_write::MemoryBlockWriteTool;
+use crate::memory_delete::MemoryDelete;
+use crate::memory_read::MemoryRead;
 use crate::memory_search::MemorySearch;
+use crate::memory_stats::MemoryStats;
 use crate::memory_write::MemoryWrite;
 use crate::network_monitor::NetworkMonitorTool;
+use crate::procedure_create::ProcedureCreate;
+use crate::procedure_delete::ProcedureDelete;
+use crate::procedure_list::ProcedureList;
+use crate::procedure_search::ProcedureSearch;
 use crate::process_manager::ProcessManagerTool;
 use crate::shell_exec::ShellExec;
 use crate::sys_monitor::SysMonitorTool;
 use crate::task_delegate::TaskDelegate;
+use crate::task_list::TaskListTool;
+use crate::task_status::TaskStatusTool;
+use crate::think::ThinkTool;
 use crate::traits::{AgentTool, ToolExecutionContext};
-use agentos_memory::{Embedder, EpisodicStore, SemanticStore};
+use crate::web_fetch::WebFetch;
+use agentos_memory::{Embedder, EpisodicStore, ProceduralStore, SemanticStore};
 use agentos_types::*;
 use std::collections::HashMap;
 use std::path::Path;
@@ -63,22 +83,27 @@ impl ToolRunner {
                 })?
             }
         });
-        let semantic = Arc::new(SemanticStore::open_with_embedder(data_dir, embedder)?);
+        let semantic = Arc::new(SemanticStore::open_with_embedder(
+            data_dir,
+            embedder.clone(),
+        )?);
         let episodic = Arc::new(EpisodicStore::open(data_dir)?);
+        let procedural = Arc::new(ProceduralStore::open_with_embedder(data_dir, embedder)?);
 
-        runner.register_memory_tools(semantic, episodic);
+        runner.register_memory_tools(semantic, episodic, procedural);
         Ok(runner)
     }
 
     pub fn new_with_shared_memory(
         semantic: Arc<SemanticStore>,
         episodic: Arc<EpisodicStore>,
+        procedural: Arc<ProceduralStore>,
     ) -> Self {
         let mut runner = Self {
             tools: HashMap::new(),
             file_lock_registry: Arc::new(FileLockRegistry::new()),
         };
-        runner.register_memory_tools(semantic, episodic);
+        runner.register_memory_tools(semantic, episodic, procedural);
         runner
     }
 
@@ -86,10 +111,16 @@ impl ToolRunner {
         &mut self,
         semantic: Arc<SemanticStore>,
         episodic: Arc<EpisodicStore>,
+        procedural: Arc<ProceduralStore>,
     ) {
         // Register all built-in tools
         self.register(Box::new(FileReader::new()));
         self.register(Box::new(FileWriter::new()));
+        self.register(Box::new(FileEditor::new()));
+        self.register(Box::new(FileGlob::new()));
+        self.register(Box::new(FileGrep::new()));
+        self.register(Box::new(FileDelete::new()));
+        self.register(Box::new(FileMove::new()));
         self.register(Box::new(MemorySearch::new(
             semantic.clone(),
             episodic.clone(),
@@ -100,6 +131,21 @@ impl ToolRunner {
         )));
         self.register(Box::new(ArchivalInsert::new(semantic.clone())));
         self.register(Box::new(ArchivalSearch::new(semantic.clone())));
+        self.register(Box::new(MemoryDelete::new(
+            semantic.clone(),
+            episodic.clone(),
+        )));
+        self.register(Box::new(MemoryStats::new(
+            semantic.clone(),
+            episodic.clone(),
+            procedural.clone(),
+        )));
+        self.register(Box::new(ProcedureCreate::new(procedural.clone())));
+        self.register(Box::new(ProcedureDelete::new(procedural.clone())));
+        self.register(Box::new(ProcedureList::new(procedural.clone())));
+        self.register(Box::new(ProcedureSearch::new(procedural.clone())));
+        self.register(Box::new(MemoryRead::new(semantic.clone())));
+        self.register(Box::new(EpisodicList::new(episodic.clone())));
         self.register(Box::new(MemoryBlockWriteTool::new()));
         self.register(Box::new(MemoryBlockReadTool::new()));
         self.register(Box::new(MemoryBlockListTool::new()));
@@ -108,16 +154,48 @@ impl ToolRunner {
         self.register(Box::new(ShellExec::new()));
         self.register(Box::new(AgentMessageTool::new()));
         self.register(Box::new(TaskDelegate::new()));
-        self.register(Box::new(HttpClientTool::new()));
+        match HttpClientTool::new() {
+            Ok(tool) => self.register(Box::new(tool)),
+            Err(e) => tracing::error!("Failed to initialize http-client tool: {}", e),
+        }
         self.register(Box::new(SysMonitorTool::new()));
         self.register(Box::new(ProcessManagerTool::new()));
         self.register(Box::new(LogReaderTool::new()));
         self.register(Box::new(NetworkMonitorTool::new()));
         self.register(Box::new(HardwareInfoTool::new()));
+        self.register(Box::new(ThinkTool::new()));
+        self.register(Box::new(DatetimeTool::new()));
+        match WebFetch::new() {
+            Ok(tool) => self.register(Box::new(tool)),
+            Err(e) => tracing::error!("Failed to initialize web-fetch tool: {}", e),
+        }
+        self.register(Box::new(FileDiff::new()));
+        self.register(Box::new(AgentListTool::new()));
+        self.register(Box::new(TaskStatusTool::new()));
+        self.register(Box::new(TaskListTool::new()));
     }
 
     pub fn register(&mut self, tool: Box<dyn AgentTool>) {
         self.tools.insert(tool.name().to_string(), tool);
+    }
+
+    /// Register the agent-manual tool with a snapshot of tool summaries.
+    /// Called by the kernel after the tool registry is fully loaded, so the
+    /// manual has an accurate view of all available tools.
+    pub fn register_agent_manual(&mut self, tool_summaries: Vec<crate::agent_manual::ToolSummary>) {
+        self.register(Box::new(crate::agent_manual::AgentManualTool::new(
+            tool_summaries,
+        )));
+    }
+
+    /// Register the agent-self tool with a snapshot of all available tool names.
+    ///
+    /// Call this after the tool runner is fully initialised so that `agent-self`
+    /// can report the complete tool list to the calling agent.  The list of
+    /// available names can be obtained from `self.list_tools()` before calling
+    /// this method.
+    pub fn register_agent_self(&mut self, tool_names: Vec<String>) {
+        self.register(Box::new(crate::agent_self::AgentSelfTool::new(tool_names)));
     }
 
     /// Execute a tool by name. Returns the JSON result.

@@ -99,12 +99,34 @@ pub enum AuditEventType {
     EventLoopDetected,
     EventTriggeredTask,
     EventTriggerFailed,
+    /// Emitted when the event channel is full and an event had to be dropped.
+    /// Written directly to the audit log (not via the event system) to avoid recursion.
+    EventChannelFull,
 
     // Hardware Abstraction Layer (Spec §9)
     HardwareDeviceDetected,
     HardwareDeviceApproved,
     HardwareDeviceDenied,
     HardwareDeviceRevoked,
+
+    // Agent identity / pubkey events
+    /// Emitted when a pubkey is successfully registered for an agent (first-time only).
+    PubkeyRegistered,
+    /// Emitted when pubkey re-registration is rejected because a different key is already set.
+    PubkeyRegistrationDenied,
+
+    // Agent feedback / tester findings
+    TestFindingCaptured,
+
+    // Proxy token lifecycle
+    /// Emitted when outstanding proxy tokens are invalidated because the
+    /// underlying secret was rotated or deleted.
+    ProxyTokensRevoked,
+
+    // Audit integrity
+    /// Emitted at kernel startup when the audit hash chain fails verification,
+    /// indicating possible tampering with historical audit entries.
+    AuditChainTampered,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,7 +286,7 @@ impl AuditLog {
     }
 
     pub fn append(&self, entry: AuditEntry) -> Result<(), AgentOSError> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         let details = serde_json::to_string(&entry.details).map_err(|e| {
             AgentOSError::Serialization(format!("AuditEntry serialize failed: {}", e))
@@ -294,8 +316,17 @@ impl AuditLog {
         let task_id_str = entry.task_id.map(|id| id.to_string()).unwrap_or_default();
         let tool_id_str = entry.tool_id.map(|id| id.to_string());
 
+        // Wrap the read + insert in an explicit transaction to guarantee that
+        // the prev_hash and predicted next_seq remain consistent with the actual
+        // inserted row. Without this, a rolled-back or interleaved operation could
+        // cause the hash chain to reference a sequence number that differs from the
+        // SQLite AUTOINCREMENT value.
+        let tx = conn
+            .transaction()
+            .map_err(|e| AgentOSError::VaultError(format!("AuditLog begin txn: {}", e)))?;
+
         // Get the previous entry's hash (or genesis hash if this is the first entry)
-        let prev_hash: String = conn
+        let prev_hash: String = tx
             .query_row(
                 "SELECT entry_hash FROM audit_log ORDER BY id DESC LIMIT 1",
                 [],
@@ -304,7 +335,7 @@ impl AuditLog {
             .unwrap_or_else(|_| GENESIS_HASH.to_string());
 
         // Use the next sequence number
-        let next_seq: i64 = conn
+        let next_seq: i64 = tx
             .query_row(
                 "SELECT COALESCE(MAX(id), 0) + 1 FROM audit_log",
                 [],
@@ -329,7 +360,7 @@ impl AuditLog {
             rollback_ref: &rollback_ref_str,
         });
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO audit_log (timestamp, trace_id, event_type, agent_id, task_id, tool_id, details, severity, reversible, rollback_ref, prev_hash, entry_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
@@ -349,7 +380,37 @@ impl AuditLog {
         )
         .map_err(|e| AgentOSError::VaultError(format!("AuditLog append failed: {}", e)))?;
 
+        tx.commit()
+            .map_err(|e| AgentOSError::VaultError(format!("AuditLog commit failed: {}", e)))?;
+
         Ok(())
+    }
+
+    /// Return the sequence id (inclusive lower bound) such that at most `n` entries
+    /// with `id >= returned_id` exist in the log. Used by the kernel to compute the
+    /// starting point for incremental chain verification at boot.
+    ///
+    /// Returns `None` when the log has fewer than `n` entries (verify the full chain)
+    /// or when `n == 0` (caller requested a full-chain verify).
+    pub fn seq_for_last_n_entries(&self, n: u64) -> Result<Option<i64>, AgentOSError> {
+        if n == 0 {
+            return Ok(None);
+        }
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // OFFSET n-1 gives the Nth-from-last row; if fewer than n rows exist,
+        // QueryReturnedNoRows is returned and we fall back to a full-chain verify.
+        match conn.query_row(
+            "SELECT id FROM audit_log ORDER BY id DESC LIMIT 1 OFFSET ?1",
+            rusqlite::params![n - 1],
+            |row| row.get::<_, i64>(0),
+        ) {
+            Ok(id) => Ok(Some(id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(AgentOSError::VaultError(format!(
+                "Failed to compute last-N seq start: {}",
+                e
+            ))),
+        }
     }
 
     /// Verify the integrity of the Merkle hash chain.
@@ -391,24 +452,27 @@ impl AuditLog {
         let mut entries_checked: u64 = 0;
         let mut expected_prev_hash: Option<String> = None;
 
-        // If starting from a non-genesis position, get the preceding entry's hash.
-        // A failure here (e.g., DB corruption) must not silently pass: without knowing
-        // the expected prev_hash we cannot validate the chain linkage at the start position.
+        // If starting from a non-genesis position, get the nearest preceding entry's hash.
+        // Using `WHERE id < from ORDER BY id DESC LIMIT 1` rather than `WHERE id = from - 1`
+        // so this works correctly when ids have gaps (e.g. after prune_old_entries removes
+        // the oldest rows and the pruned id is immediately before `from`).
         if from > 1 {
-            expected_prev_hash = Some(
-                conn.query_row(
-                    "SELECT entry_hash FROM audit_log WHERE id = ?1",
-                    params![from - 1],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(|e| {
-                    AgentOSError::VaultError(format!(
-                        "Cannot verify audit chain: failed to retrieve predecessor hash at id {}: {}",
-                        from - 1,
-                        e
-                    ))
-                })?,
-            );
+            expected_prev_hash = match conn.query_row(
+                "SELECT entry_hash FROM audit_log WHERE id < ?1 ORDER BY id DESC LIMIT 1",
+                params![from],
+                |row| row.get::<_, String>(0),
+            ) {
+                Ok(hash) => Some(hash),
+                // Predecessor row doesn't exist (pruned or empty window start) — skip
+                // the chain-linkage check for the first entry in the verified window.
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => {
+                    return Err(AgentOSError::VaultError(format!(
+                        "Cannot verify audit chain: failed to retrieve predecessor hash before id {}: {}",
+                        from, e
+                    )));
+                }
+            };
         }
 
         for row_result in rows {

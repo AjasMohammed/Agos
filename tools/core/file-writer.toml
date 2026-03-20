@@ -15,6 +15,35 @@ outputs = ["status"]
 input  = "FileWriteIntent"
 output = "WriteResult"
 
+[input_schema]
+type = "object"
+required = ["path", "content"]
+
+[input_schema.properties.path]
+type = "string"
+description = "Relative file path under data directory"
+
+[input_schema.properties.content]
+type = "string"
+description = "Text content to write"
+
+[input_schema.properties.mode]
+type = "string"
+enum = ["overwrite", "append", "create_only"]
+default = "overwrite"
+description = "Write mode"
+
+[input_schema.properties.append]
+type = "boolean"
+default = false
+description = "Legacy alias for mode=append"
+
+[input_schema.properties.max_bytes]
+type = "integer"
+default = 10485760
+minimum = 1
+description = "Maximum allowed content size in bytes"
+
 [sandbox]
 network       = false
 fs_write      = true

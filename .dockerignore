@@ -8,3 +8,6 @@ v3-plans/
 docs/
 *.md
 .claude/
+
+
+dev.sh

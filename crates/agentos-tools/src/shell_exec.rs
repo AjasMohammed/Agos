@@ -137,16 +137,29 @@ impl AgentTool for ShellExec {
             });
         };
 
-        let output = tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output())
-            .await
-            .map_err(|_| AgentOSError::ToolExecutionFailed {
-                tool_name: "shell-exec".into(),
-                reason: format!("Command timed out after {}s", timeout_secs),
-            })?
-            .map_err(|e| AgentOSError::ToolExecutionFailed {
-                tool_name: "shell-exec".into(),
-                reason: format!("Failed to execute command: {}", e),
-            })?;
+        // kill_on_drop ensures the sandboxed process is killed if the future
+        // is dropped (e.g. when the cancellation branch fires in select!).
+        cmd.kill_on_drop(true);
+
+        let output = tokio::select! {
+            result = tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output()) => {
+                result
+                    .map_err(|_| AgentOSError::ToolExecutionFailed {
+                        tool_name: "shell-exec".into(),
+                        reason: format!("Command timed out after {}s", timeout_secs),
+                    })?
+                    .map_err(|e| AgentOSError::ToolExecutionFailed {
+                        tool_name: "shell-exec".into(),
+                        reason: format!("Failed to execute command: {}", e),
+                    })?
+            }
+            _ = context.cancellation_token.cancelled() => {
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name: "shell-exec".into(),
+                    reason: "Tool execution cancelled".into(),
+                });
+            }
+        };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);

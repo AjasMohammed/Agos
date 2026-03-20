@@ -37,6 +37,7 @@ pub enum EventType {
     TaskCompleted,
     TaskFailed,
     TaskTimedOut,
+    TaskSuspended,
     TaskDelegated,
     TaskRetrying,
     TaskDeadlockDetected,
@@ -69,6 +70,8 @@ pub enum EventType {
     NetworkInterfaceDown,
     ContainerResourceQuotaExceeded,
     KernelSubsystemError,
+    BudgetWarning,
+    BudgetExhausted,
 
     // ── HardwareEvents (Phase 3) ──
     GPUAvailable,
@@ -86,6 +89,8 @@ pub enum EventType {
     ToolResourceQuotaExceeded,
     ToolChecksumMismatch,
     ToolRegistryUpdated,
+    ToolCallStarted,
+    ToolCallCompleted,
 
     // ── AgentCommunication (Phase 4) ──
     DirectMessageReceived,
@@ -121,6 +126,7 @@ impl EventType {
             | Self::TaskCompleted
             | Self::TaskFailed
             | Self::TaskTimedOut
+            | Self::TaskSuspended
             | Self::TaskDelegated
             | Self::TaskRetrying
             | Self::TaskDeadlockDetected
@@ -149,7 +155,9 @@ impl EventType {
             | Self::ProcessCrashed
             | Self::NetworkInterfaceDown
             | Self::ContainerResourceQuotaExceeded
-            | Self::KernelSubsystemError => EventCategory::SystemHealth,
+            | Self::KernelSubsystemError
+            | Self::BudgetWarning
+            | Self::BudgetExhausted => EventCategory::SystemHealth,
 
             Self::GPUAvailable
             | Self::GPUMemoryPressure
@@ -164,7 +172,9 @@ impl EventType {
             | Self::ToolSandboxViolation
             | Self::ToolResourceQuotaExceeded
             | Self::ToolChecksumMismatch
-            | Self::ToolRegistryUpdated => EventCategory::ToolEvents,
+            | Self::ToolRegistryUpdated
+            | Self::ToolCallStarted
+            | Self::ToolCallCompleted => EventCategory::ToolEvents,
 
             Self::DirectMessageReceived
             | Self::BroadcastReceived
@@ -345,6 +355,22 @@ mod tests {
         assert_eq!(
             EventType::WebhookReceived.category(),
             EventCategory::ExternalEvents
+        );
+        assert_eq!(
+            EventType::BudgetWarning.category(),
+            EventCategory::SystemHealth
+        );
+        assert_eq!(
+            EventType::BudgetExhausted.category(),
+            EventCategory::SystemHealth
+        );
+        assert_eq!(
+            EventType::ToolCallStarted.category(),
+            EventCategory::ToolEvents
+        );
+        assert_eq!(
+            EventType::ToolCallCompleted.category(),
+            EventCategory::ToolEvents
         );
     }
 

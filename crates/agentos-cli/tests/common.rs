@@ -1,6 +1,6 @@
 use agentos_kernel::config::{
     AuditSettings, BusSettings, HealthMonitorConfig, KernelConfig, KernelSettings, LlmSettings,
-    MemorySettings, OllamaSettings, SecretsSettings, ToolsSettings,
+    MemorySettings, OllamaSettings, PreflightConfig, SecretsSettings, ToolsSettings,
 };
 
 /// Returns a persistent model cache directory so the ~23MB embedding model is
@@ -19,8 +19,17 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             default_task_timeout_secs: 60,
             context_window_max_entries: 100,
             context_window_token_budget: 0,
+            state_db_path: temp_dir
+                .path()
+                .join("kernel_state.db")
+                .to_string_lossy()
+                .to_string(),
+            task_limits: Default::default(),
+            tool_calls: Default::default(),
+            tool_execution: Default::default(),
             health_port: 0,          // 0 = disabled in tests
             per_agent_rate_limit: 0, // 0 = unlimited in tests
+            events: Default::default(),
         },
         routing: Default::default(),
         secrets: SecretsSettings {
@@ -37,6 +46,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
                 .to_string_lossy()
                 .to_string(),
             max_audit_entries: 0, // 0 = unlimited in tests
+            verify_last_n_entries: 0,
         },
         tools: ToolsSettings {
             core_tools_dir: temp_dir
@@ -51,6 +61,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
                 .to_string(),
             data_dir: temp_dir.path().join("data").to_string_lossy().to_string(),
             crl_path: None,
+            workspace: Default::default(),
         },
         bus: BusSettings {
             socket_path: temp_dir
@@ -72,6 +83,6 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         },
         context_budget: Default::default(),
         health_monitor: HealthMonitorConfig::default(),
-        preflight: Default::default(),
+        preflight: PreflightConfig::default(),
     }
 }

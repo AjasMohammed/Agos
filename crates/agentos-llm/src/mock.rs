@@ -24,6 +24,7 @@ impl MockLLMCore {
                 supports_images: false,
                 supports_tool_calling: false,
                 supports_json_mode: false,
+                max_output_tokens: 0,
             },
         }
     }
@@ -57,6 +58,7 @@ impl LLMCore for MockLLMCore {
             },
             model: "mock-model".to_string(),
             duration_ms: 1,
+            tool_calls: Vec::new(),
             uncertainty: None,
         })
     }

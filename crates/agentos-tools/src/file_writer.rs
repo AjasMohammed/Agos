@@ -2,7 +2,7 @@ use crate::file_lock::WriteLockGuard;
 use crate::traits::{AgentTool, ToolExecutionContext};
 use agentos_types::*;
 use async_trait::async_trait;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 const DEFAULT_MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
 
@@ -86,14 +86,9 @@ impl AgentTool for FileWriter {
             });
         }
 
-        // SECURITY: resolve path relative to data_dir only. Prevent path traversal.
-        let requested_path = Path::new(path_str);
-        let resolved = if requested_path.is_absolute() {
-            let stripped = requested_path.strip_prefix("/").unwrap_or(requested_path);
-            context.data_dir.join(stripped)
-        } else {
-            context.data_dir.join(requested_path)
-        };
+        // SECURITY: resolve path, checking workspace paths before falling back to data_dir.
+        let resolved =
+            crate::traits::resolve_tool_path(path_str, &context.data_dir, &context.workspace_paths);
 
         // Normalize lexically (can't use canonicalize — file may not exist yet).
         let normalized = normalize_path(&resolved);
@@ -106,10 +101,24 @@ impl AgentTool for FileWriter {
                     reason: format!("Data directory error: {}", e),
                 })?;
 
-        if !normalized.starts_with(&canonical_data_dir) {
+        let in_workspace = context
+            .workspace_paths
+            .iter()
+            .any(|wp| normalized.starts_with(wp));
+        if !normalized.starts_with(&canonical_data_dir) && !in_workspace {
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
                 operation: format!("Path traversal denied: {}", path_str),
+            });
+        }
+        if in_workspace
+            && !context
+                .permissions
+                .check("fs.workspace", PermissionOp::Write)
+        {
+            return Err(AgentOSError::PermissionDenied {
+                resource: "fs.workspace".into(),
+                operation: format!("Workspace write access denied: {}", path_str),
             });
         }
 
@@ -136,24 +145,54 @@ impl AgentTool for FileWriter {
             })?;
         }
 
+        // CRITICAL: After creating parent dirs, canonicalize the destination's parent
+        // and re-join the filename to detect symlinks in newly-created paths that could
+        // escape data_dir or a workspace root — lexical normalize_path cannot catch these.
+        let final_path = if let Some(parent) = normalized.parent() {
+            let canonical_parent =
+                parent
+                    .canonicalize()
+                    .map_err(|e| AgentOSError::ToolExecutionFailed {
+                        tool_name: "file-writer".into(),
+                        reason: format!("Cannot resolve parent directory: {}", e),
+                    })?;
+            let parent_in_workspace = context
+                .workspace_paths
+                .iter()
+                .any(|wp| canonical_parent.starts_with(wp));
+            if !canonical_parent.starts_with(&canonical_data_dir) && !parent_in_workspace {
+                return Err(AgentOSError::PermissionDenied {
+                    resource: "fs.user_data".into(),
+                    operation: format!("Path traversal denied: {}", path_str),
+                });
+            }
+            canonical_parent.join(
+                normalized
+                    .file_name()
+                    .ok_or_else(|| AgentOSError::SchemaValidation("Path has no filename".into()))?,
+            )
+        } else {
+            normalized.clone()
+        };
+
         match mode.as_str() {
             "create_only" => {
                 // Fail if the file already exists.
-                if tokio::fs::metadata(&normalized).await.is_ok() {
+                if tokio::fs::metadata(&final_path).await.is_ok() {
                     return Err(AgentOSError::ToolExecutionFailed {
                         tool_name: "file-writer".into(),
                         reason: format!("File already exists: {}", path_str),
                     });
                 }
                 // Atomic write: write to .tmp then rename.
-                atomic_write(&normalized, content).await?;
+                atomic_write(&final_path, content).await?;
             }
             "append" => {
                 use tokio::io::AsyncWriteExt;
                 let mut file = tokio::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(&normalized)
+                    .open(&final_path)
                     .await
                     .map_err(|e| AgentOSError::ToolExecutionFailed {
                         tool_name: "file-writer".into(),
@@ -168,7 +207,7 @@ impl AgentTool for FileWriter {
             }
             _ => {
                 // "overwrite" — atomic write via tmp + rename.
-                atomic_write(&normalized, content).await?;
+                atomic_write(&final_path, content).await?;
             }
         }
 
@@ -199,17 +238,6 @@ async fn atomic_write(target: &PathBuf, content: &str) -> Result<(), AgentOSErro
         })
 }
 
-/// Lexically normalize a path by resolving `.` and `..` without touching the filesystem.
 fn normalize_path(path: &Path) -> PathBuf {
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                result.pop();
-            }
-            Component::CurDir => {}
-            other => result.push(other),
-        }
-    }
-    result
+    crate::workspace::normalize_path(path)
 }

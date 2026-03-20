@@ -85,6 +85,8 @@ impl HardwareAbstractionLayer {
                             PermissionOp::Read => "r".to_string(),
                             PermissionOp::Write => "w".to_string(),
                             PermissionOp::Execute => "x".to_string(),
+                            PermissionOp::Query => "q".to_string(),
+                            PermissionOp::Observe => "o".to_string(),
                         },
                     });
                 }
@@ -95,6 +97,8 @@ impl HardwareAbstractionLayer {
                         PermissionOp::Read => "r".to_string(),
                         PermissionOp::Write => "w".to_string(),
                         PermissionOp::Execute => "x".to_string(),
+                        PermissionOp::Query => "q".to_string(),
+                        PermissionOp::Observe => "o".to_string(),
                     },
                 });
             }
@@ -105,6 +109,8 @@ impl HardwareAbstractionLayer {
                     PermissionOp::Read => "r".to_string(),
                     PermissionOp::Write => "w".to_string(),
                     PermissionOp::Execute => "x".to_string(),
+                    PermissionOp::Query => "q".to_string(),
+                    PermissionOp::Observe => "o".to_string(),
                 },
             });
         }

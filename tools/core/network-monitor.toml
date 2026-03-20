@@ -1,0 +1,28 @@
+[manifest]
+name        = "network-monitor"
+version     = "1.0.0"
+description = "Query network interface statistics (bytes sent/received, packet counts, errors) via the Hardware Abstraction Layer."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["network.logs:r"]
+
+[capabilities_provided]
+outputs = ["network.stats"]
+
+[intent_schema]
+input  = "NetworkMonitorQuery"
+output = "NetworkStats"
+
+[input_schema]
+type = "object"
+description = "No input required"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 2000
+syscalls      = []

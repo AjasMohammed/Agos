@@ -17,3 +17,6 @@ mod shutdown_audit;
 
 #[path = "e2e/agent_identity.rs"]
 mod agent_identity;
+
+#[path = "e2e/chat_tool_loop.rs"]
+mod chat_tool_loop;

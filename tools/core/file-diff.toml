@@ -1,0 +1,59 @@
+[manifest]
+name        = "file-diff"
+version     = "1.0.0"
+description = "Compute a unified diff between two files (mode=files) or two inline strings (mode=strings). Returns diff text and similarity ratio."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["fs.user_data:r"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "FileDiffIntent"
+output = "FileDiffResult"
+
+[input_schema]
+type = "object"
+anyOf = [
+  { required = ["file_a", "file_b"] },
+  { required = ["text_a", "text_b"] }
+]
+
+[input_schema.properties.mode]
+type = "string"
+enum = ["files", "strings"]
+default = "files"
+description = "Compare files or raw strings"
+
+[input_schema.properties.file_a]
+type = "string"
+description = "First file path when mode=files"
+
+[input_schema.properties.file_b]
+type = "string"
+description = "Second file path when mode=files"
+
+[input_schema.properties.text_a]
+type = "string"
+description = "First text blob when mode=strings"
+
+[input_schema.properties.text_b]
+type = "string"
+description = "Second text blob when mode=strings"
+
+[input_schema.properties.context_lines]
+type = "integer"
+default = 3
+minimum = 0
+description = "Unified diff context lines"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 5000
+syscalls      = []

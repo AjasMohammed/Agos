@@ -12,7 +12,7 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::AuthToken;
-use crate::handlers::{agents, audit, dashboard, events, pipelines, secrets, tasks, tools};
+use crate::handlers::{agents, audit, chat, dashboard, events, pipelines, secrets, tasks, tools};
 use crate::state::AppState;
 
 /// Middleware that sets security headers on every response.
@@ -131,8 +131,18 @@ pub fn build_router(
             "/dashboard-recent-audit",
             axum::routing::get(dashboard::recent_audit_partial),
         )
+        // Chat (session-based, separate from the task system)
+        .route("/chat", axum::routing::get(chat::list))
+        .route("/chat/new", axum::routing::post(chat::new_session))
+        .route("/chat/{session_id}", axum::routing::get(chat::conversation))
+        .route("/chat/{session_id}/send", axum::routing::post(chat::send))
+        .route(
+            "/chat/{session_id}/stream",
+            axum::routing::get(chat::message_stream),
+        )
         // Audit
         .route("/audit", axum::routing::get(audit::list))
+        .route("/audit/{trace_id}", axum::routing::get(audit::detail))
         // SSE event streams
         .route(
             "/events/dashboard",

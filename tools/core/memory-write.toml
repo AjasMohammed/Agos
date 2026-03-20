@@ -1,7 +1,7 @@
 [manifest]
 name        = "memory-write"
 version     = "1.0.0"
-description = "Write new knowledge entries to semantic memory for long-term recall"
+description = "Write new knowledge entries to semantic or episodic memory for long-term recall"
 author      = "agentos-core"
 trust_tier  = "core"
 
@@ -15,10 +15,40 @@ outputs = ["status"]
 input  = "MemoryWriteIntent"
 output = "WriteResult"
 
+[input_schema]
+type = "object"
+required = ["content"]
+
+[input_schema.properties.content]
+type = "string"
+description = "Memory content to store"
+
+[input_schema.properties.scope]
+type = "string"
+enum = ["semantic", "episodic"]
+default = "semantic"
+description = "Target memory tier"
+
+[input_schema.properties.key]
+type = "string"
+description = "Semantic key (auto-generated when omitted)"
+
+[input_schema.properties.summary]
+type = "string"
+description = "Optional episodic summary"
+
+[input_schema.properties.tags]
+type = ["string", "array"]
+description = "Semantic tags as comma-separated string or array"
+
+[input_schema.properties.tags.items]
+type = "string"
+
+
 [sandbox]
 network       = false
 fs_write      = false
 gpu           = false
-max_memory_mb = 64
+max_memory_mb = 512
 max_cpu_ms    = 5000
 syscalls      = []

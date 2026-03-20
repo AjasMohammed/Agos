@@ -22,7 +22,7 @@ When done, include "ERRORS_COMPLETE" in your response."#
             .to_string(),
         initial_user_message: "Test various error conditions. Intentionally make mistakes and evaluate the error messages.".to_string(),
         max_turns,
-        required_permissions: vec!["fs.user_data".to_string()],
+        required_permissions: vec!["fs.user_data:rw".to_string()],
         goal_keywords: vec!["ERRORS_COMPLETE".to_string()],
     }
 }

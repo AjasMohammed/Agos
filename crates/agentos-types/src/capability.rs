@@ -50,7 +50,7 @@ pub struct PermissionSet {
     pub deny_entries: Vec<String>,
 }
 
-/// A single permission entry: resource + rwx bits.
+/// A single permission entry: resource + rwxqo bits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionEntry {
     /// Resource class, e.g. "fs.user_data", "network.outbound", "memory.semantic"
@@ -58,6 +58,12 @@ pub struct PermissionEntry {
     pub read: bool,
     pub write: bool,
     pub execute: bool,
+    /// Query permission: for IntentType::Query, Subscribe, Unsubscribe
+    #[serde(default)]
+    pub query: bool,
+    /// Observe permission: for IntentType::Observe
+    #[serde(default)]
+    pub observe: bool,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -214,6 +220,8 @@ impl PermissionSet {
                     PermissionOp::Read => e.read,
                     PermissionOp::Write => e.write,
                     PermissionOp::Execute => e.execute,
+                    PermissionOp::Query => e.query,
+                    PermissionOp::Observe => e.observe,
                 }
         })
     }
@@ -242,11 +250,90 @@ impl PermissionSet {
                 read,
                 write,
                 execute,
+                query: false,
+                observe: false,
                 expires_at,
             });
         }
     }
 
+    /// Copy all permission bits from an existing `PermissionEntry` into this set.
+    ///
+    /// Unlike `grant()`, this preserves the `query` and `observe` bits so that
+    /// entry-copying patterns (e.g. in `compute_effective_permissions`) do not
+    /// silently drop the newer op flags.
+    pub fn grant_entry(&mut self, entry: &PermissionEntry) {
+        if let Some(e) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.resource == entry.resource)
+        {
+            e.read |= entry.read;
+            e.write |= entry.write;
+            e.execute |= entry.execute;
+            e.query |= entry.query;
+            e.observe |= entry.observe;
+            // Keep the expiry that allows the longest window, or None if either is permanent.
+            e.expires_at = match (e.expires_at, entry.expires_at) {
+                (Some(e1), Some(e2)) => Some(e1.max(e2)),
+                _ => None,
+            };
+        } else {
+            self.entries.push(entry.clone());
+        }
+    }
+
+    /// Grant a single `PermissionOp` for a resource.
+    ///
+    /// Useful when granting query or observe permissions that `grant()` does not expose.
+    pub fn grant_op(
+        &mut self,
+        resource: String,
+        op: PermissionOp,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.resource == resource) {
+            match op {
+                PermissionOp::Read => e.read = true,
+                PermissionOp::Write => e.write = true,
+                PermissionOp::Execute => e.execute = true,
+                PermissionOp::Query => e.query = true,
+                PermissionOp::Observe => e.observe = true,
+            }
+            e.expires_at = match (e.expires_at, expires_at) {
+                (Some(e1), Some(e2)) => Some(e1.max(e2)),
+                _ => None,
+            };
+        } else {
+            self.entries.push(PermissionEntry {
+                resource,
+                read: op == PermissionOp::Read,
+                write: op == PermissionOp::Write,
+                execute: op == PermissionOp::Execute,
+                query: op == PermissionOp::Query,
+                observe: op == PermissionOp::Observe,
+                expires_at,
+            });
+        }
+    }
+
+    /// Revoke a single `PermissionOp` for a resource.
+    pub fn revoke_op(&mut self, resource: &str, op: PermissionOp) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.resource == resource) {
+            match op {
+                PermissionOp::Read => entry.read = false,
+                PermissionOp::Write => entry.write = false,
+                PermissionOp::Execute => entry.execute = false,
+                PermissionOp::Query => entry.query = false,
+                PermissionOp::Observe => entry.observe = false,
+            }
+        }
+    }
+
+    /// Revoke read, write, and/or execute bits for a resource.
+    ///
+    /// **Note:** This method only handles the `Read`/`Write`/`Execute` ops.
+    /// To revoke `Query` or `Observe` permissions, use [`revoke_op`](Self::revoke_op).
     pub fn revoke(&mut self, resource: &str, read: bool, write: bool, execute: bool) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.resource == resource) {
             if read {
@@ -268,7 +355,9 @@ impl PermissionSet {
                 let r = e.read && other_e.read;
                 let w = e.write && other_e.write;
                 let x = e.execute && other_e.execute;
-                if r || w || x {
+                let q = e.query && other_e.query;
+                let o = e.observe && other_e.observe;
+                if r || w || x || q || o {
                     // Intersection of expires_at: keep the one that expires earlier
                     let expires_at = match (e.expires_at, other_e.expires_at) {
                         (Some(e1), Some(e2)) => Some(e1.min(e2)),
@@ -281,6 +370,8 @@ impl PermissionSet {
                         read: r,
                         write: w,
                         execute: x,
+                        query: q,
+                        observe: o,
                         expires_at,
                     });
                 }
@@ -306,6 +397,10 @@ pub enum PermissionOp {
     Read,
     Write,
     Execute,
+    /// Maps from IntentType::Query, Subscribe, Unsubscribe.
+    Query,
+    /// Maps from IntentType::Observe.
+    Observe,
 }
 
 #[cfg(test)]
@@ -472,5 +567,95 @@ mod tests {
         // Both deny entries must appear in the intersection
         assert!(intersected.deny_entries.contains(&"fs:/etc/".to_string()));
         assert!(intersected.deny_entries.contains(&"fs:~/.ssh/".to_string()));
+    }
+
+    #[test]
+    fn test_grant_op_query_and_observe() {
+        let mut perms = PermissionSet::new();
+        perms.grant_op("memory.semantic".into(), PermissionOp::Query, None);
+        perms.grant_op("events.stream".into(), PermissionOp::Observe, None);
+
+        assert!(perms.check("memory.semantic", PermissionOp::Query));
+        assert!(!perms.check("memory.semantic", PermissionOp::Read));
+        assert!(!perms.check("memory.semantic", PermissionOp::Observe));
+
+        assert!(perms.check("events.stream", PermissionOp::Observe));
+        assert!(!perms.check("events.stream", PermissionOp::Query));
+        assert!(!perms.check("events.stream", PermissionOp::Write));
+    }
+
+    #[test]
+    fn test_grant_op_upserts_existing_entry() {
+        let mut perms = PermissionSet::new();
+        perms.grant("memory.semantic".into(), true, false, false, None);
+        perms.grant_op("memory.semantic".into(), PermissionOp::Query, None);
+
+        // Both read and query should be granted
+        assert!(perms.check("memory.semantic", PermissionOp::Read));
+        assert!(perms.check("memory.semantic", PermissionOp::Query));
+        // Only one entry (upsert, not duplicate)
+        assert_eq!(
+            perms
+                .entries
+                .iter()
+                .filter(|e| e.resource == "memory.semantic")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_grant_entry_preserves_query_observe() {
+        let source = PermissionEntry {
+            resource: "memory.semantic".into(),
+            read: true,
+            write: false,
+            execute: false,
+            query: true,
+            observe: false,
+            expires_at: None,
+        };
+        let mut perms = PermissionSet::new();
+        perms.grant_entry(&source);
+
+        assert!(perms.check("memory.semantic", PermissionOp::Read));
+        assert!(perms.check("memory.semantic", PermissionOp::Query));
+        assert!(!perms.check("memory.semantic", PermissionOp::Observe));
+    }
+
+    #[test]
+    fn test_revoke_op_query() {
+        let mut perms = PermissionSet::new();
+        perms.grant_op("memory.semantic".into(), PermissionOp::Query, None);
+        assert!(perms.check("memory.semantic", PermissionOp::Query));
+
+        perms.revoke_op("memory.semantic", PermissionOp::Query);
+        assert!(!perms.check("memory.semantic", PermissionOp::Query));
+    }
+
+    #[test]
+    fn test_intersect_handles_query_observe() {
+        let mut a = PermissionSet::new();
+        a.grant_op("events.stream".into(), PermissionOp::Query, None);
+        a.grant_op("events.stream".into(), PermissionOp::Observe, None);
+
+        let mut b = PermissionSet::new();
+        b.grant_op("events.stream".into(), PermissionOp::Query, None);
+        // b does NOT grant Observe
+
+        let intersected = a.intersect(&b);
+        assert!(intersected.check("events.stream", PermissionOp::Query));
+        assert!(!intersected.check("events.stream", PermissionOp::Observe));
+    }
+
+    #[test]
+    fn test_grant_does_not_wipe_query_on_upsert() {
+        let mut perms = PermissionSet::new();
+        perms.grant_op("memory.semantic".into(), PermissionOp::Query, None);
+        // A subsequent grant() call for r/w/x must not clear the query bit
+        perms.grant("memory.semantic".into(), true, false, false, None);
+
+        assert!(perms.check("memory.semantic", PermissionOp::Read));
+        assert!(perms.check("memory.semantic", PermissionOp::Query));
     }
 }

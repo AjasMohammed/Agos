@@ -1,0 +1,37 @@
+[manifest]
+name        = "file-glob"
+version     = "1.0.0"
+description = "Recursively discovers files matching a glob pattern (e.g. **/*.rs) within data_dir. Patterns containing '..' or absolute paths are rejected. Returns paths with size and modification time, sorted by mtime descending."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["fs.user_data:r"]
+
+[capabilities_provided]
+outputs = ["file_list"]
+
+[intent_schema]
+input  = "FileGlobIntent"
+output = "FileGlobResult"
+
+[input_schema]
+type = "object"
+required = ["pattern"]
+
+[input_schema.properties.pattern]
+type = "string"
+description = "Glob pattern relative to the search base path"
+
+[input_schema.properties.path]
+type = "string"
+default = "."
+description = "Optional subdirectory inside data_dir to search from"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 32
+max_cpu_ms    = 10000
+syscalls      = []

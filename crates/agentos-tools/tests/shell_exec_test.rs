@@ -14,6 +14,10 @@ fn make_context(data_dir: &Path) -> ToolExecutionContext {
         vault: None,
         hal: None,
         file_lock_registry: None,
+        agent_registry: None,
+        task_registry: None,
+        workspace_paths: vec![],
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
     }
 }
 

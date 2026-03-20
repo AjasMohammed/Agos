@@ -27,7 +27,10 @@ impl Kernel {
                             .filter(|s| !s.trim().is_empty())
                     })
                     .unwrap_or_else(|| self.config.ollama.host.clone());
-                Ok(Arc::new(OllamaCore::new(&host, &model)))
+                Ok(Arc::new(
+                    OllamaCore::new(&host, &model)
+                        .with_context_window(self.config.llm.ollama_context_window),
+                ))
             }
             LLMProvider::OpenAI => {
                 let key_result = match self.vault.get(&format!("{}_openai_api_key", name)).await {
@@ -64,7 +67,16 @@ impl Kernel {
                 match key_result {
                     Ok(entry) => {
                         let sec = SecretString::new(entry.as_str().to_string());
-                        Ok(Arc::new(AnthropicCore::new(sec, model.clone())))
+                        let base_url =
+                            base_url.or_else(|| self.config.llm.anthropic_base_url.clone());
+                        let adapter = if let Some(url) = base_url {
+                            AnthropicCore::with_base_url(sec, model.clone(), url)
+                        } else {
+                            AnthropicCore::new(sec, model.clone())
+                        };
+                        Ok(Arc::new(
+                            adapter.with_max_tokens(self.config.llm.max_tokens),
+                        ))
                     }
                     _ => Err(
                         "Missing 'anthropic_api_key' in vault. Please store it first.".to_string(),
@@ -123,7 +135,7 @@ impl Kernel {
         // Acquire the write lock once for the entire connect sequence: lookup, identity
         // generation, profile construction, and registration happen atomically, preventing
         // TOCTOU races from concurrent ConnectAgent calls.
-        let (old_offline_id, profile, is_reconnect) = {
+        let (old_offline_id, profile, is_reconnect, pubkey_reg_result) = {
             let mut registry = self.agent_registry.write().await;
 
             // Reuse persisted identity when the same name + provider + model reconnects.
@@ -149,7 +161,7 @@ impl Kernel {
                 _ => (
                     AgentID::new(),
                     None,
-                    PermissionSet::new(),
+                    default_permissions_for_agent(&name),
                     vec![],
                     String::new(),
                     now,
@@ -171,22 +183,38 @@ impl Kernel {
             // On reconnect reuse the existing Ed25519 keypair; otherwise generate a fresh one.
             // If reconnecting but no keypair was ever stored (e.g. prior generation failed),
             // generate a new one now so the agent always has a signing identity.
-            let public_key_hex = if is_reconnect {
+            //
+            // `register_pubkey_internal` enforces immutability: if a different key is already
+            // stored for this agent ID, it returns `PubkeyAlreadyRegistered`. We capture the
+            // result here and audit it after releasing the registry write lock.
+            let (public_key_hex, pubkey_reg_result) = if is_reconnect {
                 match persisted_pubkey {
                     Some(ref pk) => {
-                        self.message_bus.register_pubkey(agent_id, pk.clone()).await;
+                        let reg = self
+                            .message_bus
+                            .register_pubkey_internal(agent_id, pk.clone())
+                            .await;
                         tracing::info!(agent_id = %agent_id, "Reused persisted Ed25519 identity for agent");
-                        persisted_pubkey
+                        (persisted_pubkey, reg)
                     }
                     None => match self.identity_manager.generate_identity(&agent_id).await {
                         Ok(pk) => {
                             tracing::info!(agent_id = %agent_id, "Generated Ed25519 identity for reconnected agent (no prior key)");
-                            self.message_bus.register_pubkey(agent_id, pk.clone()).await;
-                            Some(pk)
+                            let reg = self
+                                .message_bus
+                                .register_pubkey_internal(agent_id, pk.clone())
+                                .await;
+                            (Some(pk), reg)
                         }
                         Err(e) => {
                             tracing::warn!(agent_id = %agent_id, error = %e, "Failed to generate agent identity on reconnect");
-                            None
+                            // Propagate as an error so the audit handler logs a denial event.
+                            (
+                                None,
+                                Err(AgentOSError::KernelError {
+                                    reason: format!("Identity generation failed: {}", e),
+                                }),
+                            )
                         }
                     },
                 }
@@ -194,12 +222,21 @@ impl Kernel {
                 match self.identity_manager.generate_identity(&agent_id).await {
                     Ok(pk) => {
                         tracing::info!(agent_id = %agent_id, "Generated Ed25519 identity for agent");
-                        self.message_bus.register_pubkey(agent_id, pk.clone()).await;
-                        Some(pk)
+                        let reg = self
+                            .message_bus
+                            .register_pubkey_internal(agent_id, pk.clone())
+                            .await;
+                        (Some(pk), reg)
                     }
                     Err(e) => {
                         tracing::warn!(agent_id = %agent_id, error = %e, "Failed to generate agent identity");
-                        None
+                        // Propagate as an error so the audit handler logs a denial event.
+                        (
+                            None,
+                            Err(AgentOSError::KernelError {
+                                reason: format!("Identity generation failed: {}", e),
+                            }),
+                        )
                     }
                 }
             };
@@ -220,11 +257,8 @@ impl Kernel {
                 model,
                 status: AgentStatus::Online,
                 // Preserve custom permissions and description granted before disconnect.
-                permissions: if is_reconnect {
-                    persisted_permissions
-                } else {
-                    PermissionSet::new()
-                },
+                // New agents receive scoped defaults; reconnecting agents keep their existing perms.
+                permissions: persisted_permissions,
                 roles: resolved_roles,
                 current_task: None,
                 description: persisted_description,
@@ -240,7 +274,7 @@ impl Kernel {
             }
             registry.register(profile.clone());
 
-            (old_offline_id, profile, is_reconnect)
+            (old_offline_id, profile, is_reconnect, pubkey_reg_result)
         };
 
         let agent_id = profile.id;
@@ -252,10 +286,63 @@ impl Kernel {
             active.insert(agent_id, llm_adapter);
         }
 
-        // Revoke the replaced agent's vault signing key to prevent orphaned key material.
+        // Revoke the replaced agent's vault signing key and deregister its pubkey
+        // from the bus so the slot cannot be re-used by an old (orphaned) identity.
         if let Some(old_id) = old_offline_id {
             if let Err(e) = self.identity_manager.revoke_identity(&old_id).await {
                 tracing::warn!(agent_id = %old_id, error = %e, "Failed to revoke replaced agent identity");
+            }
+            // Remove the old pubkey from the bus so the slot is fully cleared.
+            self.message_bus.deregister_pubkey(&old_id).await;
+        }
+
+        // Audit pubkey registration outcome.
+        match pubkey_reg_result {
+            Ok(()) => {
+                if let Some(ref pk) = profile.public_key_hex {
+                    // First 16 hex chars of the key as a human-readable fingerprint.
+                    let fingerprint = &pk[..16.min(pk.len())];
+                    self.audit_log(agentos_audit::AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        trace_id: TraceID::new(),
+                        event_type: agentos_audit::AuditEventType::PubkeyRegistered,
+                        agent_id: Some(agent_id),
+                        task_id: None,
+                        tool_id: None,
+                        details: serde_json::json!({
+                            "agent_name": agent_name,
+                            "pubkey_fingerprint": fingerprint,
+                            "is_reconnect": is_reconnect,
+                        }),
+                        severity: agentos_audit::AuditSeverity::Info,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
+                }
+            }
+            Err(ref e) => {
+                // A different pubkey was already registered for this agent ID.
+                // This should not occur in normal operation — log at Error severity.
+                tracing::error!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "Pubkey re-registration denied — bus retains the existing key"
+                );
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::PubkeyRegistrationDenied,
+                    agent_id: Some(agent_id),
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "agent_name": agent_name,
+                        "reason": e.to_string(),
+                    }),
+                    severity: agentos_audit::AuditSeverity::Security,
+                    reversible: false,
+                    rollback_ref: None,
+                });
             }
         }
 
@@ -353,6 +440,13 @@ impl Kernel {
 
         // Evict the LLM adapter so the connection to the provider is released.
         self.active_llms.write().await.remove(&agent_id);
+
+        // NOTE: The agent's pubkey is intentionally NOT deregistered from the message bus
+        // on disconnect. The agent is marked Offline rather than removed, so its registered
+        // pubkey must remain valid in case it reconnects with the same UUID. On reconnect,
+        // `register_pubkey_internal` will see the same key and allow it (idempotent).
+        // The pubkey is only deregistered when the agent's UUID is superseded by a new
+        // agent with the same name but different provider/model (see `cmd_connect_agent`).
 
         // Evict rate-limit state so the slot is reclaimed immediately on disconnect.
         self.per_agent_rate_limiter.lock().await.remove(&agent_name);
@@ -574,4 +668,13 @@ impl Kernel {
             },
         }
     }
+}
+
+fn default_permissions_for_agent(name: &str) -> PermissionSet {
+    let mut perms = PermissionSet::new();
+    // Shared user data — read-only
+    perms.grant("fs.user_data".to_string(), true, false, false, None);
+    // Agent's own namespace — full access
+    perms.grant(format!("fs:agents/{name}/"), true, true, true, None);
+    perms
 }

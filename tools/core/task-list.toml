@@ -1,0 +1,40 @@
+[manifest]
+name        = "task-list"
+version     = "1.0.0"
+description = "List tasks for the calling agent (filter=mine, default) or all active tasks system-wide (filter=active). Newest first, configurable limit (max 100)."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["task.query:r"]
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "TaskListQuery"
+output = "TaskListResult"
+
+[input_schema]
+type = "object"
+
+[input_schema.properties.filter]
+type = "string"
+enum = ["mine", "active"]
+default = "mine"
+description = "mine for caller tasks, active for global running/queued tasks"
+
+[input_schema.properties.limit]
+type = "integer"
+default = 20
+minimum = 1
+maximum = 100
+description = "Maximum tasks to return"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

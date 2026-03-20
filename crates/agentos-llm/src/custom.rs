@@ -24,7 +24,7 @@ impl CustomCore {
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
-                .unwrap_or_default(),
+                .expect("HTTP client TLS initialization failed"),
             api_key,
             model,
             base_url,
@@ -33,6 +33,7 @@ impl CustomCore {
                 supports_images: false,
                 supports_tool_calling: false,
                 supports_json_mode: false,
+                max_output_tokens: 0,
             },
         }
     }
@@ -129,6 +130,7 @@ impl LLMCore for CustomCore {
             },
             model: self.model.clone(),
             duration_ms: start_time.elapsed().as_millis() as u64,
+            tool_calls: Vec::new(),
             uncertainty: None,
         })
     }

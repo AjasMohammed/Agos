@@ -74,9 +74,50 @@ impl AgentMessageBus {
         }
     }
 
-    /// Register a public key for signature verification.
-    pub async fn register_pubkey(&self, agent_id: AgentID, pubkey_hex: String) {
-        self.pub_keys.write().await.insert(agent_id, pubkey_hex);
+    /// Register a public key for an agent during kernel-controlled agent registration.
+    ///
+    /// **Kernel-internal use only.** This method is `pub` solely to allow integration tests
+    /// in `tests/` to set up bus state without going through the full `cmd_connect_agent`
+    /// flow. Production callers must be `cmd_connect_agent` or the boot-time pre-population
+    /// in `kernel.rs`. Calling this from any other context may create a security vulnerability.
+    ///
+    /// Enforces immutability: once a pubkey is stored for an agent, it cannot be changed —
+    /// the agent must be deregistered and re-registered to rotate keys (which is audited).
+    /// This closes the authentication bypass where any component could call the old public
+    /// `register_pubkey()` with an attacker key and then forge messages as any agent.
+    ///
+    /// Returns:
+    /// - `Ok(())` if the key was registered successfully, or the same key was already set
+    ///   (idempotent — safe to call on reconnect).
+    /// - `Err(PubkeyAlreadyRegistered)` if a **different** key is already registered.
+    #[doc(hidden)]
+    pub async fn register_pubkey_internal(
+        &self,
+        agent_id: AgentID,
+        pubkey_hex: String,
+    ) -> Result<(), AgentOSError> {
+        let mut pub_keys = self.pub_keys.write().await;
+        if let Some(existing) = pub_keys.get(&agent_id) {
+            if existing == &pubkey_hex {
+                // Same key — idempotent, safe to call on reconnect.
+                return Ok(());
+            }
+            // A different key is already registered for this agent. Reject to prevent
+            // an attacker from overwriting a legitimate agent's verification key.
+            return Err(AgentOSError::PubkeyAlreadyRegistered {
+                agent_id: agent_id.to_string(),
+            });
+        }
+        pub_keys.insert(agent_id, pubkey_hex);
+        Ok(())
+    }
+
+    /// Remove a registered pubkey. `pub(crate)` so only kernel internals can clear a slot.
+    /// Making this `pub` would allow an external caller to deregister + re-register with an
+    /// attacker key, re-opening the authentication bypass that `register_pubkey_internal`
+    /// is designed to close.
+    pub(crate) async fn deregister_pubkey(&self, agent_id: &AgentID) {
+        self.pub_keys.write().await.remove(agent_id);
     }
 
     /// Verify an Ed25519 message signature against the sender's registered public key.
@@ -556,7 +597,7 @@ mod tests {
 
         let mut inbox_b = bus.register_agent(agent_b).await;
         bus.register_agent(agent_a).await;
-        bus.register_pubkey(agent_a, pk_a).await;
+        bus.register_pubkey_internal(agent_a, pk_a).await.unwrap();
 
         let msg = make_signed_msg(
             &sk_a,
@@ -582,7 +623,7 @@ mod tests {
         bus.register_agent(a).await;
         let mut inbox_b = bus.register_agent(b).await;
         let mut inbox_c = bus.register_agent(c).await;
-        bus.register_pubkey(a, pk_a).await;
+        bus.register_pubkey_internal(a, pk_a).await.unwrap();
 
         let msg = make_signed_msg(&sk_a, a, MessageTarget::Broadcast, "Hello all", 60);
         let count = bus.broadcast(msg).await.unwrap();
@@ -597,7 +638,7 @@ mod tests {
         let bus = AgentMessageBus::new();
         let from = AgentID::new();
         let (sk, pk) = make_keypair();
-        bus.register_pubkey(from, pk).await;
+        bus.register_pubkey_internal(from, pk).await.unwrap();
 
         let msg = make_signed_msg(&sk, from, MessageTarget::Direct(AgentID::new()), "ping", 60);
         assert!(bus.send_direct(msg).await.is_err());
@@ -667,7 +708,7 @@ mod tests {
 
         bus.register_agent(agent_b).await;
         bus.register_agent(agent_a).await;
-        bus.register_pubkey(agent_a, pk_a).await;
+        bus.register_pubkey_internal(agent_a, pk_a).await.unwrap();
 
         let now = chrono::Utc::now();
         let msg = AgentMessage {
@@ -704,7 +745,7 @@ mod tests {
 
         let mut inbox_b = bus.register_agent(agent_b).await;
         bus.register_agent(agent_a).await;
-        bus.register_pubkey(agent_a, pk_a).await;
+        bus.register_pubkey_internal(agent_a, pk_a).await.unwrap();
 
         let msg = make_signed_msg(
             &sk_a,
@@ -736,7 +777,7 @@ mod tests {
 
         bus.register_agent(agent_b).await;
         bus.register_agent(agent_a).await;
-        bus.register_pubkey(agent_a, pk_a).await;
+        bus.register_pubkey_internal(agent_a, pk_a).await.unwrap();
 
         let msg = make_signed_msg(
             &sk_a,
@@ -776,7 +817,7 @@ mod tests {
         bus.register_agent(a).await;
         bus.register_agent(b).await;
         bus.register_agent(c).await;
-        bus.register_pubkey(a, pk_a).await;
+        bus.register_pubkey_internal(a, pk_a).await.unwrap();
 
         let msg = make_signed_msg(&sk_a, a, MessageTarget::Broadcast, "broadcast event", 60);
         let count = bus.broadcast(msg).await.unwrap();
@@ -797,7 +838,7 @@ mod tests {
 
         let from = AgentID::new();
         let (sk, pk) = make_keypair();
-        bus.register_pubkey(from, pk).await;
+        bus.register_pubkey_internal(from, pk).await.unwrap();
 
         let msg = make_signed_msg(&sk, from, MessageTarget::Direct(AgentID::new()), "fail", 60);
         assert!(bus.send_direct(msg).await.is_err());
@@ -830,7 +871,9 @@ mod tests {
 
         let mut inbox_b = bus.register_agent(agent_b).await;
         bus.register_agent(agent_a).await;
-        bus.register_pubkey(agent_a, pk_a.clone()).await;
+        bus.register_pubkey_internal(agent_a, pk_a.clone())
+            .await
+            .unwrap();
 
         let msg = make_signed_msg(
             &sk_a,
@@ -844,5 +887,73 @@ mod tests {
 
         let msg = make_signed_msg(&sk_a, agent_a, MessageTarget::Broadcast, "no sender bc", 60);
         bus.broadcast(msg).await.unwrap();
+    }
+
+    // ── register_pubkey_internal immutability tests ──────────────────────────
+
+    #[tokio::test]
+    async fn test_register_pubkey_internal_first_time_succeeds() {
+        let bus = AgentMessageBus::new();
+        let agent_a = AgentID::new();
+        let (_sk, pk) = make_keypair();
+
+        let result = bus.register_pubkey_internal(agent_a, pk).await;
+        assert!(result.is_ok(), "First registration must succeed");
+    }
+
+    #[tokio::test]
+    async fn test_register_pubkey_internal_same_key_idempotent() {
+        let bus = AgentMessageBus::new();
+        let agent_a = AgentID::new();
+        let (_sk, pk) = make_keypair();
+
+        bus.register_pubkey_internal(agent_a, pk.clone())
+            .await
+            .unwrap();
+        // Second call with the same key must succeed (reconnect scenario).
+        let result = bus.register_pubkey_internal(agent_a, pk).await;
+        assert!(
+            result.is_ok(),
+            "Re-registration with same key must be idempotent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_register_pubkey_internal_different_key_rejected() {
+        let bus = AgentMessageBus::new();
+        let agent_a = AgentID::new();
+        let (_sk1, pk1) = make_keypair();
+        let (_sk2, pk2) = make_keypair();
+
+        bus.register_pubkey_internal(agent_a, pk1).await.unwrap();
+        let result = bus.register_pubkey_internal(agent_a, pk2).await;
+        assert!(
+            result.is_err(),
+            "Re-registration with a DIFFERENT key must be rejected"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("already registered"),
+            "Error message must mention 'already registered'"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deregister_pubkey_allows_reregistration() {
+        let bus = AgentMessageBus::new();
+        let agent_a = AgentID::new();
+        let (_sk1, pk1) = make_keypair();
+        let (_sk2, pk2) = make_keypair();
+
+        bus.register_pubkey_internal(agent_a, pk1).await.unwrap();
+        // After deregistering, a new key can be registered.
+        bus.deregister_pubkey(&agent_a).await;
+        let result = bus.register_pubkey_internal(agent_a, pk2).await;
+        assert!(
+            result.is_ok(),
+            "Re-registration must succeed after deregister"
+        );
     }
 }

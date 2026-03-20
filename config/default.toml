@@ -4,6 +4,33 @@ max_concurrent_tasks = 4
 default_task_timeout_secs = 60
 context_window_max_entries = 100
 context_window_token_budget = 8000
+# SQLite DB for persisted runtime state (tasks, escalations, cost snapshots).
+state_db_path = "/tmp/agentos/data/kernel_state.db"
+
+[kernel.task_limits]
+max_iterations_low = 10
+max_iterations_medium = 25
+max_iterations_high = 50
+
+[kernel.tool_calls]
+allow_parallel = true
+max_parallel = 5
+
+[kernel.events]
+# Capacity of the internal event dispatch channel (number of EventMessage slots).
+# Events are dropped (with a warning logged and an EventChannelFull audit entry written)
+# when the channel is full.  Increase this value if you observe dropped events under
+# heavy load (10+ agents, frequent tool calls).
+channel_capacity = 1024
+
+[kernel.tool_execution]
+# Maximum serialized bytes for a single tool's output injected into context.
+# Outputs exceeding this are truncated with a marker so the agent can adapt.
+# Long-running agentic workflows are not affected — only the output size is capped.
+max_output_bytes = 262144    # 256 KiB
+# Timeout for in-process (non-sandboxed) tool calls. Sandboxed tools use their
+# manifest's sandbox.max_cpu_ms instead, which is set per tool.
+default_timeout_seconds = 60
 
 [secrets]
 # Development default path (ephemeral on many systems).
@@ -17,12 +44,21 @@ vault_path = "/tmp/agentos/vault/secrets.db"
 log_path = "/tmp/agentos/data/audit.db"
 # Maximum rows to retain (0 = unlimited). Older rows are pruned on each 10-minute sweep.
 max_audit_entries = 0
+# Number of recent entries to verify on startup (0 = full chain, may be slow for large logs).
+verify_last_n_entries = 1000
 
 [tools]
 # Development default paths (ephemeral on many systems).
 core_tools_dir = "/tmp/agentos/tools/core"
 user_tools_dir = "/tmp/agentos/tools/user"
 data_dir = "/tmp/agentos/data"
+
+[tools.workspace]
+# Additional directories the agent can access beyond data_dir.
+# Each entry must be an absolute path pointing to a project or shared directory.
+# System roots (/etc, /var, /root, /home itself, /) are rejected at startup.
+# Example: allowed_paths = ["/home/user/project", "/shared/datasets"]
+allowed_paths = []
 
 [bus]
 # Development default socket path.
@@ -42,6 +78,12 @@ openai_base_url = "https://api.openai.com/v1"
 # Reserved for provider endpoint documentation parity.
 anthropic_base_url = "https://api.anthropic.com/v1"
 gemini_base_url = "https://generativelanguage.googleapis.com/v1beta"
+# Maximum output tokens for Anthropic requests. Increase for long-form generation.
+# Claude models support up to 8192 (claude-3) or 16384 (claude-3-5) output tokens.
+max_tokens = 8192
+# Context window size passed to Ollama as num_ctx. Many modern models support 32K+.
+# Set to match your model's actual context size (e.g. 131072 for llama3.1:8b-instruct-q8_0).
+ollama_context_window = 32768
 
 [memory]
 model_cache_dir = "models"
@@ -67,6 +109,10 @@ tools_pct = 0.18
 knowledge_pct = 0.30
 history_pct = 0.25
 task_pct = 0.12
+# Characters-per-token ratio for token estimation.
+# Default 4.0 is accurate for English/Latin text.
+# For CJK (Chinese/Japanese/Korean) workloads, use 1.5-2.0.
+chars_per_token = 4.0
 
 [health_monitor]
 enabled = true

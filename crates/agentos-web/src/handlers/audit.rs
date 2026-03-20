@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum_extra::extract::CookieJar;
@@ -62,6 +62,7 @@ pub async fn list(
                 task_id => e.task_id.as_ref().map(|id| id.to_string()),
                 tool_id => e.tool_id.as_ref().map(|id| id.to_string()),
                 details => e.details.to_string(),
+                trace_id => e.trace_id.to_string(),
             }
         })
         .collect();
@@ -81,4 +82,75 @@ pub async fn list(
         csrf_token,
     };
     super::render(&state.templates, "audit.html", ctx)
+}
+
+pub async fn detail(
+    State(state): State<AppState>,
+    Path(trace_id_str): Path<String>,
+    jar: CookieJar,
+) -> Response {
+    let parsed_uuid = match uuid::Uuid::parse_str(&trace_id_str) {
+        Ok(u) => u,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "Invalid trace ID format").into_response();
+        }
+    };
+    let trace_id = agentos_types::TraceID::from_uuid(parsed_uuid);
+
+    let audit = state.kernel.audit.clone();
+    let entries = match tokio::task::spawn_blocking(move || audit.query_by_trace(&trace_id)).await {
+        Ok(Ok(entries)) => entries,
+        Ok(Err(e)) => {
+            tracing::error!("audit query_by_trace failed: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
+        }
+        Err(e) => {
+            tracing::error!("audit query_by_trace panicked: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
+        }
+    };
+
+    if entries.is_empty() {
+        return (StatusCode::NOT_FOUND, "Audit entry not found").into_response();
+    }
+
+    let first = &entries[0];
+    let event_type = format!("{:?}", first.event_type);
+    let severity = format!("{:?}", first.severity);
+
+    let rows: Vec<_> = entries
+        .iter()
+        .map(|e| {
+            context! {
+                timestamp => e.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                timestamp_iso => e.timestamp.to_rfc3339(),
+                event_type => format!("{:?}", e.event_type),
+                severity => format!("{:?}", e.severity),
+                agent_id => e.agent_id.as_ref().map(|id| id.to_string()),
+                task_id => e.task_id.as_ref().map(|id| id.to_string()),
+                tool_id => e.tool_id.as_ref().map(|id| id.to_string()),
+                details => serde_json::to_string_pretty(&e.details)
+                    .unwrap_or_else(|_| e.details.to_string()),
+                reversible => e.reversible,
+                rollback_ref => e.rollback_ref.clone(),
+            }
+        })
+        .collect();
+
+    let short_id = &trace_id_str[..8.min(trace_id_str.len())];
+    let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);
+    let ctx = context! {
+        page_title => format!("Audit — {}", short_id),
+        breadcrumbs => vec![
+            context! { label => "Audit Log", href => "/audit" },
+            context! { label => format!("Trace {}", short_id) },
+        ],
+        trace_id => trace_id_str,
+        event_type,
+        severity,
+        entry_count => rows.len(),
+        entries => rows,
+        csrf_token,
+    };
+    super::render(&state.templates, "audit_detail.html", ctx)
 }

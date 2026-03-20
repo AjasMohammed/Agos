@@ -45,6 +45,7 @@ impl ContextManager {
             reference_count: 0,
             partition: ContextPartition::default(),
             category: ContextCategory::System,
+            is_summary: false,
         });
 
         self.windows.write().await.insert(task_id, window);
@@ -199,6 +200,7 @@ impl ContextManager {
                 reference_count: 0,
                 partition: ContextPartition::default(),
                 category: ContextCategory::History,
+                is_summary: false,
             },
         )
         .await

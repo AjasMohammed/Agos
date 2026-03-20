@@ -1,0 +1,32 @@
+[manifest]
+name        = "think"
+version     = "1.0.0"
+description = "Record an explicit reasoning step. Use before any irreversible action to think through the approach. The thought is captured in the audit log."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = ["status"]
+
+[intent_schema]
+input  = "ThinkIntent"
+output = "ThinkResult"
+
+[input_schema]
+type = "object"
+required = ["thought"]
+
+[input_schema.properties.thought]
+type = "string"
+description = "Reasoning note to record in audit trail"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 4
+max_cpu_ms    = 100
+syscalls      = []

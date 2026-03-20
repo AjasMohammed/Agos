@@ -152,6 +152,10 @@ impl ProceduralStore {
         .join("\n")
     }
 
+    /// Store a procedure. Both embedding computation and SQLite writes are offloaded
+    /// to the blocking thread pool via `spawn_blocking` so async worker threads are
+    /// never blocked by ONNX model inference or disk I/O.
+    /// Uses `conn.transaction()` for atomic, auto-rollback-on-error semantics.
     pub async fn store(&self, procedure: &Procedure) -> Result<String, AgentOSError> {
         let proc_id = if procedure.id.is_empty() {
             Uuid::new_v4().to_string()
@@ -160,28 +164,6 @@ impl ProceduralStore {
         };
         let now = Utc::now().to_rfc3339();
         let embedding_text = Self::build_embedding_text(procedure);
-        let embedding = self
-            .embedder
-            .embed(&[embedding_text.as_str()])
-            .map_err(|e| AgentOSError::StorageError(format!("Failed to compute embedding: {}", e)))?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                AgentOSError::StorageError("Procedure embedding returned empty result".to_string())
-            })?;
-        if embedding.len() != self.dimension {
-            return Err(AgentOSError::StorageError(format!(
-                "Procedure embedding dimension mismatch: expected {}, got {}",
-                self.dimension,
-                embedding.len()
-            )));
-        }
-
-        let mut blob = Vec::with_capacity(embedding.len() * 4);
-        for val in embedding {
-            blob.extend_from_slice(&val.to_le_bytes());
-        }
-
         let preconditions = serde_json::to_string(&procedure.preconditions).map_err(|e| {
             AgentOSError::StorageError(format!("Failed to serialize preconditions: {}", e))
         })?;
@@ -202,64 +184,100 @@ impl ProceduralStore {
             procedure.created_at.to_rfc3339()
         };
         let steps_text = Self::build_steps_text(&procedure.steps);
+        let name = procedure.name.clone();
+        let description = procedure.description.clone();
+        let success_count = procedure.success_count;
+        let failure_count = procedure.failure_count;
 
-        let conn = self.conn.lock().map_err(|_| {
-            AgentOSError::StorageError("Failed to lock procedural db for store".to_string())
-        })?;
-        conn.execute("BEGIN TRANSACTION", [])
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+        let embedder = self.embedder.clone();
+        let dimension = self.dimension;
+        let db = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            // Embedding is CPU-intensive; run it here on the blocking thread pool
+            // so async worker threads are not blocked by ONNX model inference.
+            let embedding = embedder
+                .embed(&[embedding_text.as_str()])
+                .map_err(|e| {
+                    AgentOSError::StorageError(format!("Failed to compute embedding: {}", e))
+                })?
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    AgentOSError::StorageError(
+                        "Procedure embedding returned empty result".to_string(),
+                    )
+                })?;
+            if embedding.len() != dimension {
+                return Err(AgentOSError::StorageError(format!(
+                    "Procedure embedding dimension mismatch: expected {}, got {}",
+                    dimension,
+                    embedding.len()
+                )));
+            }
+            let mut blob = Vec::with_capacity(embedding.len() * 4);
+            for val in embedding {
+                blob.extend_from_slice(&val.to_le_bytes());
+            }
 
-        if let Err(e) = conn.execute(
-            "INSERT OR REPLACE INTO procedures (
-                id, name, description, preconditions, steps, postconditions,
-                success_count, failure_count, source_episodes, agent_id, tags,
-                embedding, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![
-                proc_id,
-                procedure.name,
-                procedure.description,
-                preconditions,
-                steps,
-                postconditions,
-                procedure.success_count,
-                procedure.failure_count,
-                source_episodes,
-                agent_id_str,
-                tags,
-                blob,
-                created_at,
-                now
-            ],
-        ) {
-            conn.execute("ROLLBACK TRANSACTION", []).ok();
-            return Err(AgentOSError::StorageError(format!(
-                "Failed to store procedure: {}",
-                e
-            )));
-        }
+            let mut conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock procedural db for store".to_string())
+            })?;
 
-        if let Err(e) = conn.execute(
-            "INSERT INTO procedures_fts_content (proc_id, name, description, steps_text)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(proc_id) DO UPDATE SET
-                name=excluded.name,
-                description=excluded.description,
-                steps_text=excluded.steps_text",
-            params![proc_id, procedure.name, procedure.description, steps_text],
-        ) {
-            conn.execute("ROLLBACK TRANSACTION", []).ok();
-            return Err(AgentOSError::StorageError(format!(
-                "Failed to write procedure FTS content: {}",
-                e
-            )));
-        }
+            // Use rusqlite's Transaction for automatic rollback on any early return.
+            let tx = conn.transaction().map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to begin transaction: {}", e))
+            })?;
 
-        conn.execute("COMMIT TRANSACTION", [])
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
-        Ok(proc_id)
+            tx.execute(
+                "INSERT OR REPLACE INTO procedures (
+                    id, name, description, preconditions, steps, postconditions,
+                    success_count, failure_count, source_episodes, agent_id, tags,
+                    embedding, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    proc_id,
+                    name,
+                    description,
+                    preconditions,
+                    steps,
+                    postconditions,
+                    success_count,
+                    failure_count,
+                    source_episodes,
+                    agent_id_str,
+                    tags,
+                    blob,
+                    created_at,
+                    now
+                ],
+            )
+            .map_err(|e| AgentOSError::StorageError(format!("Failed to store procedure: {}", e)))?;
+
+            tx.execute(
+                "INSERT INTO procedures_fts_content (proc_id, name, description, steps_text)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(proc_id) DO UPDATE SET
+                    name=excluded.name,
+                    description=excluded.description,
+                    steps_text=excluded.steps_text",
+                params![proc_id, name, description, steps_text],
+            )
+            .map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to write procedure FTS content: {}", e))
+            })?;
+
+            tx.commit().map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to commit store transaction: {}", e))
+            })?;
+
+            Ok(proc_id)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Store task panicked: {}", e)))?
     }
 
+    /// Search procedures using hybrid FTS5 + vector similarity.
+    /// Embedding is computed in the async context; SQLite work is offloaded via `spawn_blocking`.
     pub async fn search(
         &self,
         query: &str,
@@ -278,309 +296,394 @@ impl ProceduralStore {
             return Ok(Vec::new());
         }
 
-        let query_embedding = self
-            .embedder
-            .embed(&[query])
-            .map_err(|e| AgentOSError::StorageError(format!("Query embed error: {}", e)))?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                AgentOSError::StorageError("Query embedding returned empty result".to_string())
-            })?;
-        if query_embedding.len() != self.dimension {
-            return Err(AgentOSError::StorageError(format!(
-                "Query embedding dimension mismatch: expected {}, got {}",
-                self.dimension,
-                query_embedding.len()
-            )));
-        }
-
-        let conn = self.conn.lock().map_err(|_| {
-            AgentOSError::StorageError("Failed to lock procedural db for search".to_string())
-        })?;
         let agent_id_str = agent_id.map(|id| id.as_uuid().to_string());
-
-        // Sanitize query to prevent FTS5 operator injection
         let sanitized_query = format!("\"{}\"", query.replace('"', "\"\""));
-        let fts_ranks: HashMap<i64, f32> = {
-            let mut map = HashMap::new();
-            if let Ok(mut stmt) = conn.prepare(
-                "SELECT rowid, rank FROM procedures_fts
-                 WHERE procedures_fts MATCH ?1
-                 ORDER BY rank
-                 LIMIT 200",
-            ) {
-                if let Ok(rows) = stmt.query_map(params![sanitized_query], |row| {
-                    let rowid: i64 = row.get(0)?;
-                    let rank: f64 = row.get(1)?;
-                    Ok((rowid, rank as f32))
-                }) {
-                    for row in rows.flatten() {
-                        map.insert(row.0, row.1);
-                    }
-                }
-            }
-            map
-        };
+        let query_owned = query.to_owned();
+        let dimension = self.dimension;
+        let embedder = self.embedder.clone();
+        let db = self.conn.clone();
 
-        let use_fts = !fts_ranks.is_empty();
-        let sql = if use_fts {
-            format!(
-                "SELECT p.id, p.name, p.description, p.preconditions, p.steps, p.postconditions,
-                        p.success_count, p.failure_count, p.source_episodes, p.agent_id, p.tags,
-                        p.created_at, p.updated_at, p.embedding, c.rowid
-                 FROM procedures p
-                 JOIN procedures_fts_content c ON c.proc_id = p.id
-                 WHERE c.rowid IN ({})
-                   AND (?1 IS NULL OR p.agent_id IS NULL OR p.agent_id = ?1)",
-                fts_ranks
-                    .keys()
-                    .map(|id| id.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        } else {
-            "SELECT p.id, p.name, p.description, p.preconditions, p.steps, p.postconditions,
-                    p.success_count, p.failure_count, p.source_episodes, p.agent_id, p.tags,
-                    p.created_at, p.updated_at, p.embedding, c.rowid
-             FROM procedures p
-             JOIN procedures_fts_content c ON c.proc_id = p.id
-             WHERE (?1 IS NULL OR p.agent_id IS NULL OR p.agent_id = ?1)
-             ORDER BY p.updated_at DESC
-             LIMIT 200"
-                .to_string()
-        };
-
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
-        let rows = stmt
-            .query_map(params![agent_id_str], |row| {
-                let id: String = row.get(0)?;
-                let name: String = row.get(1)?;
-                let description: String = row.get(2)?;
-                let preconditions_json: String = row.get(3)?;
-                let steps_json: String = row.get(4)?;
-                let postconditions_json: String = row.get(5)?;
-                let success_count: u32 = row.get(6)?;
-                let failure_count: u32 = row.get(7)?;
-                let source_episodes_json: String = row.get(8)?;
-                let agent_id_str: Option<String> = row.get(9)?;
-                let tags_json: String = row.get(10)?;
-                let created_at: String = row.get(11)?;
-                let updated_at: String = row.get(12)?;
-                let blob: Vec<u8> = row.get(13)?;
-                let rowid: i64 = row.get(14)?;
-
-                let mut embedding = Vec::with_capacity(blob.len() / 4);
-                for bytes in blob.chunks_exact(4) {
-                    embedding.push(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
-                }
-
-                let procedure = Procedure {
-                    id,
-                    name,
-                    description,
-                    preconditions: serde_json::from_str(&preconditions_json).unwrap_or_default(),
-                    steps: serde_json::from_str(&steps_json).unwrap_or_default(),
-                    postconditions: serde_json::from_str(&postconditions_json).unwrap_or_default(),
-                    success_count,
-                    failure_count,
-                    source_episodes: serde_json::from_str(&source_episodes_json)
-                        .unwrap_or_default(),
-                    agent_id: agent_id_str
-                        .and_then(|s| Uuid::parse_str(&s).ok())
-                        .map(AgentID::from_uuid),
-                    tags: serde_json::from_str(&tags_json).unwrap_or_default(),
-                    created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
-                        .unwrap_or_else(|_| chrono::Local::now().into())
-                        .with_timezone(&Utc),
-                    updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
-                        .unwrap_or_else(|_| chrono::Local::now().into())
-                        .with_timezone(&Utc),
-                };
-
-                Ok((procedure, embedding, rowid))
-            })
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
-
-        let mut results = Vec::new();
-        for row in rows {
-            let (procedure, embedding, rowid) =
-                row.map_err(|e| AgentOSError::StorageError(e.to_string()))?;
-            if embedding.len() != self.dimension {
-                continue;
-            }
-            let semantic_score = Self::cosine_similarity(&query_embedding, &embedding);
-            if semantic_score < min_score {
-                continue;
-            }
-            let fts_score = fts_ranks.get(&rowid).map(|r| -r).unwrap_or(0.0);
-            let rrf_score = if use_fts && fts_score > 0.0 {
-                let fts_normalized = fts_score / (fts_score + 60.0);
-                0.7 * semantic_score + 0.3 * fts_normalized
-            } else {
-                semantic_score
-            };
-            results.push(ProcedureSearchResult {
-                procedure,
-                semantic_score,
-                fts_score,
-                rrf_score,
-            });
-        }
-
-        results.sort_by(|a, b| {
-            b.rrf_score
-                .partial_cmp(&a.rrf_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        results.truncate(top_k);
-        Ok(results)
-    }
-
-    pub fn get(&self, id: &str) -> Result<Option<Procedure>, AgentOSError> {
-        let conn = self.conn.lock().map_err(|_| {
-            AgentOSError::StorageError("Failed to lock procedural db for get".to_string())
-        })?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, name, description, preconditions, steps, postconditions,
-                        success_count, failure_count, source_episodes, agent_id, tags,
-                        created_at, updated_at
-                 FROM procedures WHERE id = ?1",
-            )
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
-        let mut rows = stmt
-            .query_map(params![id], Self::row_to_procedure)
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
-        match rows.next() {
-            Some(Ok(p)) => Ok(Some(p)),
-            Some(Err(e)) => Err(AgentOSError::StorageError(e.to_string())),
-            None => Ok(None),
-        }
-    }
-
-    pub fn update_stats(&self, id: &str, success: bool) -> Result<(), AgentOSError> {
-        let conn = self.conn.lock().map_err(|_| {
-            AgentOSError::StorageError("Failed to lock procedural db for update_stats".to_string())
-        })?;
-        let now = Utc::now().to_rfc3339();
-        let sql = if success {
-            "UPDATE procedures
-             SET success_count = success_count + 1, updated_at = ?2
-             WHERE id = ?1"
-        } else {
-            "UPDATE procedures
-             SET failure_count = failure_count + 1, updated_at = ?2
-             WHERE id = ?1"
-        };
-        let updated = conn.execute(sql, params![id, now]).map_err(|e| {
-            AgentOSError::StorageError(format!("Failed to update procedure stats: {}", e))
-        })?;
-        if updated == 0 {
-            return Err(AgentOSError::StorageError(format!(
-                "Procedure '{}' not found",
-                id
-            )));
-        }
-        Ok(())
-    }
-
-    pub fn delete(&self, id: &str) -> Result<(), AgentOSError> {
-        let conn = self.conn.lock().map_err(|_| {
-            AgentOSError::StorageError("Failed to lock procedural db for delete".to_string())
-        })?;
-        conn.execute("BEGIN TRANSACTION", [])
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
-        if let Err(e) = conn.execute(
-            "DELETE FROM procedures_fts_content WHERE proc_id = ?1",
-            params![id],
-        ) {
-            conn.execute("ROLLBACK TRANSACTION", []).ok();
-            return Err(AgentOSError::StorageError(format!(
-                "Failed to delete procedure FTS content: {}",
-                e
-            )));
-        }
-
-        let deleted = match conn.execute("DELETE FROM procedures WHERE id = ?1", params![id]) {
-            Ok(n) => n,
-            Err(e) => {
-                conn.execute("ROLLBACK TRANSACTION", []).ok();
+        tokio::task::spawn_blocking(move || {
+            // Embedding is CPU-intensive; run it here on the blocking thread pool
+            // so async worker threads are not blocked by ONNX model inference.
+            let query_embedding = embedder
+                .embed(&[query_owned.as_str()])
+                .map_err(|e| AgentOSError::StorageError(format!("Query embed error: {}", e)))?
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    AgentOSError::StorageError("Query embedding returned empty result".to_string())
+                })?;
+            if query_embedding.len() != dimension {
                 return Err(AgentOSError::StorageError(format!(
-                    "Failed to delete procedure: {}",
-                    e
+                    "Query embedding dimension mismatch: expected {}, got {}",
+                    dimension,
+                    query_embedding.len()
                 )));
             }
-        };
-        if deleted == 0 {
-            conn.execute("ROLLBACK TRANSACTION", []).ok();
-            return Err(AgentOSError::StorageError(format!(
-                "Procedure '{}' not found",
-                id
-            )));
-        }
 
-        conn.execute("COMMIT TRANSACTION", [])
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
-        Ok(())
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock procedural db for search".to_string())
+            })?;
+
+            let fts_ranks: HashMap<i64, f32> = {
+                let mut map = HashMap::new();
+                if let Ok(mut stmt) = conn.prepare(
+                    "SELECT rowid, rank FROM procedures_fts
+                     WHERE procedures_fts MATCH ?1
+                     ORDER BY rank
+                     LIMIT 200",
+                ) {
+                    if let Ok(rows) = stmt.query_map(params![sanitized_query], |row| {
+                        let rowid: i64 = row.get(0)?;
+                        let rank: f64 = row.get(1)?;
+                        Ok((rowid, rank as f32))
+                    }) {
+                        for row in rows.flatten() {
+                            map.insert(row.0, row.1);
+                        }
+                    }
+                }
+                map
+            };
+
+            let use_fts = !fts_ranks.is_empty();
+
+            // Shared row mapper used by both the FTS path and the fallback path.
+            let map_proc_row =
+                |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Procedure, Vec<f32>, i64)> {
+                    let id: String = row.get(0)?;
+                    let name: String = row.get(1)?;
+                    let description: String = row.get(2)?;
+                    let preconditions_json: String = row.get(3)?;
+                    let steps_json: String = row.get(4)?;
+                    let postconditions_json: String = row.get(5)?;
+                    let success_count: u32 = row.get(6)?;
+                    let failure_count: u32 = row.get(7)?;
+                    let source_episodes_json: String = row.get(8)?;
+                    let aid_str: Option<String> = row.get(9)?;
+                    let tags_json: String = row.get(10)?;
+                    let created_at: String = row.get(11)?;
+                    let updated_at: String = row.get(12)?;
+                    let blob: Vec<u8> = row.get(13)?;
+                    let rowid: i64 = row.get(14)?;
+
+                    let mut embedding = Vec::with_capacity(blob.len() / 4);
+                    for bytes in blob.chunks_exact(4) {
+                        embedding
+                            .push(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+                    }
+
+                    let procedure = Procedure {
+                        id,
+                        name,
+                        description,
+                        preconditions: serde_json::from_str(&preconditions_json)
+                            .unwrap_or_default(),
+                        steps: serde_json::from_str(&steps_json).unwrap_or_default(),
+                        postconditions: serde_json::from_str(&postconditions_json)
+                            .unwrap_or_default(),
+                        success_count,
+                        failure_count,
+                        source_episodes: serde_json::from_str(&source_episodes_json)
+                            .unwrap_or_default(),
+                        agent_id: aid_str
+                            .and_then(|s| Uuid::parse_str(&s).ok())
+                            .map(AgentID::from_uuid),
+                        tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+                        created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                            .unwrap_or_else(|_| chrono::Local::now().into())
+                            .with_timezone(&Utc),
+                        updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
+                            .unwrap_or_else(|_| chrono::Local::now().into())
+                            .with_timezone(&Utc),
+                    };
+
+                    Ok((procedure, embedding, rowid))
+                };
+
+            // Build the candidate query using parameterized ?N placeholders so that
+            // rowid values (which come from a prior SQLite FTS5 query, not user input)
+            // follow the same parameterized-query convention as the rest of the codebase.
+            let raw_rows: Vec<(Procedure, Vec<f32>, i64)> = if use_fts {
+                let rowids: Vec<i64> = fts_ranks.keys().copied().collect();
+                // agent_id_str is bound as ?1; rowids are bound as ?2..?N
+                let placeholders = (2..=rowids.len() + 1)
+                    .map(|i| format!("?{}", i))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "SELECT p.id, p.name, p.description, p.preconditions, p.steps, p.postconditions,
+                            p.success_count, p.failure_count, p.source_episodes, p.agent_id, p.tags,
+                            p.created_at, p.updated_at, p.embedding, c.rowid
+                     FROM procedures p
+                     JOIN procedures_fts_content c ON c.proc_id = p.id
+                     WHERE c.rowid IN ({placeholders})
+                       AND (?1 IS NULL OR p.agent_id IS NULL OR p.agent_id = ?1)"
+                );
+                let mut stmt = conn
+                    .prepare(&sql)
+                    .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+                let mut bound: Vec<rusqlite::types::Value> = Vec::with_capacity(rowids.len() + 1);
+                bound.push(match &agent_id_str {
+                    Some(s) => rusqlite::types::Value::Text(s.clone()),
+                    None => rusqlite::types::Value::Null,
+                });
+                for id in &rowids {
+                    bound.push(rusqlite::types::Value::Integer(*id));
+                }
+                let collected = stmt
+                    .query_map(rusqlite::params_from_iter(bound.iter()), map_proc_row)
+                    .map_err(|e| AgentOSError::StorageError(e.to_string()))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+                collected
+            } else {
+                let sql =
+                    "SELECT p.id, p.name, p.description, p.preconditions, p.steps, p.postconditions,
+                            p.success_count, p.failure_count, p.source_episodes, p.agent_id, p.tags,
+                            p.created_at, p.updated_at, p.embedding, c.rowid
+                     FROM procedures p
+                     JOIN procedures_fts_content c ON c.proc_id = p.id
+                     WHERE (?1 IS NULL OR p.agent_id IS NULL OR p.agent_id = ?1)
+                     ORDER BY p.updated_at DESC
+                     LIMIT 200";
+                let mut stmt = conn
+                    .prepare(sql)
+                    .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+                let collected = stmt
+                    .query_map(params![agent_id_str], map_proc_row)
+                    .map_err(|e| AgentOSError::StorageError(e.to_string()))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+                collected
+            };
+
+            let mut results = Vec::new();
+            for (procedure, embedding, rowid) in raw_rows {
+                if embedding.len() != dimension {
+                    continue;
+                }
+                let semantic_score = Self::cosine_similarity(&query_embedding, &embedding);
+                if semantic_score < min_score {
+                    continue;
+                }
+                let fts_score = fts_ranks.get(&rowid).map(|r| -r).unwrap_or(0.0);
+                let rrf_score = if use_fts && fts_score > 0.0 {
+                    let fts_normalized = fts_score / (fts_score + 60.0);
+                    0.7 * semantic_score + 0.3 * fts_normalized
+                } else {
+                    semantic_score
+                };
+                results.push(ProcedureSearchResult {
+                    procedure,
+                    semantic_score,
+                    fts_score,
+                    rrf_score,
+                });
+            }
+
+            results.sort_by(|a, b| {
+                b.rrf_score
+                    .partial_cmp(&a.rrf_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            results.truncate(top_k);
+            Ok(results)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Search task panicked: {}", e)))?
     }
 
-    pub fn list_by_agent(
+    /// Get a procedure by ID. Offloads to blocking thread pool.
+    pub async fn get(&self, id: &str) -> Result<Option<Procedure>, AgentOSError> {
+        let db = self.conn.clone();
+        let id_owned = id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock procedural db for get".to_string())
+            })?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, name, description, preconditions, steps, postconditions,
+                            success_count, failure_count, source_episodes, agent_id, tags,
+                            created_at, updated_at
+                     FROM procedures WHERE id = ?1",
+                )
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+            let mut rows = stmt
+                .query_map(params![id_owned], Self::row_to_procedure)
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+            match rows.next() {
+                Some(Ok(p)) => Ok(Some(p)),
+                Some(Err(e)) => Err(AgentOSError::StorageError(e.to_string())),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Get task panicked: {}", e)))?
+    }
+
+    /// Update success/failure statistics for a procedure. Offloads to blocking thread pool.
+    pub async fn update_stats(&self, id: &str, success: bool) -> Result<(), AgentOSError> {
+        let db = self.conn.clone();
+        let id_owned = id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError(
+                    "Failed to lock procedural db for update_stats".to_string(),
+                )
+            })?;
+            let now = Utc::now().to_rfc3339();
+            let sql = if success {
+                "UPDATE procedures
+                 SET success_count = success_count + 1, updated_at = ?2
+                 WHERE id = ?1"
+            } else {
+                "UPDATE procedures
+                 SET failure_count = failure_count + 1, updated_at = ?2
+                 WHERE id = ?1"
+            };
+            let updated = conn.execute(sql, params![id_owned, now]).map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to update procedure stats: {}", e))
+            })?;
+            if updated == 0 {
+                return Err(AgentOSError::StorageError(format!(
+                    "Procedure '{}' not found",
+                    id_owned
+                )));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Update stats task panicked: {}", e)))?
+    }
+
+    /// Delete a procedure and its FTS content. Uses `conn.transaction()` for safe atomicity.
+    /// Offloads to blocking thread pool.
+    pub async fn delete(&self, id: &str) -> Result<(), AgentOSError> {
+        let db = self.conn.clone();
+        let id_owned = id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock procedural db for delete".to_string())
+            })?;
+
+            // Use rusqlite's Transaction for automatic rollback on any early return.
+            let tx = conn.transaction().map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to begin delete transaction: {}", e))
+            })?;
+
+            tx.execute(
+                "DELETE FROM procedures_fts_content WHERE proc_id = ?1",
+                params![id_owned],
+            )
+            .map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to delete procedure FTS content: {}", e))
+            })?;
+
+            let deleted = tx
+                .execute("DELETE FROM procedures WHERE id = ?1", params![id_owned])
+                .map_err(|e| {
+                    AgentOSError::StorageError(format!("Failed to delete procedure: {}", e))
+                })?;
+
+            if deleted == 0 {
+                return Err(AgentOSError::StorageError(format!(
+                    "Procedure '{}' not found",
+                    id_owned
+                )));
+            }
+
+            tx.commit().map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to commit delete transaction: {}", e))
+            })?;
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Delete task panicked: {}", e)))?
+    }
+
+    /// List procedures, optionally scoped to an agent. Offloads to blocking thread pool.
+    pub async fn list_by_agent(
         &self,
         agent_id: Option<&AgentID>,
         limit: usize,
     ) -> Result<Vec<Procedure>, AgentOSError> {
-        let conn = self.conn.lock().map_err(|_| {
-            AgentOSError::StorageError("Failed to lock procedural db for list_by_agent".to_string())
-        })?;
+        let db = self.conn.clone();
         let max = limit.min(i64::MAX as usize) as i64;
         let agent_id_str = agent_id.map(|id| id.as_uuid().to_string());
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError(
+                    "Failed to lock procedural db for list_by_agent".to_string(),
+                )
+            })?;
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, name, description, preconditions, steps, postconditions,
-                        success_count, failure_count, source_episodes, agent_id, tags,
-                        created_at, updated_at
-                 FROM procedures
-                 WHERE (?1 IS NULL OR agent_id IS NULL OR agent_id = ?1)
-                 ORDER BY updated_at DESC
-                 LIMIT ?2",
-            )
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
-        let rows = stmt
-            .query_map(params![agent_id_str, max], Self::row_to_procedure)
-            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
-        let mut procedures = Vec::new();
-        for row in rows {
-            procedures.push(row.map_err(|e| AgentOSError::StorageError(e.to_string()))?);
-        }
-        Ok(procedures)
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, name, description, preconditions, steps, postconditions,
+                            success_count, failure_count, source_episodes, agent_id, tags,
+                            created_at, updated_at
+                     FROM procedures
+                     WHERE (?1 IS NULL OR agent_id IS NULL OR agent_id = ?1)
+                     ORDER BY updated_at DESC
+                     LIMIT ?2",
+                )
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+            let rows = stmt
+                .query_map(params![agent_id_str, max], Self::row_to_procedure)
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+            let mut procedures = Vec::new();
+            for row in rows {
+                procedures.push(row.map_err(|e| AgentOSError::StorageError(e.to_string()))?);
+            }
+            Ok(procedures)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("List task panicked: {}", e)))?
     }
 
-    pub fn sweep_old_entries(&self, max_age: std::time::Duration) -> Result<usize, AgentOSError> {
+    /// Delete procedures older than `max_age`. Offloads to blocking thread pool.
+    pub async fn sweep_old_entries(
+        &self,
+        max_age: std::time::Duration,
+    ) -> Result<usize, AgentOSError> {
         let chrono_age = chrono::Duration::from_std(max_age)
             .map_err(|e| AgentOSError::StorageError(format!("Invalid max_age duration: {}", e)))?;
         let cutoff = (Utc::now() - chrono_age).to_rfc3339();
-        let conn = self.conn.lock().map_err(|_| {
-            AgentOSError::StorageError("Failed to lock procedural db for sweep".to_string())
-        })?;
-        conn.execute(
-            "DELETE FROM procedures_fts_content
-             WHERE proc_id IN (SELECT id FROM procedures WHERE updated_at < ?1)",
-            params![cutoff],
-        )
-        .map_err(|e| AgentOSError::StorageError(format!("Failed to sweep old FTS rows: {}", e)))?;
-        let deleted = conn
-            .execute(
-                "DELETE FROM procedures WHERE updated_at < ?1",
+        let db = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock procedural db for sweep".to_string())
+            })?;
+            let tx = conn.transaction().map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to begin sweep transaction: {}", e))
+            })?;
+            tx.execute(
+                "DELETE FROM procedures_fts_content
+                 WHERE proc_id IN (SELECT id FROM procedures WHERE updated_at < ?1)",
                 params![cutoff],
             )
             .map_err(|e| {
-                AgentOSError::StorageError(format!("Failed to sweep old procedures: {}", e))
+                AgentOSError::StorageError(format!("Failed to sweep old FTS rows: {}", e))
             })?;
-        Ok(deleted)
+            let deleted = tx
+                .execute(
+                    "DELETE FROM procedures WHERE updated_at < ?1",
+                    params![cutoff],
+                )
+                .map_err(|e| {
+                    AgentOSError::StorageError(format!("Failed to sweep old procedures: {}", e))
+                })?;
+            tx.commit().map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to commit sweep transaction: {}", e))
+            })?;
+            Ok(deleted)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Sweep task panicked: {}", e)))?
     }
 
     fn row_to_procedure(row: &rusqlite::Row) -> rusqlite::Result<Procedure> {
@@ -619,6 +722,29 @@ impl ProceduralStore {
                 .unwrap_or_else(|_| chrono::Local::now().into())
                 .with_timezone(&Utc),
         })
+    }
+
+    /// Count procedures, optionally scoped to an agent. Offloads to blocking thread pool.
+    pub async fn count(&self, agent_id: Option<&AgentID>) -> Result<usize, AgentOSError> {
+        let db = self.conn.clone();
+        let agent_id_str = agent_id.map(|id| id.as_uuid().to_string());
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock procedural db for count".to_string())
+            })?;
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM procedures WHERE (?1 IS NULL OR agent_id IS NULL OR agent_id = ?1)",
+                    params![agent_id_str],
+                    |row| row.get(0),
+                )
+                .map_err(|e| {
+                    AgentOSError::StorageError(format!("Count query failed: {}", e))
+                })?;
+            Ok(count as usize)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Count task panicked: {}", e)))?
     }
 
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -677,7 +803,7 @@ mod tests {
         let proc = make_test_procedure("deploy", "Deploy application safely");
 
         let id = store.store(&proc).await.unwrap();
-        let loaded = store.get(&id).unwrap().unwrap();
+        let loaded = store.get(&id).await.unwrap().unwrap();
         assert_eq!(loaded.name, "deploy");
         assert_eq!(loaded.steps.len(), 2);
     }
@@ -707,11 +833,11 @@ mod tests {
         let proc = make_test_procedure("deploy", "Deploy application safely");
         let id = store.store(&proc).await.unwrap();
 
-        store.update_stats(&id, true).unwrap();
-        let updated = store.get(&id).unwrap().unwrap();
+        store.update_stats(&id, true).await.unwrap();
+        let updated = store.get(&id).await.unwrap().unwrap();
         assert_eq!(updated.success_count, 1);
 
-        store.delete(&id).unwrap();
-        assert!(store.get(&id).unwrap().is_none());
+        store.delete(&id).await.unwrap();
+        assert!(store.get(&id).await.unwrap().is_none());
     }
 }

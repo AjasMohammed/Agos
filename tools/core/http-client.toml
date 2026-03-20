@@ -1,7 +1,7 @@
 [manifest]
 name        = "http-client"
 version     = "1.0.0"
-description = "Make outbound HTTP requests (GET, POST, PUT, DELETE). Credentials injected from the secrets vault."
+description = "Make outbound HTTP requests (GET, POST, PUT, PATCH, DELETE, HEAD). Supports redirect following, SSE streaming, multipart upload, and direct file download. Credentials injected from the secrets vault."
 author      = "agentos-core"
 trust_tier  = "core"
 
@@ -14,6 +14,65 @@ outputs = ["http.response"]
 [intent_schema]
 input  = "HttpRequest"
 output = "HttpResponse"
+
+[input_schema]
+type = "object"
+required = ["url"]
+
+[input_schema.properties.url]
+type = "string"
+format = "uri"
+description = "HTTP or HTTPS URL"
+
+[input_schema.properties.method]
+type = "string"
+enum = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]
+default = "GET"
+description = "HTTP method"
+
+[input_schema.properties.timeout_ms]
+type = "integer"
+default = 10000
+minimum = 1
+description = "Per-request timeout in milliseconds"
+
+[input_schema.properties.follow_redirects]
+type = "boolean"
+default = false
+description = "Follow redirects (up to tool limit)"
+
+[input_schema.properties.stream]
+type = "boolean"
+default = false
+description = "Parse response as SSE stream"
+
+[input_schema.properties.save_to]
+type = "string"
+description = "Optional destination path under data_dir for download"
+
+[input_schema.properties.headers]
+type = "object"
+description = "Plain request headers"
+
+[input_schema.properties.headers.additionalProperties]
+type = "string"
+
+[input_schema.properties.secret_headers]
+type = "object"
+description = "Header values resolved from vault secrets"
+
+[input_schema.properties.secret_headers.additionalProperties]
+type = "string"
+
+[input_schema.properties.multipart_fields]
+type = "object"
+description = "Multipart form fields; each value can be a plain string or an object with base64, filename, content_type"
+
+[input_schema.properties.multipart_fields.additionalProperties]
+type = ["string", "object"]
+
+[input_schema.properties.body]
+description = "Raw string, JSON object/array body"
 
 [sandbox]
 network       = true

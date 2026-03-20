@@ -1,0 +1,54 @@
+[manifest]
+name        = "log-reader"
+version     = "1.0.0"
+description = "Read application or system log entries via the Hardware Abstraction Layer."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["fs.app_logs:r", "fs.system_logs:r"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "LogReaderIntent"
+output = "LogReaderResult"
+
+[input_schema]
+type = "object"
+required = ["source"]
+
+[input_schema.properties.source]
+type = ["string", "object"]
+description = 'Log source: "SystemLog", "KernelLog", or { "AppLog": "<name>" }'
+
+[input_schema.properties.last_n_lines]
+type = "integer"
+minimum = 1
+description = "Return only the last N matching lines"
+
+[input_schema.properties.since]
+type = "string"
+format = "date-time"
+description = "RFC3339 lower time bound"
+
+[input_schema.properties.grep_pattern]
+type = "string"
+description = "Regex filter applied to each log line"
+
+[input_schema.properties.level_filter]
+type = "array"
+description = "Optional log level filter"
+
+[input_schema.properties.level_filter.items]
+type = "string"
+enum = ["Error", "Warn", "Info", "Debug", "Trace"]
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 5000
+syscalls      = []

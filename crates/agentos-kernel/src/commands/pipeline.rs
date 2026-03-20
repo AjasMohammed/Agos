@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 impl Kernel {
     pub(crate) async fn cmd_install_pipeline(&self, yaml: String) -> KernelResponse {
@@ -153,6 +154,7 @@ impl Kernel {
                 vault: self.vault.clone(),
                 hal: self.hal.clone(),
                 data_dir: self.data_dir.clone(),
+                workspace_paths: self.workspace_paths.clone(),
                 context_manager: self.context_manager.clone(),
                 cost_tracker: self.cost_tracker.clone(),
                 agent_id,
@@ -160,6 +162,7 @@ impl Kernel {
                 injection_scanner: self.injection_scanner.clone(),
                 event_sender: self.event_sender.clone(),
                 audit: self.audit.clone(),
+                cancellation_token: self.cancellation_token.child_token(),
             };
 
             let engine = self.pipeline_engine.clone();
@@ -394,6 +397,10 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
             ))),
             hal: Some(self.kernel.hal.clone()),
             file_lock_registry: None,
+            agent_registry: None,
+            task_registry: None,
+            workspace_paths: self.kernel.workspace_paths.clone(),
+            cancellation_token: self.kernel.cancellation_token.child_token(),
         };
 
         // Audit: tool execution started
@@ -502,6 +509,7 @@ pub(crate) struct OwnedPipelineExecutor {
     pub(crate) vault: Arc<SecretsVault>,
     pub(crate) hal: Arc<HardwareAbstractionLayer>,
     pub(crate) data_dir: PathBuf,
+    pub(crate) workspace_paths: Vec<PathBuf>,
     pub(crate) context_manager: Arc<ContextManager>,
     pub(crate) cost_tracker: Arc<crate::cost_tracker::CostTracker>,
     pub(crate) agent_id: AgentID,
@@ -510,6 +518,7 @@ pub(crate) struct OwnedPipelineExecutor {
     pub(crate) injection_scanner: Arc<crate::injection_scanner::InjectionScanner>,
     pub(crate) event_sender: tokio::sync::mpsc::Sender<agentos_types::EventMessage>,
     pub(crate) audit: Arc<AuditLog>,
+    pub(crate) cancellation_token: CancellationToken,
 }
 
 #[async_trait::async_trait]
@@ -578,6 +587,7 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
                     reference_count: 0,
                     partition: ContextPartition::default(),
                     category: ContextCategory::Task,
+                    is_summary: false,
                 },
             )
             .await
@@ -751,6 +761,10 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
             ))),
             hal: Some(self.hal.clone()),
             file_lock_registry: None,
+            agent_registry: None,
+            task_registry: None,
+            workspace_paths: self.workspace_paths.clone(),
+            cancellation_token: self.cancellation_token.child_token(),
         };
 
         // Audit: tool execution started

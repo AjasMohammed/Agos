@@ -1018,6 +1018,9 @@ impl Kernel {
                         if let Err(wait) = self.per_agent_rate_limiter.lock().await.check(agent_key)
                         {
                             crate::metrics::record_rate_limited();
+                            let rate_err = agentos_types::AgentOSError::RateLimited {
+                                detail: format!("retry after {} ms", wait.as_millis()),
+                            };
                             self.audit_log(agentos_audit::AuditEntry {
                                 timestamp: chrono::Utc::now(),
                                 trace_id: agentos_types::TraceID::new(),
@@ -1029,6 +1032,7 @@ impl Kernel {
                                     "reason": "per_agent_rate_limit_exceeded",
                                     "agent_key": agent_key,
                                     "wait_ms": wait.as_millis(),
+                                    "error": rate_err.to_string(),
                                 }),
                                 severity: agentos_audit::AuditSeverity::Warn,
                                 reversible: false,
@@ -1040,10 +1044,7 @@ impl Kernel {
                                 "Per-agent rate limit exceeded"
                             );
                             let response = agentos_bus::KernelResponse::Error {
-                                message: format!(
-                                    "Per-agent rate limit exceeded. Retry after {} ms",
-                                    wait.as_millis()
-                                ),
+                                message: rate_err.to_string(),
                             };
                             if conn
                                 .write(&BusMessage::CommandResponse(response))

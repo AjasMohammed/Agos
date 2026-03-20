@@ -141,7 +141,7 @@ async fn build_task_summary(state: &AppState) -> (usize, TaskSummary) {
     for t in &tasks {
         match t.state {
             TaskState::Queued => summary.queued += 1,
-            TaskState::Running | TaskState::Waiting => summary.running += 1,
+            TaskState::Running | TaskState::Waiting | TaskState::Suspended => summary.running += 1,
             TaskState::Complete => summary.completed += 1,
             TaskState::Failed | TaskState::Cancelled => summary.failed += 1,
         }

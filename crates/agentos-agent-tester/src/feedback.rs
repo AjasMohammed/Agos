@@ -391,7 +391,9 @@ mod tests {
     #[test]
     fn test_word_overlap_case_insensitive() {
         // Identical modulo capitalisation — should be 1.0
-        assert!((word_overlap("Tool docs are unclear", "tool docs are unclear") - 1.0).abs() < 1e-9);
+        assert!(
+            (word_overlap("Tool docs are unclear", "tool docs are unclear") - 1.0).abs() < 1e-9
+        );
     }
 
     #[test]

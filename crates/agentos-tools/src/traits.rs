@@ -1,6 +1,7 @@
 use agentos_types::*;
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use tokio_util::sync::CancellationToken;
 
 /// Every tool implements this trait.
 #[async_trait]
@@ -35,4 +36,44 @@ pub struct ToolExecutionContext {
     /// Shared file lock registry injected by `ToolRunner`. `None` when tools
     /// are called directly in tests without going through the runner.
     pub file_lock_registry: Option<std::sync::Arc<crate::file_lock::FileLockRegistry>>,
+    /// Snapshot of the agent registry at task dispatch time. `None` outside kernel context.
+    pub agent_registry: Option<std::sync::Arc<dyn AgentRegistryQuery>>,
+    /// Snapshot of the task store at task dispatch time. `None` outside kernel context.
+    pub task_registry: Option<std::sync::Arc<dyn TaskQuery>>,
+    /// Additional directories the agent may access beyond `data_dir`.
+    /// Populated from `tools.workspace.allowed_paths` in the kernel config.
+    /// Paths are pre-canonicalized at kernel startup.
+    pub workspace_paths: Vec<PathBuf>,
+    /// Cancellation token for this tool invocation. Tools that perform
+    /// long-running I/O (HTTP, shell exec) should check this token periodically
+    /// and return early with a `ToolExecutionFailed` error if it is cancelled.
+    pub cancellation_token: CancellationToken,
+}
+
+/// Resolve a user-supplied path for file tools, respecting workspace paths.
+///
+/// Resolution rules:
+/// - Relative path → joined onto `data_dir`.
+/// - Absolute path that starts with a configured workspace prefix → used as-is.
+/// - Absolute path with no workspace match → the leading `/` is stripped and the
+///   remainder is joined onto `data_dir` (legacy behavior for data-dir-relative
+///   absolute paths).
+///
+/// The caller must still canonicalize the result and verify containment within
+/// `data_dir` or one of `workspace_paths`.
+pub fn resolve_tool_path(path_str: &str, data_dir: &Path, workspace_paths: &[PathBuf]) -> PathBuf {
+    let p = Path::new(path_str);
+    if p.is_absolute() {
+        // If this absolute path is within a configured workspace, use it directly.
+        for wp in workspace_paths {
+            if p.starts_with(wp) {
+                return p.to_path_buf();
+            }
+        }
+        // Fall back: strip the leading `/` and resolve relative to data_dir.
+        let stripped = p.strip_prefix("/").unwrap_or(p);
+        data_dir.join(stripped)
+    } else {
+        data_dir.join(p)
+    }
 }

@@ -15,6 +15,14 @@ outputs = ["content.text"]
 input  = "MemoryBlockDeleteIntent"
 output = "MemoryBlockDeleteResult"
 
+[input_schema]
+type = "object"
+required = ["label"]
+
+[input_schema.properties.label]
+type = "string"
+description = "Memory block label"
+
 [sandbox]
 network       = false
 fs_write      = false

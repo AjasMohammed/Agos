@@ -19,7 +19,7 @@ When done, include "TOOLS_DISCOVERED" in your response."#
             .to_string(),
         initial_user_message: "Review the available tools and test the file-reader tool. Create a test file first using file-writer, then read it back.".to_string(),
         max_turns,
-        required_permissions: vec!["fs.user_data".to_string()],
+        required_permissions: vec!["fs.user_data:rw".to_string()],
         goal_keywords: vec!["TOOLS_DISCOVERED".to_string()],
     }
 }
