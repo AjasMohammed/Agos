@@ -1,12 +1,12 @@
 [manifest]
 name        = "memory-read"
 version     = "1.0.0"
-description = "Fetch a semantic memory entry by exact key (O(1) lookup, no embedding required)"
+description = "Fetch a memory entry by key (semantic) or by ID (episodic)"
 author      = "agentos-core"
 trust_tier  = "core"
 
 [capabilities_required]
-permissions = ["memory.semantic:r"]
+permissions = ["memory.semantic:r", "memory.episodic:r"]
 
 [capabilities_provided]
 outputs = ["content.text"]
@@ -17,11 +17,20 @@ output = "MemoryReadResult"
 
 [input_schema]
 type = "object"
-required = ["key"]
+
+[input_schema.properties.scope]
+type = "string"
+enum = ["semantic", "episodic"]
+default = "semantic"
+description = "Memory tier to read from"
 
 [input_schema.properties.key]
 type = "string"
-description = "Semantic memory key"
+description = "Semantic memory key (required when scope=semantic)"
+
+[input_schema.properties.id]
+type = "integer"
+description = "Episodic entry ID (required when scope=episodic)"
 
 
 [sandbox]

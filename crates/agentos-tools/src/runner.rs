@@ -5,6 +5,7 @@ use crate::archival_search::ArchivalSearch;
 use crate::data_parser::DataParser;
 use crate::datetime::DatetimeTool;
 use crate::episodic_list::EpisodicList;
+use crate::escalation_status::EscalationStatusTool;
 use crate::file_delete::FileDelete;
 use crate::file_diff::FileDiff;
 use crate::file_editor::FileEditor;
@@ -144,7 +145,10 @@ impl ToolRunner {
         self.register(Box::new(ProcedureDelete::new(procedural.clone())));
         self.register(Box::new(ProcedureList::new(procedural.clone())));
         self.register(Box::new(ProcedureSearch::new(procedural.clone())));
-        self.register(Box::new(MemoryRead::new(semantic.clone())));
+        self.register(Box::new(MemoryRead::new(
+            semantic.clone(),
+            episodic.clone(),
+        )));
         self.register(Box::new(EpisodicList::new(episodic.clone())));
         self.register(Box::new(MemoryBlockWriteTool::new()));
         self.register(Box::new(MemoryBlockReadTool::new()));
@@ -170,6 +174,7 @@ impl ToolRunner {
             Err(e) => tracing::error!("Failed to initialize web-fetch tool: {}", e),
         }
         self.register(Box::new(FileDiff::new()));
+        self.register(Box::new(EscalationStatusTool::new()));
         self.register(Box::new(AgentListTool::new()));
         self.register(Box::new(TaskStatusTool::new()));
         self.register(Box::new(TaskListTool::new()));

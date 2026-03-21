@@ -465,6 +465,8 @@ Be thorough and direct. Your feedback is the primary output of this session."#,
                     IntentTypeFlag::Query,
                     IntentTypeFlag::Observe,
                     IntentTypeFlag::Message,
+                    IntentTypeFlag::Delegate,
+                    IntentTypeFlag::Broadcast,
                     IntentTypeFlag::Escalate,
                     IntentTypeFlag::Subscribe,
                     IntentTypeFlag::Unsubscribe,
@@ -774,14 +776,17 @@ Be thorough and direct. Your feedback is the primary output of this session."#,
 fn default_permissions_for_agent(name: &str) -> PermissionSet {
     let mut perms = PermissionSet::new();
 
-    // Filesystem — shared user data read-only, own namespace full access
-    perms.grant("fs.user_data".to_string(), true, false, false, None);
+    // Filesystem — shared user data read+write, own namespace full access
+    perms.grant("fs.user_data".to_string(), true, true, false, None);
     perms.grant(format!("fs:agents/{name}/"), true, true, true, None);
 
-    // Memory — semantic read+write, episodic read, procedural read
+    // Application logs — read-only (log-reader)
+    perms.grant("fs.app_logs".to_string(), true, false, false, None);
+
+    // Memory — semantic read+write, episodic read+write, procedural read+write
     perms.grant("memory.semantic".to_string(), true, true, false, None);
-    perms.grant("memory.episodic".to_string(), true, false, false, None);
-    perms.grant("memory.procedural".to_string(), true, false, false, None);
+    perms.grant("memory.episodic".to_string(), true, true, false, None);
+    perms.grant("memory.procedural".to_string(), true, true, false, None);
 
     // Memory blocks — read+write for named memory blocks
     perms.grant("memory.blocks".to_string(), true, true, false, None);
@@ -789,14 +794,24 @@ fn default_permissions_for_agent(name: &str) -> PermissionSet {
     // Agent registry — read-only (agent-self, agent-list, agent-manual)
     perms.grant("agent.registry".to_string(), true, false, false, None);
 
+    // Agent messaging — execute (agent-message, task-delegate)
+    perms.grant_op("agent.message".to_string(), PermissionOp::Execute, None);
+
     // Hardware system info — read-only (hardware-info, sys-monitor)
     perms.grant("hardware.system".to_string(), true, false, false, None);
 
     // Network outbound — execute (http-client, web-fetch with SSRF protection)
     perms.grant_op("network.outbound".to_string(), PermissionOp::Execute, None);
 
+    // Shell execution — execute (shell-exec; sandboxed with seccomp on Linux)
+    perms.grant_op("process.exec".to_string(), PermissionOp::Execute, None);
+    perms.grant("process.list".to_string(), true, false, false, None);
+
     // Task query — read-only (task-list, task-status)
     perms.grant("task.query".to_string(), true, false, false, None);
+
+    // Escalation query — query (escalation-status)
+    perms.grant_op("escalation.query".to_string(), PermissionOp::Query, None);
 
     // Event stream — observe (subscribe/unsubscribe to kernel events)
     perms.grant_op("events.stream".to_string(), PermissionOp::Observe, None);

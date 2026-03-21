@@ -20,6 +20,7 @@ pub enum ManualSection {
     Agents,
     Tasks,
     Procedural,
+    Escalation,
 }
 
 impl ManualSection {
@@ -40,6 +41,7 @@ impl ManualSection {
             "agents" => Some(Self::Agents),
             "tasks" => Some(Self::Tasks),
             "procedural" => Some(Self::Procedural),
+            "escalation" => Some(Self::Escalation),
             _ => None,
         }
     }
@@ -59,6 +61,7 @@ impl ManualSection {
             "agents",
             "tasks",
             "procedural",
+            "escalation",
         ]
     }
 }
@@ -162,6 +165,78 @@ impl AgentManualTool {
                         field.insert("enum".to_string(), enum_values.clone());
                     }
 
+                    // For array types, include item schema details so agents
+                    // know the expected structure of array elements.
+                    if Self::schema_type_string(field_schema) == "array" {
+                        if let Some(items) = field_schema.get("items") {
+                            if let Some(items_obj) = items.as_object() {
+                                let mut items_doc = serde_json::Map::new();
+                                items_doc.insert(
+                                    "type".to_string(),
+                                    serde_json::Value::String(Self::schema_type_string(items)),
+                                );
+                                if let Some(req) = items_obj.get("required") {
+                                    items_doc.insert("required".to_string(), req.clone());
+                                }
+                                if let Some(props) =
+                                    items_obj.get("properties").and_then(|v| v.as_object())
+                                {
+                                    let mut item_fields = Vec::new();
+                                    let item_required: HashSet<String> = items_obj
+                                        .get("required")
+                                        .and_then(|v| v.as_array())
+                                        .map(|arr| {
+                                            arr.iter()
+                                                .filter_map(|v| v.as_str().map(str::to_string))
+                                                .collect()
+                                        })
+                                        .unwrap_or_default();
+                                    let mut prop_names: Vec<&String> = props.keys().collect();
+                                    prop_names.sort();
+                                    for prop_name in prop_names {
+                                        if let Some(prop_schema) = props.get(prop_name) {
+                                            let mut prop_doc = serde_json::Map::new();
+                                            prop_doc.insert(
+                                                "name".to_string(),
+                                                serde_json::Value::String(prop_name.clone()),
+                                            );
+                                            prop_doc.insert(
+                                                "type".to_string(),
+                                                serde_json::Value::String(
+                                                    Self::schema_type_string(prop_schema),
+                                                ),
+                                            );
+                                            prop_doc.insert(
+                                                "required".to_string(),
+                                                serde_json::Value::Bool(
+                                                    item_required.contains(prop_name.as_str()),
+                                                ),
+                                            );
+                                            if let Some(desc) = prop_schema
+                                                .get("description")
+                                                .and_then(|v| v.as_str())
+                                            {
+                                                prop_doc.insert(
+                                                    "description".to_string(),
+                                                    serde_json::Value::String(desc.to_string()),
+                                                );
+                                            }
+                                            item_fields.push(serde_json::Value::Object(prop_doc));
+                                        }
+                                    }
+                                    items_doc.insert(
+                                        "fields".to_string(),
+                                        serde_json::Value::Array(item_fields),
+                                    );
+                                }
+                                field.insert(
+                                    "items".to_string(),
+                                    serde_json::Value::Object(items_doc),
+                                );
+                            }
+                        }
+                    }
+
                     fields.push(serde_json::Value::Object(field));
                 }
             }
@@ -225,7 +300,8 @@ impl AgentManualTool {
                 {"name": "feedback", "description": "How to emit structured [FEEDBACK] blocks"},
                 {"name": "agents", "description": "Peer discovery, agent-message, and task delegation patterns"},
                 {"name": "tasks", "description": "Task lifecycle, status inspection, and task-list usage"},
-                {"name": "procedural", "description": "Procedural memory: record and retrieve step-by-step procedures"}
+                {"name": "procedural", "description": "Procedural memory: record and retrieve step-by-step procedures"},
+                {"name": "escalation", "description": "Escalation workflows: when and how to escalate to human operators"}
             ],
             "usage": "Call agent-manual with {\"section\": \"<name>\"} to get details. For tool-detail, also pass {\"name\": \"<tool-name>\"}."
         }))
@@ -681,6 +757,36 @@ impl AgentManualTool {
         }))
     }
 
+    fn section_escalation(&self) -> Result<serde_json::Value, AgentOSError> {
+        Ok(serde_json::json!({
+            "section": "escalation",
+            "title": "Escalation Workflows",
+            "summary": "How and when to escalate decisions to human operators.",
+            "subsections": [
+                {
+                    "title": "When to Escalate",
+                    "content": "Escalate when: (1) a decision has irreversible consequences you are uncertain about, (2) you lack permissions for an operation, (3) you detect conflicting instructions, (4) a safety concern arises, or (5) budget is insufficient for the remaining work."
+                },
+                {
+                    "title": "How to Escalate",
+                    "content": "Use intent_type 'escalate' in your tool call. The kernel will pause your task and create a PendingEscalation visible to the operator. Example: {\"tool\": \"think\", \"intent_type\": \"escalate\", \"payload\": {\"reason\": \"Need approval to delete production data\"}}"
+                },
+                {
+                    "title": "Checking Escalation Status",
+                    "content": "Use the 'escalation-status' tool with no payload to see all pending escalations for your tasks. Each escalation shows: id, reason, status (pending/approved/denied/expired), and expiry time."
+                },
+                {
+                    "title": "Escalation Expiry",
+                    "content": "Escalations expire after 5 minutes if the operator does not respond. Expired escalations are auto-denied. Plan your workflow to handle denial gracefully — have a fallback approach or report the limitation in your final answer."
+                },
+                {
+                    "title": "Auto-Escalation",
+                    "content": "The kernel automatically escalates in certain situations: high-confidence prompt injection detected, sandbox violations, and budget exhaustion. These do not require you to manually escalate."
+                }
+            ]
+        }))
+    }
+
     fn section_feedback(&self) -> Result<serde_json::Value, AgentOSError> {
         Ok(serde_json::json!({
             "section": "feedback",
@@ -723,9 +829,10 @@ impl AgentTool for AgentManualTool {
             .get("section")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                AgentOSError::SchemaValidation(
-                    "agent-manual requires 'section' field. Valid sections: index, tools, tool-detail, permissions, memory, events, commands, errors, feedback".into(),
-                )
+                AgentOSError::SchemaValidation(format!(
+                    "agent-manual requires 'section' field. Valid sections: {}",
+                    ManualSection::all_names().join(", ")
+                ))
             })?;
 
         let section = ManualSection::from_str(section_str).ok_or_else(|| {
@@ -759,6 +866,7 @@ impl AgentTool for AgentManualTool {
             ManualSection::Agents => self.section_agents(),
             ManualSection::Tasks => self.section_tasks(),
             ManualSection::Procedural => self.section_procedural(),
+            ManualSection::Escalation => self.section_escalation(),
         }
     }
 }
@@ -808,12 +916,16 @@ mod tests {
             ManualSection::from_str("procedural"),
             Some(ManualSection::Procedural)
         );
+        assert_eq!(
+            ManualSection::from_str("escalation"),
+            Some(ManualSection::Escalation)
+        );
         assert_eq!(ManualSection::from_str("nonexistent"), None);
     }
 
     #[test]
     fn test_all_names_count() {
-        assert_eq!(ManualSection::all_names().len(), 12);
+        assert_eq!(ManualSection::all_names().len(), 13);
     }
 
     #[test]
@@ -848,7 +960,22 @@ mod tests {
         let tool = AgentManualTool::new(vec![]);
         let result = tool.section_index().unwrap();
         let sections = result["sections"].as_array().unwrap();
-        assert_eq!(sections.len(), 11); // index is not listed in index
+        assert_eq!(sections.len(), 12); // index is not listed in index
+    }
+
+    #[test]
+    fn test_section_escalation_has_subsections() {
+        let tool = AgentManualTool::new(vec![]);
+        let result = tool.section_escalation().unwrap();
+        assert_eq!(result["section"], "escalation");
+        let subsections = result["subsections"].as_array().unwrap();
+        assert_eq!(subsections.len(), 5);
+        let titles: Vec<&str> = subsections
+            .iter()
+            .filter_map(|s| s["title"].as_str())
+            .collect();
+        assert!(titles.iter().any(|t| t.contains("Escalate")));
+        assert!(titles.iter().any(|t| t.contains("Expiry")));
     }
 
     #[test]

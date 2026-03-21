@@ -394,6 +394,7 @@ impl Kernel {
         tool_call_count: &mut u32,
         refresh_knowledge_blocks: &mut bool,
     ) -> Result<(), anyhow::Error> {
+        let mut consecutive_push_failures: u32 = 0;
         struct PreparedParallelToolCall {
             order: usize,
             tool_call: crate::tool_call::ParsedToolCall,
@@ -444,7 +445,13 @@ impl Kernel {
                     .push_tool_result(&task.id, &skipped.tool_name, &error_result)
                     .await
                 {
-                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                    consecutive_push_failures += 1;
+                    if consecutive_push_failures >= 3 {
+                        anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                    }
+                } else {
+                    consecutive_push_failures = 0;
                 }
             }
         }
@@ -519,7 +526,7 @@ impl Kernel {
                             .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                             .await
                         {
-                            tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                            tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                         }
                         continue;
                     }
@@ -589,7 +596,13 @@ impl Kernel {
                     .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                     .await
                 {
-                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                    consecutive_push_failures += 1;
+                    if consecutive_push_failures >= 3 {
+                        anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                    }
+                } else {
+                    consecutive_push_failures = 0;
                 }
                 continue;
             }
@@ -613,7 +626,7 @@ impl Kernel {
                         .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                         .await
                     {
-                        tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                     }
                     continue;
                 }
@@ -632,7 +645,7 @@ impl Kernel {
                         .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                         .await
                     {
-                        tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                     }
                     continue;
                 }
@@ -646,7 +659,7 @@ impl Kernel {
                         .push_tool_result(&task.id, &tool_call.tool_name, &warning)
                         .await
                     {
-                        tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                     }
                 }
                 Ok(IntentCoherenceResult::Approved) => {}
@@ -672,7 +685,13 @@ impl Kernel {
                     .push_tool_result(&task.id, &tool_call.tool_name, &context_result)
                     .await
                 {
-                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                    consecutive_push_failures += 1;
+                    if consecutive_push_failures >= 3 {
+                        anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                    }
+                } else {
+                    consecutive_push_failures = 0;
                 }
                 continue;
             }
@@ -714,7 +733,11 @@ impl Kernel {
                     .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                     .await
                 {
-                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                    consecutive_push_failures += 1;
+                    if consecutive_push_failures >= 3 {
+                        anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                    }
                 }
                 batch_budget_exceeded = Some((*action, resource.clone()));
                 break;
@@ -746,7 +769,7 @@ impl Kernel {
                         .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                         .await
                     {
-                        tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                     }
                     continue;
                 }
@@ -760,7 +783,7 @@ impl Kernel {
                         .push_tool_result(&task.id, &tool_call.tool_name, &waiting_result)
                         .await
                     {
-                        tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                     }
                     continue;
                 }
@@ -878,8 +901,33 @@ impl Kernel {
             AgentRegistrySnapshot::new(agents)
         };
         let task_snapshot = self.scheduler.snapshot_tasks().await;
+        let escalation_snapshot = {
+            let pending = self.escalation_manager.list_pending().await;
+            let agent_id = task.agent_id;
+            let summaries: Vec<EscalationSummary> = pending
+                .into_iter()
+                .filter(|e| e.agent_id == agent_id)
+                .map(|e| EscalationSummary {
+                    id: e.id,
+                    task_id: e.task_id,
+                    agent_id: e.agent_id,
+                    reason: format!("{:?}", e.reason),
+                    context_summary: e.context_summary,
+                    decision_point: e.decision_point,
+                    options: e.options,
+                    urgency: e.urgency,
+                    blocking: e.blocking,
+                    created_at: e.created_at,
+                    expires_at: e.expires_at,
+                    resolved: e.resolved,
+                    resolution: e.resolution,
+                })
+                .collect();
+            EscalationSnapshot::new(summaries)
+        };
         let agent_snapshot_ref: Arc<dyn AgentRegistryQuery> = Arc::new(agent_snapshot);
         let task_snapshot_ref: Arc<dyn TaskQuery> = Arc::new(task_snapshot);
+        let escalation_snapshot_ref: Arc<dyn EscalationQuery> = Arc::new(escalation_snapshot);
 
         let fallback_timeout_secs = if task.autonomous {
             self.config.kernel.autonomous_mode.tool_timeout_seconds
@@ -900,6 +948,7 @@ impl Kernel {
             let hal = self.hal.clone();
             let agent_registry = agent_snapshot_ref.clone();
             let task_registry = task_snapshot_ref.clone();
+            let escalation_query = escalation_snapshot_ref.clone();
             let order = call.order;
             let snapshot_ref = call.snapshot_ref;
             let tool_payload_preview = call.tool_payload_preview;
@@ -954,6 +1003,7 @@ impl Kernel {
                         file_lock_registry: None,
                         agent_registry: Some(agent_registry),
                         task_registry: Some(task_registry),
+                        escalation_query: Some(escalation_query),
                         workspace_paths,
                         cancellation_token: tool_cancellation,
                     };
@@ -1168,7 +1218,7 @@ impl Kernel {
                             .push_tool_result(&task.id, &outcome.tool_call.tool_name, &blocked)
                             .await
                         {
-                            tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                            tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                         }
                         continue;
                     }
@@ -1185,7 +1235,7 @@ impl Kernel {
                         .push_tool_result(&task.id, &outcome.tool_call.tool_name, &tainted_result)
                         .await
                     {
-                        tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                     }
 
                     if let Err(e) = self
@@ -1268,7 +1318,7 @@ impl Kernel {
                         .push_tool_result(&task.id, &outcome.tool_call.tool_name, &error_result)
                         .await
                     {
-                        tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                     }
 
                     if let Err(record_err) = self
@@ -1376,6 +1426,7 @@ impl Kernel {
         let mut final_answer = String::new();
         let mut tool_call_count: u32 = 0;
         let mut completed_iterations: u32 = 0;
+        let mut consecutive_push_failures: u32 = 0;
         let mut knowledge_blocks: Vec<String> = Vec::new();
         let mut refresh_knowledge_blocks = true;
         let mut context_warning_emitted = false;
@@ -1385,7 +1436,19 @@ impl Kernel {
             let iteration_trace_id = TraceID::new();
             let raw_context = match self.context_manager.get_context(&task.id).await {
                 Ok(ctx) => ctx,
-                Err(_) => break,
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        task_id = %task.id,
+                        iteration = iteration,
+                        "Context manager failed to fetch context — aborting task"
+                    );
+                    anyhow::bail!(
+                        "Task aborted at iteration {}: context manager error: {}",
+                        iteration,
+                        e
+                    );
+                }
             };
 
             if refresh_knowledge_blocks {
@@ -2190,7 +2253,7 @@ impl Kernel {
                                     .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                     .await
                                 {
-                                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                                 }
                                 continue;
                             }
@@ -2203,7 +2266,7 @@ impl Kernel {
                                     .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                     .await
                                 {
-                                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                                 }
                                 continue;
                             }
@@ -2229,7 +2292,7 @@ impl Kernel {
                             .push_tool_result(&task.id, &tool_call.tool_name, &context_result)
                             .await
                         {
-                            tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                            tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                         }
                         continue;
                     }
@@ -2320,7 +2383,7 @@ impl Kernel {
                                     .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                     .await
                                 {
-                                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                                 }
                             }
                             ToolAccessCheck::Unauthorized { allowed_tool_names } => {
@@ -2372,7 +2435,7 @@ impl Kernel {
                                     .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                     .await
                                 {
-                                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                                 }
                             }
                         }
@@ -2447,7 +2510,7 @@ impl Kernel {
                                 .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                 .await
                             {
-                                tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                                tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                             }
                             continue;
                         }
@@ -2466,7 +2529,7 @@ impl Kernel {
                                 .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                 .await
                             {
-                                tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                                tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                             }
                             continue;
                         }
@@ -2480,7 +2543,7 @@ impl Kernel {
                                 .push_tool_result(&task.id, &tool_call.tool_name, &warning)
                                 .await
                             {
-                                tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                                tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                             }
                         }
                         Ok(IntentCoherenceResult::Approved) => {
@@ -2619,7 +2682,7 @@ impl Kernel {
                                 .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                 .await
                             {
-                                tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                                tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                             }
                             continue;
                         }
@@ -2682,10 +2745,10 @@ impl Kernel {
                                 .push_tool_result(&task.id, &tool_call.tool_name, &waiting_result)
                                 .await
                             {
-                                tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                                tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                             }
-                            self.context_manager.remove_context(&task.id).await;
-                            self.intent_validator.remove_task(&task.id).await;
+                            // Preserve context and intent history so the agent
+                            // can resume with full state when approval arrives.
                             anyhow::bail!(
                                 "Task paused: tool '{}' requires hard approval",
                                 tool_call.tool_name
@@ -2827,6 +2890,30 @@ impl Kernel {
                         AgentRegistrySnapshot::new(agents)
                     };
                     let task_snapshot = self.scheduler.snapshot_tasks().await;
+                    let escalation_snapshot = {
+                        let pending = self.escalation_manager.list_pending().await;
+                        let agent_id = task.agent_id;
+                        let summaries: Vec<EscalationSummary> = pending
+                            .into_iter()
+                            .filter(|e| e.agent_id == agent_id)
+                            .map(|e| EscalationSummary {
+                                id: e.id,
+                                task_id: e.task_id,
+                                agent_id: e.agent_id,
+                                reason: format!("{:?}", e.reason),
+                                context_summary: e.context_summary,
+                                decision_point: e.decision_point,
+                                options: e.options,
+                                urgency: e.urgency,
+                                blocking: e.blocking,
+                                created_at: e.created_at,
+                                expires_at: e.expires_at,
+                                resolved: e.resolved,
+                                resolution: e.resolution,
+                            })
+                            .collect();
+                        EscalationSnapshot::new(summaries)
+                    };
 
                     let exec_context = ToolExecutionContext {
                         data_dir: self.data_dir.clone(),
@@ -2838,12 +2925,14 @@ impl Kernel {
                             self.vault.clone(),
                         ))),
                         hal: Some(self.hal.clone()),
-                        // ToolRunner::execute() always overrides this with the shared registry.
                         file_lock_registry: None,
                         agent_registry: Some(
                             Arc::new(agent_snapshot) as Arc<dyn AgentRegistryQuery>
                         ),
                         task_registry: Some(Arc::new(task_snapshot) as Arc<dyn TaskQuery>),
+                        escalation_query: Some(
+                            Arc::new(escalation_snapshot) as Arc<dyn EscalationQuery>
+                        ),
                         workspace_paths: self.workspace_paths.clone(),
                         cancellation_token: self.cancellation_token.child_token(),
                     };
@@ -3121,11 +3210,10 @@ impl Kernel {
                                     {
                                         tracing::error!(error = %e, task_id = %task.id, "Failed to update task state to Waiting — task may be stuck in Running state");
                                     }
-                                    // Do NOT call remove_context here: preserving conversation
-                                    // history allows the task to resume with context intact if
-                                    // the escalation is approved. The tainted output is never
-                                    // pushed to context (bail happens before push_tool_result).
-                                    self.intent_validator.remove_task(&task.id).await;
+                                    // Preserve both context and intent history so the task
+                                    // can resume with full state if the escalation is approved.
+                                    // The tainted output is never pushed to context (bail
+                                    // happens before push_tool_result).
                                     anyhow::bail!(
                                         "Task paused: high-confidence injection in output of tool '{}'",
                                         tool_call.tool_name
@@ -3142,32 +3230,42 @@ impl Kernel {
                             );
                             let tainted_result = serde_json::json!({ "output": wrapped });
 
-                            if let Ok(evicted) = self
+                            match self
                                 .context_manager
                                 .push_tool_result(&task.id, &tool_call.tool_name, &tainted_result)
                                 .await
                             {
-                                if evicted > 0 {
-                                    let chain_depth = task
-                                        .trigger_source
-                                        .as_ref()
-                                        .map(|ts| ts.chain_depth + 1)
-                                        .unwrap_or(0);
-                                    self.emit_event_with_trace(
-                                        EventType::WorkingMemoryEviction,
-                                        EventSource::ContextManager,
-                                        EventSeverity::Info,
-                                        serde_json::json!({
-                                            "task_id": task.id.to_string(),
-                                            "agent_id": task.agent_id.to_string(),
-                                            "entries_evicted": evicted,
-                                        }),
-                                        chain_depth,
-                                        Some(trace_id),
-                                        Some(task.agent_id),
-                                        Some(task.id),
-                                    )
-                                    .await;
+                                Ok(evicted) => {
+                                    consecutive_push_failures = 0;
+                                    if evicted > 0 {
+                                        let chain_depth = task
+                                            .trigger_source
+                                            .as_ref()
+                                            .map(|ts| ts.chain_depth + 1)
+                                            .unwrap_or(0);
+                                        self.emit_event_with_trace(
+                                            EventType::WorkingMemoryEviction,
+                                            EventSource::ContextManager,
+                                            EventSeverity::Info,
+                                            serde_json::json!({
+                                                "task_id": task.id.to_string(),
+                                                "agent_id": task.agent_id.to_string(),
+                                                "entries_evicted": evicted,
+                                            }),
+                                            chain_depth,
+                                            Some(trace_id),
+                                            Some(task.agent_id),
+                                            Some(task.id),
+                                        )
+                                        .await;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                                    consecutive_push_failures += 1;
+                                    if consecutive_push_failures >= 3 {
+                                        anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                                    }
                                 }
                             }
 
@@ -3378,7 +3476,7 @@ impl Kernel {
                                 .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                 .await
                             {
-                                tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                                tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                             }
 
                             if let Err(record_err) = self
@@ -3408,7 +3506,42 @@ impl Kernel {
                     }
                 }
                 None => {
-                    // No tool call — this is the final answer
+                    // No tool call — LLM produced a plain text response.
+                    if iteration == 0 && inference.text.len() < 20 {
+                        tracing::warn!(
+                            task_id = %task.id,
+                            text_len = inference.text.len(),
+                            "First iteration short response — re-prompting agent to use tools"
+                        );
+                        // Push a re-prompt and give the agent another iteration
+                        let reprompt = "Your previous response was too short and contained no tool calls. \
+                            Please use the available tools to accomplish your task, or provide a substantive answer.";
+                        if let Err(e) = self
+                            .context_manager
+                            .push_entry(
+                                &task.id,
+                                agentos_types::ContextEntry {
+                                    role: agentos_types::ContextRole::System,
+                                    content: reprompt.to_string(),
+                                    timestamp: chrono::Utc::now(),
+                                    metadata: None,
+                                    importance: 0.9,
+                                    pinned: false,
+                                    reference_count: 0,
+                                    partition: agentos_types::ContextPartition::default(),
+                                    category: agentos_types::ContextCategory::Task,
+                                    is_summary: false,
+                                },
+                            )
+                            .await
+                        {
+                            tracing::warn!(error = %e, "Failed to push re-prompt — accepting short answer");
+                            final_answer = inference.text;
+                            break;
+                        }
+                        // Continue to next iteration instead of breaking
+                        continue;
+                    }
                     final_answer = inference.text;
                     break;
                 }

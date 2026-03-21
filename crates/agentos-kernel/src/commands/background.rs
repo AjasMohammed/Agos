@@ -33,6 +33,11 @@ impl Kernel {
                     IntentTypeFlag::Write,
                     IntentTypeFlag::Execute,
                     IntentTypeFlag::Query,
+                    IntentTypeFlag::Observe,
+                    IntentTypeFlag::Message,
+                    IntentTypeFlag::Delegate,
+                    IntentTypeFlag::Broadcast,
+                    IntentTypeFlag::Escalate,
                     IntentTypeFlag::Subscribe,
                     IntentTypeFlag::Unsubscribe,
                 ]),
@@ -57,7 +62,7 @@ impl Kernel {
             reasoning_hints: None,
             max_iterations: None,
             trigger_source: None,
-            autonomous: false,
+            autonomous: true,
         };
 
         self.background_pool
