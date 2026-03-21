@@ -349,7 +349,7 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
         // capability token issuance, injection scanning, intent validation, audit logging.
         let response = self
             .kernel
-            .cmd_run_task(Some(agent_name.to_string()), prompt.to_string())
+            .cmd_run_task(Some(agent_name.to_string()), prompt.to_string(), false)
             .await;
         match response {
             KernelResponse::Success { data: Some(data) } => Ok(data

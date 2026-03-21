@@ -10,6 +10,7 @@ pub mod event;
 pub mod hal;
 pub mod healthz;
 pub mod identity;
+pub mod log;
 pub mod perm;
 pub mod pipeline;
 pub mod resource;
@@ -42,6 +43,7 @@ pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow
         Commands::Event { command } => event::handle(client, command).await,
         Commands::Identity { command } => identity::handle(client, command).await,
         Commands::Hal { command } => hal::handle(client, command).await,
+        Commands::Log { command } => log::handle(client, command).await,
         _ => unreachable!(),
     }
 }

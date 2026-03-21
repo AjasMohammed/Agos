@@ -84,6 +84,7 @@ mod tests {
         let cmd = KernelCommand::RunTask {
             agent_name: Some("test".into()),
             prompt: large_data.clone(),
+            autonomous: false,
         };
         client
             .send_message(&BusMessage::Command(cmd))

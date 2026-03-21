@@ -80,8 +80,11 @@ impl AgentTool for DataParser {
             .map(|n| n as usize);
         let output_format = payload.get("output_format").and_then(|v| v.as_str());
 
+        tracing::debug!(format, input_bytes = data.len(), "data-parser: starting");
+
         // 1. Parse
         let mut parsed = parse_format(data, format, infer_types, MAX_ROWS)?;
+        tracing::debug!(format, "data-parser: parse complete");
 
         // 2. Path query
         if let Some(path) = query {

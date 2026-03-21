@@ -11,6 +11,10 @@ pub enum TaskCommands {
         /// Agent to assign the task to (if left empty, auto-routing is used)
         #[arg(long)]
         agent: Option<String>,
+        /// Run without iteration or timeout limits.
+        /// Use for long-running autonomous workflows that must run to natural completion.
+        #[arg(long, default_value_t = false)]
+        autonomous: bool,
         /// The task prompt
         prompt: String,
     },
@@ -30,11 +34,18 @@ pub enum TaskCommands {
 
 pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Result<()> {
     match command {
-        TaskCommands::Run { agent, prompt } => {
+        TaskCommands::Run {
+            agent,
+            autonomous,
+            prompt,
+        } => {
             if let Some(ref a) = agent {
                 println!("📝 Submitting task to agent '{}'...", a);
             } else {
                 println!("🧠 Auto-routing task to best available agent...");
+            }
+            if autonomous {
+                println!("   Mode: autonomous (no iteration/timeout limits)");
             }
 
             println!(
@@ -50,6 +61,7 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                 .send_command(KernelCommand::RunTask {
                     agent_name: agent,
                     prompt,
+                    autonomous,
                 })
                 .await?;
 

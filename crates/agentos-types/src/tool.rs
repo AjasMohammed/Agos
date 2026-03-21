@@ -117,6 +117,12 @@ pub struct ToolSandbox {
     /// Explicit syscall allowlist override. Empty = use default base allowlist.
     #[serde(default)]
     pub syscalls: Vec<String>,
+    /// Optional weight classification for sandbox resource allocation.
+    /// Known values: "stateless", "memory", "network", "hal".
+    /// Unknown values are preserved for forward compatibility and interpreted by
+    /// higher layers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<String>,
 }
 
 /// A registered tool in the kernel's tool registry.
@@ -132,4 +138,64 @@ pub enum ToolStatus {
     Available,
     Running,
     Disabled,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ToolSandbox;
+    use serde_json::json;
+
+    #[test]
+    fn tool_sandbox_deserializes_without_weight() {
+        let sandbox: ToolSandbox = serde_json::from_value(json!({
+            "network": false,
+            "fs_write": false,
+            "gpu": false,
+            "max_memory_mb": 64,
+            "max_cpu_ms": 1_000,
+            "syscalls": [],
+        }))
+        .unwrap();
+
+        assert_eq!(sandbox.weight, None);
+    }
+
+    #[test]
+    fn tool_sandbox_omits_absent_weight_when_serialized() {
+        let sandbox = ToolSandbox {
+            network: false,
+            fs_write: false,
+            gpu: false,
+            max_memory_mb: 64,
+            max_cpu_ms: 1_000,
+            syscalls: vec![],
+            weight: None,
+        };
+
+        let serialized = serde_json::to_value(&sandbox).unwrap();
+
+        assert!(serialized.get("weight").is_none());
+    }
+
+    #[test]
+    fn tool_sandbox_preserves_weight_when_present() {
+        let sandbox: ToolSandbox = serde_json::from_value(json!({
+            "network": false,
+            "fs_write": false,
+            "gpu": false,
+            "max_memory_mb": 64,
+            "max_cpu_ms": 1_000,
+            "syscalls": [],
+            "weight": "stateless",
+        }))
+        .unwrap();
+
+        assert_eq!(sandbox.weight.as_deref(), Some("stateless"));
+
+        let serialized = serde_json::to_value(&sandbox).unwrap();
+        assert_eq!(
+            serialized.get("weight").and_then(|v| v.as_str()),
+            Some("stateless")
+        );
+    }
 }

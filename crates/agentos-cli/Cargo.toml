@@ -10,7 +10,9 @@ path = "src/main.rs"
 [dependencies]
 agentos-types = { path = "../agentos-types" }
 agentos-kernel = { path = "../agentos-kernel" }
+agentos-sandbox = { path = "../agentos-sandbox" }
 agentos-bus = { path = "../agentos-bus" }
+agentos-hal = { path = "../agentos-hal" }
 agentos-vault = { path = "../agentos-vault" }
 agentos-tools = { path = "../agentos-tools" }
 agentos-web = { path = "../agentos-web" }
@@ -25,11 +27,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
 anyhow = { workspace = true }
 rpassword = { workspace = true }
 reqwest = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -38,4 +42,3 @@ agentos-capability = { path = "../agentos-capability" }
 agentos-llm = { path = "../agentos-llm" }
 toml = { workspace = true }
 serial_test = "3.4.0"
-

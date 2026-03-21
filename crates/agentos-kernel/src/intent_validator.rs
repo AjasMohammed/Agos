@@ -48,6 +48,7 @@ impl IntentValidator {
     ///
     /// Layer B validation — runs after structural/capability validation passes.
     /// Returns `Approved` if all checks pass, `Suspicious` or `Rejected` otherwise.
+    #[tracing::instrument(skip_all, fields(task_id = %task.id, tool = %tool_call.tool_name))]
     pub async fn validate_coherence(
         &self,
         task: &AgentTask,
@@ -222,6 +223,7 @@ impl Kernel {
     ///
     /// Layer A: capability token + schema + permission validation (existing).
     /// Layer B: semantic coherence checks (new).
+    #[tracing::instrument(skip_all, fields(task_id = %task.id, tool = %tool_call.tool_name))]
     pub(crate) async fn validate_tool_call_full(
         &self,
         task: &AgentTask,
@@ -327,6 +329,7 @@ mod tests {
             reasoning_hints: None,
             max_iterations: None,
             trigger_source: None,
+            autonomous: false,
         }
     }
 

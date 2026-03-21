@@ -212,6 +212,7 @@ impl TaskScheduler {
     }
 
     /// Enqueue a new task. Returns the TaskID.
+    #[tracing::instrument(skip_all, fields(task_id = %task.id, priority = task.priority))]
     pub async fn enqueue(&self, task: AgentTask) -> TaskID {
         let task_id = task.id;
         let task_snapshot = task.clone();
@@ -252,6 +253,7 @@ impl TaskScheduler {
 
     /// Requeue an existing task by ID and mark it as Queued.
     /// No-ops silently if the task is already in a terminal state (Complete, Failed, Cancelled).
+    #[tracing::instrument(skip_all, fields(task_id = %task_id))]
     pub async fn requeue(&self, task_id: &TaskID) -> Result<(), AgentOSError> {
         let mut tasks = self.tasks.write().await;
         let task = match tasks.get_mut(task_id) {
@@ -491,6 +493,7 @@ mod tests {
             reasoning_hints: None,
             max_iterations: None,
             trigger_source: None,
+            autonomous: false,
         }
     }
 

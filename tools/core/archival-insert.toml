@@ -37,7 +37,7 @@ type = "string"
 
 [sandbox]
 network       = false
-fs_write      = false
+fs_write      = true
 gpu           = false
 max_memory_mb = 128
 max_cpu_ms    = 10000

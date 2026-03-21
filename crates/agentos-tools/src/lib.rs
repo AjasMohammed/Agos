@@ -7,6 +7,7 @@ pub mod archival_search;
 pub mod data_parser;
 pub mod datetime;
 pub mod episodic_list;
+pub mod factory;
 pub mod file_delete;
 pub mod file_diff;
 pub mod file_editor;
@@ -58,6 +59,11 @@ pub use archival_search::ArchivalSearch;
 pub use data_parser::DataParser;
 pub use datetime::DatetimeTool;
 pub use episodic_list::EpisodicList;
+pub use factory::{
+    build_single_tool, build_single_tool_with_model_cache,
+    build_single_tool_with_model_cache_and_weight, tool_category, tool_category_with_weight,
+    ToolCategory,
+};
 pub use file_delete::FileDelete;
 pub use file_diff::FileDiff;
 pub use file_editor::FileEditor;

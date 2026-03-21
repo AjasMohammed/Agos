@@ -25,7 +25,8 @@ A task represents a unit of work assigned to an agent. Each task has:
 - **Agent** — the assigned agent (explicit or auto-routed)
 - **Capability token** — HMAC-SHA256 signed token authorizing specific permissions
 - **Priority** — 0–255, higher values are more urgent
-- **Timeout** — maximum execution duration (default: 60 seconds, configurable)
+- **Timeout** — maximum execution duration (default: 1 hour, configurable; 24 hours in autonomous mode)
+- **Autonomous** — when `true`, all iteration and timeout limits are replaced by the `[kernel.autonomous_mode]` ceiling
 - **History** — accumulated tool calls and results (`Vec<IntentMessage>`)
 - **Parent task** — optional link to a parent task for delegation chains
 
@@ -44,6 +45,9 @@ stateDiagram-v2
     Running --> Complete : final answer produced
     Running --> Failed : error or timeout
     Running --> Cancelled : user cancels
+    Running --> Suspended : budget exhausted
+    Suspended --> Running : budget restored
+    Suspended --> Cancelled : user cancels
     Waiting --> Running : escalation approved
     Waiting --> Failed : escalation denied or expired
     Waiting --> Cancelled : user cancels
@@ -58,7 +62,8 @@ stateDiagram-v2
 | `Running` | Agent is actively executing — LLM inference and tool calls in progress |
 | `Waiting` | Task paused pending human approval of a high-risk action (escalation) |
 | `Complete` | Task finished successfully with a final answer |
-| `Failed` | Task terminated due to error, timeout, budget exhaustion, or denied escalation |
+| `Failed` | Task terminated due to error, timeout, or denied escalation |
+| `Suspended` | Task paused by the kernel due to budget exhaustion; can be resumed when budget is restored |
 | `Cancelled` | Task cancelled by user before completion |
 
 State transitions are enforced by `TaskState::can_transition_to()` — invalid transitions are rejected.
@@ -68,12 +73,13 @@ State transitions are enforced by `TaskState::can_transition_to()` — invalid t
 ## Creating Tasks
 
 ```bash
-agentctl task run [--agent <NAME>] "<PROMPT>"
+agentctl task run [--agent <NAME>] [--autonomous] "<PROMPT>"
 ```
 
 | Flag | Type | Required | Description |
 |------|------|----------|-------------|
 | `--agent` | `String` | No | Agent name to execute the task. If omitted, the router selects one automatically |
+| `--autonomous` | flag | No | Run without iteration or timeout limits. Use for long-running workflows |
 | `prompt` | positional | Yes | The task prompt |
 
 **Examples:**
@@ -84,6 +90,9 @@ agentctl task run "Summarize the contents of /data/report.csv"
 
 # Assign to a specific agent
 agentctl task run --agent "code-reviewer" "Review the authentication module for security issues"
+
+# Run an autonomous long-running task with no iteration/timeout ceiling
+agentctl task run --autonomous "Refactor the entire auth module, write tests, and ensure all tests pass"
 ```
 
 When a task is created:
@@ -138,7 +147,7 @@ The task executor loop runs continuously, polling every 100ms for queued tasks. 
 1. **Transition to Running** — set state, record `started_at` timestamp, emit `TaskStarted` event
 2. **Context setup** — create context window with system prompt, tool descriptions, agent directory, and adaptive retrieval plan
 3. **Injection scan** — scan the user prompt for injection patterns; high-confidence threats create an escalation
-4. **LLM inference loop** (max 10 iterations):
+4. **LLM inference loop** (max iterations set by complexity tier via `[kernel.task_limits]`, or `[kernel.autonomous_mode]` when `autonomous=true`):
    1. Compile context window with history, knowledge blocks, and budget state
    2. Check context utilization (warn at 80%, critical at 95%)
    3. Pre-inference budget check (skip if hard limit exceeded)
@@ -412,21 +421,62 @@ Permanently removes a scheduled task.
 
 ---
 
+## Autonomous Mode
+
+Tasks that must run to natural completion — deep refactors, multi-file analysis, extended research — should use autonomous mode to avoid hitting artificial iteration or time ceilings.
+
+### Enabling Autonomous Mode
+
+```bash
+agentctl task run --autonomous "<PROMPT>"
+```
+
+When `autonomous=true`, the kernel replaces all complexity-based limits with the `[kernel.autonomous_mode]` ceiling:
+
+| Limit | Normal (high complexity) | Autonomous |
+|-------|--------------------------|------------|
+| Max iterations | 1,000 | **10,000** |
+| Task timeout | 1 hour | **24 hours** |
+| Per-tool timeout | 5 minutes | **10 minutes** |
+| Max parallel tool calls | 10 | **10** |
+
+### Child Task Inheritance
+
+Child tasks created by delegation from an autonomous parent **automatically inherit `autonomous=true`**. This ensures sub-agents in an orchestrated workflow are not cut short by the default limits.
+
+### Configuration
+
+All autonomous mode limits are configurable in `config/default.toml`:
+
+```toml
+[kernel.autonomous_mode]
+max_iterations = 10000
+task_timeout_secs = 86400    # 24 hours
+tool_timeout_seconds = 600   # 10 minutes per tool call
+max_parallel_tool_calls = 10
+```
+
+### When to Use Autonomous Mode
+
+| Use case | Autonomous? |
+|----------|-------------|
+| Simple lookup or single-step query | No |
+| Multi-file codebase analysis | Yes |
+| Write tests + fix all failures | Yes |
+| Extended research with many tool calls | Yes |
+| Scheduled nightly maintenance | Yes |
+| Quick summarization | No |
+
+---
+
 ## Task Timeouts
 
 Tasks have a configurable timeout. If a task exceeds its timeout, it transitions to `Failed`.
 
 | Config Key | Default | Description |
 |------------|---------|-------------|
-| `[kernel].default_task_timeout_secs` | `60` | Default timeout for all tasks (seconds) |
-
-The effective timeout is multiplied by the task's `PreemptionLevel`:
-
-| Preemption Level | Multiplier | Effective Timeout (at default 60s) |
-|-----------------|------------|-------------------------------------|
-| `Low` | 1x | 60 seconds |
-| `Normal` | 2x | 120 seconds |
-| `High` | 3x | 180 seconds |
+| `[kernel].default_task_timeout_secs` | `3600` (1 hour) | Default timeout for all tasks (seconds) |
+| `[kernel.autonomous_mode].task_timeout_secs` | `86400` (24 hours) | Timeout when `autonomous=true` |
 
 The scheduler's `check_timeouts()` method sweeps for timed-out tasks and marks them `Failed` with a `TimedOutTask` record.
 
@@ -438,7 +488,7 @@ The kernel limits the number of simultaneously running tasks.
 
 | Config Key | Default | Description |
 |------------|---------|-------------|
-| `[kernel].max_concurrent_tasks` | `4` | Maximum parallel tasks |
+| `[kernel].max_concurrent_tasks` | `4` (dev) / `8` (prod) | Maximum parallel tasks |
 
 When the limit is reached, new tasks remain `Queued` until a running task completes. Tasks are dequeued in priority order (highest priority first; FIFO within the same priority).
 
@@ -486,6 +536,7 @@ Tasks can form dependency chains through delegation. The kernel maintains a `Tas
 | Operation | Command | Key Behavior |
 |-----------|---------|-------------|
 | Run task | `agentctl task run [--agent name] "prompt"` | Auto-routes if no agent specified |
+| Run autonomous task | `agentctl task run --autonomous "prompt"` | No iteration/timeout limits; child tasks inherit |
 | List tasks | `agentctl task list` | Shows ID, state, agent, prompt preview |
 | View logs | `agentctl task logs <id>` | Execution history and tool calls |
 | Cancel task | `agentctl task cancel <id>` | Transitions to Cancelled state |

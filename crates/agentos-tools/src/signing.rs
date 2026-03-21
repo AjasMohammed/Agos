@@ -7,7 +7,7 @@
 //! (`description`, `checksum`) and the signature itself are excluded.
 //!
 //! ```json
-//! {"author":"...","capabilities":[...],"max_cpu_ms":N,"max_memory_mb":N,"name":"...","network":B,"version":"..."}
+//! {"author":"...","capabilities":[...],"max_cpu_ms":N,"max_memory_mb":N,"name":"...","network":B,"version":"...","weight":"stateless"}
 //! ```
 //!
 //! # Trust tier policy
@@ -21,7 +21,7 @@
 
 use agentos_types::{AgentOSError, ToolManifest, TrustTier};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
 /// Build the deterministic signing payload for a manifest.
@@ -32,18 +32,24 @@ pub fn signing_payload(manifest: &ToolManifest) -> Vec<u8> {
     let mut caps = manifest.capabilities_required.permissions.clone();
     caps.sort(); // deterministic order
 
-    let payload = json!({
-        "author": manifest.manifest.author,
-        "capabilities": caps,
-        "max_cpu_ms": manifest.sandbox.max_cpu_ms,
-        "max_memory_mb": manifest.sandbox.max_memory_mb,
-        "name": manifest.manifest.name,
-        "network": manifest.sandbox.network,
-        "version": manifest.manifest.version,
-    });
+    let mut payload = Map::new();
+    payload.insert("author".to_string(), json!(manifest.manifest.author));
+    payload.insert("capabilities".to_string(), json!(caps));
+    payload.insert("max_cpu_ms".to_string(), json!(manifest.sandbox.max_cpu_ms));
+    payload.insert(
+        "max_memory_mb".to_string(),
+        json!(manifest.sandbox.max_memory_mb),
+    );
+    payload.insert("name".to_string(), json!(manifest.manifest.name));
+    payload.insert("network".to_string(), json!(manifest.sandbox.network));
+    payload.insert("version".to_string(), json!(manifest.manifest.version));
+    if let Some(weight) = manifest.sandbox.weight.as_ref() {
+        payload.insert("weight".to_string(), json!(weight));
+    }
 
     // serde_json serialises Value::Object with BTreeMap-ordered keys
-    serde_json::to_vec(&payload).expect("signing payload serialization is infallible")
+    serde_json::to_vec(&Value::Object(payload))
+        .expect("signing payload serialization is infallible")
 }
 
 /// Verify the Ed25519 signature on a manifest.
@@ -245,6 +251,7 @@ mod tests {
                 max_memory_mb: 64,
                 max_cpu_ms: 5000,
                 syscalls: vec![],
+                weight: None,
             },
             executor: ToolExecutor::default(),
         }
@@ -312,6 +319,39 @@ mod tests {
         let m1 = make_manifest(TrustTier::Community);
         let m2 = make_manifest(TrustTier::Community);
         assert_eq!(signing_payload(&m1), signing_payload(&m2));
+    }
+
+    #[test]
+    fn signing_payload_includes_weight_when_present() {
+        let mut manifest = make_manifest(TrustTier::Community);
+        manifest.sandbox.weight = Some("stateless".into());
+
+        let payload: serde_json::Value =
+            serde_json::from_slice(&signing_payload(&manifest)).unwrap();
+        assert_eq!(
+            payload.get("weight").and_then(|value| value.as_str()),
+            Some("stateless")
+        );
+    }
+
+    #[test]
+    fn tampering_weight_invalidates_signature() {
+        let seed = [42u8; 32];
+        let signing_key = SigningKey::from_bytes(&seed);
+        let pubkey_hex = hex::encode(signing_key.verifying_key().to_bytes());
+
+        let mut manifest = make_manifest(TrustTier::Community);
+        manifest.manifest.author_pubkey = Some(pubkey_hex);
+        manifest.sandbox.weight = Some("stateless".into());
+
+        let payload = signing_payload(&manifest);
+        let sig = signing_key.sign(&payload);
+        manifest.manifest.signature = Some(hex::encode(sig.to_bytes()));
+
+        manifest.sandbox.weight = Some("network".into());
+
+        let err = verify_manifest(&manifest).unwrap_err();
+        assert!(matches!(err, AgentOSError::ToolSignatureInvalid { .. }));
     }
 
     #[test]

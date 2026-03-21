@@ -473,6 +473,7 @@ mod tests {
                 max_memory_mb: 64,
                 max_cpu_ms: 1000,
                 syscalls: vec![],
+                weight: None,
             },
             executor: ToolExecutor::default(),
         }

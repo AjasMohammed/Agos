@@ -4,6 +4,7 @@ use agentos_bus::client::BusClient;
 use agentos_bus::message::{KernelCommand, KernelResponse};
 use agentos_kernel::Kernel;
 use agentos_llm::MockLLMCore;
+use agentos_sandbox::{SandboxConfig, SandboxExecRequest, SandboxExecutor};
 use agentos_types::*;
 use serial_test::serial;
 use std::path::Path;
@@ -114,6 +115,7 @@ async fn test_full_lifecycle_with_mock_llm() {
             .send_command(KernelCommand::RunTask {
                 agent_name: Some("test-agent".into()),
                 prompt: "What is the meaning of life?".into(),
+                autonomous: false,
             })
             .await
             .unwrap();
@@ -168,6 +170,7 @@ async fn test_run_task_nonexistent_agent() {
             .send_command(KernelCommand::RunTask {
                 agent_name: Some("nonexistent".into()),
                 prompt: "hello".into(),
+                autonomous: false,
             })
             .await
             .unwrap();
@@ -211,6 +214,7 @@ async fn test_task_with_tool_call() {
             .send_command(KernelCommand::RunTask {
                 agent_name: Some("tool-agent".into()),
                 prompt: "What time is it?".into(),
+                autonomous: false,
             })
             .await
             .unwrap();
@@ -236,6 +240,57 @@ async fn test_task_with_tool_call() {
     })
     .await;
     result.expect("test_task_with_tool_call timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn test_sandbox_exec_datetime_smoke() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let sandbox_home = temp_dir.path().join("sandbox-home");
+    let data_dir = temp_dir.path().join("data");
+    std::fs::create_dir_all(&sandbox_home).unwrap();
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    let executor = SandboxExecutor::with_executable(
+        sandbox_home,
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_agentctl")),
+        4,
+    );
+    let request = SandboxExecRequest {
+        tool_name: "datetime".to_string(),
+        payload: serde_json::json!({}),
+        data_dir,
+        manifest_weight: None,
+        task_id: Some(TaskID::new()),
+        agent_id: Some(AgentID::new()),
+        trace_id: Some(TraceID::new()),
+        permissions: PermissionSet::new(),
+        workspace_paths: Some(vec![]),
+    };
+    let config = SandboxConfig {
+        allow_network: false,
+        allow_fs_write: false,
+        allow_gpu: false,
+        max_memory_bytes: 4 * 1024 * 1024,
+        max_cpu_ms: 100,
+        allowed_syscalls: Vec::new(),
+    };
+
+    let result = executor
+        .spawn(
+            request,
+            &config,
+            Duration::from_secs(5),
+            SandboxConfig::OVERHEAD_STATELESS,
+        )
+        .await
+        .unwrap();
+    let parsed = SandboxExecutor::parse_result(&result).unwrap();
+
+    assert_eq!(parsed["timezone"], "UTC");
+    assert!(parsed["unix_timestamp_secs"].as_i64().unwrap() > 0);
+    assert_eq!(parsed["date"].as_str().unwrap().len(), 10);
+    assert_eq!(parsed["time"].as_str().unwrap().len(), 8);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -133,6 +133,8 @@ impl Kernel {
                     }),
                     chain_depth,
                     Some(trace_id),
+                                Some(task.agent_id),
+                Some(task.id),
                 )
                 .await;
 

@@ -26,7 +26,7 @@ description = "Procedure id"
 
 [sandbox]
 network       = false
-fs_write      = false
+fs_write      = true
 gpu           = false
 max_memory_mb = 64
 max_cpu_ms    = 2000

@@ -46,6 +46,8 @@ impl AgentTool for FileReader {
             .and_then(|v| v.as_str())
             .unwrap_or("read");
 
+        tracing::debug!(path = path_str, mode, "file-reader: starting");
+
         // SECURITY: resolve path, checking workspace paths before falling back to data_dir.
         let resolved =
             crate::traits::resolve_tool_path(path_str, &context.data_dir, &context.workspace_paths);
@@ -75,6 +77,7 @@ impl AgentTool for FileReader {
             .iter()
             .any(|wp| canonical.starts_with(wp));
         if !canonical.starts_with(&canonical_data_dir) && !in_workspace {
+            tracing::warn!(path = path_str, "file-reader: path traversal blocked");
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
                 operation: format!("Path traversal denied: {}", path_str),
@@ -151,6 +154,14 @@ impl AgentTool for FileReader {
         let returned_lines = end - start;
 
         let page_content = all_lines[start..end].join("\n");
+
+        tracing::debug!(
+            path = path_str,
+            size_bytes,
+            total_lines,
+            returned_lines,
+            "file-reader: read complete"
+        );
 
         Ok(serde_json::json!({
             "path": path_str,

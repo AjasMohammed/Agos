@@ -128,6 +128,7 @@ impl AgentTool for WebFetch {
         if let Some(host_str) = parsed.host_str() {
             if let Ok(ip) = host_str.parse::<std::net::IpAddr>() {
                 if !is_test && is_private_ip(&ip) {
+                    tracing::warn!(url = url_str, %ip, "web-fetch: SSRF blocked (private IP)");
                     return Err(AgentOSError::PermissionDenied {
                         resource: "network.outbound".into(),
                         operation: format!(
@@ -143,6 +144,11 @@ impl AgentTool for WebFetch {
                         || lower.ends_with(".localhost")
                         || lower.ends_with(".local"))
                 {
+                    tracing::warn!(
+                        url = url_str,
+                        host = host_str,
+                        "web-fetch: SSRF blocked (local hostname)"
+                    );
                     return Err(AgentOSError::PermissionDenied {
                         resource: "network.outbound".into(),
                         operation: format!(
@@ -167,6 +173,7 @@ impl AgentTool for WebFetch {
                             for addr in addrs {
                                 let ip = addr.ip();
                                 if is_private_ip(&ip) {
+                                    tracing::warn!(url = url_str, host = host_str, %ip, "web-fetch: SSRF blocked (DNS rebind to private IP)");
                                     return Err(AgentOSError::PermissionDenied {
                                         resource: "network.outbound".into(),
                                         operation: format!(
@@ -201,6 +208,8 @@ impl AgentTool for WebFetch {
             .unwrap_or(32_000)
             .min(100_000) as usize;
 
+        tracing::debug!(url = url_str, "web-fetch: sending request");
+
         let response = tokio::select! {
             result = self.client.get(url_str).send() => {
                 result.map_err(|e| AgentOSError::ToolExecutionFailed {
@@ -217,6 +226,11 @@ impl AgentTool for WebFetch {
         };
 
         let status = response.status().as_u16();
+        if status >= 400 {
+            tracing::warn!(url = url_str, status, "web-fetch: HTTP error response");
+        } else {
+            tracing::debug!(url = url_str, status, "web-fetch: response received");
+        }
         let content_type = response
             .headers()
             .get("content-type")

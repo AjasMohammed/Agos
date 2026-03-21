@@ -32,6 +32,11 @@ pub struct AgentTask {
     /// If this task was triggered by an event, records the event provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_source: Option<TriggerSource>,
+    /// When true, the task runs without iteration or timeout limits.
+    /// Designed for long-running autonomous workflows that must run to natural
+    /// completion. Limits are sourced from `[kernel.autonomous_mode]` config.
+    #[serde(default)]
+    pub autonomous: bool,
 }
 
 /// Provenance data for a task that was triggered by an OS event.

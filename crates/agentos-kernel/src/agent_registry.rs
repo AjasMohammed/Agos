@@ -561,6 +561,12 @@ impl AgentRegistry {
     }
 }
 
+impl Default for AgentRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,11 +785,5 @@ mod tests {
             content1, content2,
             "Repeated saves of the same data should produce identical output"
         );
-    }
-}
-
-impl Default for AgentRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }

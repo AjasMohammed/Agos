@@ -1,5 +1,7 @@
 use crate::traits::LLMCore;
-use crate::types::{InferenceEvent, InferenceResult, ModelCapabilities, TokenUsage};
+use crate::types::{
+    InferenceEvent, InferenceResult, InferenceToolCall, ModelCapabilities, TokenUsage,
+};
 use agentos_types::*;
 use async_trait::async_trait;
 use reqwest::Client;
@@ -19,11 +21,16 @@ impl OllamaCore {
     /// Default context window size. Many modern Ollama models support 32K+.
     pub const DEFAULT_CONTEXT_WINDOW: u32 = 32768;
 
+    /// Default HTTP request timeout. Cloud-proxied models may need much longer.
+    pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 300;
+
     pub fn new(host: &str, model: &str) -> Self {
         Self {
             client: Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(std::time::Duration::from_secs(120))
+                .timeout(std::time::Duration::from_secs(
+                    Self::DEFAULT_REQUEST_TIMEOUT_SECS,
+                ))
                 .build()
                 .expect("HTTP client TLS initialization failed"),
             host: host.to_string(),
@@ -32,11 +39,25 @@ impl OllamaCore {
             capabilities: ModelCapabilities {
                 context_window_tokens: Self::DEFAULT_CONTEXT_WINDOW as u64,
                 supports_images: false,
-                supports_tool_calling: false,
+                supports_tool_calling: true,
                 supports_json_mode: true,
                 max_output_tokens: 0,
             },
         }
+    }
+
+    /// Override the HTTP request timeout for inference calls.
+    ///
+    /// Call this after construction to apply a value from kernel config
+    /// (`ollama.request_timeout_secs`). Panics if `secs` is zero.
+    pub fn with_request_timeout(mut self, secs: u64) -> Self {
+        assert!(secs > 0, "request_timeout_secs must be greater than zero");
+        self.client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(secs))
+            .build()
+            .expect("HTTP client TLS initialization failed");
+        self
     }
 
     /// Override the context window size reported to callers and sent to Ollama as `num_ctx`.
@@ -52,47 +73,11 @@ impl OllamaCore {
         self.capabilities.context_window_tokens = tokens as u64;
         self
     }
-}
 
-// --- Ollama REST API types (private) ---
+    // --- Private helpers ---
 
-#[derive(Debug, Serialize)]
-struct OllamaOptions {
-    num_ctx: u32,
-}
-
-#[derive(Debug, Serialize)]
-struct OllamaChatRequest {
-    model: String,
-    messages: Vec<OllamaChatMessage>,
-    stream: bool,
-    options: OllamaOptions,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct OllamaChatMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct OllamaChatResponse {
-    model: String,
-    message: OllamaChatMessage,
-    done: bool,
-    total_duration: Option<u64>,
-    prompt_eval_count: Option<u64>,
-    eval_count: Option<u64>,
-}
-
-#[async_trait]
-impl LLMCore for OllamaCore {
-    async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
-        let start = std::time::Instant::now();
-
-        // Convert ContextWindow to Ollama chat messages format
-        let messages: Vec<OllamaChatMessage> = context
+    fn context_to_messages(&self, context: &ContextWindow) -> Vec<OllamaChatMessage> {
+        context
             .active_entries()
             .iter()
             .map(|entry| OllamaChatMessage {
@@ -100,21 +85,18 @@ impl LLMCore for OllamaCore {
                     ContextRole::System => "system".to_string(),
                     ContextRole::User => "user".to_string(),
                     ContextRole::Assistant => "assistant".to_string(),
-                    ContextRole::ToolResult => "user".to_string(), // tool results sent as user messages
+                    ContextRole::ToolResult => "user".to_string(),
                 },
                 content: entry.content.clone(),
+                tool_calls: Vec::new(),
             })
-            .collect();
+            .collect()
+    }
 
-        let request = OllamaChatRequest {
-            model: self.model.clone(),
-            messages,
-            stream: false,
-            options: OllamaOptions {
-                num_ctx: self.context_window,
-            },
-        };
-
+    async fn send_chat_request(
+        &self,
+        request: OllamaChatRequest,
+    ) -> Result<OllamaChatResponse, AgentOSError> {
         let response = self
             .client
             .post(format!("{}/api/chat", self.host))
@@ -143,15 +125,33 @@ impl LLMCore for OllamaCore {
             });
         }
 
-        let ollama_response: OllamaChatResponse =
-            response.json().await.map_err(|e| AgentOSError::LLMError {
+        response
+            .json::<OllamaChatResponse>()
+            .await
+            .map_err(|e| AgentOSError::LLMError {
                 provider: "ollama".to_string(),
                 reason: format!("Failed to parse JSON response: {}", e),
-            })?;
+            })
+    }
 
-        let duration_ms = start.elapsed().as_millis() as u64;
+    fn response_to_inference_result(
+        &self,
+        ollama_response: OllamaChatResponse,
+        duration_ms: u64,
+    ) -> InferenceResult {
+        let tool_calls: Vec<InferenceToolCall> = ollama_response
+            .message
+            .tool_calls
+            .into_iter()
+            .map(|tc| InferenceToolCall {
+                id: None,
+                tool_name: tc.function.name,
+                intent_type: "execute".to_string(),
+                payload: tc.function.arguments,
+            })
+            .collect();
 
-        Ok(InferenceResult {
+        InferenceResult {
             text: ollama_response.message.content,
             tokens_used: TokenUsage {
                 prompt_tokens: ollama_response.prompt_eval_count.unwrap_or(0),
@@ -161,9 +161,138 @@ impl LLMCore for OllamaCore {
             },
             model: self.model.clone(),
             duration_ms,
-            tool_calls: Vec::new(),
+            tool_calls,
             uncertainty: None,
-        })
+        }
+    }
+}
+
+// --- Ollama REST API types (private) ---
+
+#[derive(Debug, Serialize)]
+struct OllamaOptions {
+    num_ctx: u32,
+}
+
+/// Tool function definition sent in requests (Ollama native tool calling).
+#[derive(Debug, Serialize)]
+struct OllamaRequestToolFunction {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+/// Tool definition sent in requests.
+#[derive(Debug, Serialize)]
+struct OllamaRequestTool {
+    #[serde(rename = "type")]
+    tool_type: String,
+    function: OllamaRequestToolFunction,
+}
+
+/// Tool call function returned in assistant messages.
+#[derive(Debug, Deserialize)]
+struct OllamaResponseToolCallFunction {
+    name: String,
+    arguments: serde_json::Value,
+}
+
+/// Native tool call returned by the model in a response message.
+#[derive(Debug, Deserialize)]
+struct OllamaResponseToolCall {
+    function: OllamaResponseToolCallFunction,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaChatRequest {
+    model: String,
+    messages: Vec<OllamaChatMessage>,
+    stream: bool,
+    options: OllamaOptions,
+    /// Tool definitions — omitted when empty so non-tool requests stay minimal.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<OllamaRequestTool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OllamaChatMessage {
+    role: String,
+    content: String,
+    /// Native tool calls emitted by the model. Only present in assistant responses;
+    /// skipped when serializing outgoing request messages.
+    #[serde(default, skip_serializing)]
+    tool_calls: Vec<OllamaResponseToolCall>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct OllamaChatResponse {
+    model: String,
+    message: OllamaChatMessage,
+    done: bool,
+    total_duration: Option<u64>,
+    prompt_eval_count: Option<u64>,
+    eval_count: Option<u64>,
+}
+
+#[async_trait]
+impl LLMCore for OllamaCore {
+    async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
+        let start = std::time::Instant::now();
+
+        // Convert ContextWindow to Ollama chat messages format
+        let messages = self.context_to_messages(context);
+
+        let request = OllamaChatRequest {
+            model: self.model.clone(),
+            messages,
+            stream: false,
+            options: OllamaOptions {
+                num_ctx: self.context_window,
+            },
+            tools: Vec::new(),
+        };
+
+        let ollama_response = self.send_chat_request(request).await?;
+        let duration_ms = start.elapsed().as_millis() as u64;
+        Ok(self.response_to_inference_result(ollama_response, duration_ms))
+    }
+
+    async fn infer_with_tools(
+        &self,
+        context: &ContextWindow,
+        tools: &[ToolManifest],
+    ) -> Result<InferenceResult, AgentOSError> {
+        let start = std::time::Instant::now();
+        let messages = self.context_to_messages(context);
+        let ollama_tools = tools
+            .iter()
+            .map(|t| OllamaRequestTool {
+                tool_type: "function".to_string(),
+                function: OllamaRequestToolFunction {
+                    name: t.manifest.name.clone(),
+                    description: t.manifest.description.clone(),
+                    parameters: t
+                        .input_schema
+                        .clone()
+                        .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}})),
+                },
+            })
+            .collect();
+
+        let request = OllamaChatRequest {
+            model: self.model.clone(),
+            messages,
+            stream: false,
+            options: OllamaOptions {
+                num_ctx: self.context_window,
+            },
+            tools: ollama_tools,
+        };
+
+        let ollama_response = self.send_chat_request(request).await?;
+        let duration_ms = start.elapsed().as_millis() as u64;
+        Ok(self.response_to_inference_result(ollama_response, duration_ms))
     }
 
     fn capabilities(&self) -> &ModelCapabilities {
@@ -205,19 +334,7 @@ impl LLMCore for OllamaCore {
     ) -> Result<(), AgentOSError> {
         let start = std::time::Instant::now();
 
-        let messages: Vec<OllamaChatMessage> = context
-            .active_entries()
-            .iter()
-            .map(|entry| OllamaChatMessage {
-                role: match entry.role {
-                    ContextRole::System => "system".to_string(),
-                    ContextRole::User => "user".to_string(),
-                    ContextRole::Assistant => "assistant".to_string(),
-                    ContextRole::ToolResult => "user".to_string(),
-                },
-                content: entry.content.clone(),
-            })
-            .collect();
+        let messages = self.context_to_messages(context);
 
         let request = OllamaChatRequest {
             model: self.model.clone(),
@@ -226,6 +343,7 @@ impl LLMCore for OllamaCore {
             options: OllamaOptions {
                 num_ctx: self.context_window,
             },
+            tools: Vec::new(),
         };
 
         let response = self

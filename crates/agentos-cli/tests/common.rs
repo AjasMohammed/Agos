@@ -27,9 +27,12 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             task_limits: Default::default(),
             tool_calls: Default::default(),
             tool_execution: Default::default(),
+            autonomous_mode: Default::default(),
             health_port: 0,          // 0 = disabled in tests
             per_agent_rate_limit: 0, // 0 = unlimited in tests
             events: Default::default(),
+            sandbox_policy: Default::default(),
+            max_concurrent_sandbox_children: 4,
         },
         routing: Default::default(),
         secrets: SecretsSettings {
@@ -74,6 +77,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         ollama: OllamaSettings {
             host: "http://localhost:11434".to_string(),
             default_model: "llama3.2".to_string(),
+            request_timeout_secs: 300,
         },
         llm: LlmSettings::default(),
         memory: MemorySettings {
@@ -84,5 +88,6 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         context_budget: Default::default(),
         health_monitor: HealthMonitorConfig::default(),
         preflight: PreflightConfig::default(),
+        logging: Default::default(),
     }
 }

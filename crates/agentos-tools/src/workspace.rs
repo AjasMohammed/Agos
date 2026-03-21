@@ -230,9 +230,13 @@ mod tests {
         let src = workspace.join("main.rs");
         std::fs::write(&src, "fn main() {}").unwrap();
 
-        let (resolved, zone) =
-            resolve_path_existing(src.to_str().unwrap(), "test", &data, &[workspace.clone()])
-                .unwrap();
+        let (resolved, zone) = resolve_path_existing(
+            src.to_str().unwrap(),
+            "test",
+            &data,
+            std::slice::from_ref(&workspace),
+        )
+        .unwrap();
         assert_eq!(zone, PathZone::Workspace);
         assert_eq!(resolved, src.canonicalize().unwrap());
     }
@@ -268,7 +272,7 @@ mod tests {
             new_file.to_str().unwrap(),
             "test",
             &data,
-            &[workspace.clone()],
+            std::slice::from_ref(&workspace),
         )
         .unwrap();
         assert_eq!(zone, PathZone::Workspace);

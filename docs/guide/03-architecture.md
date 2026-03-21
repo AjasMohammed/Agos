@@ -52,7 +52,7 @@ This document explains how all the pieces of AgentOS fit together — from the k
 
 ## Crate Dependency Graph
 
-AgentOS is organized as a Rust workspace with 10 crates. Dependencies flow strictly downward — no circular dependencies.
+AgentOS is organized as a Rust workspace with 17 crates. Dependencies flow strictly downward — no circular dependencies.
 
 ```
 agentos-cli
@@ -83,9 +83,16 @@ agentos-cli
 | **agentos-capability** | Permission system and token management  | `CapabilityEngine`, `PermissionProfile`, `ProfileManager`                                                                                          |
 | **agentos-bus**        | IPC layer over Unix domain sockets      | `BusServer`, `BusClient`, `BusConnection`, `KernelCommand`, `KernelResponse`                                                                       |
 | **agentos-llm**        | LLM adapter trait and implementations   | `LLMCore` trait, `OllamaCore`, `OpenAICore`, `AnthropicCore`, `GeminiCore`, `CustomCore`                                                           |
-| **agentos-tools**      | Built-in tool implementations           | `AgentTool` trait, `FileReader`, `FileWriter`, `MemorySearch`, `MemoryWrite`, `DataParser`, `ShellExec`                                            |
+| **agentos-tools**      | Built-in tool implementations (41 tools) | `AgentTool` trait, file tools, memory tools, procedural tools, network tools, agent coordination, utilities |
 | **agentos-sandbox**    | Seccomp-BPF sandboxed process execution | `SandboxExecutor`, `SandboxConfig`, `SandboxResult`                                                                                                |
-| **agentos-kernel**     | Central orchestrator — the "brain"      | `Kernel`, `TaskScheduler`, `ContextManager`, `AgentRegistry`, `ToolRegistry`, `TaskRouter`, `AgentMessageBus`, `ScheduleManager`, `BackgroundPool` |
+| **agentos-memory**     | Multi-tier memory (semantic + episodic) with embeddings | `SemanticMemory`, `EpisodicMemory`, `ProceduralMemory`                                                                               |
+| **agentos-pipeline**   | Multi-step workflow orchestration engine | `PipelineEngine`, `PipelineStore`, template variable sanitization                                                                                  |
+| **agentos-hal**        | Hardware Abstraction Layer (system, process, network, GPU, storage, sensor) | `HalRegistry`, driver traits                                                                              |
+| **agentos-sdk**        | Ergonomic macros and re-exports for tool development | `#[tool]` attribute macro, re-exports from `agentos-types` and `agentos-tools`                                                                    |
+| **agentos-sdk-macros** | Proc-macro crate for `#[tool]` attribute | `tool` attribute macro                                                                                                                            |
+| **agentos-wasm**       | WASM tool execution via Wasmtime        | `WasmExecutor`, `WasmModule`                                                                                                                       |
+| **agentos-web**        | Web UI server (Axum + HTMX)            | `WebServer`, task/agent/audit views, chat interface                                                                                                |
+| **agentos-kernel**     | Central orchestrator — the "brain"      | `Kernel`, `TaskScheduler`, `ContextCompiler`, `AgentRegistry`, `ToolRegistry`, `TaskRouter`, `CostTracker`, `IntentValidator`, `EventDispatch`     |
 | **agentos-cli**        | User-facing CLI (`agentctl`)            | `Cli`, `Commands`, all command handlers                                                                                                            |
 
 ---
@@ -96,19 +103,25 @@ When you run `agentctl start`, the following happens:
 
 ```
 1. Parse CLI arguments and load config (config/default.toml)
+   - Validate all config sections (task_limits, context_budget, LLM, workspace paths)
 2. Prompt for vault passphrase (if not provided via --vault-passphrase)
 3. Initialize subsystems:
-   a. AuditLog     — open/create SQLite database
-   b. SecretsVault — derive master key from passphrase via Argon2id, open encrypted vault DB
-   c. CapabilityEngine — initialize with signing key from vault
-   d. ToolRegistry — scan core_tools_dir and user_tools_dir, load all .toml manifests
-   e. AgentRegistry — empty (agents connect after boot)
-   f. TaskScheduler — initialize priority queue
-   g. ContextManager — initialize empty
-   h. TaskRouter — load routing strategy from config
-   i. ScheduleManager — initialize cron scheduler
-   j. BackgroundPool — initialize background task pool
-   k. AgentMessageBus — initialize message channels
+   a. AuditLog      — open/create SQLite database
+   b. Audit verify   — verify hash chain integrity of last N entries (configurable)
+   c. SecretsVault  — derive master key from passphrase via Argon2id, open encrypted vault DB
+   d. CapabilityEngine — initialize with signing key from vault
+   e. ToolRegistry  — scan core_tools_dir and user_tools_dir, load all .toml manifests
+   f. AgentRegistry — load persisted state from disk (with backup recovery)
+   g. TaskScheduler — initialize priority queue
+   h. CostTracker   — initialize per-agent budget tracking
+   i. ContextCompiler — initialize with token budget config
+   j. TaskRouter    — load routing strategy from config
+   k. EventDispatch — initialize event broadcast channel
+   l. ScheduleManager — initialize cron scheduler
+   m. BackgroundPool — initialize background task pool
+   n. AgentMessageBus — initialize message channels
+   o. StateStore    — open/create SQLite for persisted kernel state
+   p. HealthMonitor — initialize system health checks
 4. Start BusServer on Unix domain socket
 5. Enter main run loop — accept connections, dispatch commands
 ```
@@ -215,10 +228,17 @@ AgentOS manages three tiers of memory:
 
 ### Tier 3: Semantic Memory (global, persisted)
 
-- Long-term recall via keyword-based search (vector search planned)
+- Long-term recall via hybrid vector + FTS5 search
 - Cross-task, cross-agent, cross-session
-- Accessed via `memory-search` and `memory-write` tools
+- Accessed via `memory-search`, `memory-write`, `memory-read`, `memory-delete` tools
 - Permission-gated: agents can have different read/write scopes
+
+### Tier 4: Procedural Memory (global, persisted)
+
+- Reusable step-by-step procedures extracted from successful tasks
+- Can be created manually by agents (`procedure-create`) or auto-populated by the consolidation engine
+- Searched by natural language query via `procedure-search`
+- The kernel auto-queries procedures at task start and injects relevant ones into context
 
 ---
 

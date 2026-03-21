@@ -19,6 +19,7 @@ pub mod injection_scanner;
 pub mod intent_validator;
 pub mod kernel;
 pub mod kernel_action;
+pub mod logging;
 pub mod memory_blocks;
 pub mod memory_extraction;
 pub mod metrics;

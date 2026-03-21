@@ -39,6 +39,8 @@ impl AgentTool for FileDelete {
                 AgentOSError::SchemaValidation("file-delete requires 'path' field".into())
             })?;
 
+        tracing::debug!(path = path_str, "file-delete: starting");
+
         // SECURITY: resolve path, checking workspace paths before falling back to data_dir.
         let resolved =
             crate::traits::resolve_tool_path(path_str, &context.data_dir, &context.workspace_paths);
@@ -65,6 +67,7 @@ impl AgentTool for FileDelete {
             .iter()
             .any(|wp| canonical.starts_with(wp));
         if !canonical.starts_with(&canonical_data_dir) && !in_workspace {
+            tracing::warn!(path = path_str, "file-delete: path traversal blocked");
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
                 operation: format!("Path traversal denied: {}", path_str),
@@ -110,6 +113,8 @@ impl AgentTool for FileDelete {
                 reason: format!("Cannot delete {}: {}", path_str, e),
             }
         })?;
+
+        tracing::debug!(path = path_str, "file-delete: complete");
 
         Ok(serde_json::json!({
             "path": path_str,

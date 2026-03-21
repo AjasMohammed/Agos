@@ -23,17 +23,47 @@ max_concurrent_tasks = 4
 default_task_timeout_secs = 60
 context_window_max_entries = 100
 context_window_token_budget = 8000
+# SQLite DB for persisted runtime state (tasks, escalations, cost snapshots).
+state_db_path = "/tmp/agentos/data/kernel_state.db"
+
+[kernel.task_limits]
+# Per-task iteration caps by complexity tier (low/medium/high).
+# Agents may override via task metadata up to the tier's max.
+max_iterations_low = 10
+max_iterations_medium = 25
+max_iterations_high = 50
+
+[kernel.tool_calls]
+# Allow agents to issue multiple tool calls per LLM turn.
+allow_parallel = true
+max_parallel = 5
+
+[kernel.events]
+# Capacity of the internal event dispatch channel.
+# Increase if you observe dropped events under heavy load.
+channel_capacity = 1024
+
+[kernel.tool_execution]
+max_output_bytes = 262144    # 256 KiB — truncated with marker if exceeded
+default_timeout_seconds = 60 # Timeout for in-process (non-sandboxed) tools
 
 [secrets]
 vault_path = "/tmp/agentos/vault/secrets.db"
 
 [audit]
 log_path = "/tmp/agentos/data/audit.db"
+max_audit_entries = 0          # 0 = unlimited
+verify_last_n_entries = 1000   # Hash chain entries to verify at boot (0 = full)
 
 [tools]
 core_tools_dir = "/tmp/agentos/tools/core"
 user_tools_dir = "/tmp/agentos/tools/user"
 data_dir = "/tmp/agentos/data"
+
+[tools.workspace]
+# Additional directories agents can access beyond data_dir.
+# Must be absolute paths. System roots (/, /etc, /var, /root) are rejected.
+allowed_paths = []
 
 [bus]
 socket_path = "/tmp/agentos/agentos.sock"
@@ -46,9 +76,25 @@ default_model = "llama3.2"
 openai_base_url = "https://api.openai.com/v1"
 anthropic_base_url = "https://api.anthropic.com/v1"
 gemini_base_url = "https://generativelanguage.googleapis.com/v1beta"
+max_tokens = 8192              # Max output tokens for Anthropic
+ollama_context_window = 32768  # Context window size for Ollama
 
 [memory]
 model_cache_dir = "models"
+
+[context_budget]
+total_tokens = 128000
+reserve_pct = 0.25
+system_pct = 0.15
+tools_pct = 0.18
+knowledge_pct = 0.30
+history_pct = 0.25
+task_pct = 0.12
+chars_per_token = 4.0  # Use 1.5-2.0 for CJK workloads
+
+[health_monitor]
+enabled = true
+check_interval_secs = 30
 ```
 
 ---

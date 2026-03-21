@@ -41,5 +41,5 @@ network       = false
 fs_write      = false
 gpu           = false
 max_memory_mb = 512
-max_cpu_ms    = 5000
+max_cpu_ms    = 15000
 syscalls      = []

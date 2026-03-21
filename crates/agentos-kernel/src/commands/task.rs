@@ -9,6 +9,7 @@ impl Kernel {
         &self,
         agent_name: Option<String>,
         prompt: String,
+        autonomous: bool,
     ) -> KernelResponse {
         let registry = self.agent_registry.read().await;
         let agent_id = match agent_name {
@@ -51,6 +52,11 @@ impl Kernel {
         drop(registry);
 
         let task_id = TaskID::new();
+        let task_timeout = if autonomous {
+            Duration::from_secs(self.config.kernel.autonomous_mode.task_timeout_secs)
+        } else {
+            Duration::from_secs(self.config.kernel.default_task_timeout_secs)
+        };
         let capability_token = match self.capability_engine.issue_token(
             task_id,
             agent.id,
@@ -60,11 +66,14 @@ impl Kernel {
                 IntentTypeFlag::Write,
                 IntentTypeFlag::Execute,
                 IntentTypeFlag::Query,
+                IntentTypeFlag::Observe,
+                IntentTypeFlag::Message,
+                IntentTypeFlag::Escalate,
                 IntentTypeFlag::Subscribe,
                 IntentTypeFlag::Unsubscribe,
             ]),
             effective_permissions,
-            Duration::from_secs(self.config.kernel.default_task_timeout_secs),
+            task_timeout,
         ) {
             Ok(token) => token,
             Err(e) => {
@@ -84,13 +93,14 @@ impl Kernel {
             priority: 5,
             created_at: chrono::Utc::now(),
             started_at: None,
-            timeout: Duration::from_secs(self.config.kernel.default_task_timeout_secs),
+            timeout: task_timeout,
             original_prompt: prompt,
             history: Vec::new(),
             parent_task: None,
             reasoning_hints,
             max_iterations: None,
             trigger_source: None,
+            autonomous,
         };
 
         self.scheduler.register_external(task.clone()).await;
@@ -247,6 +257,9 @@ impl Kernel {
             reasoning_hints: Some(infer_reasoning_hints(prompt)),
             max_iterations: None,
             trigger_source: None,
+            // Child tasks inherit the parent's autonomous mode so long-running
+            // orchestrators don't have their sub-agents capped arbitrarily.
+            autonomous: parent_task.autonomous,
         };
 
         // Check for circular dependencies before enqueuing

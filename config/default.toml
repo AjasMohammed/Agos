@@ -1,20 +1,38 @@
 [kernel]
 # Development defaults. Use config/production.toml for deployment.
 max_concurrent_tasks = 4
-default_task_timeout_secs = 60
-context_window_max_entries = 100
-context_window_token_budget = 8000
+default_task_timeout_secs = 3600
+context_window_max_entries = 500
+context_window_token_budget = 32000
 # SQLite DB for persisted runtime state (tasks, escalations, cost snapshots).
 state_db_path = "/tmp/agentos/data/kernel_state.db"
 
+# Sandbox execution policy for tool calls.
+# "trust_aware" (default): Core tools run in-process, Community/Verified tools sandboxed.
+# "always": All sandbox-eligible tools run in sandbox children (legacy behavior).
+# "never": No sandboxing (development only, NOT for production).
+sandbox_policy = "trust_aware"
+# Maximum concurrent sandbox child processes. Default: number of logical CPUs (minimum 2).
+# Increase if running many Community/Verified tools in parallel.
+# max_concurrent_sandbox_children = 8  # example; actual default = num CPUs
+
 [kernel.task_limits]
-max_iterations_low = 10
-max_iterations_medium = 25
-max_iterations_high = 50
+max_iterations_low = 50
+max_iterations_medium = 200
+max_iterations_high = 1000
 
 [kernel.tool_calls]
 allow_parallel = true
-max_parallel = 5
+max_parallel = 10
+
+# Limits applied when a task is submitted with autonomous=true.
+# These replace the complexity-based caps so long-running agents can work
+# to natural completion without hitting artificial iteration or time ceilings.
+[kernel.autonomous_mode]
+max_iterations = 10000
+task_timeout_secs = 86400    # 24 hours
+tool_timeout_seconds = 600   # 10 minutes per tool call
+max_parallel_tool_calls = 10
 
 [kernel.events]
 # Capacity of the internal event dispatch channel (number of EventMessage slots).
@@ -30,7 +48,8 @@ channel_capacity = 1024
 max_output_bytes = 262144    # 256 KiB
 # Timeout for in-process (non-sandboxed) tool calls. Sandboxed tools use their
 # manifest's sandbox.max_cpu_ms instead, which is set per tool.
-default_timeout_seconds = 60
+# Autonomous tasks use autonomous_mode.tool_timeout_seconds instead.
+default_timeout_seconds = 300
 
 [secrets]
 # Development default path (ephemeral on many systems).
@@ -68,6 +87,10 @@ socket_path = "/tmp/agentos/agentos.sock"
 # Development default host. Override with AGENTOS_OLLAMA_HOST or production config.
 host = "http://localhost:11434"
 default_model = "llama3.2"
+# HTTP request timeout for Ollama inference calls (seconds).
+# Cloud-proxied models (e.g. kimi-k2.5:cloud, gpt-oss:120b-cloud) and large
+# local models with many tools in context may need 300–600s.
+request_timeout_secs = 300
 
 [llm]
 # Optional custom/OpenAI-compatible provider endpoint.
@@ -113,6 +136,18 @@ task_pct = 0.12
 # Default 4.0 is accurate for English/Latin text.
 # For CJK (Chinese/Japanese/Korean) workloads, use 1.5-2.0.
 chars_per_token = 4.0
+
+[logging]
+# Directory where rolling log files are written.
+# Logs rotate daily; up to 7 days are kept.
+# Set to "" to disable file logging (stderr only).
+log_dir = "/tmp/agentos/logs"
+# Minimum log level: trace | debug | info | warn | error
+# Can be overridden at runtime with the RUST_LOG environment variable or `agentctl log set-level`.
+log_level = "info"
+# Output format: "text" (human-readable, default) or "json" (structured, for log aggregators like
+# Loki, Datadog, or Elasticsearch). In production, set to "json".
+log_format = "text"
 
 [health_monitor]
 enabled = true

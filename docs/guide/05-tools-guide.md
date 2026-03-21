@@ -26,95 +26,85 @@ LLM emits intent → Kernel receives IntentMessage
 
 ## Built-in Tools
 
-AgentOS ships with the following core tools (compiled into the kernel as native Rust):
+AgentOS ships with 41 core tools (compiled into the kernel as native Rust). Use the `agent-manual` tool with `{"section": "tools"}` at runtime for the live list, or `{"section": "tool-detail", "name": "<tool>"}` for full schemas.
 
-### `file-reader`
+### File System
 
-Read files from the data directory.
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `file-reader` | `fs.user_data:r` | Read files, list directories, with pagination (offset/limit) |
+| `file-writer` | `fs.user_data:w` | Write files with create_only/overwrite modes and size guards |
+| `file-editor` | `fs.user_data:w` | Apply line-range edits (insert, replace, delete) to existing files |
+| `file-delete` | `fs.user_data:w` | Delete a file from the data directory |
+| `file-move` | `fs.user_data:w` | Move or rename a file within the data directory |
+| `file-diff` | `fs.user_data:r` | Compute unified diff between two files or between a file and a string |
+| `file-glob` | `fs.user_data:r` | Find files matching a glob pattern |
+| `file-grep` | `fs.user_data:r` | Search file contents by regex pattern |
 
-| Property            | Value                                  |
-| ------------------- | -------------------------------------- |
-| Permission required | `fs.user_data:r`                       |
-| Sandbox             | No network, no filesystem write        |
-| Input               | File path (relative to data directory) |
-| Output              | File content as text                   |
+### Memory
 
-### `file-writer`
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `memory-search` | `memory.semantic:r` | Hybrid vector + FTS5 search across semantic or episodic memory |
+| `memory-write` | `memory.semantic:w` | Write to semantic or episodic memory |
+| `memory-read` | `memory.semantic:r` | Read a specific memory entry by key |
+| `memory-delete` | `memory.semantic:w` | Delete a memory entry by key |
+| `memory-stats` | `memory.semantic:r` | Memory usage statistics (counts, sizes per tier) |
+| `memory-block-read` | `memory.blocks:r` | Read a named key-value memory block |
+| `memory-block-write` | `memory.blocks:w` | Write or update a named memory block |
+| `memory-block-list` | `memory.blocks:r` | List all named memory blocks |
+| `memory-block-delete` | `memory.blocks:w` | Delete a named memory block |
+| `archival-insert` | `memory.semantic:w` | Insert a large document into archival memory (chunked + indexed) |
+| `archival-search` | `memory.semantic:r` | Search archival memory by query |
+| `episodic-list` | `memory.episodic:r` | List episodic memory entries for a task |
 
-Write files to the data directory. Creates subdirectories automatically.
+### Procedural Memory
 
-| Property            | Value                 |
-| ------------------- | --------------------- |
-| Permission required | `fs.user_data:w`      |
-| Sandbox             | No network            |
-| Input               | File path + content   |
-| Output              | Confirmation of write |
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `procedure-create` | `memory.procedural:w` | Record a reusable step-by-step procedure |
+| `procedure-search` | `memory.procedural:r` | Search procedures by natural language query |
+| `procedure-list` | `memory.procedural:r` | List all recorded procedures |
+| `procedure-delete` | `memory.procedural:w` | Delete a procedure by ID |
 
-### `memory-search`
+### Network
 
-Search the semantic memory store by keyword.
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `http-client` | `network.outbound:x` | HTTP requests with secret injection, SSRF protection, and redirect control |
+| `web-fetch` | `network.outbound:x` | Fetch a web page and extract text content (HTML stripped) |
 
-| Property            | Value                     |
-| ------------------- | ------------------------- |
-| Permission required | `memory.semantic:r`       |
-| Sandbox             | No network, no filesystem |
-| Input               | Search query string       |
-| Output              | Matching memory entries   |
+### System & Process
 
-### `memory-write`
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `shell-exec` | `process.exec:x` | Execute shell commands in bwrap sandbox with timeout and cancellation |
+| `process-manager` | `process.list:x` | List and kill processes |
+| `network-monitor` | `hal.devices:r` | Network interface stats |
+| `hardware-info` | `hal.devices:r` | Hardware info: CPU, memory, disk, GPU |
+| `log-reader` | `audit.read:r` | Read kernel and system log entries with filtering |
 
-Write an entry to the semantic memory store for long-term recall.
+> **Warning:** `shell-exec` requires `bwrap` (bubblewrap) for sandbox isolation. It will refuse to run without it.
 
-| Property            | Value                     |
-| ------------------- | ------------------------- |
-| Permission required | `memory.semantic:w`       |
-| Sandbox             | No network                |
-| Input               | Key + content to remember |
-| Output              | Confirmation of write     |
+### Agent Coordination
 
-### `data-parser`
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `agent-message` | `agent.message:x` | Send a direct message to another agent |
+| `agent-list` | `agent.registry:r` | List registered agents and their status |
+| `task-delegate` | `agent.message:x` | Delegate a sub-task to another agent (non-blocking) |
+| `task-list` | `task.query:r` | List active and recent tasks |
+| `task-status` | `task.query:r` | Inspect status of a specific task by ID |
 
-Parse structured data formats.
+### Data & Utilities
 
-| Property            | Value                             |
-| ------------------- | --------------------------------- |
-| Permission required | (none — read-only transformation) |
-| Supported formats   | JSON, CSV                         |
-| Input               | Raw data string + format hint     |
-| Output              | Parsed structured data            |
-
-### `shell-exec`
-
-Execute shell commands in an isolated environment.
-
-| Property            | Value                                             |
-| ------------------- | ------------------------------------------------- |
-| Permission required | `process.list:x` or `process.kill:x`              |
-| Sandbox             | `bwrap` path-based isolation, restricted syscalls |
-| Input               | Shell command string                              |
-| Output              | Command stdout/stderr and exit code               |
-
-> **Warning:** This tool is highly restricted. It uses `bwrap` (bubblewrap) for path-based isolation to prevent agents from accessing the host filesystem beyond designated boundaries.
-
-### `agent-message`
-
-Send a message to another agent via the Agent Message Bus.
-
-| Property            | Value                               |
-| ------------------- | ----------------------------------- |
-| Permission required | `agent.message:x`                   |
-| Input               | Target agent name + message content |
-| Output              | Delivery confirmation               |
-
-### `task-delegate`
-
-Delegate a subtask to another agent and wait for the result.
-
-| Property            | Value                                |
-| ------------------- | ------------------------------------ |
-| Permission required | `agent.message:x`                    |
-| Input               | Target agent name + task description |
-| Output              | Delegated task result                |
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `data-parser` | (none) | Parse JSON, CSV, TOML, YAML data |
+| `think` | (none) | Private scratchpad for reasoning — output is NOT shown to the user |
+| `datetime` | (none) | Get current date, time, timezone, and Unix timestamp |
+| `agent-manual` | (none) | Query structured AgentOS documentation |
+| `agent-self` | (none) | View own agent state: permissions, budget, tools, subscriptions |
 
 ---
 
@@ -334,8 +324,10 @@ pub trait AgentTool: Send + Sync {
 The `ToolExecutionContext` provides:
 
 - `data_dir` — Sandboxed filesystem root for tool I/O
+- `workspace_paths` — Additional directories the agent can access (configured by operator)
 - `task_id` — ID of the task that triggered this tool call
 - `trace_id` — Distributed trace ID for the audit log
+- `cancellation_token` — Token that fires when the task is cancelled or timed out; long-running tools should check this via `tokio::select!`
 
 ---
 
