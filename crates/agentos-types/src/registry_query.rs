@@ -124,3 +124,56 @@ impl TaskQuery for TaskSnapshot {
         results
     }
 }
+
+/// Lightweight escalation summary returned by the `escalation-status` tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EscalationSummary {
+    pub id: u64,
+    pub task_id: TaskID,
+    pub agent_id: AgentID,
+    pub reason: String,
+    pub context_summary: String,
+    pub decision_point: String,
+    pub options: Vec<String>,
+    pub urgency: String,
+    pub blocking: bool,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub resolved: bool,
+    pub resolution: Option<String>,
+}
+
+/// Thin query interface for the escalation manager.
+pub trait EscalationQuery: Send + Sync {
+    /// Return pending (unresolved) escalations for a specific agent.
+    fn list_pending_for_agent(&self, agent_id: &AgentID) -> Vec<EscalationSummary>;
+
+    /// Return a single escalation by ID, or None if not found.
+    fn get_escalation(&self, id: u64) -> Option<EscalationSummary>;
+}
+
+/// Snapshot implementation of `EscalationQuery`.
+#[derive(Clone)]
+pub struct EscalationSnapshot {
+    escalations: Vec<EscalationSummary>,
+}
+
+impl EscalationSnapshot {
+    pub fn new(escalations: Vec<EscalationSummary>) -> Self {
+        Self { escalations }
+    }
+}
+
+impl EscalationQuery for EscalationSnapshot {
+    fn list_pending_for_agent(&self, agent_id: &AgentID) -> Vec<EscalationSummary> {
+        self.escalations
+            .iter()
+            .filter(|e| &e.agent_id == agent_id && !e.resolved)
+            .cloned()
+            .collect()
+    }
+
+    fn get_escalation(&self, id: u64) -> Option<EscalationSummary> {
+        self.escalations.iter().find(|e| e.id == id).cloned()
+    }
+}

@@ -309,6 +309,10 @@ impl Kernel {
                                                         .await
                                                         .unwrap_or(false);
                                                     if transitioned {
+                                                        // Clean up context and intent history for the
+                                                        // failed task to prevent unbounded memory growth.
+                                                        kernel.context_manager.remove_context(task_id).await;
+                                                        kernel.intent_validator.remove_task(task_id).await;
                                                         kernel
                                                             .background_pool
                                                             .fail(task_id, "Escalation expired and auto-denied".to_string())

@@ -38,8 +38,8 @@ pub use intent::{
     SubscriptionDuration, UnsubscribePayload,
 };
 pub use registry_query::{
-    AgentRegistryQuery, AgentRegistrySnapshot, AgentSummary, TaskIntrospectionSummary, TaskQuery,
-    TaskSnapshot,
+    AgentRegistryQuery, AgentRegistrySnapshot, AgentSummary, EscalationQuery, EscalationSnapshot,
+    EscalationSummary, TaskIntrospectionSummary, TaskQuery, TaskSnapshot,
 };
 pub use role::Role;
 pub use secret::{SecretEntry, SecretMetadata, SecretOwner, SecretScope};

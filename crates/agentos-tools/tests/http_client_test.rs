@@ -30,6 +30,7 @@ fn make_context(data_dir: &Path, vault: Option<Arc<ProxyVault>>) -> ToolExecutio
         file_lock_registry: None,
         agent_registry: None,
         task_registry: None,
+        escalation_query: None,
         workspace_paths: vec![],
         cancellation_token: tokio_util::sync::CancellationToken::new(),
     }

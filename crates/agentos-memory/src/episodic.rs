@@ -1,7 +1,9 @@
 use crate::types::{EpisodeType, EpisodicEntry};
 use agentos_types::{AgentID, AgentOSError, PermissionOp, TaskID, TraceID};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, params_from_iter, types::Value, Connection, Result as SqliteResult};
+use rusqlite::{
+    params, params_from_iter, types::Value, Connection, OptionalExtension, Result as SqliteResult,
+};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -769,6 +771,31 @@ impl EpisodicStore {
         })
         .await
         .map_err(|e| AgentOSError::StorageError(format!("Import task panicked: {}", e)))?
+    }
+
+    /// Fetch a single episodic entry by its integer ID.
+    pub async fn get_by_id(&self, id: i64) -> Result<Option<EpisodicEntry>, AgentOSError> {
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock episodic db for read".to_string())
+            })?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, task_id, agent_id, entry_type, content, summary, metadata, timestamp, trace_id
+                     FROM episodic_events WHERE id = ?1",
+                )
+                .map_err(|e| AgentOSError::StorageError(format!("Prepare failed: {}", e)))?;
+            let entry = stmt
+                .query_row(params![id], Self::row_to_episode)
+                .optional()
+                .map_err(|e| {
+                    AgentOSError::StorageError(format!("Episodic get_by_id failed: {}", e))
+                })?;
+            Ok(entry)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("get_by_id task panicked: {}", e)))?
     }
 
     /// Expected column order:

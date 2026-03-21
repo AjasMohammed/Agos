@@ -40,6 +40,8 @@ pub struct ToolExecutionContext {
     pub agent_registry: Option<std::sync::Arc<dyn AgentRegistryQuery>>,
     /// Snapshot of the task store at task dispatch time. `None` outside kernel context.
     pub task_registry: Option<std::sync::Arc<dyn TaskQuery>>,
+    /// Snapshot of the escalation manager at task dispatch time. `None` outside kernel context.
+    pub escalation_query: Option<std::sync::Arc<dyn EscalationQuery>>,
     /// Additional directories the agent may access beyond `data_dir`.
     /// Populated from `tools.workspace.allowed_paths` in the kernel config.
     /// Paths are pre-canonicalized at kernel startup.

@@ -521,6 +521,8 @@ impl Kernel {
                 IntentTypeFlag::Query,
                 IntentTypeFlag::Observe,
                 IntentTypeFlag::Message,
+                IntentTypeFlag::Delegate,
+                IntentTypeFlag::Broadcast,
                 IntentTypeFlag::Escalate,
                 IntentTypeFlag::Subscribe,
                 IntentTypeFlag::Unsubscribe,

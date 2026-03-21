@@ -63,6 +63,7 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "task-status",
     "task-list",
     "shell-exec",
+    "escalation-status",
 ];
 
 const SPECIAL_CONTEXT_TOOL_NAMES: &[&str] = &["agent-manual", "agent-self"];
@@ -216,7 +217,10 @@ fn build_memory_tool(
             let embedder = init_embedder(model_cache_dir)?;
             let semantic = Arc::new(SemanticStore::open_with_embedder(data_dir, embedder)?);
             let tool: Box<dyn AgentTool> = match name {
-                "memory-read" => Box::new(crate::memory_read::MemoryRead::new(semantic)),
+                "memory-read" => {
+                    let episodic = Arc::new(EpisodicStore::open(data_dir)?);
+                    Box::new(crate::memory_read::MemoryRead::new(semantic, episodic))
+                }
                 "archival-insert" => {
                     Box::new(crate::archival_insert::ArchivalInsert::new(semantic))
                 }

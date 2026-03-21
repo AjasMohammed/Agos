@@ -1,0 +1,32 @@
+[manifest]
+name        = "escalation-status"
+version     = "1.0.0"
+description = "Query pending escalation/approval status for the calling agent"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["escalation.query:q"]
+
+[capabilities_provided]
+outputs = ["status"]
+
+[intent_schema]
+input  = "EscalationQueryIntent"
+output = "EscalationStatusResult"
+
+[input_schema]
+type = "object"
+
+[input_schema.properties.id]
+type = "integer"
+description = "Optional escalation ID to query a specific escalation. If omitted, lists all pending escalations for this agent."
+
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 8
+max_cpu_ms    = 500
+syscalls      = []
