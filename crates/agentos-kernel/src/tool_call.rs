@@ -95,7 +95,29 @@ pub fn parse_tool_calls(text: &str) -> Vec<ToolCallRequest> {
                 }
             }
             Err(error) => {
-                warn!(%error, "Skipping invalid tool call JSON block");
+                // The LLM may have emitted multiple JSON objects separated by
+                // newlines inside a single block (NDJSON style). Try each line
+                // individually before giving up.
+                let recovered: Vec<ToolCallRequest> = json_str
+                    .as_str()
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .filter_map(|line| {
+                        serde_json::from_str::<serde_json::Value>(line)
+                            .ok()
+                            .and_then(parse_call_value)
+                    })
+                    .collect();
+
+                if recovered.is_empty() {
+                    warn!(%error, raw = json_str.as_str(), "Skipping invalid tool call JSON block");
+                } else {
+                    tracing::debug!(
+                        count = recovered.len(),
+                        "Recovered tool calls from multi-object JSON block"
+                    );
+                    calls.extend(recovered);
+                }
             }
         }
     }
@@ -177,7 +199,26 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_tool_call_skips_oversized_payload() {
+    fn test_parse_tool_calls_multi_object_block() {
+        // LLM emits two JSON objects on separate lines inside one ```json``` block
+        let text = "```json\n{\"tool\": \"agent-self\", \"intent_type\": \"query\", \"payload\": {}}\n{\"tool\": \"agent-manual\", \"intent_type\": \"query\", \"payload\": {\"section\": \"index\"}}\n```";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].tool_name, "agent-self");
+        assert_eq!(calls[1].tool_name, "agent-manual");
+    }
+
+    #[test]
+    fn test_parse_tool_calls_multi_object_block_partial_recovery() {
+        // Second line is invalid JSON — first should still be recovered
+        let text = "```json\n{\"tool\": \"agent-self\", \"intent_type\": \"query\", \"payload\": {}}\n{invalid}\n```";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool_name, "agent-self");
+    }
+
+    #[test]
+    fn test_parse_tool_calls_skips_oversized_payload() {
         let oversized = "x".repeat(MAX_PARSED_PAYLOAD_BYTES + 1);
         let text = format!(
             r#"```json

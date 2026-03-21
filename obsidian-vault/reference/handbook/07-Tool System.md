@@ -52,6 +52,7 @@ At execution time the kernel constructs a `ToolExecutionContext` containing the 
 ```rust
 pub struct ToolExecutionContext {
     pub data_dir: PathBuf,      // agent's data directory
+    pub workspace_paths: Vec<PathBuf>,  // additional dirs beyond data_dir
     pub task_id: TaskID,
     pub agent_id: AgentID,
     pub trace_id: TraceID,
@@ -59,6 +60,7 @@ pub struct ToolExecutionContext {
     pub vault: Option<Arc<ProxyVault>>,
     pub hal: Option<Arc<HardwareAbstractionLayer>>,
     pub file_lock_registry: Option<Arc<FileLockRegistry>>,
+    pub cancellation_token: CancellationToken,  // fires on task cancel/timeout
 }
 ```
 
@@ -395,20 +397,6 @@ For `kill`, additional HAL-specific fields (e.g. `pid`) are required. Permission
 
 ---
 
-### `sys-monitor`
-
-Query current system resource usage (CPU, RAM, disk) via the HAL.
-
-| | |
-|---|---|
-| **Permission** | `hardware.system:r` |
-| **Network** | No |
-| **fs_write** | No |
-
-No required input fields. Returns a snapshot of CPU usage, memory usage, disk I/O, and load average.
-
----
-
 ### `hardware-info`
 
 Query static hardware information via the HAL.
@@ -524,6 +512,59 @@ Delete a named memory block.
 | **fs_write** | No |
 
 **Input:** `{ "label": "old-persona" }`
+
+---
+
+### Additional Tools (v3)
+
+The following tools were added in v3. Use `agent-manual` with `{"section": "tool-detail", "name": "<tool>"}` for full input schemas.
+
+#### File Operations
+
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `file-editor` | `fs.user_data:w` | Apply line-range edits (insert, replace, delete) to existing files |
+| `file-delete` | `fs.user_data:w` | Delete a file from the data directory |
+| `file-move` | `fs.user_data:w` | Move or rename a file within the data directory |
+| `file-diff` | `fs.user_data:r` | Compute unified diff between two files or between a file and a string |
+| `file-glob` | `fs.user_data:r` | Find files matching a glob pattern |
+| `file-grep` | `fs.user_data:r` | Search file contents by regex pattern |
+
+#### Memory & Procedural
+
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `memory-read` | `memory.semantic:r` | Read a specific memory entry by key |
+| `memory-delete` | `memory.semantic:w` | Delete a memory entry by key |
+| `memory-stats` | `memory.semantic:r` | Memory usage statistics (counts, sizes per tier) |
+| `episodic-list` | `memory.episodic:r` | List episodic memory entries for a task |
+| `procedure-create` | `memory.procedural:w` | Record a reusable step-by-step procedure |
+| `procedure-search` | `memory.procedural:r` | Search procedures by natural language query |
+| `procedure-list` | `memory.procedural:r` | List all recorded procedures |
+| `procedure-delete` | `memory.procedural:w` | Delete a procedure by ID |
+
+#### Network
+
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `web-fetch` | `network.outbound:x` | Fetch a web page and extract text content (HTML stripped) |
+
+#### Agent Coordination
+
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `agent-list` | `agent.registry:r` | List registered agents and their status |
+| `task-list` | `task.query:r` | List active and recent tasks |
+| `task-status` | `task.query:r` | Inspect status of a specific task by ID |
+
+#### Utilities
+
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `think` | (none) | Private scratchpad for reasoning — output is NOT shown to the user |
+| `datetime` | (none) | Get current date, time, timezone, and Unix timestamp |
+| `agent-manual` | (none) | Query structured AgentOS documentation |
+| `agent-self` | (none) | View own agent state: permissions, budget, tools, subscriptions |
 
 ---
 

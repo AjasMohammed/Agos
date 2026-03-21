@@ -33,12 +33,19 @@ fn syscall_number(name: &str) -> Option<i64> {
         "getrandom" => libc::SYS_getrandom,
         "futex" => libc::SYS_futex,
         "sched_yield" => libc::SYS_sched_yield,
+        "sched_getaffinity" => libc::SYS_sched_getaffinity,
         "madvise" => libc::SYS_madvise,
+        "mremap" => libc::SYS_mremap,
         "set_tid_address" => libc::SYS_set_tid_address,
         "set_robust_list" => libc::SYS_set_robust_list,
         "rseq" => libc::SYS_rseq,
         "prlimit64" => libc::SYS_prlimit64,
         "sigaltstack" => libc::SYS_sigaltstack,
+        "rt_sigreturn" => libc::SYS_rt_sigreturn,
+        "readv" => libc::SYS_readv,
+        "writev" => libc::SYS_writev,
+        "clock_getres" => libc::SYS_clock_getres,
+        "statx" => libc::SYS_statx,
         // Network
         "socket" => libc::SYS_socket,
         "connect" => libc::SYS_connect,
@@ -102,6 +109,22 @@ fn syscall_number(name: &str) -> Option<i64> {
         "eventfd2" => libc::SYS_eventfd2,
         "prctl" => libc::SYS_prctl,
         "execve" => libc::SYS_execve,
+        // Signals — required for Rust panic handler / libc abort()
+        "tgkill" => libc::SYS_tgkill,
+        "tkill" => libc::SYS_tkill,
+        "kill" => libc::SYS_kill,
+        // Buffered I/O — glibc fread/fwrite use positional variants
+        "pread64" => libc::SYS_pread64,
+        "pwrite64" => libc::SYS_pwrite64,
+        // Tokio signal driver / inter-thread communication
+        "socketpair" => libc::SYS_socketpair,
+        // Allocator / glibc system memory query
+        "sysinfo" => libc::SYS_sysinfo,
+        // Required by glibc NSS modules (libnss_myhostname.so from systemd).
+        // Any hostname/DNS resolution triggers NSS → dlopen(libnss_myhostname) →
+        // gethostname_malloc() → uname(). Without this, the module hard-asserts
+        // and aborts the child process.
+        "uname" => libc::SYS_uname,
         _ => return None,
     };
     Some(num)

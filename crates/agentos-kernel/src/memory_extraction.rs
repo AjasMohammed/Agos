@@ -380,9 +380,11 @@ mod tests {
         // `updated > 0` means detect_conflict returned MemoryOperation::Update,
         // which only happens when semantic similarity is between 0.85 and 0.95
         // (high enough to be related, not identical). This IS a conflict.
-        let mut report = ExtractionReport::default();
-        report.updated = 3;
-        report.added = 1;
+        let report = ExtractionReport {
+            added: 1,
+            updated: 3,
+            ..ExtractionReport::default()
+        };
         assert!(
             report.updated > 0,
             "updated > 0 signals conflict resolution, triggering SemanticMemoryConflict event"

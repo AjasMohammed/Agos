@@ -61,6 +61,7 @@ fn make_blocked_manifest() -> ToolManifest {
             max_memory_mb: 64,
             max_cpu_ms: 1000,
             syscalls: vec![],
+            weight: None,
         },
         executor: Default::default(),
     }
@@ -94,6 +95,7 @@ fn make_community_manifest_with_sig(pubkey_hex: &str, sig_hex: &str) -> ToolMani
             max_memory_mb: 64,
             max_cpu_ms: 1000,
             syscalls: vec![],
+            weight: None,
         },
         executor: Default::default(),
     }

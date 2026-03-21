@@ -1046,7 +1046,15 @@ impl Kernel {
         }
 
         let tool_runner = Arc::new(tool_runner);
-        let sandbox = Arc::new(SandboxExecutor::new(data_dir.clone()));
+        let sandbox = Arc::new(SandboxExecutor::new(
+            data_dir.clone(),
+            config.kernel.max_concurrent_sandbox_children,
+        ));
+        tracing::info!(
+            sandbox_policy = ?config.kernel.sandbox_policy,
+            max_concurrent_sandbox_children = config.kernel.max_concurrent_sandbox_children,
+            "Sandbox execution policy configured"
+        );
         let scheduler = Arc::new(TaskScheduler::with_state_store(
             config.kernel.max_concurrent_tasks,
             Some(state_store.clone()),
@@ -1326,7 +1334,7 @@ impl Kernel {
         roles: Vec<String>,
     ) -> Result<(), String> {
         match self
-            .cmd_connect_agent(name, provider, model, base_url, roles)
+            .cmd_connect_agent(name, provider, model, base_url, roles, false)
             .await
         {
             agentos_bus::KernelResponse::Success { .. } => Ok(()),
@@ -1596,9 +1604,12 @@ mod preflight_tests {
                 task_limits: Default::default(),
                 tool_calls: Default::default(),
                 tool_execution: Default::default(),
+                autonomous_mode: Default::default(),
                 health_port: 9091,
                 per_agent_rate_limit: 0,
                 events: Default::default(),
+                sandbox_policy: Default::default(),
+                max_concurrent_sandbox_children: 4,
             },
             secrets: SecretsSettings {
                 vault_path: vault_path.to_string(),
@@ -1622,6 +1633,7 @@ mod preflight_tests {
             ollama: OllamaSettings {
                 host: "http://localhost:11434".to_string(),
                 default_model: "test".to_string(),
+                request_timeout_secs: 300,
             },
             llm: LlmSettings::default(),
             memory: MemorySettings::default(),
@@ -1632,6 +1644,7 @@ mod preflight_tests {
                 min_free_disk_mb: min_free_mb,
                 check_db_writable: check_writable,
             },
+            logging: Default::default(),
         }
     }
 
@@ -1699,7 +1712,7 @@ mod preflight_tests {
         let is_root = std::process::Command::new("id")
             .arg("-u")
             .output()
-            .map_or(false, |o| String::from_utf8_lossy(&o.stdout).trim() == "0");
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "0");
         if is_root {
             return;
         }

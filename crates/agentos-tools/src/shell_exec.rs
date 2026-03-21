@@ -137,6 +137,19 @@ impl AgentTool for ShellExec {
             });
         };
 
+        // Truncate command preview to avoid logging secrets at debug level
+        let cmd_preview = if command.len() > 120 {
+            &command[..120]
+        } else {
+            command
+        };
+        tracing::debug!(
+            command_preview = cmd_preview,
+            timeout_secs,
+            allow_network,
+            "shell-exec: starting"
+        );
+
         // kill_on_drop ensures the sandboxed process is killed if the future
         // is dropped (e.g. when the cancellation branch fires in select!).
         cmd.kill_on_drop(true);
@@ -177,9 +190,27 @@ impl AgentTool for ShellExec {
             stderr.to_string()
         };
 
+        let exit_code = output.status.code().unwrap_or(-1);
+        if !output.status.success() {
+            // Truncate command to avoid leaking secrets (API keys, tokens in env vars)
+            let cmd_preview = if command.len() > 120 {
+                &command[..120]
+            } else {
+                command
+            };
+            tracing::warn!(
+                command_preview = cmd_preview,
+                exit_code,
+                stderr_bytes = output.stderr.len(),
+                "shell-exec: command exited with non-zero status"
+            );
+        } else {
+            tracing::debug!(exit_code, "shell-exec: completed");
+        }
+
         Ok(serde_json::json!({
             "command": command,
-            "exit_code": output.status.code().unwrap_or(-1),
+            "exit_code": exit_code,
             "stdout": stdout_display,
             "stderr": stderr_display,
             "success": output.status.success(),

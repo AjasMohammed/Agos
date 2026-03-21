@@ -293,6 +293,8 @@ impl AgentManualTool {
                 {"resource": "vault.secrets", "description": "Read secrets from the encrypted vault", "typical_ops": "r"},
                 {"resource": "hal.devices", "description": "Access hardware devices via HAL", "typical_ops": "r, x"},
                 {"resource": "audit.read", "description": "Read the audit log", "typical_ops": "r"},
+                {"resource": "memory.procedural", "description": "Read/write reusable step-by-step procedures", "typical_ops": "r, w"},
+                {"resource": "fs.workspace", "description": "Access workspace directories beyond data_dir (configured by operator)", "typical_ops": "r, w"},
             ],
             "deny_entries": "Deny rules take precedence over grants. Example: grant fs:/home/user/ but deny fs:/home/user/.ssh/ blocks SSH key access.",
             "path_prefix_matching": "Grants like fs:/home/user/ match all paths under that prefix. Partial segment matches are blocked (fs:/home/user does NOT match fs:/home/username).",
@@ -322,10 +324,10 @@ impl AgentManualTool {
                 },
                 {
                     "tier": "procedural",
-                    "description": "Reusable patterns and procedures extracted from successful task completions. Auto-populated by the consolidation engine.",
-                    "tools": ["Not directly writable by agents — populated by kernel extraction/consolidation"],
-                    "permission": "Read-only via retrieval gate at task start",
-                    "search": "Automatically queried by the kernel when starting a task. Relevant procedures injected into context."
+                    "description": "Reusable step-by-step procedures. Can be created by agents or auto-populated by the consolidation engine.",
+                    "tools": ["procedure-create", "procedure-search", "procedure-list", "procedure-delete"],
+                    "permission": "memory.procedural:rw",
+                    "search": "Use procedure-search with a natural language query. The kernel also auto-queries procedures when starting a task and injects relevant ones into context."
                 }
             ],
             "memory_blocks": {
@@ -356,7 +358,7 @@ impl AgentManualTool {
                 },
                 {
                     "category": "SecurityEvents",
-                    "events": ["PromptInjectionAttempt", "CapabilityViolation", "UnauthorizedToolAccess", "SecretsAccessAttempt", "SandboxEscapeAttempt", "AuditLogTamperAttempt", "AgentImpersonationAttempt", "UnverifiedToolInstalled"]
+                    "events": ["PromptInjectionAttempt", "CapabilityViolation", "UnauthorizedToolAccess", "SecretsAccessAttempt", "SandboxEscapeAttempt", "AuditLogTamperAttempt", "AuditChainTampered", "AgentImpersonationAttempt", "UnverifiedToolInstalled"]
                 },
                 {
                     "category": "MemoryEvents",
@@ -426,36 +428,65 @@ impl AgentManualTool {
                         {"name": "memory-block-list", "description": "List all named memory blocks", "tool": "memory-block-list", "kernel_only": false},
                         {"name": "memory-block-delete", "description": "Delete a named memory block by key", "tool": "memory-block-delete", "kernel_only": false},
                         {"name": "archival-insert", "description": "Insert a large document into archival memory", "tool": "archival-insert", "kernel_only": false},
-                        {"name": "archival-search", "description": "Search archival memory by query", "tool": "archival-search", "kernel_only": false}
+                        {"name": "archival-search", "description": "Search archival memory by query", "tool": "archival-search", "kernel_only": false},
+                        {"name": "memory-read", "description": "Read a specific memory entry by key", "tool": "memory-read", "kernel_only": false},
+                        {"name": "memory-delete", "description": "Delete a memory entry by key", "tool": "memory-delete", "kernel_only": false},
+                        {"name": "memory-stats", "description": "Get memory usage statistics (counts, sizes per tier)", "tool": "memory-stats", "kernel_only": false},
+                        {"name": "episodic-list", "description": "List episodic memory entries for a task", "tool": "episodic-list", "kernel_only": false}
                     ]
                 },
                 {
                     "domain": "File System",
                     "commands": [
                         {"name": "file-reader", "description": "Read files, list directories, with pagination", "tool": "file-reader", "kernel_only": false},
-                        {"name": "file-writer", "description": "Write files with create_only/overwrite modes and size guards", "tool": "file-writer", "kernel_only": false}
+                        {"name": "file-writer", "description": "Write files with create_only/overwrite modes and size guards", "tool": "file-writer", "kernel_only": false},
+                        {"name": "file-editor", "description": "Apply line-range edits (insert, replace, delete) to existing files", "tool": "file-editor", "kernel_only": false},
+                        {"name": "file-delete", "description": "Delete a file from the data directory", "tool": "file-delete", "kernel_only": false},
+                        {"name": "file-move", "description": "Move or rename a file within the data directory", "tool": "file-move", "kernel_only": false},
+                        {"name": "file-diff", "description": "Compute unified diff between two files or between file and string", "tool": "file-diff", "kernel_only": false},
+                        {"name": "file-glob", "description": "Find files matching a glob pattern in the data directory", "tool": "file-glob", "kernel_only": false},
+                        {"name": "file-grep", "description": "Search file contents by regex pattern", "tool": "file-grep", "kernel_only": false}
                     ]
                 },
                 {
                     "domain": "Network",
                     "commands": [
-                        {"name": "http-client", "description": "HTTP requests with secret injection and SSRF protection", "tool": "http-client", "kernel_only": false}
+                        {"name": "http-client", "description": "HTTP requests with secret injection and SSRF protection", "tool": "http-client", "kernel_only": false},
+                        {"name": "web-fetch", "description": "Fetch a web page and extract text content (HTML stripped)", "tool": "web-fetch", "kernel_only": false}
                     ]
                 },
                 {
                     "domain": "System",
                     "commands": [
-                        {"name": "shell-exec", "description": "Execute shell commands with timeout", "tool": "shell-exec", "kernel_only": false},
-                        {"name": "sys-monitor", "description": "Get CPU, memory, disk stats", "tool": "sys-monitor", "kernel_only": false},
+                        {"name": "shell-exec", "description": "Execute shell commands in bwrap sandbox with timeout", "tool": "shell-exec", "kernel_only": false},
                         {"name": "process-manager", "description": "List/kill processes", "tool": "process-manager", "kernel_only": false},
                         {"name": "network-monitor", "description": "Network interface stats", "tool": "network-monitor", "kernel_only": false},
-                        {"name": "hardware-info", "description": "Hardware and HAL device info", "tool": "hardware-info", "kernel_only": false}
+                        {"name": "hardware-info", "description": "Hardware and HAL device info (CPU, memory, disk, GPU)", "tool": "hardware-info", "kernel_only": false},
+                        {"name": "log-reader", "description": "Read kernel and system log entries with filtering", "tool": "log-reader", "kernel_only": false}
                     ]
                 },
                 {
-                    "domain": "Data",
+                    "domain": "Data & Utilities",
                     "commands": [
-                        {"name": "data-parser", "description": "Parse JSON, CSV, TOML, YAML data", "tool": "data-parser", "kernel_only": false}
+                        {"name": "data-parser", "description": "Parse JSON, CSV, TOML, YAML data", "tool": "data-parser", "kernel_only": false},
+                        {"name": "think", "description": "Private scratchpad for reasoning — output is NOT shown to the user", "tool": "think", "kernel_only": false},
+                        {"name": "datetime", "description": "Get current date, time, timezone, and Unix timestamp", "tool": "datetime", "kernel_only": false}
+                    ]
+                },
+                {
+                    "domain": "Procedural Memory",
+                    "commands": [
+                        {"name": "procedure-create", "description": "Record a reusable step-by-step procedure", "tool": "procedure-create", "kernel_only": false},
+                        {"name": "procedure-search", "description": "Search procedures by natural language query", "tool": "procedure-search", "kernel_only": false},
+                        {"name": "procedure-list", "description": "List all recorded procedures", "tool": "procedure-list", "kernel_only": false},
+                        {"name": "procedure-delete", "description": "Delete a procedure by ID", "tool": "procedure-delete", "kernel_only": false}
+                    ]
+                },
+                {
+                    "domain": "Agent Introspection",
+                    "commands": [
+                        {"name": "agent-manual", "description": "Query structured AgentOS documentation (this tool)", "tool": "agent-manual", "kernel_only": false},
+                        {"name": "agent-self", "description": "View own agent state: permissions, budget, tools, subscriptions", "tool": "agent-self", "kernel_only": false}
                     ]
                 },
                 {
@@ -545,6 +576,24 @@ impl AgentManualTool {
                     "pattern": "Budget check: HardLimit",
                     "cause": "The agent's token or cost budget has been exceeded.",
                     "recovery": "Complete the current task with available context. Model may be auto-downgraded."
+                },
+                {
+                    "error": "BudgetExceeded",
+                    "pattern": "Budget exceeded for agent {agent_id}: {detail}",
+                    "cause": "The agent hit its budget limit and the task was killed.",
+                    "recovery": "The task cannot continue. Break future work into smaller tasks with lower token usage."
+                },
+                {
+                    "error": "RateLimited",
+                    "pattern": "Rate limited: {detail}",
+                    "cause": "Too many requests in a short period. The kernel's rate limiter is enforcing a cooldown.",
+                    "recovery": "Wait before retrying. The cooldown period is included in the error detail."
+                },
+                {
+                    "error": "ToolCancelled",
+                    "pattern": "Tool execution cancelled",
+                    "cause": "The tool was cancelled because the parent task was cancelled or timed out.",
+                    "recovery": "This is expected when a task is externally cancelled. No action needed."
                 }
             ]
         }))
@@ -580,11 +629,15 @@ impl AgentManualTool {
         Ok(serde_json::json!({
             "section": "tasks",
             "title": "Task Lifecycle",
-            "summary": "Task states, introspection tools, and how to interpret results.",
+            "summary": "Task states, introspection tools, autonomous mode, and how to interpret results.",
             "subsections": [
                 {
                     "title": "Task States",
-                    "content": "queued → running → complete | failed | cancelled. A task starts as 'queued' when created. It becomes 'running' when an agent picks it up. Terminal states are 'complete', 'failed', and 'cancelled'. 'waiting' means the task is paused waiting for a sub-agent or tool."
+                    "content": "queued → running → complete | failed | cancelled | suspended. A task starts as 'queued' when created. It becomes 'running' when an agent picks it up. Terminal states are 'complete', 'failed', and 'cancelled'. 'waiting' means the task is paused waiting for a sub-agent or tool. 'suspended' means the task was paused by the kernel due to budget exhaustion — it can be resumed when budget is restored."
+                },
+                {
+                    "title": "Autonomous Mode",
+                    "content": "Tasks can run without iteration or timeout limits by setting autonomous=true. In autonomous mode: iteration cap becomes 10,000 (vs 1,000 for high-complexity normal tasks), task timeout extends to 24 hours (vs 1 hour), per-tool timeout extends to 10 minutes (vs 5 minutes), and max parallel tool calls per turn increases to 10. Child tasks delegated by an autonomous task automatically inherit autonomous=true so sub-agents are not artificially capped. Use autonomous mode for long-running workflows: deep codebase refactors, multi-file analysis, extended research, or any task that must run to natural completion. From the CLI: agentctl task run --autonomous \"<prompt>\". Limits are configurable via [kernel.autonomous_mode] in config."
                 },
                 {
                     "title": "Inspect a Task",
@@ -596,7 +649,7 @@ impl AgentManualTool {
                 },
                 {
                     "title": "Best Practices",
-                    "content": "After delegating, store the returned task ID in episodic memory or a memory block. Poll 'task-status' to detect completion. Use 'memory-search' or 'file-reader' to retrieve detailed results written by the delegated task."
+                    "content": "After delegating, store the returned task ID in episodic memory or a memory block. Poll 'task-status' to detect completion. Use 'memory-search' or 'file-reader' to retrieve detailed results written by the delegated task. For long multi-step workflows, set autonomous=true so iteration and timeout limits do not cut the work short mid-way."
                 }
             ]
         }))

@@ -44,6 +44,8 @@ impl AgentTool for FileMove {
             AgentOSError::SchemaValidation("file-move requires 'to' field".into())
         })?;
 
+        tracing::debug!(from = from_str, to = to_str, "file-move: starting");
+
         let canonical_data_dir =
             context
                 .data_dir

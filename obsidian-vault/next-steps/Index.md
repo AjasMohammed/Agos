@@ -128,6 +128,9 @@ graph TD
 | 46 | [[30-Network Tool Hardening\|Network tool hardening: redirect control, SSE streaming, network-monitor manifest, multipart upload, download-to-file (5 subtasks)]] | ~4h | **Complete** |
 | 47 | [[30-Pure Agentic Workflow Compatibility\|Pure agentic workflow: 9 hidden manifests, 7 new tools (think, datetime, web-fetch, file-diff, agent-list, task-status, task-list), 3 new agent-manual sections (7 subtasks)]] | ~5d | **Complete** |
 | 48 | [[31-Agentic Readiness Fixes\|Agentic readiness fixes: 25 subtasks across 5 phases — autonomy (iterations, parallel tools, schemas, OpenAI), reliability (persistence, async mutex, output limits), security (pubkey, pipeline injection, vault rotation, audit chain), ergonomics (types, events, introspection), polish (scanner, workspace, backoff, cancellation)]] | ~6w | **Critical** |
+| 49 | [[32-Logging Observability\|Logging & observability: #[instrument] spans, tools logging, silent failure elimination, JSON output + correlation IDs (4 phases)]] | ~5d | **High** |
+| 50 | [[33-Sandbox Lightweight Execution\|Sandbox lightweight execution: single-tool factory, lazy sandbox init, per-category RLIMIT_AS, tool weight classification (4 phases)]] | ~10d | **Critical** |
+| 51 | [[34-Sandbox Execution Policy\|Sandbox execution policy: trust-aware dispatch (Core=in-process, Community=sandboxed), concurrency semaphore, RAYON_NUM_THREADS=1, execution mode audit (4 phases, 4 subtasks)]] | ~5d | **Critical** |
 
 ---
 

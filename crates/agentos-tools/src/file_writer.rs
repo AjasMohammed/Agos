@@ -86,6 +86,13 @@ impl AgentTool for FileWriter {
             });
         }
 
+        tracing::debug!(
+            path = path_str,
+            mode = mode.as_str(),
+            bytes = content_bytes,
+            "file-writer: starting"
+        );
+
         // SECURITY: resolve path, checking workspace paths before falling back to data_dir.
         let resolved =
             crate::traits::resolve_tool_path(path_str, &context.data_dir, &context.workspace_paths);
@@ -106,6 +113,7 @@ impl AgentTool for FileWriter {
             .iter()
             .any(|wp| normalized.starts_with(wp));
         if !normalized.starts_with(&canonical_data_dir) && !in_workspace {
+            tracing::warn!(path = path_str, "file-writer: path traversal blocked");
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
                 operation: format!("Path traversal denied: {}", path_str),
@@ -210,6 +218,13 @@ impl AgentTool for FileWriter {
                 atomic_write(&final_path, content).await?;
             }
         }
+
+        tracing::debug!(
+            path = path_str,
+            bytes_written = content_bytes,
+            mode = mode.as_str(),
+            "file-writer: complete"
+        );
 
         Ok(serde_json::json!({
             "path": path_str,

@@ -6,6 +6,7 @@ pub mod escalation;
 pub mod event;
 pub mod hal;
 pub mod identity;
+pub mod log;
 pub mod permission;
 pub mod pipeline;
 pub mod resource;

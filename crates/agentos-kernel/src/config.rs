@@ -1,4 +1,25 @@
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+
 use serde::{Deserialize, Serialize};
+
+/// Controls when tools are executed in a sandbox child process vs in-process.
+///
+/// - `TrustAware` (default): Core-tier tools run in-process (shared memory stores,
+///   zero fork overhead); Community/Verified tools run sandboxed with seccomp+rlimits.
+/// - `Always`: Every sandbox-eligible tool runs in a child process (legacy behavior).
+/// - `Never`: No sandboxing — development/testing only, **not production-safe**.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxPolicy {
+    /// Core tools in-process, Community/Verified tools sandboxed.
+    #[default]
+    TrustAware,
+    /// All sandbox-eligible tools run in sandbox children.
+    Always,
+    /// No sandboxing at all (development only).
+    Never,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct KernelConfig {
@@ -22,6 +43,8 @@ pub struct KernelConfig {
     pub health_monitor: HealthMonitorConfig,
     #[serde(default)]
     pub preflight: PreflightConfig,
+    #[serde(default)]
+    pub logging: LoggingSettings,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -49,6 +72,11 @@ pub struct KernelSettings {
     pub tool_calls: ToolCallSettings,
     #[serde(default)]
     pub tool_execution: ToolExecutionConfig,
+    /// Limits applied when a task runs in autonomous mode (`task.autonomous = true`).
+    /// These replace the normal per-complexity caps so long-running agents can
+    /// work to natural completion without hitting artificial ceilings.
+    #[serde(default)]
+    pub autonomous_mode: AutonomousModeConfig,
     #[serde(default = "default_health_port")]
     pub health_port: u16,
     /// Maximum commands per second per agent (across all connections). 0 = unlimited.
@@ -57,6 +85,14 @@ pub struct KernelSettings {
     /// Event broadcast channel configuration.
     #[serde(default)]
     pub events: EventChannelConfig,
+    /// Controls when tools are executed in sandbox child processes vs in-process.
+    #[serde(default)]
+    pub sandbox_policy: SandboxPolicy,
+    /// Maximum concurrent sandbox child processes. Prevents thread/process
+    /// exhaustion when multiple Community/Verified tools run in parallel.
+    /// Default: number of logical CPUs (minimum 2).
+    #[serde(default = "default_max_concurrent_sandbox_children")]
+    pub max_concurrent_sandbox_children: usize,
 }
 
 /// Per-tool output and runtime limits applied at context injection time.
@@ -166,19 +202,76 @@ fn default_state_db_path() -> String {
 }
 
 fn default_max_iterations_low() -> u32 {
-    10
+    50
 }
 
 fn default_max_iterations_medium() -> u32 {
-    25
+    200
 }
 
 fn default_max_iterations_high() -> u32 {
-    50
+    1000
+}
+
+/// Configuration for tasks running in autonomous mode.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AutonomousModeConfig {
+    /// Maximum iterations before the agent loop terminates.
+    /// Default: 10000 — high enough to be effectively unlimited for any
+    /// real-world long-running workflow.
+    #[serde(default = "default_autonomous_max_iterations")]
+    pub max_iterations: u32,
+    /// Wall-clock timeout for the entire task, in seconds.
+    /// Default: 86400 (24 hours).
+    #[serde(default = "default_autonomous_task_timeout_secs")]
+    pub task_timeout_secs: u64,
+    /// Per-tool timeout for in-process tool calls, in seconds.
+    /// Default: 600 (10 minutes) — covers long-running tools like compilers,
+    /// test runners, and data-processing pipelines.
+    #[serde(default = "default_autonomous_tool_timeout_seconds")]
+    pub tool_timeout_seconds: u64,
+    /// Maximum parallel tool calls per turn for autonomous tasks.
+    /// Default: 10.
+    #[serde(default = "default_autonomous_max_parallel")]
+    pub max_parallel_tool_calls: usize,
+}
+
+impl Default for AutonomousModeConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: default_autonomous_max_iterations(),
+            task_timeout_secs: default_autonomous_task_timeout_secs(),
+            tool_timeout_seconds: default_autonomous_tool_timeout_seconds(),
+            max_parallel_tool_calls: default_autonomous_max_parallel(),
+        }
+    }
+}
+
+fn default_autonomous_max_iterations() -> u32 {
+    10_000
+}
+
+fn default_autonomous_task_timeout_secs() -> u64 {
+    86_400 // 24 hours
+}
+
+fn default_autonomous_tool_timeout_seconds() -> u64 {
+    600 // 10 minutes
+}
+
+fn default_autonomous_max_parallel() -> usize {
+    10
 }
 
 fn default_per_agent_rate_limit() -> u32 {
     100
+}
+
+fn default_max_concurrent_sandbox_children() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(2)
 }
 
 fn default_allow_parallel_tool_calls() -> bool {
@@ -258,6 +351,14 @@ pub struct TlsSettings {
 pub struct OllamaSettings {
     pub host: String,
     pub default_model: String,
+    /// HTTP request timeout for Ollama inference calls, in seconds.
+    /// Cloud-proxied and large models may need 300–600s. Default: 300.
+    #[serde(default = "default_ollama_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+}
+
+fn default_ollama_request_timeout_secs() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -398,6 +499,42 @@ impl Default for HealthThresholds {
     }
 }
 
+/// File-based logging configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LoggingSettings {
+    /// Directory for rolling log files. Empty string disables file logging.
+    #[serde(default = "default_log_dir")]
+    pub log_dir: String,
+    /// Minimum log level: trace | debug | info | warn | error
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+    /// Output format: "text" (human-readable) or "json" (structured, for log aggregators).
+    #[serde(default = "default_log_format")]
+    pub log_format: String,
+}
+
+fn default_log_dir() -> String {
+    "/tmp/agentos/logs".to_string()
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn default_log_format() -> String {
+    "text".to_string()
+}
+
+impl Default for LoggingSettings {
+    fn default() -> Self {
+        Self {
+            log_dir: default_log_dir(),
+            log_level: default_log_level(),
+            log_format: default_log_format(),
+        }
+    }
+}
+
 /// Load kernel configuration from a TOML file.
 pub fn load_config(path: &std::path::Path) -> Result<KernelConfig, anyhow::Error> {
     let content = std::fs::read_to_string(path)?;
@@ -407,6 +544,8 @@ pub fn load_config(path: &std::path::Path) -> Result<KernelConfig, anyhow::Error
     validate_event_channel(&config.kernel.events)?;
     validate_llm_settings(&config.llm)?;
     validate_workspace_paths(&config.tools.workspace)?;
+    validate_logging_settings(&config.logging)?;
+    validate_sandbox_settings(&config.kernel)?;
     config
         .context_budget
         .validate()
@@ -497,6 +636,32 @@ fn validate_event_channel(cfg: &EventChannelConfig) -> Result<(), anyhow::Error>
     Ok(())
 }
 
+fn validate_logging_settings(logging: &LoggingSettings) -> Result<(), anyhow::Error> {
+    if !["text", "json"].contains(&logging.log_format.as_str()) {
+        anyhow::bail!(
+            "logging.log_format must be \"text\" or \"json\", got \"{}\"",
+            logging.log_format
+        );
+    }
+    Ok(())
+}
+
+fn validate_sandbox_settings(kernel: &KernelSettings) -> Result<(), anyhow::Error> {
+    if kernel.max_concurrent_sandbox_children == 0 {
+        anyhow::bail!(
+            "kernel.max_concurrent_sandbox_children must be > 0 (got 0); \
+             at least one sandbox child slot is required"
+        );
+    }
+    if kernel.sandbox_policy == SandboxPolicy::Never {
+        tracing::warn!(
+            "kernel.sandbox_policy is set to 'never' — all tools run unsandboxed. \
+             This is NOT safe for production. Use 'trust_aware' or 'always' instead."
+        );
+    }
+    Ok(())
+}
+
 fn apply_env_overrides(config: &mut KernelConfig) {
     if let Ok(host) = std::env::var("AGENTOS_OLLAMA_HOST") {
         if !host.trim().is_empty() {
@@ -535,6 +700,15 @@ fn apply_env_overrides(config: &mut KernelConfig) {
     }
 }
 
+/// Tracks which (config_key, path) pairs have already been warned about
+/// so that repeated `load_config()` calls within the same process don't
+/// flood the log with identical warnings.
+static WARNED_TMP_PATHS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn warned_paths() -> &'static Mutex<HashSet<String>> {
+    WARNED_TMP_PATHS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
 fn warn_on_tmp_paths(config: &KernelConfig) {
     let runtime_paths = [
         ("secrets.vault_path", config.secrets.vault_path.as_str()),
@@ -545,13 +719,20 @@ fn warn_on_tmp_paths(config: &KernelConfig) {
         ("bus.socket_path", config.bus.socket_path.as_str()),
     ];
 
+    let warned = warned_paths();
+
     for (name, path) in runtime_paths {
         if is_tmp_path(path) {
-            tracing::warn!(
-                config_key = %name,
-                path = %path,
-                "Runtime path points to a temporary location; use persistent storage in production"
-            );
+            let key = format!("{}:{}", name, path);
+            let already_warned = warned.lock().unwrap().contains(&key);
+            if !already_warned {
+                tracing::warn!(
+                    config_key = %name,
+                    path = %path,
+                    "Runtime path points to a temporary location; use persistent storage in production"
+                );
+                warned.lock().unwrap().insert(key);
+            }
         }
     }
 
@@ -559,20 +740,30 @@ fn warn_on_tmp_paths(config: &KernelConfig) {
     // their safety from tools.data_dir, which is already checked above.
     let model_cache = config.memory.model_cache_dir.as_str();
     if std::path::Path::new(model_cache).is_absolute() && is_tmp_path(model_cache) {
-        tracing::warn!(
-            config_key = "memory.model_cache_dir",
-            path = %model_cache,
-            "Runtime path points to a temporary location; use persistent storage in production"
-        );
+        let key = format!("memory.model_cache_dir:{}", model_cache);
+        let already_warned = warned.lock().unwrap().contains(&key);
+        if !already_warned {
+            tracing::warn!(
+                config_key = "memory.model_cache_dir",
+                path = %model_cache,
+                "Runtime path points to a temporary location; use persistent storage in production"
+            );
+            warned.lock().unwrap().insert(key);
+        }
     }
 
     let state_db_path = config.kernel.state_db_path.as_str();
     if std::path::Path::new(state_db_path).is_absolute() && is_tmp_path(state_db_path) {
-        tracing::warn!(
-            config_key = "kernel.state_db_path",
-            path = %state_db_path,
-            "Runtime path points to a temporary location; use persistent storage in production"
-        );
+        let key = format!("kernel.state_db_path:{}", state_db_path);
+        let already_warned = warned.lock().unwrap().contains(&key);
+        if !already_warned {
+            tracing::warn!(
+                config_key = "kernel.state_db_path",
+                path = %state_db_path,
+                "Runtime path points to a temporary location; use persistent storage in production"
+            );
+            warned.lock().unwrap().insert(key);
+        }
     }
 }
 
@@ -616,9 +807,9 @@ default_model = "llama3.2"
         )
         .expect("config should parse");
 
-        assert_eq!(config.kernel.task_limits.max_iterations_low, 10);
-        assert_eq!(config.kernel.task_limits.max_iterations_medium, 25);
-        assert_eq!(config.kernel.task_limits.max_iterations_high, 50);
+        assert_eq!(config.kernel.task_limits.max_iterations_low, 50);
+        assert_eq!(config.kernel.task_limits.max_iterations_medium, 200);
+        assert_eq!(config.kernel.task_limits.max_iterations_high, 1000);
         assert_eq!(config.kernel.state_db_path, "data/kernel_state.db");
     }
 
@@ -774,6 +965,54 @@ default_model = "llama3.2"
             err.to_string()
                 .contains("llm.ollama_context_window must be > 0"),
             "expected context_window error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sandbox_policy_defaults_to_trust_aware() {
+        let config: KernelConfig = toml::from_str(MINIMAL_TOML).expect("should parse");
+        assert_eq!(config.kernel.sandbox_policy, SandboxPolicy::TrustAware);
+    }
+
+    #[test]
+    fn sandbox_policy_parses_always() {
+        let toml_str = MINIMAL_TOML.replace(
+            "context_window_token_budget = 8000",
+            "context_window_token_budget = 8000\nsandbox_policy = \"always\"",
+        );
+        let config: KernelConfig = toml::from_str(&toml_str).expect("should parse");
+        assert_eq!(config.kernel.sandbox_policy, SandboxPolicy::Always);
+    }
+
+    #[test]
+    fn sandbox_policy_parses_never() {
+        let toml_str = MINIMAL_TOML.replace(
+            "context_window_token_budget = 8000",
+            "context_window_token_budget = 8000\nsandbox_policy = \"never\"",
+        );
+        let config: KernelConfig = toml::from_str(&toml_str).expect("should parse");
+        assert_eq!(config.kernel.sandbox_policy, SandboxPolicy::Never);
+    }
+
+    #[test]
+    fn max_concurrent_sandbox_children_defaults_nonzero() {
+        let config: KernelConfig = toml::from_str(MINIMAL_TOML).expect("should parse");
+        assert!(config.kernel.max_concurrent_sandbox_children >= 2);
+    }
+
+    #[test]
+    fn max_concurrent_sandbox_children_rejects_zero() {
+        let toml_str = MINIMAL_TOML.replace(
+            "context_window_token_budget = 8000",
+            "context_window_token_budget = 8000\nmax_concurrent_sandbox_children = 0",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, toml_str).unwrap();
+        let err = load_config(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("must be > 0"),
+            "expected concurrency error, got: {err}"
         );
     }
 }

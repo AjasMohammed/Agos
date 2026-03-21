@@ -32,10 +32,86 @@ Core kernel operational limits.
 | Key | Type | Dev Default | Prod Default | Description |
 |---|---|---|---|---|
 | `max_concurrent_tasks` | integer | `4` | `8` | Maximum number of tasks running concurrently in the scheduler |
-| `default_task_timeout_secs` | integer | `60` | `120` | Seconds before a running task is timed out if it has not completed |
-| `context_window_max_entries` | integer | `100` | `200` | Maximum number of entries retained in a task's context window |
-| `context_window_token_budget` | integer | `8000` | `16000` | Token budget for a single context window before eviction |
+| `default_task_timeout_secs` | integer | `3600` | `3600` | Seconds before a running task is timed out if it has not completed |
+| `context_window_max_entries` | integer | `500` | `500` | Maximum number of entries retained in a task's context window |
+| `context_window_token_budget` | integer | `32000` | `32000` | Token budget for a single context window before eviction |
 | `health_port` | integer | _(absent)_ | `9091` | HTTP port for the health check endpoint (production only) |
+| `state_db_path` | string | `/tmp/agentos/data/kernel_state.db` | `/var/lib/agentos/data/kernel_state.db` | SQLite DB for persisted runtime state (tasks, escalations, cost snapshots) |
+
+---
+
+## `[kernel.task_limits]`
+
+Per-task iteration caps by complexity tier. Apply to normal (non-autonomous) tasks only.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `max_iterations_low` | integer | `50` | Max LLM inference iterations for low-complexity tasks |
+| `max_iterations_medium` | integer | `200` | Max iterations for medium-complexity tasks |
+| `max_iterations_high` | integer | `1000` | Max iterations for high-complexity tasks (must be > 0) |
+
+Validation: `low <= medium <= high` and `high > 0`. At runtime, the actual limit is `max(resolved_limit, 1)`.
+
+Autonomous tasks ignore these limits entirely — see `[kernel.autonomous_mode]` below.
+
+---
+
+## `[kernel.tool_calls]`
+
+Parallel tool execution configuration for normal (non-autonomous) tasks.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `allow_parallel` | bool | `true` | Allow agents to issue multiple tool calls per LLM turn |
+| `max_parallel` | integer | `10` | Maximum concurrent tool calls per turn |
+
+Autonomous tasks use `[kernel.autonomous_mode].max_parallel_tool_calls` instead.
+
+---
+
+## `[kernel.events]`
+
+Event dispatch channel configuration.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `channel_capacity` | integer | `1024` | Capacity of the internal event broadcast channel. Events dropped when full (with warning logged). Must be > 0. |
+
+---
+
+## `[kernel.tool_execution]`
+
+Tool output and timeout limits for normal (non-autonomous) tasks.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `max_output_bytes` | integer | `262144` (256 KiB) | Maximum serialized bytes for a single tool's output. Truncated with marker if exceeded. Applies to all tasks including autonomous. |
+| `default_timeout_seconds` | integer | `300` | Timeout for in-process (non-sandboxed) tool calls. Sandboxed tools use their manifest's `sandbox.max_cpu_ms`. Autonomous tasks use `[kernel.autonomous_mode].tool_timeout_seconds` instead. |
+
+---
+
+## `[kernel.autonomous_mode]`
+
+Limits applied when a task is submitted with `autonomous=true`. These replace the complexity-based iteration caps so long-running agents can work to natural completion without hitting artificial ceilings.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `max_iterations` | integer | `10000` | Maximum LLM inference iterations before the task loop terminates |
+| `task_timeout_secs` | integer | `86400` (24 hours) | Wall-clock timeout for the entire task |
+| `tool_timeout_seconds` | integer | `600` (10 minutes) | Timeout for in-process tool calls within autonomous tasks |
+| `max_parallel_tool_calls` | integer | `10` | Maximum concurrent tool calls per LLM turn for autonomous tasks |
+
+**Example:**
+
+```toml
+[kernel.autonomous_mode]
+max_iterations = 10000
+task_timeout_secs = 86400
+tool_timeout_seconds = 600
+max_parallel_tool_calls = 10
+```
+
+> **Note:** Child tasks delegated by an autonomous parent automatically inherit `autonomous=true`, so sub-agents in an orchestrated workflow are not capped by the normal tier limits.
 
 ---
 
@@ -59,6 +135,7 @@ Audit log database settings.
 |---|---|---|---|---|
 | `log_path` | string | `/tmp/agentos/data/audit.db` | `/var/lib/agentos/data/audit.db` | Path to the append-only SQLite audit log database |
 | `max_audit_entries` | integer | `0` | `500000` | Maximum rows to retain (0 = unlimited). Older rows are pruned on each 10-minute sweep. |
+| `verify_last_n_entries` | integer | `1000` | `1000` | Number of recent entries to verify hash chain integrity at startup (0 = full chain verification, may be slow for large logs) |
 
 ---
 
@@ -71,6 +148,16 @@ Tool loading paths and data directory.
 | `core_tools_dir` | string | `/tmp/agentos/tools/core` | `/var/lib/agentos/tools/core` | Directory containing distribution-provided core tool manifests |
 | `user_tools_dir` | string | `/tmp/agentos/tools/user` | `/var/lib/agentos/tools/user` | Directory for user-installed tool manifests |
 | `data_dir` | string | `/tmp/agentos/data` | `/var/lib/agentos/data` | General data directory used by tools and the kernel |
+
+---
+
+## `[tools.workspace]`
+
+Additional directories agents can access beyond `data_dir`. Validated at startup.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `allowed_paths` | array of strings | `[]` | Absolute paths to project or shared directories. System roots (`/`, `/etc`, `/var`, `/root`, `/home`) are rejected. Each path must have at least one subdirectory component. |
 
 ---
 
@@ -105,6 +192,8 @@ Remote LLM provider base URLs.
 | `openai_base_url` | string | `https://api.openai.com/v1` | `https://api.openai.com/v1` | OpenAI API base URL. Override with `AGENTOS_OPENAI_BASE_URL`. |
 | `anthropic_base_url` | string | `https://api.anthropic.com/v1` | `https://api.anthropic.com/v1` | Anthropic API base URL. |
 | `gemini_base_url` | string | `https://generativelanguage.googleapis.com/v1beta` | `https://generativelanguage.googleapis.com/v1beta` | Google Gemini API base URL. |
+| `max_tokens` | integer | `8192` | `8192` | Maximum output tokens for Anthropic requests. Claude 3 supports up to 8192, Claude 3.5 up to 16384. |
+| `ollama_context_window` | integer | `32768` | `32768` | Context window size passed to Ollama as `num_ctx`. Set to match your model's actual context size. |
 
 ---
 
@@ -160,6 +249,9 @@ All `_pct` values are fractions of `total_tokens`. They do not need to sum to 1.
 | `knowledge_pct` | float | `0.30` | Fraction allocated to memory / knowledge entries |
 | `history_pct` | float | `0.25` | Fraction allocated to conversation history entries |
 | `task_pct` | float | `0.12` | Fraction allocated to task-specific context entries |
+| `chars_per_token` | float | `4.0` | Characters-per-token ratio for token estimation. Default 4.0 is accurate for English/Latin text. Use 1.5–2.0 for CJK workloads. Clamped to [0.5, 16.0]. |
+
+Validation: all `_pct` values must be >= 0.0, sum must be <= 1.001, `reserve_pct` must be in [0.0, 0.5], `chars_per_token` must be in [0.5, 16.0].
 
 ---
 
@@ -186,88 +278,7 @@ System health monitoring thresholds (development config).
 
 ## Complete `config/default.toml`
 
-```toml
-[kernel]
-# Development defaults. Use config/production.toml for deployment.
-max_concurrent_tasks = 4
-default_task_timeout_secs = 60
-context_window_max_entries = 100
-context_window_token_budget = 8000
-
-[secrets]
-# Development default path (ephemeral on many systems).
-# WARNING: /tmp is world-listable. For production use a private path such as
-# ~/.agentos/vault/secrets.db or $XDG_DATA_HOME/agentos/vault/secrets.db.
-# The kernel creates parent directories with 0o700 permissions at startup.
-vault_path = "/tmp/agentos/vault/secrets.db"
-
-[audit]
-# Development default path (ephemeral on many systems).
-log_path = "/tmp/agentos/data/audit.db"
-# Maximum rows to retain (0 = unlimited). Older rows are pruned on each 10-minute sweep.
-max_audit_entries = 0
-
-[tools]
-# Development default paths (ephemeral on many systems).
-core_tools_dir = "/tmp/agentos/tools/core"
-user_tools_dir = "/tmp/agentos/tools/user"
-data_dir = "/tmp/agentos/data"
-
-[bus]
-# Development default socket path.
-socket_path = "/tmp/agentos/agentos.sock"
-
-[ollama]
-# Development default host. Override with AGENTOS_OLLAMA_HOST or production config.
-host = "http://localhost:11434"
-default_model = "llama3.2"
-
-[llm]
-# Optional custom/OpenAI-compatible provider endpoint.
-# For production, set AGENTOS_LLM_URL or configure this in config/production.toml.
-# custom_base_url = "https://llm-gateway.example.com/v1"
-# Optional OpenAI base URL override (for gateways/proxies).
-openai_base_url = "https://api.openai.com/v1"
-# Reserved for provider endpoint documentation parity.
-anthropic_base_url = "https://api.anthropic.com/v1"
-gemini_base_url = "https://generativelanguage.googleapis.com/v1beta"
-
-[memory]
-model_cache_dir = "models"
-
-[memory.extraction]
-enabled = true
-conflict_threshold = 0.85
-max_facts_per_result = 5
-min_result_length = 50
-
-[memory.consolidation]
-enabled = true
-min_pattern_occurrences = 3
-task_completions_trigger = 100
-time_trigger_hours = 24
-max_episodes_per_cycle = 500
-
-[context_budget]
-total_tokens = 128000
-reserve_pct = 0.25
-system_pct = 0.15
-tools_pct = 0.18
-knowledge_pct = 0.30
-history_pct = 0.25
-task_pct = 0.12
-
-[health_monitor]
-enabled = true
-check_interval_secs = 30
-
-[health_monitor.thresholds]
-cpu_warning_percent = 85.0
-memory_warning_percent = 80.0
-disk_warning_percent = 85.0
-disk_critical_percent = 95.0
-gpu_vram_warning_percent = 90.0
-```
+See `config/default.toml` in the repository for the complete, up-to-date configuration file with inline comments. The file includes all sections documented above.
 
 ---
 

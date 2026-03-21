@@ -1,13 +1,14 @@
 use crate::event_bus::{parse_event_type_filter, parse_subscription_priority};
 use crate::injection_scanner::ThreatLevel;
 use crate::kernel::Kernel;
-use agentos_sandbox::SandboxConfig;
-use agentos_sandbox::SandboxExecutor;
+use agentos_sandbox::{SandboxConfig, SandboxExecRequest, SandboxExecutor};
 use agentos_tools::traits::ToolExecutionContext;
+use agentos_tools::{tool_category_with_weight, ToolCategory};
 use agentos_types::*;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinSet;
+use tracing::Instrument;
 
 /// Result of synchronous task execution, carrying data needed by the outer
 /// `execute_task()` method for enriched episodic memory recording.
@@ -43,7 +44,14 @@ impl Kernel {
     fn resolve_task_max_iterations(
         task: &AgentTask,
         task_limits: &crate::config::TaskLimitsConfig,
+        autonomous_config: &crate::config::AutonomousModeConfig,
     ) -> u32 {
+        // Autonomous tasks use the autonomous_mode ceiling — effectively unlimited
+        // for any real-world workflow, but still bounded to prevent infinite loops
+        // caused by bugs rather than intentional long-running work.
+        if task.autonomous {
+            return autonomous_config.max_iterations.max(1);
+        }
         let resolved = if let Some(max_iterations) = task.max_iterations {
             max_iterations
         } else {
@@ -60,6 +68,53 @@ impl Kernel {
         };
         // Ensure at least 1 iteration to avoid silent no-ops.
         resolved.max(1)
+    }
+
+    fn sandbox_overhead_for_category(category: ToolCategory) -> u64 {
+        match category {
+            ToolCategory::Stateless => SandboxConfig::OVERHEAD_STATELESS,
+            ToolCategory::Memory => SandboxConfig::OVERHEAD_MEMORY,
+            ToolCategory::Network => SandboxConfig::OVERHEAD_NETWORK,
+            ToolCategory::Hal => SandboxConfig::OVERHEAD_HAL,
+        }
+    }
+
+    async fn sandbox_plan_for_tool(
+        &self,
+        tool_name: &str,
+    ) -> Option<(SandboxConfig, u64, Option<String>)> {
+        let registry = self.tool_registry.read().await;
+        let tool = registry.get_by_name(tool_name)?;
+
+        if tool.manifest.executor.executor_type != ExecutorType::Inline {
+            return None;
+        }
+
+        let manifest_weight = tool.manifest.sandbox.weight.clone();
+        // Kernel-context and special tools (agent-list, task-list, agent-self, etc.)
+        // return None from tool_category_with_weight — they must execute in-process,
+        // not in a sandbox child where they lack access to kernel state.
+        let category = tool_category_with_weight(tool_name, manifest_weight.as_deref())?;
+
+        // Check sandbox policy against tool trust tier.
+        let trust_tier = tool.manifest.manifest.trust_tier;
+        let should_sandbox = should_sandbox_tool(self.config.kernel.sandbox_policy, trust_tier);
+
+        tracing::debug!(
+            tool = tool_name,
+            ?trust_tier,
+            sandbox_policy = ?self.config.kernel.sandbox_policy,
+            should_sandbox,
+            "Sandbox dispatch decision"
+        );
+
+        if !should_sandbox {
+            return None;
+        }
+
+        let config = SandboxConfig::from_manifest(&tool.manifest.sandbox);
+        let overhead_bytes = Self::sandbox_overhead_for_category(category);
+        Some((config, overhead_bytes, manifest_weight))
     }
 
     async fn register_task_subscription(&self, task_id: TaskID, subscription_id: SubscriptionID) {
@@ -345,7 +400,7 @@ impl Kernel {
             trace_id: TraceID,
             snapshot_ref: Option<String>,
             tool_payload_preview: String,
-            sandbox_config: Option<SandboxConfig>,
+            sandbox_plan: Option<(SandboxConfig, u64, Option<String>)>,
         }
 
         struct ParallelToolOutcome {
@@ -356,9 +411,19 @@ impl Kernel {
             tool_payload_preview: String,
             duration_ms: u64,
             result: Result<serde_json::Value, AgentOSError>,
+            /// "sandbox" or "in_process" — for audit and tracing.
+            execution_mode: &'static str,
         }
 
-        let max_parallel = self.config.kernel.tool_calls.max_parallel.max(1);
+        let max_parallel = if task.autonomous {
+            self.config
+                .kernel
+                .autonomous_mode
+                .max_parallel_tool_calls
+                .max(1)
+        } else {
+            self.config.kernel.tool_calls.max_parallel.max(1)
+        };
         if tool_calls.len() > max_parallel {
             tracing::warn!(
                 task_id = %task.id,
@@ -374,10 +439,13 @@ impl Kernel {
                         max_parallel
                     )
                 });
-                self.context_manager
+                if let Err(e) = self
+                    .context_manager
                     .push_tool_result(&task.id, &skipped.tool_name, &error_result)
                     .await
-                    .ok();
+                {
+                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                }
             }
         }
 
@@ -439,15 +507,20 @@ impl Kernel {
                             }),
                             chain_depth,
                             Some(trace_id),
+                            Some(task.agent_id),
+                            Some(task.id),
                         )
                         .await;
                         let error_result = serde_json::json!({
                             "error": format!("Unknown tool requested: {}", tool_call.tool_name)
                         });
-                        self.context_manager
+                        if let Err(e) = self
+                            .context_manager
                             .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                             .await
-                            .ok();
+                        {
+                            tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                        }
                         continue;
                     }
                 }
@@ -504,15 +577,20 @@ impl Kernel {
                     }),
                     chain_depth,
                     Some(trace_id),
+                    Some(task.agent_id),
+                    Some(task.id),
                 )
                 .await;
                 let error_result = serde_json::json!({
                     "error": format!("Unauthorized tool access blocked: {}", tool_call.tool_name)
                 });
-                self.context_manager
+                if let Err(e) = self
+                    .context_manager
                     .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                     .await
-                    .ok();
+                {
+                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                }
                 continue;
             }
 
@@ -530,10 +608,13 @@ impl Kernel {
                     let error_result = serde_json::json!({
                         "error": format!("Permission denied: {}", denial_reason)
                     });
-                    self.context_manager
+                    if let Err(e) = self
+                        .context_manager
                         .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                         .await
-                        .ok();
+                    {
+                        tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                    }
                     continue;
                 }
                 Ok(IntentCoherenceResult::Rejected { reason }) => {
@@ -546,13 +627,29 @@ impl Kernel {
                     let error_result = serde_json::json!({
                         "error": format!("Coherence check failed: {}", reason)
                     });
-                    self.context_manager
+                    if let Err(e) = self
+                        .context_manager
                         .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                         .await
-                        .ok();
+                    {
+                        tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                    }
                     continue;
                 }
-                Ok(IntentCoherenceResult::Suspicious { .. } | IntentCoherenceResult::Approved) => {}
+                Ok(IntentCoherenceResult::Suspicious { reason, .. }) => {
+                    // Inject loop warning into context so the LLM knows it is repeating itself
+                    let warning = serde_json::json!({
+                        "warning": format!("LOOP DETECTED: {}. You are repeating the same action. Try a different approach or complete the task with the information you already have.", reason)
+                    });
+                    if let Err(e) = self
+                        .context_manager
+                        .push_tool_result(&task.id, &tool_call.tool_name, &warning)
+                        .await
+                    {
+                        tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                    }
+                }
+                Ok(IntentCoherenceResult::Approved) => {}
             }
 
             if matches!(
@@ -570,10 +667,13 @@ impl Kernel {
                     Ok(value) => value,
                     Err(err) => serde_json::json!({ "error": err }),
                 };
-                self.context_manager
+                if let Err(e) = self
+                    .context_manager
                     .push_tool_result(&task.id, &tool_call.tool_name, &context_result)
                     .await
-                    .ok();
+                {
+                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                }
                 continue;
             }
 
@@ -609,10 +709,13 @@ impl Kernel {
                 let error_result = serde_json::json!({
                     "error": "Tool call budget exceeded"
                 });
-                self.context_manager
+                if let Err(e) = self
+                    .context_manager
                     .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                     .await
-                    .ok();
+                {
+                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                }
                 batch_budget_exceeded = Some((*action, resource.clone()));
                 break;
             }
@@ -638,10 +741,13 @@ impl Kernel {
                     let error_result = serde_json::json!({
                         "error": "Action forbidden by security policy"
                     });
-                    self.context_manager
+                    if let Err(e) = self
+                        .context_manager
                         .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                         .await
-                        .ok();
+                    {
+                        tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                    }
                     continue;
                 }
                 ActionRiskLevel::HardApproval => {
@@ -649,10 +755,13 @@ impl Kernel {
                         "status": "awaiting_approval",
                         "message": "This action requires human approval and was skipped from the parallel batch."
                     });
-                    self.context_manager
+                    if let Err(e) = self
+                        .context_manager
                         .push_tool_result(&task.id, &tool_call.tool_name, &waiting_result)
                         .await
-                        .ok();
+                    {
+                        tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                    }
                     continue;
                 }
                 ActionRiskLevel::SoftApproval
@@ -685,12 +794,7 @@ impl Kernel {
                 &serde_json::to_string(&tool_call.payload).unwrap_or_default(),
                 600,
             );
-            let sandbox_config = {
-                let registry = self.tool_registry.read().await;
-                registry
-                    .get_by_name(&tool_call.tool_name)
-                    .map(|t| SandboxConfig::from_manifest(&t.manifest.sandbox))
-            };
+            let sandbox_plan = self.sandbox_plan_for_tool(&tool_call.tool_name).await;
 
             prepared.push(PreparedParallelToolCall {
                 order,
@@ -698,7 +802,7 @@ impl Kernel {
                 trace_id,
                 snapshot_ref,
                 tool_payload_preview,
-                sandbox_config,
+                sandbox_plan,
             });
         }
 
@@ -725,6 +829,8 @@ impl Kernel {
                             }),
                             0,
                             Some(*task_trace_id),
+                            Some(task.agent_id),
+                            Some(task.id),
                         )
                         .await;
                         anyhow::bail!(
@@ -775,7 +881,11 @@ impl Kernel {
         let agent_snapshot_ref: Arc<dyn AgentRegistryQuery> = Arc::new(agent_snapshot);
         let task_snapshot_ref: Arc<dyn TaskQuery> = Arc::new(task_snapshot);
 
-        let fallback_timeout_secs = self.config.kernel.tool_execution.default_timeout_seconds;
+        let fallback_timeout_secs = if task.autonomous {
+            self.config.kernel.autonomous_mode.tool_timeout_seconds
+        } else {
+            self.config.kernel.tool_execution.default_timeout_seconds
+        };
         let mut join_set = JoinSet::new();
         for call in prepared {
             let tool_runner = self.tool_runner.clone();
@@ -794,8 +904,13 @@ impl Kernel {
             let snapshot_ref = call.snapshot_ref;
             let tool_payload_preview = call.tool_payload_preview;
             let tool_call = call.tool_call;
-            let sandbox_config = call.sandbox_config;
+            let sandbox_plan = call.sandbox_plan;
             let tool_cancellation = self.cancellation_token.child_token();
+            let execution_mode: &'static str = if sandbox_plan.is_some() {
+                "sandbox"
+            } else {
+                "in_process"
+            };
 
             self.emit_event_with_trace(
                 EventType::ToolCallStarted,
@@ -805,84 +920,112 @@ impl Kernel {
                     "tool_name": tool_call.tool_name,
                     "task_id": task.id.to_string(),
                     "agent_id": task.agent_id.to_string(),
+                    "execution_mode": execution_mode,
                 }),
                 task.trigger_source
                     .as_ref()
                     .map(|ts| ts.chain_depth + 1)
                     .unwrap_or(0),
                 Some(trace_id),
+                Some(task.agent_id),
+                Some(task.id),
             )
             .await;
 
-            join_set.spawn(async move {
-                let exec_context = ToolExecutionContext {
-                    data_dir,
-                    task_id,
-                    agent_id,
-                    trace_id,
-                    permissions,
-                    vault: Some(Arc::new(agentos_vault::ProxyVault::new(vault))),
-                    hal: Some(hal),
-                    // ToolRunner::execute() always overrides this with the shared registry.
-                    file_lock_registry: None,
-                    agent_registry: Some(agent_registry),
-                    task_registry: Some(task_registry),
-                    workspace_paths,
-                    cancellation_token: tool_cancellation,
-                };
+            let tool_span = tracing::info_span!(
+                "tool_execution",
+                tool = %tool_call.tool_name,
+                mode = execution_mode,
+                task_id = %task_id,
+            );
+            join_set.spawn(
+                async move {
+                    let sandbox_permissions = permissions.clone();
+                    let sandbox_workspace_paths = workspace_paths.clone();
+                    let exec_context = ToolExecutionContext {
+                        data_dir,
+                        task_id,
+                        agent_id,
+                        trace_id,
+                        permissions,
+                        vault: Some(Arc::new(agentos_vault::ProxyVault::new(vault))),
+                        hal: Some(hal),
+                        // ToolRunner::execute() always overrides this with the shared registry.
+                        file_lock_registry: None,
+                        agent_registry: Some(agent_registry),
+                        task_registry: Some(task_registry),
+                        workspace_paths,
+                        cancellation_token: tool_cancellation,
+                    };
 
-                let tool_start = std::time::Instant::now();
-                let payload = tool_call.payload.clone();
-                let result = if let Some(config) = sandbox_config {
-                    let timeout = Duration::from_millis(config.max_cpu_ms.max(5000));
-                    match sandbox
-                        .spawn(&tool_call.tool_name, payload, &config, timeout)
+                    let tool_start = std::time::Instant::now();
+                    let payload = tool_call.payload.clone();
+                    let result = if let Some((config, category_overhead_bytes, manifest_weight)) =
+                        sandbox_plan
+                    {
+                        let timeout = Duration::from_millis(config.max_cpu_ms.max(5000));
+                        let request = SandboxExecRequest {
+                            tool_name: tool_call.tool_name.clone(),
+                            payload,
+                            data_dir: exec_context.data_dir.clone(),
+                            manifest_weight,
+                            task_id: Some(exec_context.task_id),
+                            agent_id: Some(exec_context.agent_id),
+                            trace_id: Some(exec_context.trace_id),
+                            permissions: sandbox_permissions,
+                            workspace_paths: Some(sandbox_workspace_paths),
+                        };
+                        match sandbox
+                            .spawn(request, &config, timeout, category_overhead_bytes)
+                            .await
+                        {
+                            Ok(sandbox_result) => SandboxExecutor::parse_result(&sandbox_result),
+                            Err(e) => {
+                                tracing::error!(
+                                    tool = %tool_call.tool_name,
+                                    error = %e,
+                                    "Sandbox spawn failed — refusing unsandboxed execution"
+                                );
+                                Err(e)
+                            }
+                        }
+                    } else {
+                        let execute_fut =
+                            tool_runner.execute(&tool_call.tool_name, payload, exec_context);
+                        match tokio::time::timeout(
+                            Duration::from_secs(fallback_timeout_secs),
+                            execute_fut,
+                        )
                         .await
-                    {
-                        Ok(sandbox_result) => SandboxExecutor::parse_result(&sandbox_result),
-                        Err(e) => {
-                            tracing::error!(
-                                tool = %tool_call.tool_name,
-                                error = %e,
-                                "Sandbox spawn failed — refusing unsandboxed execution"
-                            );
-                            Err(e)
+                        {
+                            Ok(result) => result,
+                            Err(_) => {
+                                tracing::warn!(
+                                    tool = %tool_call.tool_name,
+                                    timeout_secs = fallback_timeout_secs,
+                                    "In-process tool call timed out"
+                                );
+                                Err(agentos_types::AgentOSError::ToolExecutionFailed {
+                                    tool_name: tool_call.tool_name.clone(),
+                                    reason: format!("timed out after {}s", fallback_timeout_secs),
+                                })
+                            }
                         }
-                    }
-                } else {
-                    let execute_fut =
-                        tool_runner.execute(&tool_call.tool_name, payload, exec_context);
-                    match tokio::time::timeout(
-                        Duration::from_secs(fallback_timeout_secs),
-                        execute_fut,
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => {
-                            tracing::warn!(
-                                tool = %tool_call.tool_name,
-                                timeout_secs = fallback_timeout_secs,
-                                "In-process tool call timed out"
-                            );
-                            Err(agentos_types::AgentOSError::ToolExecutionFailed {
-                                tool_name: tool_call.tool_name.clone(),
-                                reason: format!("timed out after {}s", fallback_timeout_secs),
-                            })
-                        }
-                    }
-                };
+                    };
 
-                ParallelToolOutcome {
-                    order,
-                    tool_call,
-                    trace_id,
-                    snapshot_ref,
-                    tool_payload_preview,
-                    duration_ms: tool_start.elapsed().as_millis() as u64,
-                    result,
+                    ParallelToolOutcome {
+                        order,
+                        tool_call,
+                        trace_id,
+                        snapshot_ref,
+                        tool_payload_preview,
+                        duration_ms: tool_start.elapsed().as_millis() as u64,
+                        result,
+                        execution_mode,
+                    }
                 }
-            });
+                .instrument(tool_span),
+            );
         }
 
         let mut outcomes: Vec<ParallelToolOutcome> = Vec::new();
@@ -942,9 +1085,12 @@ impl Kernel {
                                 "task_id": task.id.to_string(),
                                 "agent_id": task.agent_id.to_string(),
                                 "duration_ms": outcome.duration_ms,
+                                "execution_mode": outcome.execution_mode,
                             }),
                             chain_depth,
                             Some(outcome.trace_id),
+                            Some(task.agent_id),
+                            Some(task.id),
                         )
                         .await;
                     }
@@ -1008,6 +1154,8 @@ impl Kernel {
                             }),
                             chain_depth,
                             Some(*task_trace_id),
+                                                Some(task.agent_id),
+                        Some(task.id),
                         )
                         .await;
                     }
@@ -1015,10 +1163,13 @@ impl Kernel {
                         let blocked = serde_json::json!({
                             "error": "Tool output blocked due to high-confidence injection patterns"
                         });
-                        self.context_manager
+                        if let Err(e) = self
+                            .context_manager
                             .push_tool_result(&task.id, &outcome.tool_call.tool_name, &blocked)
                             .await
-                            .ok();
+                        {
+                            tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                        }
                         continue;
                     }
 
@@ -1029,10 +1180,13 @@ impl Kernel {
                         &scan,
                     );
                     let tainted_result = serde_json::json!({ "output": wrapped });
-                    self.context_manager
+                    if let Err(e) = self
+                        .context_manager
                         .push_tool_result(&task.id, &outcome.tool_call.tool_name, &tainted_result)
                         .await
-                        .ok();
+                    {
+                        tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                    }
 
                     if let Err(e) = self
                         .episodic_memory
@@ -1097,19 +1251,25 @@ impl Kernel {
                             "agent_id": task.agent_id.to_string(),
                             "tool_name": outcome.tool_call.tool_name,
                             "error": e.to_string(),
+                            "execution_mode": outcome.execution_mode,
                         }),
                         chain_depth,
                         Some(outcome.trace_id),
+                        Some(task.agent_id),
+                        Some(task.id),
                     )
                     .await;
 
                     let error_result = serde_json::json!({
                         "error": e.to_string()
                     });
-                    self.context_manager
+                    if let Err(e) = self
+                        .context_manager
                         .push_tool_result(&task.id, &outcome.tool_call.tool_name, &error_result)
                         .await
-                        .ok();
+                    {
+                        tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                    }
 
                     if let Err(record_err) = self
                         .episodic_memory
@@ -1147,6 +1307,7 @@ impl Kernel {
     }
 
     /// Execute a single task synchronously: assemble context, call LLM, process tool calls, repeat.
+    #[tracing::instrument(skip_all, fields(task_id = %task.id, agent_id = %task.agent_id))]
     pub(crate) async fn execute_task_sync(
         &self,
         task: &AgentTask,
@@ -1207,8 +1368,11 @@ impl Kernel {
         };
 
         // 3. Agent loop: LLM → parse → tool call → push result → repeat
-        let max_iterations =
-            Self::resolve_task_max_iterations(task, &self.config.kernel.task_limits);
+        let max_iterations = Self::resolve_task_max_iterations(
+            task,
+            &self.config.kernel.task_limits,
+            &self.config.kernel.autonomous_mode,
+        );
         let mut final_answer = String::new();
         let mut tool_call_count: u32 = 0;
         let mut completed_iterations: u32 = 0;
@@ -1271,6 +1435,8 @@ impl Kernel {
                             }),
                             chain_depth,
                             Some(iteration_trace_id),
+                            Some(task.agent_id),
+                            Some(task.id),
                         )
                         .await;
                     }
@@ -1365,6 +1531,8 @@ impl Kernel {
                             }),
                             chain_depth,
                             Some(iteration_trace_id),
+                            Some(task.agent_id),
+                            Some(task.id),
                         )
                         .await;
                         context_warning_emitted = true;
@@ -1382,6 +1550,8 @@ impl Kernel {
                                 }),
                                 chain_depth,
                                 Some(iteration_trace_id),
+                                Some(task.agent_id),
+                                Some(task.id),
                             )
                             .await;
                         }
@@ -1477,6 +1647,8 @@ impl Kernel {
                                 }),
                                 0,
                                 Some(iteration_trace_id),
+                                Some(task.agent_id),
+                                Some(task.id),
                             )
                             .await;
                             anyhow::bail!(
@@ -1537,6 +1709,14 @@ impl Kernel {
                 inference.tokens_used.total_tokens,
                 inference.duration_ms
             );
+            tracing::debug!(
+                task_id = %task.id,
+                iteration = iteration,
+                tokens = inference.tokens_used.total_tokens,
+                duration_ms = inference.duration_ms,
+                output = %inference.text,
+                "LLM raw output"
+            );
 
             // --- Cost budget enforcement ---
             let budget_result = self
@@ -1553,7 +1733,10 @@ impl Kernel {
             if let Some(snapshot) = self.cost_tracker.get_snapshot(&task.agent_id).await {
                 self.audit_log(agentos_audit::AuditEntry {
                     timestamp: chrono::Utc::now(),
-                    trace_id: iteration_trace_id,
+                    // Use task-level trace_id so CostAttribution can be correlated
+                    // with TaskStarted/TaskFailed by trace. Include iteration_trace_id
+                    // in details for finer-grained per-inference correlation.
+                    trace_id: *task_trace_id,
                     event_type: agentos_audit::AuditEventType::CostAttribution,
                     agent_id: Some(task.agent_id),
                     task_id: Some(task.id),
@@ -1567,6 +1750,7 @@ impl Kernel {
                         "cost_usd": snapshot.cost_usd,
                         "cumulative_today_usd": snapshot.cost_usd,
                         "budget_remaining_usd": (snapshot.budget.max_cost_usd_per_day - snapshot.cost_usd).max(0.0),
+                        "iteration_trace_id": iteration_trace_id.to_string(),
                     }),
                     severity: agentos_audit::AuditSeverity::Info,
                     reversible: false,
@@ -1616,6 +1800,8 @@ impl Kernel {
                             .map(|ts| ts.chain_depth + 1)
                             .unwrap_or(0),
                         Some(iteration_trace_id),
+                        Some(task.agent_id),
+                        Some(task.id),
                     )
                     .await;
                 }
@@ -1662,6 +1848,8 @@ impl Kernel {
                             .map(|ts| ts.chain_depth + 1)
                             .unwrap_or(0),
                         Some(iteration_trace_id),
+                        Some(task.agent_id),
+                        Some(task.id),
                     )
                     .await;
                     self.context_manager.remove_context(&task.id).await;
@@ -1714,6 +1902,8 @@ impl Kernel {
                             .map(|ts| ts.chain_depth + 1)
                             .unwrap_or(0),
                         Some(iteration_trace_id),
+                        Some(task.agent_id),
+                        Some(task.id),
                     )
                     .await;
                     self.context_manager.remove_context(&task.id).await;
@@ -1737,6 +1927,8 @@ impl Kernel {
                                     }),
                                     0,
                                     Some(iteration_trace_id),
+                                    Some(task.agent_id),
+                                    Some(task.id),
                                 )
                                 .await;
                                 anyhow::bail!(
@@ -1993,20 +2185,26 @@ impl Kernel {
                                 let error_result = serde_json::json!({
                                     "error": format!("Permission denied: {}", denial_reason)
                                 });
-                                self.context_manager
+                                if let Err(e) = self
+                                    .context_manager
                                     .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                     .await
-                                    .ok();
+                                {
+                                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                                }
                                 continue;
                             }
                             Ok(IntentCoherenceResult::Rejected { reason }) => {
                                 let error_result = serde_json::json!({
                                     "error": format!("Coherence check failed: {}", reason)
                                 });
-                                self.context_manager
+                                if let Err(e) = self
+                                    .context_manager
                                     .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                     .await
-                                    .ok();
+                                {
+                                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                                }
                                 continue;
                             }
                             Ok(
@@ -2026,10 +2224,13 @@ impl Kernel {
                             Ok(value) => value,
                             Err(err) => serde_json::json!({ "error": err }),
                         };
-                        self.context_manager
+                        if let Err(e) = self
+                            .context_manager
                             .push_tool_result(&task.id, &tool_call.tool_name, &context_result)
                             .await
-                            .ok();
+                        {
+                            tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                        }
                         continue;
                     }
 
@@ -2106,16 +2307,21 @@ impl Kernel {
                                     }),
                                     chain_depth,
                                     Some(trace_id),
+                                    Some(task.agent_id),
+                                    Some(task.id),
                                 )
                                 .await;
 
                                 let error_result = serde_json::json!({
                                     "error": format!("Unknown tool requested: {}", tool_call.tool_name)
                                 });
-                                self.context_manager
+                                if let Err(e) = self
+                                    .context_manager
                                     .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                     .await
-                                    .ok();
+                                {
+                                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                                }
                             }
                             ToolAccessCheck::Unauthorized { allowed_tool_names } => {
                                 self.audit_log(agentos_audit::AuditEntry {
@@ -2153,16 +2359,21 @@ impl Kernel {
                                     }),
                                     chain_depth,
                                     Some(trace_id),
+                                    Some(task.agent_id),
+                                    Some(task.id),
                                 )
                                 .await;
 
                                 let error_result = serde_json::json!({
                                     "error": format!("Unauthorized tool access blocked: {}", tool_call.tool_name)
                                 });
-                                self.context_manager
+                                if let Err(e) = self
+                                    .context_manager
                                     .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                     .await
-                                    .ok();
+                                {
+                                    tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                                }
                             }
                         }
                         continue;
@@ -2223,16 +2434,21 @@ impl Kernel {
                                 }),
                                 chain_depth,
                                 Some(trace_id),
+                                Some(task.agent_id),
+                                Some(task.id),
                             )
                             .await;
 
                             let error_result = serde_json::json!({
                                 "error": format!("Permission denied: {}", denial_reason)
                             });
-                            self.context_manager
+                            if let Err(e) = self
+                                .context_manager
                                 .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                 .await
-                                .ok();
+                            {
+                                tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                            }
                             continue;
                         }
                         Ok(IntentCoherenceResult::Rejected { reason }) => {
@@ -2245,18 +2461,30 @@ impl Kernel {
                             let error_result = serde_json::json!({
                                 "error": format!("Coherence check failed: {}", reason)
                             });
-                            self.context_manager
+                            if let Err(e) = self
+                                .context_manager
                                 .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                 .await
-                                .ok();
+                            {
+                                tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                            }
                             continue;
                         }
-                        Ok(
-                            IntentCoherenceResult::Suspicious { .. }
-                            | IntentCoherenceResult::Approved,
-                        ) => {
-                            // Suspicious: logged by validate_tool_call_full, proceed for now
-                            // Approved: all clear
+                        Ok(IntentCoherenceResult::Suspicious { reason, .. }) => {
+                            // Inject loop warning so the LLM knows it is repeating itself
+                            let warning = serde_json::json!({
+                                "warning": format!("LOOP DETECTED: {}. You are repeating the same action. Try a different approach or complete the task with the information you already have.", reason)
+                            });
+                            if let Err(e) = self
+                                .context_manager
+                                .push_tool_result(&task.id, &tool_call.tool_name, &warning)
+                                .await
+                            {
+                                tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                            }
+                        }
+                        Ok(IntentCoherenceResult::Approved) => {
+                            // All clear
                         }
                     }
 
@@ -2316,6 +2544,8 @@ impl Kernel {
                                         }),
                                         0,
                                         Some(trace_id),
+                                        Some(task.agent_id),
+                                        Some(task.id),
                                     )
                                     .await;
                                     anyhow::bail!(
@@ -2384,10 +2614,13 @@ impl Kernel {
                             let error_result = serde_json::json!({
                                 "error": "Action forbidden by security policy"
                             });
-                            self.context_manager
+                            if let Err(e) = self
+                                .context_manager
                                 .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                 .await
-                                .ok();
+                            {
+                                tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                            }
                             continue;
                         }
                         ActionRiskLevel::HardApproval => {
@@ -2433,18 +2666,24 @@ impl Kernel {
                                     None, // auto_action: default deny on expiry
                                 )
                                 .await;
-                            self.scheduler
+                            if let Err(e) = self
+                                .scheduler
                                 .update_state(&task.id, TaskState::Waiting)
                                 .await
-                                .ok();
+                            {
+                                tracing::error!(error = %e, task_id = %task.id, "Failed to update task state to Waiting — task may be stuck in Running state");
+                            }
                             let waiting_result = serde_json::json!({
                                 "status": "awaiting_approval",
                                 "message": "This action requires human approval. Task is paused."
                             });
-                            self.context_manager
+                            if let Err(e) = self
+                                .context_manager
                                 .push_tool_result(&task.id, &tool_call.tool_name, &waiting_result)
                                 .await
-                                .ok();
+                            {
+                                tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                            }
                             self.context_manager.remove_context(&task.id).await;
                             self.intent_validator.remove_task(&task.id).await;
                             anyhow::bail!(
@@ -2613,6 +2852,14 @@ impl Kernel {
                         600,
                     );
 
+                    let tool_start = std::time::Instant::now();
+                    let sandbox_plan = self.sandbox_plan_for_tool(&tool_call.tool_name).await;
+                    let execution_mode: &'static str = if sandbox_plan.is_some() {
+                        "sandbox"
+                    } else {
+                        "in_process"
+                    };
+
                     self.emit_event_with_trace(
                         EventType::ToolCallStarted,
                         EventSource::ToolRunner,
@@ -2621,34 +2868,37 @@ impl Kernel {
                             "tool_name": tool_call.tool_name,
                             "task_id": task.id.to_string(),
                             "agent_id": task.agent_id.to_string(),
+                            "execution_mode": execution_mode,
                         }),
                         task.trigger_source
                             .as_ref()
                             .map(|ts| ts.chain_depth + 1)
                             .unwrap_or(0),
                         Some(trace_id),
+                        Some(task.agent_id),
+                        Some(task.id),
                     )
                     .await;
 
-                    let tool_start = std::time::Instant::now();
                     let tool_result = {
-                        let sandbox_config = {
-                            let registry = self.tool_registry.read().await;
-                            registry
-                                .get_by_name(&tool_call.tool_name)
-                                .map(|t| SandboxConfig::from_manifest(&t.manifest.sandbox))
-                        };
-
-                        if let Some(config) = sandbox_config {
+                        if let Some((config, category_overhead_bytes, manifest_weight)) =
+                            sandbox_plan
+                        {
                             let timeout = Duration::from_millis(config.max_cpu_ms.max(5000));
+                            let request = SandboxExecRequest {
+                                tool_name: tool_call.tool_name.clone(),
+                                payload: tool_call.payload.clone(),
+                                data_dir: exec_context.data_dir.clone(),
+                                manifest_weight,
+                                task_id: Some(exec_context.task_id),
+                                agent_id: Some(exec_context.agent_id),
+                                trace_id: Some(exec_context.trace_id),
+                                permissions: exec_context.permissions.clone(),
+                                workspace_paths: Some(exec_context.workspace_paths.clone()),
+                            };
                             match self
                                 .sandbox
-                                .spawn(
-                                    &tool_call.tool_name,
-                                    tool_call.payload.clone(),
-                                    &config,
-                                    timeout,
-                                )
+                                .spawn(request, &config, timeout, category_overhead_bytes)
                                 .await
                             {
                                 Ok(sandbox_result) => {
@@ -2730,9 +2980,12 @@ impl Kernel {
                                         "task_id": task.id.to_string(),
                                         "agent_id": task.agent_id.to_string(),
                                         "duration_ms": tool_start.elapsed().as_millis() as u64,
+                                        "execution_mode": execution_mode,
                                     }),
                                     chain_depth,
                                     Some(trace_id),
+                                    Some(task.agent_id),
+                                    Some(task.id),
                                 )
                                 .await;
                             }
@@ -2827,6 +3080,8 @@ impl Kernel {
                                     }),
                                     chain_depth,
                                     Some(*task_trace_id),
+                                                                Some(task.agent_id),
+                                Some(task.id),
                                 )
                                 .await;
 
@@ -2859,10 +3114,13 @@ impl Kernel {
                                             None, // auto_action: default deny on expiry
                                         )
                                         .await;
-                                    self.scheduler
+                                    if let Err(e) = self
+                                        .scheduler
                                         .update_state(&task.id, TaskState::Waiting)
                                         .await
-                                        .ok();
+                                    {
+                                        tracing::error!(error = %e, task_id = %task.id, "Failed to update task state to Waiting — task may be stuck in Running state");
+                                    }
                                     // Do NOT call remove_context here: preserving conversation
                                     // history allows the task to resume with context intact if
                                     // the escalation is approved. The tainted output is never
@@ -2906,6 +3164,8 @@ impl Kernel {
                                         }),
                                         chain_depth,
                                         Some(trace_id),
+                                        Some(task.agent_id),
+                                        Some(task.id),
                                     )
                                     .await;
                                 }
@@ -3036,9 +3296,12 @@ impl Kernel {
                                     "agent_id": task.agent_id.to_string(),
                                     "tool_name": tool_call.tool_name,
                                     "error": e.to_string(),
+                                    "execution_mode": execution_mode,
                                 }),
                                 chain_depth,
                                 Some(trace_id),
+                                Some(task.agent_id),
+                                Some(task.id),
                             )
                             .await;
 
@@ -3060,6 +3323,8 @@ impl Kernel {
                                     }),
                                     chain_depth,
                                     Some(trace_id),
+                                    Some(task.agent_id),
+                                    Some(task.id),
                                 )
                                 .await;
                                 self.emit_event_with_trace(
@@ -3074,6 +3339,8 @@ impl Kernel {
                                     }),
                                     chain_depth,
                                     Some(trace_id),
+                                    Some(task.agent_id),
+                                    Some(task.id),
                                 )
                                 .await;
                             }
@@ -3097,6 +3364,8 @@ impl Kernel {
                                     }),
                                     chain_depth,
                                     Some(trace_id),
+                                    Some(task.agent_id),
+                                    Some(task.id),
                                 )
                                 .await;
                             }
@@ -3104,10 +3373,13 @@ impl Kernel {
                             let error_result = serde_json::json!({
                                 "error": e.to_string()
                             });
-                            self.context_manager
+                            if let Err(e) = self
+                                .context_manager
                                 .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
                                 .await
-                                .ok();
+                            {
+                                tracing::warn!(error = %e, task_id = %task.id, "Failed to push tool result to context window");
+                            }
 
                             if let Err(record_err) = self
                                 .episodic_memory
@@ -3162,6 +3434,7 @@ impl Kernel {
     }
 
     /// Execute a task from the background executor loop.
+    #[tracing::instrument(skip_all, fields(task_id = %task.id, agent_id = %task.agent_id))]
     pub(crate) async fn execute_task(&self, task: &AgentTask) {
         let start = std::time::Instant::now();
         let task_trace_id = TraceID::new();
@@ -3181,7 +3454,9 @@ impl Kernel {
             );
             return;
         }
-        self.scheduler.mark_started(&task.id).await.ok();
+        if let Err(e) = self.scheduler.mark_started(&task.id).await {
+            tracing::error!(error = %e, task_id = %task.id, "Failed to mark task as started in scheduler");
+        }
 
         self.emit_event_with_trace(
             EventType::TaskStarted,
@@ -3194,6 +3469,8 @@ impl Kernel {
             }),
             0,
             Some(task_trace_id),
+            Some(task.agent_id),
+            Some(task.id),
         )
         .await;
 
@@ -3330,6 +3607,18 @@ fn extract_feedback_blocks(text: &str) -> Vec<serde_json::Value> {
     results
 }
 
+/// Determine whether a tool should be sandboxed based on policy and trust tier.
+///
+/// Extracted as a pure function for testability — the full `sandbox_plan_for_tool()`
+/// method requires a running kernel with tool registry access.
+fn should_sandbox_tool(policy: crate::config::SandboxPolicy, trust_tier: TrustTier) -> bool {
+    match policy {
+        crate::config::SandboxPolicy::Never => false,
+        crate::config::SandboxPolicy::Always => true,
+        crate::config::SandboxPolicy::TrustAware => trust_tier != TrustTier::Core,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3384,7 +3673,12 @@ mod tests {
             }),
             max_iterations,
             trigger_source: None,
+            autonomous: false,
         }
+    }
+
+    fn default_autonomous_config() -> crate::config::AutonomousModeConfig {
+        crate::config::AutonomousModeConfig::default()
     }
 
     #[test]
@@ -3396,7 +3690,10 @@ mod tests {
         };
         let task = make_task(Some(ComplexityLevel::High), Some(7));
 
-        assert_eq!(Kernel::resolve_task_max_iterations(&task, &limits), 7);
+        assert_eq!(
+            Kernel::resolve_task_max_iterations(&task, &limits, &default_autonomous_config()),
+            7
+        );
     }
 
     #[test]
@@ -3410,21 +3707,24 @@ mod tests {
         assert_eq!(
             Kernel::resolve_task_max_iterations(
                 &make_task(Some(ComplexityLevel::Low), None),
-                &limits
+                &limits,
+                &default_autonomous_config()
             ),
             9
         );
         assert_eq!(
             Kernel::resolve_task_max_iterations(
                 &make_task(Some(ComplexityLevel::Medium), None),
-                &limits
+                &limits,
+                &default_autonomous_config()
             ),
             21
         );
         assert_eq!(
             Kernel::resolve_task_max_iterations(
                 &make_task(Some(ComplexityLevel::High), None),
-                &limits
+                &limits,
+                &default_autonomous_config()
             ),
             55
         );
@@ -3439,7 +3739,11 @@ mod tests {
         };
 
         assert_eq!(
-            Kernel::resolve_task_max_iterations(&make_task(None, None), &limits),
+            Kernel::resolve_task_max_iterations(
+                &make_task(None, None),
+                &limits,
+                &default_autonomous_config()
+            ),
             12
         );
     }
@@ -3453,14 +3757,19 @@ mod tests {
         };
         // Zero in config should be clamped to 1.
         assert_eq!(
-            Kernel::resolve_task_max_iterations(&make_task(None, None), &limits),
+            Kernel::resolve_task_max_iterations(
+                &make_task(None, None),
+                &limits,
+                &default_autonomous_config()
+            ),
             1
         );
         // Zero as per-task override should also be clamped to 1.
         assert_eq!(
             Kernel::resolve_task_max_iterations(
                 &make_task(Some(ComplexityLevel::High), Some(0)),
-                &limits
+                &limits,
+                &default_autonomous_config()
             ),
             1
         );
@@ -3492,5 +3801,63 @@ mod tests {
         let s = "a".repeat(256);
         let result = Kernel::maybe_truncate_output(s.clone(), 256, "tool");
         assert_eq!(result, s); // no truncation at exact limit
+    }
+
+    #[test]
+    fn trust_aware_core_runs_in_process() {
+        assert!(!should_sandbox_tool(
+            crate::config::SandboxPolicy::TrustAware,
+            TrustTier::Core
+        ));
+    }
+
+    #[test]
+    fn trust_aware_verified_sandboxed() {
+        assert!(should_sandbox_tool(
+            crate::config::SandboxPolicy::TrustAware,
+            TrustTier::Verified
+        ));
+    }
+
+    #[test]
+    fn trust_aware_community_sandboxed() {
+        assert!(should_sandbox_tool(
+            crate::config::SandboxPolicy::TrustAware,
+            TrustTier::Community
+        ));
+    }
+
+    #[test]
+    fn always_sandboxes_core() {
+        assert!(should_sandbox_tool(
+            crate::config::SandboxPolicy::Always,
+            TrustTier::Core
+        ));
+    }
+
+    #[test]
+    fn never_skips_sandbox_for_community() {
+        assert!(!should_sandbox_tool(
+            crate::config::SandboxPolicy::Never,
+            TrustTier::Community
+        ));
+    }
+
+    #[test]
+    fn never_skips_sandbox_for_verified() {
+        assert!(!should_sandbox_tool(
+            crate::config::SandboxPolicy::Never,
+            TrustTier::Verified
+        ));
+    }
+
+    #[test]
+    fn trust_aware_blocked_would_sandbox() {
+        // Blocked tools are rejected earlier at registration, but if they
+        // somehow reach dispatch, they should be treated as untrusted.
+        assert!(should_sandbox_tool(
+            crate::config::SandboxPolicy::TrustAware,
+            TrustTier::Blocked
+        ));
     }
 }

@@ -4,16 +4,85 @@
 //! On other platforms, applies resource limits only (no seccomp).
 
 use crate::config::SandboxConfig;
+use crate::request::SandboxExecRequest;
 use crate::result::SandboxResult;
 use agentos_types::AgentOSError;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 /// Maximum bytes to read from sandbox child stdout or stderr.
 /// Prevents child processes from exhausting host memory via large output.
 const MAX_SANDBOX_OUTPUT_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
+
+fn write_request_file(
+    temp_dir: &Path,
+    tool_name: &str,
+    request: &SandboxExecRequest,
+) -> Result<PathBuf, AgentOSError> {
+    std::fs::create_dir_all(temp_dir).map_err(|e| AgentOSError::SandboxSpawnFailed {
+        reason: format!("Cannot create temp dir: {}", e),
+    })?;
+    restrict_temp_dir_permissions(temp_dir)?;
+
+    let request_file = temp_dir.join(format!("{}-{}.json", tool_name, Uuid::new_v4().simple()));
+    let request_json =
+        serde_json::to_vec(request).map_err(|e| AgentOSError::SandboxSpawnFailed {
+            reason: format!("Cannot serialize sandbox request: {}", e),
+        })?;
+    let mut file = create_private_request_file(&request_file).map_err(|e| {
+        AgentOSError::SandboxSpawnFailed {
+            reason: format!("Cannot create request file: {}", e),
+        }
+    })?;
+    file.write_all(&request_json)
+        .and_then(|_| file.flush())
+        .map_err(|e| AgentOSError::SandboxSpawnFailed {
+            reason: format!("Cannot write request file: {}", e),
+        })?;
+
+    Ok(request_file)
+}
+
+#[cfg(unix)]
+fn restrict_temp_dir_permissions(temp_dir: &Path) -> Result<(), AgentOSError> {
+    std::fs::set_permissions(temp_dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+        AgentOSError::SandboxSpawnFailed {
+            reason: format!("Cannot secure temp dir permissions: {}", e),
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn restrict_temp_dir_permissions(_temp_dir: &Path) -> Result<(), AgentOSError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_private_request_file(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_request_file(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+}
 
 /// Sandbox executor manages the lifecycle of sandboxed tool processes.
 ///
@@ -25,12 +94,37 @@ const MAX_SANDBOX_OUTPUT_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
 pub struct SandboxExecutor {
     /// Working directory for tool execution.
     data_dir: PathBuf,
+    /// Optional override for the sandbox child executable.
+    executable_path: Option<PathBuf>,
+    /// Limits the number of concurrent sandbox child processes to prevent
+    /// thread/process exhaustion (e.g., rayon EAGAIN panics).
+    concurrency_semaphore: Arc<Semaphore>,
 }
 
 impl SandboxExecutor {
     /// Create a new sandbox executor with the given data directory.
-    pub fn new(data_dir: PathBuf) -> Self {
-        Self { data_dir }
+    ///
+    /// `max_concurrent` controls the maximum number of sandbox child processes
+    /// that can run simultaneously. Clamped to a minimum of 1.
+    pub fn new(data_dir: PathBuf, max_concurrent: usize) -> Self {
+        Self {
+            data_dir,
+            executable_path: None,
+            concurrency_semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
+        }
+    }
+
+    /// Create a sandbox executor that launches a specific executable.
+    pub fn with_executable(
+        data_dir: PathBuf,
+        executable_path: PathBuf,
+        max_concurrent: usize,
+    ) -> Self {
+        Self {
+            data_dir,
+            executable_path: Some(executable_path),
+            concurrency_semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
+        }
     }
 
     /// Get the data directory path.
@@ -51,37 +145,41 @@ impl SandboxExecutor {
     ///
     /// Returns `SandboxSpawnFailed` if the child cannot be started,
     /// `SandboxTimeout` if the child exceeds the wall-clock timeout.
+    ///
+    /// `category_overhead_bytes` must be the per-category startup baseline for
+    /// the tool being executed (for example stateless vs memory-heavy).
     pub async fn spawn(
         &self,
-        tool_name: &str,
-        payload: serde_json::Value,
+        request: SandboxExecRequest,
         config: &SandboxConfig,
         timeout: Duration,
+        category_overhead_bytes: u64,
     ) -> Result<SandboxResult, AgentOSError> {
-        let start = Instant::now();
-
-        // 1. Serialize the execution request to a temp file
-        let exec_request = serde_json::json!({
-            "tool_name": tool_name,
-            "payload": payload,
-            "data_dir": self.data_dir.to_string_lossy(),
-        });
-        let temp_dir = std::env::temp_dir().join("agentos-sandbox");
-        std::fs::create_dir_all(&temp_dir).map_err(|e| AgentOSError::SandboxSpawnFailed {
-            reason: format!("Cannot create temp dir: {}", e),
-        })?;
-        let request_file = temp_dir.join(format!("{}-{}.json", tool_name, Uuid::new_v4().simple()));
-        std::fs::write(&request_file, exec_request.to_string()).map_err(|e| {
+        // Acquire a concurrency permit before spawning. This prevents
+        // thread pool exhaustion when many tools run in parallel.
+        // The permit is held until this function returns, ensuring the child
+        // process has fully exited before releasing the concurrency slot.
+        let _permit = self.concurrency_semaphore.acquire().await.map_err(|_| {
             AgentOSError::SandboxSpawnFailed {
-                reason: format!("Cannot write request file: {}", e),
+                reason: "Sandbox concurrency semaphore closed".to_string(),
             }
         })?;
 
+        let start = Instant::now();
+        let tool_name = request.tool_name.clone();
+
+        // 1. Serialize the execution request to a temp file
+        let temp_dir = std::env::temp_dir().join("agentos-sandbox");
+        let request_file = write_request_file(&temp_dir, &tool_name, &request)?;
+
         // 2. Build the child command
-        let current_exe =
+        let current_exe = if let Some(executable_path) = self.executable_path.as_ref() {
+            executable_path.clone()
+        } else {
             std::env::current_exe().map_err(|e| AgentOSError::SandboxSpawnFailed {
                 reason: format!("Cannot determine current executable: {}", e),
-            })?;
+            })?
+        };
 
         // We use the same binary with a special `--sandbox-exec` flag.
         // The child reads the request file, executes the tool, and writes JSON to stdout.
@@ -97,10 +195,19 @@ impl SandboxExecutor {
         cmd.env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &self.data_dir)
-            .env("LANG", "C.UTF-8");
+            .env("LANG", "C.UTF-8")
+            // Prevent rayon from spawning num_cpus threads in each child.
+            // Without this, parallel sandbox children exhaust OS thread limits
+            // and panic with EAGAIN in ThreadPoolBuilder.
+            .env("RAYON_NUM_THREADS", "1");
 
         // 3. Set resource limits and seccomp via pre-exec hook (unsafe because pre_exec)
-        let max_memory = config.max_memory_bytes;
+        //
+        let exe_size = std::fs::metadata(&current_exe)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let max_memory = effective_rlimit_as(config, category_overhead_bytes, exe_size);
+        let max_fsize = config.max_memory_bytes; // tool's declared budget (for RLIMIT_FSIZE)
         let max_cpu_secs = config.max_cpu_ms.div_ceil(1000); // round up to full seconds
 
         #[cfg(target_os = "linux")]
@@ -116,19 +223,12 @@ impl SandboxExecutor {
             let bpf_for_closure = bpf_filter.clone();
 
             cmd.pre_exec(move || {
-                // Close all inherited file descriptors > 2 (keep stdin/stdout/stderr)
-                // to prevent child from accessing parent's DB connections, sockets, etc.
-                #[cfg(target_os = "linux")]
-                {
-                    // close_range is available since Linux 5.9
-                    let ret = libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32);
-                    if ret != 0 {
-                        // Fallback: iterate and close
-                        for fd in 3..1024 {
-                            libc::close(fd);
-                        }
-                    }
-                }
+                // NOTE: Do NOT close inherited FDs here. pre_exec runs between
+                // fork() and exec(). Tokio uses an internal error-reporting pipe
+                // (FD > 2) to communicate exec failures back to the parent. If we
+                // close_range(3, MAX) here, that pipe is destroyed and exec failures
+                // become undiagnosable. Instead, FD cleanup happens in the child
+                // binary's run_sandbox_exec() after exec has succeeded.
 
                 // Set RLIMIT_AS (virtual memory limit)
                 let mem_limit = libc::rlimit {
@@ -148,19 +248,17 @@ impl SandboxExecutor {
                     return Err(std::io::Error::last_os_error());
                 }
 
-                // Set RLIMIT_NPROC (prevent fork bombs)
-                let nproc_limit = libc::rlimit {
-                    rlim_cur: 4,
-                    rlim_max: 4,
-                };
-                if libc::setrlimit(libc::RLIMIT_NPROC, &nproc_limit) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
+                // Note: RLIMIT_NPROC is intentionally NOT set here.
+                // It is a per-user (not per-process) limit, so setting it to a
+                // low value would prevent thread creation if the user already has
+                // more processes than the limit.  Seccomp + RLIMIT_CPU + RLIMIT_AS
+                // already constrain the child sufficiently.
 
                 // Set RLIMIT_FSIZE (prevent disk filling via large file writes)
+                // Uses the tool's declared memory budget, not the inflated RLIMIT_AS.
                 let fsize_limit = libc::rlimit {
-                    rlim_cur: max_memory, // use same limit as memory
-                    rlim_max: max_memory,
+                    rlim_cur: max_fsize,
+                    rlim_max: max_fsize,
                 };
                 if libc::setrlimit(libc::RLIMIT_FSIZE, &fsize_limit) != 0 {
                     return Err(std::io::Error::last_os_error());
@@ -203,35 +301,45 @@ impl SandboxExecutor {
         tracing::info!(
             tool = %tool_name,
             pid = ?child_pid,
-            max_memory_mb = max_memory / (1024 * 1024),
+            declared_memory_mb = config.max_memory_bytes / (1024 * 1024),
+            rlimit_as_mb = max_memory / (1024 * 1024),
+            exe_floor_mb = exe_size.saturating_mul(2) / (1024 * 1024),
             max_cpu_secs = max_cpu_secs,
             "Sandbox child spawned"
         );
 
         // 5. Wait for completion with timeout
-        let result = tokio::time::timeout(timeout, async {
-            let status = child.wait().await;
+        //
+        // CRITICAL: We must read stdout/stderr CONCURRENTLY with waiting for the
+        // child to exit. If we wait() first, the child may fill the OS pipe buffer
+        // (typically 64 KiB on Linux) and block on write(), causing a deadlock
+        // because the parent never drains the pipe.
+        let mut child_stdout = child.stdout.take();
+        let mut child_stderr = child.stderr.take();
 
-            // Read stdout and stderr with size caps to prevent memory exhaustion.
-            // A misbehaving child that writes beyond the cap will have its excess
-            // output silently dropped — the exit code still reflects failure.
+        let result = tokio::time::timeout(timeout, async {
             let mut stdout_bytes = Vec::new();
             let mut stderr_bytes = Vec::new();
 
-            if let Some(stdout) = child.stdout.take() {
-                stdout
-                    .take(MAX_SANDBOX_OUTPUT_BYTES)
-                    .read_to_end(&mut stdout_bytes)
-                    .await
-                    .ok();
-            }
-            if let Some(stderr) = child.stderr.take() {
-                stderr
-                    .take(MAX_SANDBOX_OUTPUT_BYTES)
-                    .read_to_end(&mut stderr_bytes)
-                    .await
-                    .ok();
-            }
+            let stdout_fut = async {
+                if let Some(ref mut stdout) = child_stdout {
+                    let _ = stdout
+                        .take(MAX_SANDBOX_OUTPUT_BYTES)
+                        .read_to_end(&mut stdout_bytes)
+                        .await;
+                }
+            };
+            let stderr_fut = async {
+                if let Some(ref mut stderr) = child_stderr {
+                    let _ = stderr
+                        .take(MAX_SANDBOX_OUTPUT_BYTES)
+                        .read_to_end(&mut stderr_bytes)
+                        .await;
+                }
+            };
+
+            // Wait for stdout drain, stderr drain, AND child exit concurrently.
+            let (_, _, status) = tokio::join!(stdout_fut, stderr_fut, child.wait());
 
             let stdout_buf = String::from_utf8_lossy(&stdout_bytes).into_owned();
             let stderr_buf = String::from_utf8_lossy(&stderr_bytes).into_owned();
@@ -259,14 +367,47 @@ impl SandboxExecutor {
                     }
                 };
 
-                tracing::info!(
-                    tool = %tool_name,
-                    exit_code = exit_code,
-                    wall_time_ms = wall_time_ms,
-                    stdout_len = stdout.len(),
-                    stderr_len = stderr.len(),
-                    "Sandbox child completed"
-                );
+                if exit_code != 0 && !stderr.is_empty() {
+                    // Truncate stderr for logging to avoid flooding
+                    let stderr_preview: &str = if stderr.len() > 512 {
+                        &stderr[..512]
+                    } else {
+                        &stderr
+                    };
+                    tracing::warn!(
+                        tool = %tool_name,
+                        exit_code = exit_code,
+                        wall_time_ms = wall_time_ms,
+                        stderr = %stderr_preview,
+                        "Sandbox child failed"
+                    );
+                    // exit_code == -1 means ExitStatus::code() returned None:
+                    // the child was killed by a signal (SIGILL, SIGABRT, SIGSYS…).
+                    // Common causes:
+                    //   - Missing syscall in seccomp allowlist (seccomp default action = EPERM
+                    //     so the process keeps running, but abort() falls back to ud2 → SIGILL)
+                    //   - RLIMIT_AS exhausted during Rust/tokio runtime startup → OOM → SIGABRT
+                    // If you see this, check the seccomp base allowlist and RLIMIT_AS formula.
+                    if exit_code == -1 {
+                        tracing::error!(
+                            tool = %tool_name,
+                            wall_time_ms = wall_time_ms,
+                            "Sandbox child killed by signal (exit -1). \
+                             Likely causes: missing syscall in seccomp allowlist \
+                             or RLIMIT_AS too tight for Rust runtime. \
+                             Re-run outside sandbox with RUST_BACKTRACE=1 to diagnose."
+                        );
+                    }
+                } else {
+                    tracing::info!(
+                        tool = %tool_name,
+                        exit_code = exit_code,
+                        wall_time_ms = wall_time_ms,
+                        stdout_len = stdout.len(),
+                        stderr_len = stderr.len(),
+                        "Sandbox child completed"
+                    );
+                }
 
                 Ok(SandboxResult {
                     stdout,
@@ -286,25 +427,21 @@ impl SandboxExecutor {
 
                 child.kill().await.ok();
 
-                // Drain any partial output (bounded, same as success path)
+                // Drain any partial output from the already-taken handles.
                 let mut stdout_bytes = Vec::new();
                 let mut stderr_bytes = Vec::new();
-                if let Some(stdout) = child.stdout.take() {
-                    stdout
+                if let Some(ref mut stdout) = child_stdout {
+                    let _ = stdout
                         .take(MAX_SANDBOX_OUTPUT_BYTES)
                         .read_to_end(&mut stdout_bytes)
-                        .await
-                        .ok();
+                        .await;
                 }
-                if let Some(stderr) = child.stderr.take() {
-                    stderr
+                if let Some(ref mut stderr) = child_stderr {
+                    let _ = stderr
                         .take(MAX_SANDBOX_OUTPUT_BYTES)
                         .read_to_end(&mut stderr_bytes)
-                        .await
-                        .ok();
+                        .await;
                 }
-                let _stdout_buf = String::from_utf8_lossy(&stdout_bytes).into_owned();
-                let _stderr_buf = String::from_utf8_lossy(&stderr_bytes).into_owned();
 
                 Err(AgentOSError::SandboxTimeout {
                     tool_name: tool_name.to_string(),
@@ -339,15 +476,44 @@ impl SandboxExecutor {
     }
 }
 
+/// Compute effective RLIMIT_AS, applying an executable-size floor.
+///
+/// Debug builds can be 700+ MB, and the dynamic linker maps the entire text section
+/// into virtual memory on exec(). The Tokio runtime then adds thread stacks (~8 MB
+/// virtual each). Without this floor, tools with small declared budgets OOM before
+/// they can even start. For release builds (~30 MB), the floor is well below every
+/// category overhead constant, so it has no effect.
+fn effective_rlimit_as(
+    config: &SandboxConfig,
+    category_overhead_bytes: u64,
+    exe_size_bytes: u64,
+) -> u64 {
+    let exe_floor = exe_size_bytes.saturating_mul(2);
+    config
+        .rlimit_as_bytes(category_overhead_bytes)
+        .max(exe_floor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentos_types::PermissionSet;
 
     #[test]
     fn test_sandbox_executor_new() {
         let dir = std::env::temp_dir();
-        let executor = SandboxExecutor::new(dir.clone());
+        let executor = SandboxExecutor::new(dir.clone(), 4);
         assert_eq!(executor.data_dir(), &dir);
+        assert!(executor.executable_path.is_none());
+    }
+
+    #[test]
+    fn test_sandbox_executor_with_executable_override() {
+        let dir = std::env::temp_dir();
+        let executable_path = PathBuf::from("/tmp/agentctl-test");
+        let executor = SandboxExecutor::with_executable(dir.clone(), executable_path.clone(), 4);
+        assert_eq!(executor.data_dir(), &dir);
+        assert_eq!(executor.executable_path.as_ref(), Some(&executable_path));
     }
 
     #[test]
@@ -405,5 +571,77 @@ mod tests {
         let b = Uuid::new_v4().simple().to_string();
         assert_ne!(a, b, "Each UUID must be unique");
         assert_eq!(a.len(), 32, "simple UUID should be 32 hex chars");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_request_file_permissions_are_private() {
+        let temp_root = tempfile::TempDir::new().unwrap();
+        let sandbox_dir = temp_root.path().join("agentos-sandbox");
+        let request = SandboxExecRequest {
+            tool_name: "datetime".to_string(),
+            payload: serde_json::json!({}),
+            data_dir: temp_root.path().join("data"),
+            manifest_weight: None,
+            task_id: None,
+            agent_id: None,
+            trace_id: None,
+            permissions: PermissionSet::new(),
+            workspace_paths: None,
+        };
+
+        let request_file = write_request_file(&sandbox_dir, &request.tool_name, &request).unwrap();
+
+        let file_mode = std::fs::metadata(&request_file)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let dir_mode = std::fs::metadata(&sandbox_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(file_mode, 0o600);
+        assert_eq!(dir_mode, 0o700);
+    }
+
+    #[test]
+    fn test_effective_rlimit_as_uses_category_when_larger() {
+        // Release binary ~30 MB → floor = 60 MB, category = 256 MB → category wins
+        let config = SandboxConfig {
+            max_memory_bytes: 64 * 1024 * 1024,
+            ..Default::default()
+        };
+        let result =
+            effective_rlimit_as(&config, SandboxConfig::OVERHEAD_STATELESS, 30 * 1024 * 1024);
+        assert_eq!(
+            result,
+            config.rlimit_as_bytes(SandboxConfig::OVERHEAD_STATELESS)
+        );
+    }
+
+    #[test]
+    fn test_effective_rlimit_as_uses_exe_floor_when_larger() {
+        // Debug binary ~700 MB → floor = 1400 MB, category = 208 MB → floor wins
+        let config = SandboxConfig {
+            max_memory_bytes: 16 * 1024 * 1024,
+            ..Default::default()
+        };
+        let exe_size = 700 * 1024 * 1024;
+        let result = effective_rlimit_as(&config, SandboxConfig::OVERHEAD_HAL, exe_size);
+        assert_eq!(result, exe_size * 2);
+        assert!(result > config.rlimit_as_bytes(SandboxConfig::OVERHEAD_HAL));
+    }
+
+    #[test]
+    fn test_effective_rlimit_as_zero_exe_size_uses_category() {
+        let config = SandboxConfig::default();
+        let result = effective_rlimit_as(&config, SandboxConfig::OVERHEAD_DEFAULT, 0);
+        assert_eq!(
+            result,
+            config.rlimit_as_bytes(SandboxConfig::OVERHEAD_DEFAULT)
+        );
     }
 }

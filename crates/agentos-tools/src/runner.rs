@@ -242,11 +242,19 @@ impl ToolRunner {
         let result = tool.execute(payload, context).await;
         let duration = start.elapsed();
 
-        tracing::info!(
-            tool = tool_name,
-            duration_ms = duration.as_millis() as u64,
-            "Tool execution completed"
-        );
+        match &result {
+            Ok(_) => tracing::info!(
+                tool = tool_name,
+                duration_ms = duration.as_millis() as u64,
+                "Tool execution completed"
+            ),
+            Err(e) => tracing::warn!(
+                tool = tool_name,
+                duration_ms = duration.as_millis() as u64,
+                error = %e,
+                "Tool execution failed"
+            ),
+        }
 
         result
     }

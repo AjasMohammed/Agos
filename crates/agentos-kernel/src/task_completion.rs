@@ -5,6 +5,7 @@ use agentos_types::*;
 impl Kernel {
     /// Handle successful task completion: record to episodic memory, update scheduler state,
     /// emit events, notify background pool, wake dependency waiters, and trigger consolidation.
+    #[tracing::instrument(skip_all, fields(task_id = %task.id, agent_id = %task.agent_id))]
     pub(crate) async fn complete_task_success(
         &self,
         task: &AgentTask,
@@ -12,11 +13,7 @@ impl Kernel {
         duration_ms: u64,
         task_trace_id: TraceID,
     ) {
-        tracing::info!(
-            "Task {} complete: {}",
-            task.id,
-            Self::truncate_for_prompt_payload(&result.answer, 100)
-        );
+        tracing::info!("Task {} complete: {}", task.id, result.answer);
         crate::metrics::record_task_completed(duration_ms, true);
 
         // Record enriched task success to episodic memory
@@ -59,6 +56,8 @@ impl Kernel {
                     }),
                     0,
                     Some(task_trace_id),
+                    Some(task.agent_id),
+                    Some(task.id),
                 )
                 .await;
             }
@@ -95,6 +94,8 @@ impl Kernel {
                 }),
                 0,
                 Some(task_trace_id),
+                Some(task.agent_id),
+                Some(task.id),
             )
             .await;
 
@@ -131,9 +132,13 @@ impl Kernel {
                     }),
                     0,
                     Some(task_trace_id),
+                    Some(task.agent_id),
+                    Some(task.id),
                 )
                 .await;
-                self.scheduler.requeue(waiter_id).await.ok();
+                if let Err(e) = self.scheduler.requeue(waiter_id).await {
+                    tracing::warn!(error = %e, waiter_id = %waiter_id, "Requeue failed after task success — waiter will timeout naturally");
+                }
             }
 
             // Trigger consolidation bookkeeping in the background.
@@ -159,6 +164,7 @@ impl Kernel {
 
     /// Handle task failure: classify the error, record to episodic memory, update scheduler state,
     /// emit events, notify background pool, and clean up dependency edges.
+    #[tracing::instrument(skip_all, fields(task_id = %task.id, agent_id = %task.agent_id))]
     pub(crate) async fn complete_task_failure(
         &self,
         task: &AgentTask,
@@ -166,7 +172,9 @@ impl Kernel {
         duration_ms: u64,
         task_trace_id: TraceID,
     ) {
-        let error_message = error.to_string();
+        // Build the full anyhow error chain before consuming `error`.
+        let error_chain: Vec<String> = error.chain().map(|e| e.to_string()).collect();
+        let error_message = error_chain[0].clone();
         let (reason, severity, is_pause) = Self::classify_task_failure(&error_message);
         let task_state = self.scheduler.get_task(&task.id).await.map(|t| t.state);
         let task_is_waiting = matches!(task_state, Some(TaskState::Waiting));
@@ -238,7 +246,26 @@ impl Kernel {
             return;
         }
 
-        tracing::error!("Task {} failed: {}", task.id, error_message);
+        if error_chain.len() > 1 {
+            tracing::error!(
+                task_id = %task.id,
+                agent_id = %task.agent_id,
+                duration_ms = duration_ms,
+                prompt = %task.original_prompt.chars().take(120).collect::<String>(),
+                error = %error_message,
+                cause = %error_chain[1..].join(" → "),
+                "Task failed"
+            );
+        } else {
+            tracing::error!(
+                task_id = %task.id,
+                agent_id = %task.agent_id,
+                duration_ms = duration_ms,
+                prompt = %task.original_prompt.chars().take(120).collect::<String>(),
+                error = %error_message,
+                "Task failed"
+            );
+        }
         crate::metrics::record_task_completed(duration_ms, false);
 
         // Only transition to Failed and emit events if the task hasn't
@@ -265,6 +292,28 @@ impl Kernel {
             return;
         }
 
+        // Write a direct TaskFailed audit entry with task_id, agent_id, and full
+        // error details. This is separate from the EventEmitted path below so the
+        // failure is always queryable by task_id regardless of event-system state.
+        self.audit_log(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: task_trace_id,
+            event_type: agentos_audit::AuditEventType::TaskFailed,
+            agent_id: Some(task.agent_id),
+            task_id: Some(task.id),
+            tool_id: None,
+            details: serde_json::json!({
+                "reason": reason,
+                "error": error_message,
+                "error_chain": error_chain,
+                "duration_ms": duration_ms,
+                "prompt_preview": task.original_prompt.chars().take(200).collect::<String>(),
+            }),
+            severity: agentos_audit::AuditSeverity::Error,
+            reversible: false,
+            rollback_ref: None,
+        });
+
         // Emit TaskRetrying for retryable failure types (LLM transient errors).
         // Note: the task is not actually retried in this code path — this signal
         // indicates the failure *was* retryable, allowing subscribers to implement
@@ -283,6 +332,8 @@ impl Kernel {
                 }),
                 0,
                 Some(task_trace_id),
+                Some(task.agent_id),
+                Some(task.id),
             )
             .await;
         }
@@ -299,6 +350,8 @@ impl Kernel {
             }),
             0,
             Some(task_trace_id),
+            Some(task.agent_id),
+            Some(task.id),
         )
         .await;
 
@@ -352,6 +405,8 @@ impl Kernel {
                     }),
                     0,
                     Some(task_trace_id),
+                    Some(task.agent_id),
+                    Some(task.id),
                 )
                 .await;
             }
@@ -375,9 +430,13 @@ impl Kernel {
                 }),
                 0,
                 Some(task_trace_id),
+                Some(task.agent_id),
+                Some(task.id),
             )
             .await;
-            self.scheduler.requeue(waiter_id).await.ok();
+            if let Err(e) = self.scheduler.requeue(waiter_id).await {
+                tracing::warn!(error = %e, waiter_id = %waiter_id, "Requeue failed after task failure — waiter will timeout naturally");
+            }
         }
 
         self.cleanup_task_subscriptions(&task.id).await;

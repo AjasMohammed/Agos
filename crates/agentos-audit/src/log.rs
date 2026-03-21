@@ -59,6 +59,8 @@ pub enum AuditEventType {
     KernelStarted,
     KernelShutdown,
     KernelSubsystemRestarted,
+    /// Emitted when a kernel runtime configuration parameter is changed (e.g. log level).
+    KernelConfigChanged,
 
     // agentd - Schedule
     ScheduledJobCreated,

@@ -194,7 +194,9 @@ impl Kernel {
                                         .complete_dependency(timed_out.task_id)
                                         .await;
                                     for waiter_id in waiters {
-                                        kernel.scheduler.requeue(&waiter_id).await.ok();
+                                        if let Err(e) = kernel.scheduler.requeue(&waiter_id).await {
+                                            tracing::warn!(error = %e, waiter_id = %waiter_id, "Requeue failed after timeout — waiter will timeout naturally");
+                                        }
                                     }
                                     kernel.cleanup_task_subscriptions(&timed_out.task_id).await;
                                     // Release context window, intent validator state, and resource
@@ -274,7 +276,9 @@ impl Kernel {
                                                                 let waiters =
                                                                     kernel.scheduler.complete_dependency(*task_id).await;
                                                                 for waiter_id in waiters {
-                                                                    kernel.scheduler.requeue(&waiter_id).await.ok();
+                                                                    if let Err(e) = kernel.scheduler.requeue(&waiter_id).await {
+                                            tracing::warn!(error = %e, waiter_id = %waiter_id, "Requeue failed after timeout — waiter will timeout naturally");
+                                        }
                                                                 }
                                                             }
                                                         }
@@ -326,7 +330,9 @@ impl Kernel {
                                                         let waiters =
                                                             kernel.scheduler.complete_dependency(*task_id).await;
                                                         for waiter_id in waiters {
-                                                            kernel.scheduler.requeue(&waiter_id).await.ok();
+                                                            if let Err(e) = kernel.scheduler.requeue(&waiter_id).await {
+                                            tracing::warn!(error = %e, waiter_id = %waiter_id, "Requeue failed after timeout — waiter will timeout naturally");
+                                        }
                                                         }
                                                     }
                                                 }
@@ -683,6 +689,15 @@ impl Kernel {
                         // Remove the now-stale task ID entry to prevent map growth and
                         // potential misidentification if a new task reuses the same ID.
                         task_id_map.retain(|_, v| *v != kind);
+
+                        // If the cancellation token fired, this exit is expected (the task
+                        // detected shutdown and returned cleanly). Skip the restart path —
+                        // the outer `cancelled()` arm will drain remaining tasks and break.
+                        if self.cancellation_token.is_cancelled() {
+                            tracing::debug!(task = %kind, "Kernel task exited during shutdown (expected)");
+                            continue;
+                        }
+
                         tracing::warn!(task = %kind, "Kernel task exited unexpectedly, restarting");
 
                         self.audit_log(agentos_audit::AuditEntry {
@@ -1083,8 +1098,9 @@ impl Kernel {
                 model,
                 base_url,
                 roles,
+                test_mode,
             } => {
-                self.cmd_connect_agent(name, provider, model, base_url, roles)
+                self.cmd_connect_agent(name, provider, model, base_url, roles, test_mode)
                     .await
             }
             KernelCommand::ListAgents => self.cmd_list_agents().await,
@@ -1092,8 +1108,10 @@ impl Kernel {
                 self.cmd_disconnect_agent(agent_id).await
             }
             KernelCommand::RunTask {
-                agent_name, prompt, ..
-            } => self.cmd_run_task(agent_name, prompt).await,
+                agent_name,
+                prompt,
+                autonomous,
+            } => self.cmd_run_task(agent_name, prompt, autonomous).await,
             KernelCommand::ListTasks => self.cmd_list_tasks().await,
             KernelCommand::SetSecret {
                 name,
@@ -1375,6 +1393,8 @@ impl Kernel {
                 let data = self.cmd_hal_revoke_device(&device_id, &agent_name).await;
                 agentos_bus::KernelResponse::Success { data: Some(data) }
             }
+
+            KernelCommand::SetLogLevel { level } => self.cmd_set_log_level(level).await,
 
             KernelCommand::Shutdown => {
                 tracing::info!("Shutdown command received, initiating graceful shutdown");

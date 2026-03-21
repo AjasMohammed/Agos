@@ -60,12 +60,28 @@ pub(crate) fn emit_signed_event(
         agent_id,
         task_id,
         tool_id: None,
-        details: serde_json::json!({
-            "event_id": event_id.to_string(),
-            "event_type": format!("{:?}", event.event_type),
-            "severity": format!("{:?}", severity),
-            "chain_depth": chain_depth,
-        }),
+        details: {
+            // Include the original event payload so EventEmitted entries are
+            // self-contained and queryable. Guard against the 64 KiB details limit.
+            const MAX_PAYLOAD_BYTES: usize = 60 * 1024;
+            let payload_value: serde_json::Value = match serde_json::to_string(&payload) {
+                Ok(s) if s.len() <= MAX_PAYLOAD_BYTES => payload.clone(),
+                Ok(s) => serde_json::json!({
+                    "__truncated": true,
+                    "original_bytes": s.len(),
+                }),
+                Err(_) => {
+                    serde_json::json!({ "__truncated": true, "error": "serialization_failed" })
+                }
+            };
+            serde_json::json!({
+                "event_id": event_id.to_string(),
+                "event_type": format!("{:?}", event.event_type),
+                "severity": format!("{:?}", severity),
+                "chain_depth": chain_depth,
+                "payload": payload_value,
+            })
+        },
         severity: AuditSeverity::Info,
         reversible: false,
         rollback_ref: None,
@@ -124,12 +140,24 @@ impl Kernel {
         payload: serde_json::Value,
         chain_depth: u32,
     ) {
-        self.emit_event_with_trace(event_type, source, severity, payload, chain_depth, None)
-            .await;
+        self.emit_event_with_trace(
+            event_type,
+            source,
+            severity,
+            payload,
+            chain_depth,
+            None,
+            None,
+            None,
+        )
+        .await;
     }
 
     /// Emit an event and optionally preserve an existing trace ID for
-    /// correlation with the surrounding audit trail.
+    /// correlation with the surrounding audit trail. Pass `agent_id` and
+    /// `task_id` when available so the EventEmitted audit entry is queryable
+    /// by agent or task without needing to join through the event payload.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn emit_event_with_trace(
         &self,
         event_type: EventType,
@@ -138,6 +166,8 @@ impl Kernel {
         payload: serde_json::Value,
         chain_depth: u32,
         trace_id: Option<TraceID>,
+        agent_id: Option<AgentID>,
+        task_id: Option<TaskID>,
     ) {
         emit_signed_event(
             &self.capability_engine,
@@ -149,8 +179,8 @@ impl Kernel {
             payload,
             chain_depth,
             trace_id.unwrap_or_default(),
-            None,
-            None,
+            agent_id,
+            task_id,
         );
     }
 
@@ -528,6 +558,7 @@ impl Kernel {
                 subscription_id: sub.id,
                 chain_depth: event.chain_depth,
             }),
+            autonomous: false,
         };
 
         self.scheduler.enqueue(task).await;

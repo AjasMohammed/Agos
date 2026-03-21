@@ -53,6 +53,12 @@ impl AgentTool for FileEditor {
             ));
         }
 
+        tracing::debug!(
+            path = path_str,
+            edits_count = edits.len(),
+            "file-editor: starting"
+        );
+
         // Parse edits upfront so we fail fast on malformed input.
         let mut parsed_edits: Vec<(String, String)> = Vec::with_capacity(edits.len());
         for (i, edit) in edits.iter().enumerate() {
@@ -104,6 +110,7 @@ impl AgentTool for FileEditor {
             .iter()
             .any(|wp| canonical.starts_with(wp));
         if !canonical.starts_with(&canonical_data_dir) && !in_workspace {
+            tracing::warn!(path = path_str, "file-editor: path traversal blocked");
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
                 operation: format!("Path traversal denied: {}", path_str),
@@ -184,6 +191,13 @@ impl AgentTool for FileEditor {
         // Atomic write via tmp + rename.
         let bytes_written = content.len() as u64;
         atomic_write(&canonical, &content).await?;
+
+        tracing::debug!(
+            path = path_str,
+            edits_applied = parsed_edits.len(),
+            bytes_written,
+            "file-editor: complete"
+        );
 
         Ok(serde_json::json!({
             "path": path_str,

@@ -33,6 +33,10 @@ pub enum KernelCommand {
         /// Roles assigned to the agent; defaults to ["general"] if empty.
         #[serde(default)]
         roles: Vec<String>,
+        /// When true, the agent is immediately given an ecosystem-testing prompt
+        /// instead of starting idle. Used for evaluating AgentOS usability.
+        #[serde(default)]
+        test_mode: bool,
     },
     ListAgents,
     DisconnectAgent {
@@ -43,6 +47,9 @@ pub enum KernelCommand {
     RunTask {
         agent_name: Option<String>,
         prompt: String,
+        /// When true, runs without iteration/timeout limits (autonomous mode).
+        #[serde(default)]
+        autonomous: bool,
     },
     ListTasks,
     GetTaskLogs {
@@ -332,6 +339,14 @@ pub enum KernelCommand {
     },
     EventHistory {
         last: u32,
+    },
+
+    // Logging control
+    /// Dynamically update the active log filter level at runtime.
+    /// Accepts any `EnvFilter`-compatible string, e.g. "debug", "warn",
+    /// "agentos=debug,agentos_kernel=trace".
+    SetLogLevel {
+        level: String,
     },
 }
 

@@ -130,7 +130,10 @@ impl Kernel {
                                         let waiters =
                                             self.scheduler.complete_dependency(task_id).await;
                                         for waiter_id in waiters {
-                                            self.scheduler.requeue(&waiter_id).await.ok();
+                                            if let Err(e) = self.scheduler.requeue(&waiter_id).await
+                                            {
+                                                tracing::warn!(error = %e, waiter_id = %waiter_id, "Requeue failed after escalation approval — waiter will timeout naturally");
+                                            }
                                         }
                                     }
                                 }
@@ -183,7 +186,9 @@ impl Kernel {
                                 .await;
                                 let waiters = self.scheduler.complete_dependency(task_id).await;
                                 for waiter_id in waiters {
-                                    self.scheduler.requeue(&waiter_id).await.ok();
+                                    if let Err(e) = self.scheduler.requeue(&waiter_id).await {
+                                        tracing::warn!(error = %e, waiter_id = %waiter_id, "Requeue failed after escalation denial — waiter will timeout naturally");
+                                    }
                                 }
                             }
                         }

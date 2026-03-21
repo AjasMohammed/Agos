@@ -24,6 +24,10 @@ pub enum AgentCommands {
         /// Defaults to "general" if omitted.
         #[arg(long = "role")]
         roles: Vec<String>,
+        /// Connect in test mode: the agent receives an ecosystem-evaluation prompt
+        /// instead of starting idle, and is asked to provide usability feedback.
+        #[arg(long, default_value_t = false)]
+        test: bool,
     },
     /// List connected agents
     List,
@@ -87,6 +91,7 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
             name,
             base_url,
             roles,
+            test,
         } => {
             let provider = parse_provider(&provider)?;
             let response = client
@@ -96,11 +101,25 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                     name: name.clone(),
                     base_url,
                     roles,
+                    test_mode: test,
                 })
                 .await?;
 
             match response {
-                KernelResponse::Success { .. } => println!("✅ Agent '{}' connected", name),
+                KernelResponse::Success { data } => {
+                    println!("✅ Agent '{}' connected", name);
+                    if let Some(tid) = data
+                        .as_ref()
+                        .and_then(|d| d.get("test_task_id"))
+                        .and_then(|v| v.as_str())
+                    {
+                        println!();
+                        println!("  Test mode: ecosystem evaluation task queued.");
+                        println!("  Task ID : {}", tid);
+                        println!("  Monitor : agentctl task logs {}", tid);
+                        println!("  Results will appear once the agent completes its evaluation.");
+                    }
+                }
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
                 _ => eprintln!("❌ Unexpected response"),
             }

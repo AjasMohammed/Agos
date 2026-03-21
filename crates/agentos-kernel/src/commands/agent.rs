@@ -14,6 +14,7 @@ impl Kernel {
         model: String,
         base_url: Option<String>,
         roles: Vec<String>,
+        test_mode: bool,
     ) -> KernelResponse {
         let now = chrono::Utc::now();
 
@@ -29,6 +30,7 @@ impl Kernel {
                     .unwrap_or_else(|| self.config.ollama.host.clone());
                 Ok(Arc::new(
                     OllamaCore::new(&host, &model)
+                        .with_request_timeout(self.config.ollama.request_timeout_secs)
                         .with_context_window(self.config.llm.ollama_context_window),
                 ))
             }
@@ -407,9 +409,108 @@ impl Kernel {
         )
         .await;
 
-        KernelResponse::Success {
-            data: Some(serde_json::json!({ "agent_id": agent_id.to_string() })),
+        // In test mode, immediately queue an ecosystem-evaluation task so the agent
+        // receives a structured feedback prompt instead of starting idle.
+        let mut test_task_id_opt: Option<TaskID> = None;
+        if test_mode {
+            let test_prompt = format!(
+                r#"[TEST MODE — ECOSYSTEM EVALUATION]
+
+You are {agent_name}, a {agent_model} agent that has just been connected to AgentOS in test mode.
+Your sole purpose in this session is to evaluate the AgentOS ecosystem and provide honest, structured feedback on its usability and capabilities.
+
+Please explore the system systematically:
+1. Examine your available tools and permissions (use list-tools or introspect your capability token).
+2. Attempt to exercise core capabilities: memory-read, memory-write, file access, agent-message, and any other tools available to you.
+3. Assess the clarity of the intent system and how natural it feels to express actions as structured intents.
+4. Identify friction points, confusing APIs, missing primitives, or anything that would slow down a real workload.
+5. Evaluate the agent communication model — how easy is it to coordinate with peer agents?
+
+After your exploration, respond with structured feedback in the following format:
+
+## What Works Well
+(List specific capabilities or design choices that felt intuitive and effective)
+
+## Friction Points
+(List specific things that were confusing, tedious, or poorly documented)
+
+## Missing Capabilities
+(Tools, permissions, or primitives you expected to exist but could not find)
+
+## Suggestions for Improvement
+(Concrete, actionable recommendations for the AgentOS team)
+
+## Overall Assessment
+(1-2 paragraphs summarising the ecosystem's fitness for LLM-native workflows)
+
+Be thorough and direct. Your feedback is the primary output of this session."#,
+                agent_name = agent_name,
+                agent_model = agent_model,
+            );
+
+            let test_task_id = TaskID::new();
+            let effective_permissions = self
+                .agent_registry
+                .read()
+                .await
+                .compute_effective_permissions(&agent_id);
+            match self.capability_engine.issue_token(
+                test_task_id,
+                agent_id,
+                std::collections::BTreeSet::new(),
+                std::collections::BTreeSet::from([
+                    IntentTypeFlag::Read,
+                    IntentTypeFlag::Write,
+                    IntentTypeFlag::Execute,
+                    IntentTypeFlag::Query,
+                    IntentTypeFlag::Observe,
+                    IntentTypeFlag::Message,
+                    IntentTypeFlag::Escalate,
+                    IntentTypeFlag::Subscribe,
+                    IntentTypeFlag::Unsubscribe,
+                ]),
+                effective_permissions,
+                std::time::Duration::from_secs(self.config.kernel.default_task_timeout_secs),
+            ) {
+                Ok(token) => {
+                    let test_task = AgentTask {
+                        id: test_task_id,
+                        state: TaskState::Queued,
+                        agent_id,
+                        capability_token: token,
+                        assigned_llm: Some(agent_id),
+                        priority: 5,
+                        created_at: chrono::Utc::now(),
+                        started_at: None,
+                        timeout: std::time::Duration::from_secs(
+                            self.config.kernel.default_task_timeout_secs,
+                        ),
+                        original_prompt: test_prompt,
+                        history: Vec::new(),
+                        parent_task: None,
+                        reasoning_hints: None,
+                        max_iterations: None,
+                        trigger_source: None,
+                        autonomous: false,
+                    };
+                    self.scheduler.enqueue(test_task).await;
+                    test_task_id_opt = Some(test_task_id);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        error = %e,
+                        "Failed to issue capability token for test task"
+                    );
+                }
+            }
         }
+
+        let mut data = serde_json::json!({ "agent_id": agent_id.to_string() });
+        if let Some(tid) = test_task_id_opt {
+            data["test_task_id"] = serde_json::json!(tid.to_string());
+        }
+        KernelResponse::Success { data: Some(data) }
     }
 
     pub(crate) async fn cmd_list_agents(&self) -> KernelResponse {
@@ -672,9 +773,33 @@ impl Kernel {
 
 fn default_permissions_for_agent(name: &str) -> PermissionSet {
     let mut perms = PermissionSet::new();
-    // Shared user data — read-only
+
+    // Filesystem — shared user data read-only, own namespace full access
     perms.grant("fs.user_data".to_string(), true, false, false, None);
-    // Agent's own namespace — full access
     perms.grant(format!("fs:agents/{name}/"), true, true, true, None);
+
+    // Memory — semantic read+write, episodic read, procedural read
+    perms.grant("memory.semantic".to_string(), true, true, false, None);
+    perms.grant("memory.episodic".to_string(), true, false, false, None);
+    perms.grant("memory.procedural".to_string(), true, false, false, None);
+
+    // Memory blocks — read+write for named memory blocks
+    perms.grant("memory.blocks".to_string(), true, true, false, None);
+
+    // Agent registry — read-only (agent-self, agent-list, agent-manual)
+    perms.grant("agent.registry".to_string(), true, false, false, None);
+
+    // Hardware system info — read-only (hardware-info, sys-monitor)
+    perms.grant("hardware.system".to_string(), true, false, false, None);
+
+    // Network outbound — execute (http-client, web-fetch with SSRF protection)
+    perms.grant_op("network.outbound".to_string(), PermissionOp::Execute, None);
+
+    // Task query — read-only (task-list, task-status)
+    perms.grant("task.query".to_string(), true, false, false, None);
+
+    // Event stream — observe (subscribe/unsubscribe to kernel events)
+    perms.grant_op("events.stream".to_string(), PermissionOp::Observe, None);
+
     perms
 }

@@ -57,6 +57,7 @@ impl Kernel {
             reasoning_hints: None,
             max_iterations: None,
             trigger_source: None,
+            autonomous: false,
         };
 
         self.background_pool
