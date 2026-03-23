@@ -28,6 +28,10 @@ pub enum AgentCommands {
         /// instead of starting idle, and is asked to provide usability feedback.
         #[arg(long, default_value_t = false)]
         test: bool,
+        /// Extra permissions to grant on connect (format: resource:flags, e.g. process.exec:x).
+        /// May be repeated: --grant process.exec:x --grant fs.data:rw
+        #[arg(long = "grant")]
+        grants: Vec<String>,
     },
     /// List connected agents
     List,
@@ -92,6 +96,7 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
             base_url,
             roles,
             test,
+            grants,
         } => {
             let provider = parse_provider(&provider)?;
             let response = client
@@ -102,6 +107,7 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                     base_url,
                     roles,
                     test_mode: test,
+                    extra_permissions: grants,
                 })
                 .await?;
 
@@ -110,14 +116,19 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                     println!("✅ Agent '{}' connected", name);
                     if let Some(tid) = data
                         .as_ref()
-                        .and_then(|d| d.get("test_task_id"))
+                        .and_then(|d| d.get("onboarding_task_id"))
                         .and_then(|v| v.as_str())
                     {
                         println!();
-                        println!("  Test mode: ecosystem evaluation task queued.");
+                        if test {
+                            println!("  Test mode: ecosystem evaluation task queued.");
+                        } else {
+                            println!(
+                                "  Onboarding task queued — agent is exploring the ecosystem."
+                            );
+                        }
                         println!("  Task ID : {}", tid);
                         println!("  Monitor : agentctl task logs {}", tid);
-                        println!("  Results will appear once the agent completes its evaluation.");
                     }
                 }
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),

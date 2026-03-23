@@ -556,6 +556,7 @@ mod tests {
                         base_url: _,
                         roles: _,
                         test: _,
+                        grants: _,
                     },
             } => {
                 assert_eq!(provider, "openai");

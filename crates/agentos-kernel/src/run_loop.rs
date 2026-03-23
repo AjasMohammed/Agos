@@ -1103,9 +1103,18 @@ impl Kernel {
                 base_url,
                 roles,
                 test_mode,
+                extra_permissions,
             } => {
-                self.cmd_connect_agent(name, provider, model, base_url, roles, test_mode)
-                    .await
+                self.cmd_connect_agent(
+                    name,
+                    provider,
+                    model,
+                    base_url,
+                    roles,
+                    test_mode,
+                    extra_permissions,
+                )
+                .await
             }
             KernelCommand::ListAgents => self.cmd_list_agents().await,
             KernelCommand::DisconnectAgent { agent_id } => {

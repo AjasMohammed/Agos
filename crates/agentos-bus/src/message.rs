@@ -37,6 +37,9 @@ pub enum KernelCommand {
         /// instead of starting idle. Used for evaluating AgentOS usability.
         #[serde(default)]
         test_mode: bool,
+        /// Extra permissions to grant on connect (format: "resource:flags", e.g. "process.exec:x").
+        #[serde(default)]
+        extra_permissions: Vec<String>,
     },
     ListAgents,
     DisconnectAgent {

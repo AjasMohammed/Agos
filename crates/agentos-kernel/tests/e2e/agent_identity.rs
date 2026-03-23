@@ -19,6 +19,7 @@ async fn test_reconnect_same_provider_model_reuses_agent_id() {
             base_url: Some("http://localhost:11434".to_string()),
             roles: vec![],
             test_mode: false,
+            extra_permissions: vec![],
         })
         .await
         .expect("first ConnectAgent")
@@ -49,6 +50,7 @@ async fn test_reconnect_same_provider_model_reuses_agent_id() {
             base_url: Some("http://localhost:11434".to_string()),
             roles: vec![],
             test_mode: false,
+            extra_permissions: vec![],
         })
         .await
         .expect("second ConnectAgent")
@@ -92,6 +94,7 @@ async fn test_reconnect_different_model_issues_new_agent_id() {
             base_url: Some("http://localhost:11434".to_string()),
             roles: vec![],
             test_mode: false,
+            extra_permissions: vec![],
         })
         .await
         .expect("first ConnectAgent")
@@ -121,6 +124,7 @@ async fn test_reconnect_different_model_issues_new_agent_id() {
             base_url: Some("http://localhost:11434".to_string()),
             roles: vec![],
             test_mode: false,
+            extra_permissions: vec![],
         })
         .await
         .expect("second ConnectAgent different model")
