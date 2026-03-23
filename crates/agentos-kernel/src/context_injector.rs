@@ -199,8 +199,12 @@ impl Kernel {
                     {
                         tracing::error!(error = %e, task_id = %task.id, "Failed to update task state to Waiting — task may be stuck in Running state");
                     }
-                    // Preserve context and intent history so the task can resume
-                    // if the escalation is approved.
+                    // Injection is a security event — clear tainted context and
+                    // intent history so the adversarial payload cannot be re-ingested
+                    // if the task is ever resumed. Context preservation is only
+                    // appropriate for legitimate escalation pauses (tool hard-approval).
+                    self.context_manager.remove_context(&task.id).await;
+                    self.intent_validator.remove_task(&task.id).await;
                     anyhow::bail!("Task paused: high-confidence injection detected in user prompt");
                 }
             }
