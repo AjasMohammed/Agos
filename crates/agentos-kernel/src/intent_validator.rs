@@ -220,7 +220,7 @@ fn check_scope_escalation(
 fn extract_resource_target(payload: &serde_json::Value) -> Option<String> {
     // Try common field names for resource targets
     for key in &[
-        "path", "key", "file", "resource", "target", "url", "scope", "name", "id",
+        "path", "key", "file", "resource", "target", "url", "name", "id", "scope",
     ] {
         if let Some(val) = payload.get(key).and_then(|v| v.as_str()) {
             return Some(val.to_string());
