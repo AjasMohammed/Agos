@@ -7,6 +7,7 @@ use secrecy::SecretString;
 use std::sync::Arc;
 
 impl Kernel {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn cmd_connect_agent(
         &self,
         name: String,
@@ -15,6 +16,7 @@ impl Kernel {
         base_url: Option<String>,
         roles: Vec<String>,
         test_mode: bool,
+        extra_permissions: Vec<String>,
     ) -> KernelResponse {
         let now = chrono::Utc::now();
 
@@ -170,6 +172,31 @@ impl Kernel {
                     false,
                 ),
             };
+
+            // Apply extra permissions supplied via --grant flags
+            let mut persisted_permissions = persisted_permissions;
+            for perm_str in &extra_permissions {
+                if let Some((resource, read, write, execute, query, observe)) =
+                    Self::parse_permission(perm_str)
+                {
+                    persisted_permissions.grant(resource.clone(), read, write, execute, None);
+                    if query {
+                        persisted_permissions
+                            .grant_op(resource.clone(), PermissionOp::Query, None);
+                    }
+                    if observe {
+                        persisted_permissions
+                            .grant_op(resource.clone(), PermissionOp::Observe, None);
+                    }
+                } else {
+                    return KernelResponse::Error {
+                        message: format!(
+                            "Invalid permission '{}'. Expected format: resource:FLAGS (r,w,x,q,o e.g. process.exec:x)",
+                            perm_str
+                        ),
+                    };
+                }
+            }
 
             // Capture the ID of any stale Offline entry with this name before removing it,
             // so we can revoke its vault key after releasing the registry write lock.
