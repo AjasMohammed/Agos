@@ -48,8 +48,13 @@ impl Kernel {
                 }
             }
         };
-        let effective_permissions = registry.compute_effective_permissions(&agent_id);
+        let mut effective_permissions = registry.compute_effective_permissions(&agent_id);
         drop(registry);
+
+        // Autonomous tasks get shell execution permission — interactive tasks do not
+        if autonomous {
+            effective_permissions.grant_op("process.exec".to_string(), PermissionOp::Execute, None);
+        }
 
         let task_id = TaskID::new();
         let task_timeout = if autonomous {
@@ -232,7 +237,14 @@ impl Kernel {
         drop(registry);
 
         let child_permissions = parent_task.capability_token.permissions.clone();
-        let effective_permissions = child_permissions.intersect(&target_permissions);
+        let mut effective_permissions = child_permissions.intersect(&target_permissions);
+
+        // Autonomous delegated tasks get shell execution — mirrors the grant
+        // in cmd_run_task / create_background_task so child agents can use
+        // shell-exec without requiring it in their base permission set.
+        if parent_task.autonomous {
+            effective_permissions.grant_op("process.exec".to_string(), PermissionOp::Execute, None);
+        }
 
         let child_token = self.capability_engine.issue_token(
             TaskID::new(),
