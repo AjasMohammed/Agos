@@ -219,9 +219,7 @@ fn check_scope_escalation(
 /// Extract a resource identifier from a tool payload for comparison purposes.
 fn extract_resource_target(payload: &serde_json::Value) -> Option<String> {
     // Try common field names for resource targets
-    for key in &[
-        "path", "key", "file", "resource", "target", "url", "name", "id", "scope",
-    ] {
+    for key in &["path", "key", "file", "resource", "target", "url", "scope"] {
         if let Some(val) = payload.get(key).and_then(|v| v.as_str()) {
             return Some(val.to_string());
         }
