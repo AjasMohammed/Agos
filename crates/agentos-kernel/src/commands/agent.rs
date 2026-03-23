@@ -181,12 +181,14 @@ impl Kernel {
                 {
                     persisted_permissions.grant(resource.clone(), read, write, execute, None);
                     if query {
-                        persisted_permissions
-                            .grant_op(resource.clone(), PermissionOp::Query, None);
+                        persisted_permissions.grant_op(resource.clone(), PermissionOp::Query, None);
                     }
                     if observe {
-                        persisted_permissions
-                            .grant_op(resource.clone(), PermissionOp::Observe, None);
+                        persisted_permissions.grant_op(
+                            resource.clone(),
+                            PermissionOp::Observe,
+                            None,
+                        );
                     }
                 } else {
                     return KernelResponse::Error {
