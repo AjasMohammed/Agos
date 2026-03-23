@@ -18,8 +18,11 @@ impl Kernel {
             .ok_or_else(|| AgentOSError::AgentNotFound(agent_name.clone()))?
             .clone();
 
-        let target_permissions = registry.compute_effective_permissions(&agent.id);
+        let mut target_permissions = registry.compute_effective_permissions(&agent.id);
         drop(registry);
+
+        // Background tasks run autonomously — grant shell execution permission
+        target_permissions.grant_op("process.exec".to_string(), PermissionOp::Execute, None);
 
         let task_id = TaskID::new();
         let capability_token = self
