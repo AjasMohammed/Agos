@@ -3509,7 +3509,10 @@ impl Kernel {
                 }
                 None => {
                     // No tool call — LLM produced a plain text response.
-                    if iteration == 0 && inference.text.len() < 20 {
+                    // Only re-prompt if tools are actually available; short answers
+                    // are valid when no tools exist (e.g. pure Q&A tasks).
+                    if iteration == 0 && inference.text.len() < 20 && !llm_tool_manifests.is_empty()
+                    {
                         tracing::warn!(
                             task_id = %task.id,
                             text_len = inference.text.len(),
