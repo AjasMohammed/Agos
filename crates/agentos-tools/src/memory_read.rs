@@ -22,10 +22,10 @@ impl AgentTool for MemoryRead {
     }
 
     fn required_permissions(&self) -> Vec<(String, PermissionOp)> {
-        vec![
-            ("memory.semantic".to_string(), PermissionOp::Read),
-            ("memory.episodic".to_string(), PermissionOp::Read),
-        ]
+        // Coarse gate: agents need at least one memory read permission.
+        // Scope-specific checks (memory.semantic vs memory.episodic) are
+        // enforced inside execute().
+        vec![("memory.read".to_string(), PermissionOp::Read)]
     }
 
     async fn execute(

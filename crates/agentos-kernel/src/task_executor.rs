@@ -739,6 +739,8 @@ impl Kernel {
                         anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
                     }
                 }
+                // Note: no else-reset here because `break` follows immediately —
+                // the counter won't be read again in this loop iteration.
                 batch_budget_exceeded = Some((*action, resource.clone()));
                 break;
             }
