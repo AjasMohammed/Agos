@@ -832,7 +832,8 @@ fn default_permissions_for_agent(name: &str) -> PermissionSet {
     // Application logs — read-only (log-reader)
     perms.grant("fs.app_logs".to_string(), true, false, false, None);
 
-    // Memory — semantic read+write, episodic read+write, procedural read+write
+    // Memory — coarse read gate + per-scope read+write
+    perms.grant("memory.read".to_string(), true, false, false, None);
     perms.grant("memory.semantic".to_string(), true, true, false, None);
     perms.grant("memory.episodic".to_string(), true, true, false, None);
     perms.grant("memory.procedural".to_string(), true, true, false, None);
