@@ -7,6 +7,7 @@ pub mod archival_search;
 pub mod data_parser;
 pub mod datetime;
 pub mod episodic_list;
+pub mod escalation_status;
 pub mod factory;
 pub mod file_delete;
 pub mod file_diff;
@@ -128,6 +129,7 @@ mod tests {
             file_lock_registry: None,
             agent_registry: None,
             task_registry: None,
+            escalation_query: None,
             workspace_paths: vec![],
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         };
@@ -164,6 +166,7 @@ mod tests {
             file_lock_registry: None,
             agent_registry: None,
             task_registry: None,
+            escalation_query: None,
             workspace_paths: vec![],
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         };
@@ -203,6 +206,7 @@ mod tests {
             file_lock_registry: None,
             agent_registry: None,
             task_registry: None,
+            escalation_query: None,
             workspace_paths: vec![],
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         }
@@ -225,6 +229,7 @@ mod tests {
             file_lock_registry: Some(registry),
             agent_registry: None,
             task_registry: None,
+            escalation_query: None,
             workspace_paths: vec![],
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         }

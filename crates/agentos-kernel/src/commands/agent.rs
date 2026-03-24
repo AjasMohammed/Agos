@@ -7,6 +7,7 @@ use secrecy::SecretString;
 use std::sync::Arc;
 
 impl Kernel {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn cmd_connect_agent(
         &self,
         name: String,
@@ -15,6 +16,7 @@ impl Kernel {
         base_url: Option<String>,
         roles: Vec<String>,
         test_mode: bool,
+        extra_permissions: Vec<String>,
     ) -> KernelResponse {
         let now = chrono::Utc::now();
 
@@ -170,6 +172,33 @@ impl Kernel {
                     false,
                 ),
             };
+
+            // Apply extra permissions supplied via --grant flags
+            let mut persisted_permissions = persisted_permissions;
+            for perm_str in &extra_permissions {
+                if let Some((resource, read, write, execute, query, observe)) =
+                    Self::parse_permission(perm_str)
+                {
+                    persisted_permissions.grant(resource.clone(), read, write, execute, None);
+                    if query {
+                        persisted_permissions.grant_op(resource.clone(), PermissionOp::Query, None);
+                    }
+                    if observe {
+                        persisted_permissions.grant_op(
+                            resource.clone(),
+                            PermissionOp::Observe,
+                            None,
+                        );
+                    }
+                } else {
+                    return KernelResponse::Error {
+                        message: format!(
+                            "Invalid permission '{}'. Expected format: resource:FLAGS (r,w,x,q,o e.g. process.exec:x)",
+                            perm_str
+                        ),
+                    };
+                }
+            }
 
             // Capture the ID of any stale Offline entry with this name before removing it,
             // so we can revoke its vault key after releasing the registry write lock.
@@ -409,12 +438,14 @@ impl Kernel {
         )
         .await;
 
-        // In test mode, immediately queue an ecosystem-evaluation task so the agent
-        // receives a structured feedback prompt instead of starting idle.
-        let mut test_task_id_opt: Option<TaskID> = None;
-        if test_mode {
-            let test_prompt = format!(
-                r#"[TEST MODE — ECOSYSTEM EVALUATION]
+        // Queue an onboarding or test-evaluation task for the agent.
+        // New agents always get an onboarding prompt so they orient themselves in the
+        // ecosystem. Reconnecting agents only get a task when --test is explicitly passed.
+        let mut onboarding_task_id_opt: Option<TaskID> = None;
+        if !is_reconnect || test_mode {
+            let prompt = if test_mode {
+                format!(
+                    r#"[TEST MODE — ECOSYSTEM EVALUATION]
 
 You are {agent_name}, a {agent_model} agent that has just been connected to AgentOS in test mode.
 Your sole purpose in this session is to evaluate the AgentOS ecosystem and provide honest, structured feedback on its usability and capabilities.
@@ -444,18 +475,36 @@ After your exploration, respond with structured feedback in the following format
 (1-2 paragraphs summarising the ecosystem's fitness for LLM-native workflows)
 
 Be thorough and direct. Your feedback is the primary output of this session."#,
-                agent_name = agent_name,
-                agent_model = agent_model,
-            );
+                    agent_name = agent_name,
+                    agent_model = agent_model,
+                )
+            } else {
+                format!(
+                    r#"[ONBOARDING — WELCOME TO AGENTOS]
 
-            let test_task_id = TaskID::new();
+You are {agent_name}, powered by {agent_model}, and you have just been connected to AgentOS — an LLM-native operating system where AI agents are first-class citizens.
+
+Take a moment to orient yourself:
+1. Discover your available tools by listing them — this is how you interact with the system.
+2. Check your permissions and understand what you can and cannot do.
+3. Try reading and writing to your memory — this is how you persist knowledge across tasks.
+4. Look around the filesystem if you have access.
+5. If other agents are online, introduce yourself.
+
+Once you have explored, briefly summarise what you found and confirm you are ready to receive tasks."#,
+                    agent_name = agent_name,
+                    agent_model = agent_model,
+                )
+            };
+
+            let onboarding_task_id = TaskID::new();
             let effective_permissions = self
                 .agent_registry
                 .read()
                 .await
                 .compute_effective_permissions(&agent_id);
             match self.capability_engine.issue_token(
-                test_task_id,
+                onboarding_task_id,
                 agent_id,
                 std::collections::BTreeSet::new(),
                 std::collections::BTreeSet::from([
@@ -465,6 +514,8 @@ Be thorough and direct. Your feedback is the primary output of this session."#,
                     IntentTypeFlag::Query,
                     IntentTypeFlag::Observe,
                     IntentTypeFlag::Message,
+                    IntentTypeFlag::Delegate,
+                    IntentTypeFlag::Broadcast,
                     IntentTypeFlag::Escalate,
                     IntentTypeFlag::Subscribe,
                     IntentTypeFlag::Unsubscribe,
@@ -473,8 +524,8 @@ Be thorough and direct. Your feedback is the primary output of this session."#,
                 std::time::Duration::from_secs(self.config.kernel.default_task_timeout_secs),
             ) {
                 Ok(token) => {
-                    let test_task = AgentTask {
-                        id: test_task_id,
+                    let onboarding_task = AgentTask {
+                        id: onboarding_task_id,
                         state: TaskState::Queued,
                         agent_id,
                         capability_token: token,
@@ -485,7 +536,7 @@ Be thorough and direct. Your feedback is the primary output of this session."#,
                         timeout: std::time::Duration::from_secs(
                             self.config.kernel.default_task_timeout_secs,
                         ),
-                        original_prompt: test_prompt,
+                        original_prompt: prompt,
                         history: Vec::new(),
                         parent_task: None,
                         reasoning_hints: None,
@@ -493,22 +544,22 @@ Be thorough and direct. Your feedback is the primary output of this session."#,
                         trigger_source: None,
                         autonomous: false,
                     };
-                    self.scheduler.enqueue(test_task).await;
-                    test_task_id_opt = Some(test_task_id);
+                    self.scheduler.enqueue(onboarding_task).await;
+                    onboarding_task_id_opt = Some(onboarding_task_id);
                 }
                 Err(e) => {
                     tracing::warn!(
                         agent_id = %agent_id,
                         error = %e,
-                        "Failed to issue capability token for test task"
+                        "Failed to issue capability token for onboarding task"
                     );
                 }
             }
         }
 
         let mut data = serde_json::json!({ "agent_id": agent_id.to_string() });
-        if let Some(tid) = test_task_id_opt {
-            data["test_task_id"] = serde_json::json!(tid.to_string());
+        if let Some(tid) = onboarding_task_id_opt {
+            data["onboarding_task_id"] = serde_json::json!(tid.to_string());
         }
         KernelResponse::Success { data: Some(data) }
     }
@@ -774,14 +825,18 @@ Be thorough and direct. Your feedback is the primary output of this session."#,
 fn default_permissions_for_agent(name: &str) -> PermissionSet {
     let mut perms = PermissionSet::new();
 
-    // Filesystem — shared user data read-only, own namespace full access
-    perms.grant("fs.user_data".to_string(), true, false, false, None);
+    // Filesystem — shared user data read+write, own namespace full access
+    perms.grant("fs.user_data".to_string(), true, true, false, None);
     perms.grant(format!("fs:agents/{name}/"), true, true, true, None);
 
-    // Memory — semantic read+write, episodic read, procedural read
+    // Application logs — read-only (log-reader)
+    perms.grant("fs.app_logs".to_string(), true, false, false, None);
+
+    // Memory — coarse read gate + per-scope read+write
+    perms.grant("memory.read".to_string(), true, false, false, None);
     perms.grant("memory.semantic".to_string(), true, true, false, None);
-    perms.grant("memory.episodic".to_string(), true, false, false, None);
-    perms.grant("memory.procedural".to_string(), true, false, false, None);
+    perms.grant("memory.episodic".to_string(), true, true, false, None);
+    perms.grant("memory.procedural".to_string(), true, true, false, None);
 
     // Memory blocks — read+write for named memory blocks
     perms.grant("memory.blocks".to_string(), true, true, false, None);
@@ -789,14 +844,26 @@ fn default_permissions_for_agent(name: &str) -> PermissionSet {
     // Agent registry — read-only (agent-self, agent-list, agent-manual)
     perms.grant("agent.registry".to_string(), true, false, false, None);
 
+    // Agent messaging — execute (agent-message, task-delegate)
+    perms.grant_op("agent.message".to_string(), PermissionOp::Execute, None);
+
     // Hardware system info — read-only (hardware-info, sys-monitor)
     perms.grant("hardware.system".to_string(), true, false, false, None);
 
     // Network outbound — execute (http-client, web-fetch with SSRF protection)
     perms.grant_op("network.outbound".to_string(), PermissionOp::Execute, None);
 
+    // Process listing — read-only (sys-monitor)
+    perms.grant("process.list".to_string(), true, false, false, None);
+    // Note: process.exec (shell-exec) is NOT granted by default — it is
+    // added dynamically for autonomous/background tasks, or can be granted
+    // explicitly via `agentctl perm grant <agent> process.exec:x`.
+
     // Task query — read-only (task-list, task-status)
     perms.grant("task.query".to_string(), true, false, false, None);
+
+    // Escalation query — query (escalation-status)
+    perms.grant_op("escalation.query".to_string(), PermissionOp::Query, None);
 
     // Event stream — observe (subscribe/unsubscribe to kernel events)
     perms.grant_op("events.stream".to_string(), PermissionOp::Observe, None);

@@ -444,6 +444,7 @@ async fn run_sandbox_exec(request_path: &str) -> anyhow::Result<()> {
         file_lock_registry: None,
         agent_registry: None,
         task_registry: None,
+        escalation_query: None,
         workspace_paths: workspace_paths.unwrap_or_default(),
         cancellation_token: tokio_util::sync::CancellationToken::new(),
     };
@@ -555,6 +556,7 @@ mod tests {
                         base_url: _,
                         roles: _,
                         test: _,
+                        grants: _,
                     },
             } => {
                 assert_eq!(provider, "openai");

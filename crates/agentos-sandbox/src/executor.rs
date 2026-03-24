@@ -426,6 +426,8 @@ impl SandboxExecutor {
                 );
 
                 child.kill().await.ok();
+                // Reap the zombie so it doesn't leak a PID table entry.
+                child.wait().await.ok();
 
                 // Drain any partial output from the already-taken handles.
                 let mut stdout_bytes = Vec::new();

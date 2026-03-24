@@ -15,6 +15,7 @@ struct ToolCallRecord {
     tool_name: String,
     intent_type: IntentType,
     payload_hash: u64,
+    resource_target: Option<String>,
 }
 
 impl IntentValidator {
@@ -30,6 +31,7 @@ impl IntentValidator {
             tool_name: tool_call.tool_name.clone(),
             intent_type: tool_call.intent_type,
             payload_hash: hash_payload(&tool_call.payload),
+            resource_target: extract_resource_target(&tool_call.payload),
         };
         self.task_history
             .write()
@@ -122,7 +124,8 @@ fn check_intent_loop(
     None
 }
 
-/// Check for write-without-read: agent writes to a resource without having read it first.
+/// Check for blind overwrite: agent writes to a resource it previously wrote but never
+/// read back. First-time writes to new resources are allowed without a prior read.
 fn check_write_without_read(
     records: &[ToolCallRecord],
     tool_call: &ParsedToolCall,
@@ -131,31 +134,46 @@ fn check_write_without_read(
         return None;
     }
 
-    // Extract the resource target from the payload (commonly "path" or "key")
     let target = extract_resource_target(&tool_call.payload)?;
 
-    // Check if this resource was previously read in this task
-    let was_read = records.iter().any(|r| {
-        r.intent_type == IntentType::Read && {
-            // We approximate by checking if any read had the same tool base name
-            // (e.g., "file-reader" for "file-writer")
-            let read_base = r.tool_name.replace("-reader", "").replace("-read", "");
-            let write_base = tool_call
-                .tool_name
-                .replace("-writer", "")
-                .replace("-write", "");
-            read_base == write_base
-        }
+    // First write to this resource in this task — no issue.
+    let was_previously_written = records.iter().any(|r| {
+        r.intent_type == IntentType::Write && r.resource_target.as_deref() == Some(target.as_str())
     });
 
-    if !was_read {
-        return Some(IntentCoherenceResult::Suspicious {
-            reason: format!(
-                "Write-without-read: tool '{}' writing to '{}' without a prior read of that resource",
-                tool_call.tool_name, target
-            ),
-            confidence: 0.5,
+    if !was_previously_written {
+        return None;
+    }
+
+    // Resource was written before. Check if it was read back since the last write.
+    let write_base = tool_call
+        .tool_name
+        .replace("-writer", "")
+        .replace("-write", "");
+
+    let last_write_idx = records.iter().rposition(|r| {
+        r.intent_type == IntentType::Write && r.resource_target.as_deref() == Some(target.as_str())
+    });
+
+    if let Some(write_idx) = last_write_idx {
+        let was_read_since = records[write_idx..].iter().any(|r| {
+            r.intent_type == IntentType::Read
+                && r.resource_target.as_deref() == Some(target.as_str())
+                && {
+                    let read_base = r.tool_name.replace("-reader", "").replace("-read", "");
+                    read_base == write_base
+                }
         });
+
+        if !was_read_since {
+            return Some(IntentCoherenceResult::Suspicious {
+                reason: format!(
+                    "Blind overwrite: tool '{}' re-writing '{}' without reading it back since last write",
+                    tool_call.tool_name, target
+                ),
+                confidence: 0.5,
+            });
+        }
     }
 
     None
@@ -201,7 +219,7 @@ fn check_scope_escalation(
 /// Extract a resource identifier from a tool payload for comparison purposes.
 fn extract_resource_target(payload: &serde_json::Value) -> Option<String> {
     // Try common field names for resource targets
-    for key in &["path", "key", "file", "resource", "target", "url"] {
+    for key in &["path", "key", "file", "resource", "target", "url", "scope"] {
         if let Some(val) = payload.get(key).and_then(|v| v.as_str()) {
             return Some(val.to_string());
         }
@@ -365,7 +383,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_without_read_suspicious() {
+    async fn test_first_write_to_new_resource_approved() {
         let validator = IntentValidator::new();
         let task = make_task();
         let write_call = make_tool_call(
@@ -373,6 +391,22 @@ mod tests {
             IntentType::Write,
             serde_json::json!({"path": "/data/output.txt", "content": "hello"}),
         );
+
+        let result = validator.validate_coherence(&task, &write_call).await;
+        assert!(matches!(result, IntentCoherenceResult::Approved));
+    }
+
+    #[tokio::test]
+    async fn test_blind_overwrite_suspicious() {
+        let validator = IntentValidator::new();
+        let task = make_task();
+        let write_call = make_tool_call(
+            "file-writer",
+            IntentType::Write,
+            serde_json::json!({"path": "/data/output.txt", "content": "hello"}),
+        );
+
+        validator.record_tool_call(&task.id, &write_call).await;
 
         let result = validator.validate_coherence(&task, &write_call).await;
         assert!(matches!(result, IntentCoherenceResult::Suspicious { .. }));
@@ -383,20 +417,19 @@ mod tests {
         let validator = IntentValidator::new();
         let task = make_task();
 
-        // First, read
-        let read_call = make_tool_call(
-            "file-reader",
-            IntentType::Read,
-            serde_json::json!({"path": "/data/input.txt"}),
-        );
-        validator.record_tool_call(&task.id, &read_call).await;
-
-        // Then, write
         let write_call = make_tool_call(
             "file-writer",
             IntentType::Write,
             serde_json::json!({"path": "/data/output.txt", "content": "hello"}),
         );
+        validator.record_tool_call(&task.id, &write_call).await;
+
+        let read_call = make_tool_call(
+            "file-reader",
+            IntentType::Read,
+            serde_json::json!({"path": "/data/output.txt"}),
+        );
+        validator.record_tool_call(&task.id, &read_call).await;
 
         let result = validator.validate_coherence(&task, &write_call).await;
         assert!(matches!(result, IntentCoherenceResult::Approved));

@@ -653,6 +653,14 @@ fn validate_sandbox_settings(kernel: &KernelSettings) -> Result<(), anyhow::Erro
              at least one sandbox child slot is required"
         );
     }
+    // Tokio Semaphore panics above MAX_PERMITS (usize::MAX >> 3); cap at a sane limit.
+    if kernel.max_concurrent_sandbox_children > 1024 {
+        tracing::warn!(
+            value = kernel.max_concurrent_sandbox_children,
+            "kernel.max_concurrent_sandbox_children is unusually high; \
+             values above 1024 may exhaust system resources"
+        );
+    }
     if kernel.sandbox_policy == SandboxPolicy::Never {
         tracing::warn!(
             "kernel.sandbox_policy is set to 'never' — all tools run unsandboxed. \
