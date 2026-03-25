@@ -69,10 +69,15 @@ pub struct LogQuery {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogLevel {
+    #[serde(alias = "error")]
     Error,
+    #[serde(alias = "warn", alias = "warning", alias = "Warning")]
     Warn,
+    #[serde(alias = "info")]
     Info,
+    #[serde(alias = "debug")]
     Debug,
+    #[serde(alias = "trace")]
     Trace,
 }
 

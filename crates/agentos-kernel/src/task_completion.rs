@@ -1,6 +1,7 @@
 use crate::kernel::Kernel;
 use crate::task_executor::TaskResult;
 use agentos_types::*;
+use std::collections::HashMap;
 
 impl Kernel {
     /// Handle successful task completion: record to episodic memory, update scheduler state,
@@ -82,6 +83,28 @@ impl Kernel {
             });
 
         if completed {
+            self.push_status_update(
+                task.id,
+                TaskState::Complete,
+                "Task completed successfully".to_string(),
+            );
+            self.audit_log(agentos_audit::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: task_trace_id,
+                event_type: agentos_audit::AuditEventType::TaskCompleted,
+                agent_id: Some(task.agent_id),
+                task_id: Some(task.id),
+                tool_id: None,
+                details: serde_json::json!({
+                    "iterations": result.iterations,
+                    "tool_calls": result.tool_call_count,
+                    "duration_ms": duration_ms,
+                    "answer_preview": Self::truncate_for_prompt_payload(&result.answer, 200),
+                }),
+                severity: agentos_audit::AuditSeverity::Info,
+                reversible: false,
+                rollback_ref: None,
+            });
             self.emit_event_with_trace(
                 EventType::TaskCompleted,
                 EventSource::TaskScheduler,
@@ -157,6 +180,23 @@ impl Kernel {
                 task_id = %task.id,
                 "Task finished but was already in terminal state (likely timed out), skipping completion"
             );
+        }
+
+        // Send task-completion notification to user inbox (root tasks only).
+        if completed
+            && Self::is_root_task(task)
+            && self.config.notifications.notify_on_task_complete
+        {
+            self.send_completion_notification(
+                task,
+                TaskOutcome::Success,
+                &result.answer,
+                Some(result.tool_call_count),
+                Some(result.iterations),
+                duration_ms,
+                task_trace_id,
+            )
+            .await;
         }
 
         self.cleanup_task_subscriptions(&task.id).await;
@@ -291,6 +331,8 @@ impl Kernel {
             self.cleanup_task_subscriptions(&task.id).await;
             return;
         }
+
+        self.push_status_update(task.id, TaskState::Failed, error_message.clone());
 
         // Write a direct TaskFailed audit entry with task_id, agent_id, and full
         // error details. This is separate from the EventEmitted path below so the
@@ -439,6 +481,157 @@ impl Kernel {
             }
         }
 
+        // Send task-failure notification to user inbox (root tasks only).
+        if Self::is_root_task(task) && self.config.notifications.notify_on_task_failed {
+            self.send_completion_notification(
+                task,
+                TaskOutcome::Failed,
+                &error_message,
+                None, // tool_calls not available in failure path
+                None, // iterations not available in failure path
+                duration_ms,
+                task_trace_id,
+            )
+            .await;
+        }
+
         self.cleanup_task_subscriptions(&task.id).await;
+    }
+
+    // ── Task-completion notification helpers ─────────────────────────────────
+
+    /// Returns `true` only for root tasks (no parent) that the user sees directly.
+    fn is_root_task(task: &AgentTask) -> bool {
+        task.parent_task.is_none()
+    }
+
+    /// Build the short subject line (≤80 chars) for a task-completion notification.
+    fn format_completion_subject(outcome: TaskOutcome, prompt: &str) -> String {
+        let (icon, verb) = match outcome {
+            TaskOutcome::Success => ("✓", "completed"),
+            TaskOutcome::Failed => ("✗", "failed"),
+            TaskOutcome::Cancelled => ("○", "cancelled"),
+            TaskOutcome::TimedOut => ("⏱", "timed out"),
+        };
+        let short_prompt: String = prompt.chars().take(50).collect();
+        let ellipsis = if prompt.chars().count() > 50 {
+            "…"
+        } else {
+            ""
+        };
+        format!("{icon} Task {verb}: {short_prompt}{ellipsis}")
+    }
+
+    /// Build the markdown body for a task-completion notification.
+    fn format_completion_body(
+        outcome: TaskOutcome,
+        prompt: &str,
+        summary: &str,
+        duration_ms: u64,
+        iterations: Option<u32>,
+        tool_calls: Option<u32>,
+        cost_usd: Option<f64>,
+    ) -> String {
+        let duration_s = duration_ms as f64 / 1000.0;
+        let iterations_str = iterations
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        let tool_calls_str = tool_calls
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        let cost_str = cost_usd
+            .map(|c| format!("${c:.4} (period)"))
+            .unwrap_or_else(|| "N/A".to_string());
+
+        format!(
+            "## Task {outcome}\n\n\
+            **Original request:** {prompt}\n\n\
+            **Summary:** {summary}\n\n\
+            | Metric | Value |\n\
+            |--------|-------|\n\
+            | Duration | {duration_s:.1}s |\n\
+            | Iterations | {iterations_str} |\n\
+            | Tool calls | {tool_calls_str} |\n\
+            | Agent cost (period) | {cost_str} |\n",
+        )
+    }
+
+    /// Deliver a `TaskComplete` `UserMessage` to the notification router.
+    ///
+    /// `tool_calls` and `iterations` are `None` when the data is not available
+    /// (e.g. failure paths where `TaskResult` was never produced).
+    ///
+    /// Non-fatal: logs a warning and continues if delivery fails.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn send_completion_notification(
+        &self,
+        task: &AgentTask,
+        outcome: TaskOutcome,
+        summary: &str,
+        tool_calls: Option<u32>,
+        iterations: Option<u32>,
+        duration_ms: u64,
+        trace_id: TraceID,
+    ) {
+        debug_assert!(
+            Self::is_root_task(task),
+            "send_completion_notification called for sub-task"
+        );
+
+        let cost_usd = self
+            .cost_tracker
+            .get_snapshot(&task.agent_id)
+            .await
+            .map(|s| s.cost_usd);
+
+        let subject = Self::format_completion_subject(outcome, &task.original_prompt);
+        let body = Self::format_completion_body(
+            outcome,
+            &task.original_prompt,
+            summary,
+            duration_ms,
+            iterations,
+            tool_calls,
+            cost_usd,
+        );
+        let priority = match outcome {
+            TaskOutcome::Success | TaskOutcome::Cancelled => NotificationPriority::Info,
+            TaskOutcome::Failed | TaskOutcome::TimedOut => NotificationPriority::Warning,
+        };
+
+        let msg = UserMessage {
+            id: NotificationID::new(),
+            from: NotificationSource::Kernel,
+            task_id: Some(task.id),
+            trace_id,
+            kind: UserMessageKind::TaskComplete {
+                task_id: task.id,
+                outcome,
+                summary: summary.chars().take(500).collect(),
+                duration_ms,
+                iterations: iterations.unwrap_or(0),
+                cost_usd,
+                tool_calls: tool_calls.unwrap_or(0),
+            },
+            priority,
+            subject,
+            body,
+            interaction: None,
+            delivery_status: HashMap::new(),
+            response: None,
+            created_at: chrono::Utc::now(),
+            expires_at: None,
+            read: false,
+            thread_id: Some(task.id.to_string()),
+            reply_to_external_id: None,
+        };
+
+        if let Err(e) = self.notification_router.deliver(msg).await {
+            tracing::warn!(
+                task_id = %task.id,
+                error = %e,
+                "Failed to send task completion notification (non-fatal)"
+            );
+        }
     }
 }

@@ -4,7 +4,7 @@ use agentos_kernel::config::{
     MemorySettings, OllamaSettings, PreflightConfig, SecretsSettings, ToolsSettings,
 };
 use agentos_kernel::Kernel;
-use agentos_llm::MockLLMCore;
+use agentos_llm::{MockLLMCore, MockResponse};
 use agentos_types::*;
 use std::path::Path;
 use std::sync::Arc;
@@ -94,6 +94,8 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         health_monitor: HealthMonitorConfig::default(),
         preflight: PreflightConfig::default(),
         logging: Default::default(),
+        notifications: Default::default(),
+        mcp: Default::default(),
     }
 }
 
@@ -177,6 +179,40 @@ pub async fn register_mock_agent(kernel: &Kernel, name: &str, responses: Vec<Str
         .write()
         .await
         .insert(agent_id, Arc::new(MockLLMCore::new(responses)));
+
+    agent_id
+}
+
+/// Register a mock agent with typed `MockResponse` values (supports native tool calls).
+pub async fn register_mock_agent_with_responses(
+    kernel: &Kernel,
+    name: &str,
+    responses: Vec<MockResponse>,
+) -> AgentID {
+    let agent_id = AgentID::new();
+    let now = chrono::Utc::now();
+
+    let profile = AgentProfile {
+        id: agent_id,
+        name: name.to_string(),
+        provider: LLMProvider::Ollama,
+        model: "mock-model".to_string(),
+        status: AgentStatus::Online,
+        permissions: PermissionSet::new(),
+        roles: vec!["base".to_string()],
+        current_task: None,
+        description: String::new(),
+        created_at: now,
+        last_active: now,
+        public_key_hex: None,
+    };
+
+    kernel.agent_registry.write().await.register(profile);
+    kernel
+        .active_llms
+        .write()
+        .await
+        .insert(agent_id, Arc::new(MockLLMCore::with_responses(responses)));
 
     agent_id
 }

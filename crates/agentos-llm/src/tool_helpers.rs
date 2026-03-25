@@ -1,13 +1,11 @@
 //! Shared helpers for building tool payloads and parsing tool call responses
 //! across LLM adapters (OpenAI, Anthropic, Gemini).
 
-use crate::types::InferenceToolCall;
 use serde_json::{json, Value};
 use tracing::warn;
 
 /// Maximum serialised payload size in bytes. Payloads exceeding this limit are
 /// dropped to prevent oversized requests from consuming kernel resources.
-/// Kept in sync with `MAX_PARSED_PAYLOAD_BYTES` in `agentos-kernel/src/tool_call.rs`.
 pub const MAX_TOOL_PAYLOAD_BYTES: usize = 64 * 1024;
 
 /// Infer an intent type string from a permission set.
@@ -64,25 +62,6 @@ pub fn normalize_tool_input_schema(input_schema: Option<&Value>) -> Value {
     }
 }
 
-/// Render tool calls as legacy ```json blocks for backward compatibility
-/// with the kernel text-based parser.
-pub fn render_legacy_tool_blocks(tool_calls: &[InferenceToolCall]) -> String {
-    tool_calls
-        .iter()
-        .map(|call| {
-            format!(
-                "```json\n{}\n```",
-                json!({
-                    "tool": call.tool_name,
-                    "intent_type": call.intent_type,
-                    "payload": call.payload
-                })
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Check whether a serialised payload exceeds the size limit.
 /// Returns `true` if the payload is within limits, `false` (with a warning) if oversized.
 pub fn check_payload_size(tool_name: &str, payload: &Value) -> bool {
@@ -110,19 +89,6 @@ pub fn validate_payload_object(tool_name: &str, provider: &str, value: Option<Va
             );
             json!({"_raw": other})
         }
-    }
-}
-
-/// Append legacy tool call blocks to text, preserving any existing reasoning.
-pub fn append_legacy_blocks(text: &str, tool_calls: &[InferenceToolCall]) -> String {
-    if tool_calls.is_empty() {
-        return text.to_string();
-    }
-    let legacy_blocks = render_legacy_tool_blocks(tool_calls);
-    if text.trim().is_empty() {
-        legacy_blocks
-    } else {
-        format!("{text}\n\n{legacy_blocks}")
     }
 }
 
@@ -196,49 +162,5 @@ mod tests {
     fn test_validate_payload_object_none() {
         let result = validate_payload_object("tool", "test", None);
         assert_eq!(result, json!({}));
-    }
-
-    #[test]
-    fn test_render_legacy_tool_blocks() {
-        let calls = vec![InferenceToolCall {
-            id: Some("call_1".to_string()),
-            tool_name: "file-reader".to_string(),
-            intent_type: "read".to_string(),
-            payload: json!({"path": "test.txt"}),
-        }];
-        let rendered = render_legacy_tool_blocks(&calls);
-        assert!(rendered.contains("\"tool\":\"file-reader\""));
-        assert!(rendered.contains("\"intent_type\":\"read\""));
-    }
-
-    #[test]
-    fn test_append_legacy_blocks_empty_text() {
-        let calls = vec![InferenceToolCall {
-            id: None,
-            tool_name: "tool".to_string(),
-            intent_type: "query".to_string(),
-            payload: json!({}),
-        }];
-        let result = append_legacy_blocks("", &calls);
-        assert!(result.starts_with("```json"));
-    }
-
-    #[test]
-    fn test_append_legacy_blocks_with_existing_text() {
-        let calls = vec![InferenceToolCall {
-            id: None,
-            tool_name: "tool".to_string(),
-            intent_type: "query".to_string(),
-            payload: json!({}),
-        }];
-        let result = append_legacy_blocks("Reasoning here.", &calls);
-        assert!(result.starts_with("Reasoning here."));
-        assert!(result.contains("```json"));
-    }
-
-    #[test]
-    fn test_append_legacy_blocks_no_calls() {
-        let result = append_legacy_blocks("Just text.", &[]);
-        assert_eq!(result, "Just text.");
     }
 }

@@ -1,3 +1,4 @@
+pub mod adapters;
 pub mod agent_message_bus;
 pub mod agent_registry;
 pub mod background_pool;
@@ -15,6 +16,7 @@ pub mod event_dispatch;
 pub mod health;
 pub mod health_monitor;
 pub mod identity;
+pub mod inbound_router;
 pub mod injection_scanner;
 pub mod intent_validator;
 pub mod kernel;
@@ -23,6 +25,8 @@ pub mod logging;
 pub mod memory_blocks;
 pub mod memory_extraction;
 pub mod metrics;
+pub mod network_safety;
+pub mod notification_router;
 pub mod rate_limit;
 pub mod resource_arbiter;
 pub mod retrieval_gate;
@@ -40,6 +44,8 @@ pub mod task_executor;
 pub mod tool_call;
 pub mod tool_registry;
 pub mod trigger_prompt;
+pub mod user_channel_registry;
+pub mod user_inbox;
 
 pub use agent_message_bus::AgentMessageBus;
 pub use agent_registry::AgentRegistry;
@@ -51,5 +57,5 @@ pub use retrieval_gate::{
     IndexType, RetrievalExecutor, RetrievalGate, RetrievalOutcome, RetrievalPlan, RetrievalResult,
 };
 pub use scheduler::TaskScheduler;
-pub use tool_call::{parse_tool_call, parse_tool_calls, ParsedToolCall, ToolCallRequest};
+pub use tool_call::{parse_intent_type, ParsedToolCall, ToolCallRequest};
 pub use tool_registry::ToolRegistry;

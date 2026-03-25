@@ -177,7 +177,7 @@ impl EscalationManager {
         // Fire-and-forget webhook notification if configured.
         // The URL is validated before use to prevent SSRF attacks.
         if let Some(url) = self.notify_url.read().await.clone() {
-            match validate_webhook_url(&url) {
+            match crate::network_safety::validate_webhook_url_str(&url) {
                 Ok(()) => {
                     let payload = serde_json::json!({
                         "escalation_id": id,
@@ -400,75 +400,6 @@ impl Default for EscalationManager {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Validates that a webhook URL is safe to POST to, preventing SSRF attacks.
-///
-/// Rules enforced:
-/// - Scheme must be `https` (prevents cleartext credential/payload exposure)
-/// - Host must not be a loopback address (`localhost`, `127.x.x.x`, `::1`)
-/// - Host must not be in RFC 1918 private ranges (10/8, 172.16/12, 192.168/16)
-/// - Host must not be a link-local/cloud-metadata address (169.254.x.x)
-///
-/// Note: DNS rebinding attacks (where a safe hostname later resolves to a private IP)
-/// are not mitigated here. For production deployments, perform a post-resolution IP
-/// check after `tokio::net::lookup_host`.
-fn validate_webhook_url(url: &str) -> Result<(), String> {
-    // Require HTTPS to prevent plaintext exposure of the notification payload
-    if !url.starts_with("https://") {
-        return Err(format!(
-            "Webhook URL must use HTTPS scheme (got: '{}')",
-            url.split("://").next().unwrap_or(url)
-        ));
-    }
-
-    // Extract the host (between `://` and the first `/`, `?`, `#`, or `:`)
-    let after_scheme = &url["https://".len()..];
-    let host_end = after_scheme
-        .find(['/', '?', '#', ':'])
-        .unwrap_or(after_scheme.len());
-    let host = after_scheme[..host_end].to_ascii_lowercase();
-
-    if host.is_empty() {
-        return Err("Webhook URL has no host".to_string());
-    }
-
-    // Block loopback variants
-    if host == "localhost" || host.starts_with("127.") || host == "::1" || host == "[::1]" {
-        return Err(format!("Webhook URL targets a loopback address: '{host}'"));
-    }
-
-    // Block cloud instance metadata service (AWS, GCP, Azure all use 169.254.169.254)
-    if host.starts_with("169.254.") {
-        return Err(format!(
-            "Webhook URL targets a link-local/metadata address: '{host}'"
-        ));
-    }
-
-    // Block RFC 1918 private ranges: 10.0.0.0/8 and 192.168.0.0/16
-    if host.starts_with("10.") || host.starts_with("192.168.") {
-        return Err(format!("Webhook URL targets a private IP range: '{host}'"));
-    }
-
-    // Block 172.16.0.0/12 (172.16.x.x – 172.31.x.x)
-    if host.starts_with("172.") {
-        if let Some(second) = host.split('.').nth(1) {
-            if let Ok(octet) = second.parse::<u8>() {
-                if (16..=31).contains(&octet) {
-                    return Err(format!("Webhook URL targets a private IP range: '{host}'"));
-                }
-            }
-        }
-    }
-
-    // Block hostnames that contain "metadata" (common internal naming convention)
-    if host.contains("metadata") {
-        return Err(format!(
-            "Webhook URL appears to target an instance metadata service: '{host}'"
-        ));
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

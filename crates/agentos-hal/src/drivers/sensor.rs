@@ -61,6 +61,34 @@ impl HalDriver for SensorDriver {
         ("hardware.sensor", PermissionOp::Read)
     }
 
+    /// Returns `"sensor:<sensor_id>"` when a sensor ID is provided, otherwise `"sensor:default"`.
+    ///
+    /// The sensor ID component is sanitized to prevent registry key injection:
+    /// only alphanumeric characters, hyphens, underscores, and dots are kept.
+    /// This ensures agent-supplied IDs cannot collide with keys from other HAL
+    /// driver namespaces (e.g. `"gpu:0"`).
+    fn device_key(&self, params: &Value) -> Option<String> {
+        let key = params
+            .get("sensor_id")
+            .and_then(|v| v.as_str())
+            .map(|id| {
+                let sanitized: String = id
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                    .collect();
+                format!(
+                    "sensor:{}",
+                    if sanitized.is_empty() {
+                        "default"
+                    } else {
+                        &sanitized
+                    }
+                )
+            })
+            .unwrap_or_else(|| "sensor:default".to_string());
+        Some(key)
+    }
+
     async fn query(&self, params: Value) -> Result<Value, AgentOSError> {
         let action = params
             .get("action")

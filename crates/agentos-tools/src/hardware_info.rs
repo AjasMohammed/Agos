@@ -43,6 +43,12 @@ impl AgentTool for HardwareInfoTool {
         let mut perms = agentos_types::PermissionSet::new();
         perms.grant("hardware.system".to_string(), true, false, false, None);
 
-        hal.query("system", serde_json::json!({}), &perms).await
+        hal.query(
+            "system",
+            serde_json::json!({}),
+            &perms,
+            Some(&context.agent_id),
+        )
+        .await
     }
 }

@@ -1,0 +1,27 @@
+<article id="notif-{{ n.id }}" {% if not n.read %}aria-current="true"{% endif %}>
+  <header>
+    <span class="badge badge-{{ n.priority }}">{{ n.priority | upper }}</span>
+    <strong>{{ n.subject }}</strong>
+    <small class="muted">{{ n.created_at }}</small>
+    <small class="muted">from {{ n.from }}</small>
+    {% if not n.read %}<mark>unread</mark>{% endif %}
+  </header>
+
+  <p>{{ n.body | truncate(200) }}</p>
+
+  {% if n.kind_tag == "question" and n.requires_response %}
+    {% set msg = n %}
+    {% include "notifications/_respond_form.html" %}
+  {% elif n.response_text %}
+    <footer><em>You responded: &#34;{{ n.response_text }}&#34;</em></footer>
+  {% endif %}
+
+  <footer>
+    <a href="/notifications/{{ n.id }}"
+       hx-get="/notifications/{{ n.id }}"
+       hx-target="#notif-{{ n.id }}"
+       hx-swap="outerHTML"
+       role="button"
+       class="outline secondary">View detail</a>
+  </footer>
+</article>

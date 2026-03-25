@@ -1,21 +1,71 @@
 use agentos_types::IntentType;
-use regex::Regex;
-use std::sync::LazyLock;
-use tracing::warn;
-
-static JSON_BLOCK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"```json\s*\n([\s\S]*?)\n```").expect("valid regex"));
-
-const MAX_PARSED_PAYLOAD_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ToolCallRequest {
+    /// Provider-native tool call ID (e.g. OpenAI "call_abc", Anthropic "toolu_xyz").
+    /// Threaded through to push_tool_result so the adapter can emit the correct
+    /// tool_call_id in the context entry and reconstruct valid multi-turn sequences.
+    pub id: Option<String>,
     pub tool_name: String,
     pub intent_type: IntentType,
     pub payload: serde_json::Value,
 }
 
 pub type ParsedToolCall = ToolCallRequest;
+
+/// Try to parse a JSON tool call from plain LLM text output.
+///
+/// Handles models that output tool calls as text rather than using native function
+/// calling. Supports the AgentOS tool call schema:
+///   `{"tool": "name", "intent_type": "read", "payload": {...}}`
+///
+/// Strips leading/trailing whitespace and optional markdown code fences before parsing.
+pub fn parse_tool_call_from_text(text: &str) -> Option<ToolCallRequest> {
+    // Strip markdown code fences (```json ... ``` or ``` ... ```)
+    let stripped = text.trim();
+    let stripped = if stripped.starts_with("```") {
+        let inner = stripped.trim_start_matches('`').trim_start_matches("json");
+        if let Some(end) = inner.rfind("```") {
+            inner[..end].trim()
+        } else {
+            inner.trim()
+        }
+    } else {
+        stripped
+    };
+
+    // Must start with '{' to be a JSON object
+    if !stripped.starts_with('{') {
+        return None;
+    }
+
+    let value: serde_json::Value = serde_json::from_str(stripped).ok()?;
+    let obj = value.as_object()?;
+
+    let tool_name = obj.get("tool")?.as_str()?.to_string();
+    if tool_name.is_empty() {
+        return None;
+    }
+
+    let intent_type_str = obj
+        .get("intent_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("query");
+    let intent_type =
+        parse_intent_type(intent_type_str).unwrap_or(agentos_types::IntentType::Query);
+
+    let payload = obj
+        .get("payload")
+        .cloned()
+        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+    Some(ToolCallRequest {
+        id: None,
+        tool_name,
+        intent_type,
+        payload,
+    })
+}
 
 pub fn parse_intent_type(intent_type_str: &str) -> Option<IntentType> {
     match intent_type_str {
@@ -31,207 +81,5 @@ pub fn parse_intent_type(intent_type_str: &str) -> Option<IntentType> {
         "subscribe" => Some(IntentType::Subscribe),
         "unsubscribe" => Some(IntentType::Unsubscribe),
         _ => None,
-    }
-}
-
-fn parse_call_value(value: serde_json::Value) -> Option<ToolCallRequest> {
-    let intent_type_str = value.get("intent_type").and_then(|v| v.as_str())?;
-    let intent_type = parse_intent_type(intent_type_str)?;
-
-    let tool_name = value
-        .get("tool")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| match intent_type {
-            // Runtime event subscription intents can target the kernel directly.
-            IntentType::Subscribe | IntentType::Unsubscribe => {
-                Some("event-subscription".to_string())
-            }
-            _ => None,
-        })?;
-
-    let payload = value
-        .get("payload")
-        .cloned()
-        .unwrap_or(serde_json::json!({}));
-    let payload_size = serde_json::to_vec(&payload)
-        .map(|bytes| bytes.len())
-        .unwrap_or(0);
-    if payload_size > MAX_PARSED_PAYLOAD_BYTES {
-        warn!(
-            payload_size_bytes = payload_size,
-            payload_limit_bytes = MAX_PARSED_PAYLOAD_BYTES,
-            tool = %tool_name,
-            "Skipping tool call with oversized payload"
-        );
-        return None;
-    }
-
-    Some(ToolCallRequest {
-        tool_name,
-        intent_type,
-        payload,
-    })
-}
-
-/// Parse all valid tool calls from the LLM's text response.
-///
-/// Looks for ```json ... ``` blocks containing
-/// {"tool": "...", "intent_type": "...", "payload": {...}} and returns every
-/// valid call in source order.
-pub fn parse_tool_calls(text: &str) -> Vec<ToolCallRequest> {
-    let mut calls = Vec::new();
-
-    for cap in JSON_BLOCK_RE.captures_iter(text) {
-        let Some(json_str) = cap.get(1) else {
-            continue;
-        };
-        match serde_json::from_str::<serde_json::Value>(json_str.as_str()) {
-            Ok(value) => {
-                if let Some(call) = parse_call_value(value) {
-                    calls.push(call);
-                } else {
-                    warn!("Skipping malformed tool call JSON block");
-                }
-            }
-            Err(error) => {
-                // The LLM may have emitted multiple JSON objects separated by
-                // newlines inside a single block (NDJSON style). Try each line
-                // individually before giving up.
-                let recovered: Vec<ToolCallRequest> = json_str
-                    .as_str()
-                    .lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .filter_map(|line| {
-                        serde_json::from_str::<serde_json::Value>(line)
-                            .ok()
-                            .and_then(parse_call_value)
-                    })
-                    .collect();
-
-                if recovered.is_empty() {
-                    warn!(%error, raw = json_str.as_str(), "Skipping invalid tool call JSON block");
-                } else {
-                    tracing::debug!(
-                        count = recovered.len(),
-                        "Recovered tool calls from multi-object JSON block"
-                    );
-                    calls.extend(recovered);
-                }
-            }
-        }
-    }
-
-    calls
-}
-
-/// Parse the LLM's text response for a tool call JSON block.
-/// Looks for ```json ... ``` blocks containing {"tool": "...", "intent_type": "...", "payload": {...}}
-pub fn parse_tool_call(text: &str) -> Option<ToolCallRequest> {
-    parse_tool_calls(text).into_iter().next()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_tool_call_valid() {
-        let text = r#"I need to read a file. Let me do that.
-```json
-{"tool": "file-reader", "intent_type": "read", "payload": {"path": "/data/report.txt"}}
-```"#;
-        let call = parse_tool_call(text).unwrap();
-        assert_eq!(call.tool_name, "file-reader");
-        assert!(matches!(call.intent_type, IntentType::Read));
-    }
-
-    #[test]
-    fn test_parse_tool_calls_returns_all_valid_blocks() {
-        let text = r#"```json
-{"tool": "file-reader", "intent_type": "read", "payload": {"path": "/tmp/a.txt"}}
-```
-```json
-{"tool": "memory-read", "intent_type": "query", "payload": {"key": "project"}}
-```"#;
-
-        let calls = parse_tool_calls(text);
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].tool_name, "file-reader");
-        assert_eq!(calls[1].tool_name, "memory-read");
-    }
-
-    #[test]
-    fn test_parse_tool_call_no_json() {
-        let text = "Here is my final answer: the report is complete.";
-        assert!(parse_tool_call(text).is_none());
-    }
-
-    #[test]
-    fn test_parse_tool_call_invalid_json() {
-        let text = "```json\n{invalid json}\n```";
-        assert!(parse_tool_call(text).is_none());
-    }
-
-    #[test]
-    fn test_parse_tool_call_subscribe_without_tool_name() {
-        let text = r#"```json
-{"intent_type": "subscribe", "payload": {"event_filter": "SecurityEvents.*", "duration": "Task"}}
-```"#;
-        let call = parse_tool_call(text).unwrap();
-        assert_eq!(call.tool_name, "event-subscription");
-        assert!(matches!(call.intent_type, IntentType::Subscribe));
-    }
-
-    #[test]
-    fn test_parse_tool_call_skips_invalid_block_and_finds_valid_one() {
-        let text = r#"```json
-{"tool": "file-reader", "payload": {"path": "/tmp/a.txt"}}
-```
-```json
-{"tool": "file-reader", "intent_type": "read", "payload": {"path": "/tmp/b.txt"}}
-```"#;
-
-        let call = parse_tool_call(text).expect("expected second valid block to be parsed");
-        assert_eq!(call.tool_name, "file-reader");
-        assert!(matches!(call.intent_type, IntentType::Read));
-        assert_eq!(call.payload["path"], "/tmp/b.txt");
-    }
-
-    #[test]
-    fn test_parse_tool_calls_multi_object_block() {
-        // LLM emits two JSON objects on separate lines inside one ```json``` block
-        let text = "```json\n{\"tool\": \"agent-self\", \"intent_type\": \"query\", \"payload\": {}}\n{\"tool\": \"agent-manual\", \"intent_type\": \"query\", \"payload\": {\"section\": \"index\"}}\n```";
-        let calls = parse_tool_calls(text);
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].tool_name, "agent-self");
-        assert_eq!(calls[1].tool_name, "agent-manual");
-    }
-
-    #[test]
-    fn test_parse_tool_calls_multi_object_block_partial_recovery() {
-        // Second line is invalid JSON — first should still be recovered
-        let text = "```json\n{\"tool\": \"agent-self\", \"intent_type\": \"query\", \"payload\": {}}\n{invalid}\n```";
-        let calls = parse_tool_calls(text);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].tool_name, "agent-self");
-    }
-
-    #[test]
-    fn test_parse_tool_calls_skips_oversized_payload() {
-        let oversized = "x".repeat(MAX_PARSED_PAYLOAD_BYTES + 1);
-        let text = format!(
-            r#"```json
-{{"tool": "file-reader", "intent_type": "read", "payload": {{"blob": "{}"}}}}
-```
-```json
-{{"tool": "file-reader", "intent_type": "read", "payload": {{"path": "/tmp/ok.txt"}}}}
-```"#,
-            oversized
-        );
-
-        let calls = parse_tool_calls(&text);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].payload["path"], "/tmp/ok.txt");
     }
 }

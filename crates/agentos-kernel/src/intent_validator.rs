@@ -357,6 +357,7 @@ mod tests {
         payload: serde_json::Value,
     ) -> ParsedToolCall {
         ParsedToolCall {
+            id: None,
             tool_name: name.to_string(),
             intent_type: intent,
             payload,

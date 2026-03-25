@@ -139,7 +139,7 @@ async fn check_system_health(
     // ── 1. System snapshot: CPU / memory / disk ─────────────────────────────
     let system_snapshot = kernel
         .hal
-        .query("system", serde_json::Value::Null, permissions)
+        .query("system", serde_json::Value::Null, permissions, None)
         .await;
     match &system_snapshot {
         Ok(snapshot) => {
@@ -281,7 +281,12 @@ async fn check_system_health(
     // ── 2. GPU VRAM — optional, silently skipped when no GPU / no VRAM data ─
     if let Ok(gpu_json) = kernel
         .hal
-        .query("gpu", serde_json::json!({"action": "list"}), permissions)
+        .query(
+            "gpu",
+            serde_json::json!({"action": "list"}),
+            permissions,
+            None,
+        )
         .await
     {
         if let Some(devices) = gpu_json.get("devices").and_then(|d| d.as_array()) {
@@ -350,6 +355,7 @@ async fn check_system_health(
             "network",
             serde_json::json!({"action": "list"}),
             permissions,
+            None,
         )
         .await
     {
@@ -422,7 +428,12 @@ async fn check_system_health(
     // ── 5. Sensor readings — check for threshold exceedances ─────────────────
     if let Ok(sensor_json) = kernel
         .hal
-        .query("sensor", serde_json::json!({"action": "list"}), permissions)
+        .query(
+            "sensor",
+            serde_json::json!({"action": "list"}),
+            permissions,
+            None,
+        )
         .await
     {
         if let Some(readings) = sensor_json.get("readings").and_then(|r| r.as_array()) {

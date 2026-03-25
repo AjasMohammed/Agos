@@ -15,11 +15,13 @@ agentos-bus = { path = "../agentos-bus" }
 agentos-hal = { path = "../agentos-hal" }
 agentos-vault = { path = "../agentos-vault" }
 agentos-tools = { path = "../agentos-tools" }
+agentos-mcp = { path = "../agentos-mcp" }
 agentos-web = { path = "../agentos-web" }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 toml = { workspace = true }
 rand = { workspace = true }
+async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 clap = { workspace = true }

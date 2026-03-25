@@ -5,6 +5,7 @@ use clap::Subcommand;
 #[derive(Subcommand)]
 pub enum AuditCommands {
     /// View recent audit log entries
+    #[command(alias = "tail")]
     Logs {
         /// Number of recent entries to show
         #[arg(long, default_value = "50")]

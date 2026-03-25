@@ -34,6 +34,7 @@
                 <li><a href="/secrets" data-nav="/secrets"><span class="nav-icon" aria-hidden="true">&#128274;</span> Secrets</a></li>
                 <li><a href="/pipelines" data-nav="/pipelines"><span class="nav-icon" aria-hidden="true">&#8658;</span> Pipelines</a></li>
                 <li><a href="/chat" data-nav="/chat"><span class="nav-icon" aria-hidden="true">&#128172;</span> Chat</a></li>
+                <li><a href="/notifications" data-nav="/notifications"><span class="nav-icon" aria-hidden="true">&#128276;</span> Notifications</a></li>
                 <li><a href="/audit" data-nav="/audit"><span class="nav-icon" aria-hidden="true">&#128196;</span> Audit</a></li>
             </ul>
         </nav>
@@ -70,6 +71,19 @@
                 {% endif %}
             </div>
             <div class="topbar-right" x-data="themeToggle()">
+                <!-- Notification bell: live-updated via SSE -->
+                <span x-data="notificationBell()" x-init="init()" style="margin-right:0.5rem">
+                    <a href="/notifications" role="button" class="outline topbar-btn"
+                       aria-label="Notifications" title="Notifications"
+                       style="position:relative;padding-right:0.25rem">
+                        &#128276;
+                        <span x-show="unreadCount > 0"
+                              x-text="unreadCount"
+                              style="position:absolute;top:-4px;right:-8px;background:var(--pico-color-red-500,#e53e3e);color:#fff;border-radius:50%;padding:1px 5px;font-size:0.7rem;min-width:1.1rem;text-align:center"
+                              aria-live="polite"
+                              aria-label="unread notifications"></span>
+                    </a>
+                </span>
                 <button class="topbar-btn" @click="toggle()"
                         :title="dark ? 'Switch to light theme' : 'Switch to dark theme'"
                         aria-label="Toggle theme">
@@ -106,6 +120,46 @@
             }
         });
     }());
+    </script>
+    <script>
+    function notificationBell() {
+        return {
+            unreadCount: 0,
+            evtSource: null,
+            init() {
+                var self = this;
+                // Fetch current unread count immediately so the bell is accurate on load.
+                fetch('/notifications/unread-count')
+                    .then(function (r) { return r.ok ? r.json() : null; })
+                    .then(function (data) { if (data) { self.unreadCount = data.count; } })
+                    .catch(function () {});
+                // Open SSE stream for real-time notification pushes.
+                self.evtSource = new EventSource('/notifications/stream');
+                self.evtSource.addEventListener('notification-new', function (e) {
+                    self.unreadCount += 1;
+                    try {
+                        var data = JSON.parse(e.data);
+                        // Dispatch a toast event if the toast system is present.
+                        window.dispatchEvent(new CustomEvent('showToast', {
+                            detail: {
+                                message: data.subject || 'New notification',
+                                type: data.priority === 'critical' ? 'error'
+                                    : data.priority === 'urgent' ? 'warning'
+                                    : 'info'
+                            }
+                        }));
+                    } catch (_) {}
+                });
+                self.evtSource.addEventListener('notification-reload', function () {
+                    // Too many messages were missed — re-fetch the current count.
+                    fetch('/notifications/unread-count')
+                        .then(function (r) { return r.ok ? r.json() : null; })
+                        .then(function (data) { if (data) { self.unreadCount = data.count; } })
+                        .catch(function () {});
+                });
+            }
+        };
+    }
     </script>
 </body>
 </html>

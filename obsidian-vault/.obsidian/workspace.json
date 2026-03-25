@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "plans/sandbox-execution-policy/02-trust-aware-dispatch.md",
+                "file": "plans/llm-adapter-redesign/LLM Adapter Redesign Plan.md",
                 "mode": "preview",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "02-trust-aware-dispatch"
+              "title": "LLM Adapter Redesign Plan"
             }
           },
           {
@@ -27,12 +27,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "plans/webui-security-fixes/01-quick-wins.md",
+                "file": "plans/v3-completion/02-mcp-adapter.md",
                 "mode": "preview",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "01-quick-wins"
+              "title": "02-mcp-adapter"
             }
           },
           {
@@ -119,7 +119,8 @@
               "title": "Memory Context Architecture Plan"
             }
           }
-        ]
+        ],
+        "currentTab": 1
       }
     ],
     "direction": "vertical"
@@ -281,43 +282,43 @@
       "bases:Create new base": false
     }
   },
-  "active": "d0ea60c9beca429b",
+  "active": "3a567ad10f3cfa83",
   "lastOpenFiles": [
-    "next-steps/34-Sandbox Execution Policy.md.tmp.1956365.1774109079672",
-    "plans/sandbox-execution-policy/01-execution-policy-config.md",
-    "plans/sandbox-execution-policy/Sandbox Execution Policy Plan.md",
-    "plans/sandbox-lightweight-execution/01-single-tool-factory.md",
-    "next-steps/subtasks/34-04-In-Process Safety Hardening.md",
-    "next-steps/subtasks/34-04-In-Process Safety Hardening.md.tmp.1956365.1774096917092",
-    "next-steps/subtasks/34-03-Sandbox Concurrency Semaphore.md",
-    "next-steps/subtasks/34-03-Sandbox Concurrency Semaphore.md.tmp.1956365.1774096886462",
-    "next-steps/subtasks/34-02-Trust-Aware Dispatch.md",
-    "next-steps/subtasks/34-02-Trust-Aware Dispatch.md.tmp.1956365.1774096853606",
-    "next-steps/subtasks/34-01-Add SandboxPolicy Config.md",
-    "next-steps/34-Sandbox Execution Policy.md",
-    "next-steps/34-Sandbox Execution Policy.md.tmp.1956365.1774096782460",
-    "plans/sandbox-execution-policy/04-in-process-safety-hardening.md",
-    "plans/sandbox-execution-policy/04-in-process-safety-hardening.md.tmp.1956365.1774096765265",
-    "plans/sandbox-execution-policy/03-sandbox-concurrency-semaphore.md",
-    "plans/sandbox-execution-policy/03-sandbox-concurrency-semaphore.md.tmp.1956365.1774096717146",
-    "plans/sandbox-execution-policy/02-trust-aware-dispatch.md",
-    "plans/sandbox-execution-policy/02-trust-aware-dispatch.md.tmp.1956365.1774096668773",
-    "plans/sandbox-execution-policy/01-execution-policy-config.md.tmp.1956365.1774096626010",
-    "plans/sandbox-execution-policy/Sandbox Execution Policy Plan.md.tmp.1956365.1774096590509",
-    "plans/sandbox-execution-policy",
-    "plans/sandbox-lightweight-execution/Sandbox Lightweight Execution Plan.md",
-    "plans/logging-observability/01-span-instrumentation.md",
-    "next-steps/33-Sandbox Lightweight Execution.md",
-    "plans/sandbox-lightweight-execution/04-tool-weight-classification.md",
-    "plans/sandbox-lightweight-execution/03-per-category-rlimit.md",
-    "plans/sandbox-lightweight-execution/02-sandbox-child-lazy-init.md",
-    "plans/logging-observability/Logging Observability Data Flow.md",
-    "plans/logging-observability/Logging Observability Plan.md",
-    "next-steps/32-Logging Observability.md",
-    "plans/agentic-readiness-fixes/31-24-Pipeline Retry Backoff.md",
-    "plans/logging-observability/04-production-structured-logging.md",
-    "plans/logging-observability/03-silent-failure-elimination.md",
-    "plans/logging-observability/02-tools-logging.md",
-    "plans/agentic-readiness-fixes/31-25-Tool Cancellation Support.md"
+    "reference/handbook/AgentOS Handbook Index.md.tmp.280497.1774454828886",
+    "reference/handbook/AgentOS Handbook Index.md.tmp.280497.1774454822724",
+    "reference/handbook/AgentOS Handbook Index.md.tmp.280497.1774454813934",
+    "reference/handbook/AgentOS Handbook Index.md.tmp.280497.1774454799464",
+    "reference/handbook/04-CLI Reference Complete.md.tmp.280497.1774454792376",
+    "reference/handbook/04-CLI Reference Complete.md.tmp.280497.1774454781782",
+    "reference/handbook/04-CLI Reference Complete.md.tmp.280497.1774454774836",
+    "reference/handbook/22-MCP Integration.md",
+    "reference/handbook/AgentOS Handbook Index.md.tmp.77121.1774439836007",
+    "reference/handbook/AgentOS Handbook Index.md.tmp.77121.1774439830169",
+    "reference/handbook/AgentOS Handbook Index.md.tmp.77121.1774439823927",
+    "reference/handbook/AgentOS Handbook Index.md.tmp.77121.1774439816913",
+    "plans/v3-completion/01-hal-registry-enforcement.md",
+    "plans/user-agent-communication/06-bidirectional-channel-protocol.md",
+    "plans/user-agent-communication/User-Agent Communication Plan.md",
+    "plans/user-agent-communication/Architecture Review.md",
+    "plans/user-agent-communication/01-user-message-type-and-router.md",
+    "plans/user-agent-communication/User-Agent Communication Research.md",
+    "plans/user-agent-communication/05-pluggable-delivery-adapters.md",
+    "plans/user-agent-communication/04-task-completion-notifications.md",
+    "plans/user-agent-communication/03-ask-user-tool.md",
+    "plans/user-agent-communication/02-sse-delivery-and-web-inbox.md",
+    "plans/user-agent-communication/User-Agent Communication Data Flow.md",
+    "plans/v3-completion/V3 Completion Plan.md",
+    "plans/llm-adapter-redesign/08-provider-failover-and-advanced-options.md",
+    "plans/v3-completion/02-mcp-adapter.md",
+    "plans/llm-adapter-redesign/07-enhanced-mock-and-testing.md",
+    "plans/llm-adapter-redesign/06-cost-attribution-and-token-estimation.md",
+    "plans/llm-adapter-redesign/05-retry-middleware-and-circuit-breaker.md",
+    "plans/llm-adapter-redesign/04-real-streaming-all-providers.md",
+    "plans/llm-adapter-redesign/03-stop-reason-and-kernel-migration.md",
+    "plans/webui-security-fixes/01-quick-wins.md",
+    "plans/llm-adapter-redesign/01-core-types-and-trait-redesign.md",
+    "plans/llm-adapter-redesign/LLM Adapter Redesign Research.md",
+    "plans/llm-adapter-redesign/09-legacy-cleanup-and-migration.md",
+    "plans/agent-scratchpad/01-core-storage-engine.md"
   ]
 }

@@ -63,6 +63,13 @@ impl ScheduleManager {
         task_prompt: String,
         permissions: Vec<String>,
     ) -> Result<ScheduleID, AgentOSError> {
+        // Normalize 5-field cron (min hr dom mon dow) to 6-field (sec min hr dom mon dow)
+        // by prepending a "0" seconds field, matching standard crontab format.
+        let cron_expression = if cron_expression.split_whitespace().count() == 5 {
+            format!("0 {}", cron_expression)
+        } else {
+            cron_expression
+        };
         Schedule::from_str(&cron_expression).map_err(|e| {
             AgentOSError::SchemaValidation(format!(
                 "Invalid cron expression '{}': {}",
@@ -286,6 +293,23 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_five_field_cron_normalization() {
+        let mgr = ScheduleManager::new();
+        let id = mgr
+            .create_job(
+                "five-field".into(),
+                "*/5 * * * *".into(), // standard 5-field cron
+                "agent".into(),
+                "task".into(),
+                vec![],
+            )
+            .await
+            .expect("5-field cron should be accepted");
+        let job = mgr.get_job(&id).await.unwrap();
+        assert_eq!(job.cron_expression, "0 */5 * * * *");
     }
 
     #[tokio::test]

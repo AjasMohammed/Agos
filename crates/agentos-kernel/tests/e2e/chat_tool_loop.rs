@@ -1,11 +1,15 @@
 use crate::common;
+use agentos_llm::{InferenceToolCall, MockResponse, StopReason};
 use serial_test::serial;
 
-/// Helper: a minimal tool call block the LLM would emit.
-fn tool_call_text(tool: &str) -> String {
-    format!(
-        "Let me look that up.\n```json\n{{\"tool\": \"{tool}\", \"intent_type\": \"query\", \"payload\": {{\"section\": \"tools\"}}}}\n```"
-    )
+/// Helper: a mock response that emits a native tool call.
+fn tool_call_response(tool: &str) -> MockResponse {
+    MockResponse::text("Let me look that up.").with_tool_calls(vec![InferenceToolCall {
+        id: Some(format!("call_{tool}")),
+        tool_name: tool.to_string(),
+        intent_type: "query".to_string(),
+        payload: serde_json::json!({"section": "tools"}),
+    }])
 }
 
 /// Plain response with no tool call.
@@ -40,12 +44,13 @@ async fn test_chat_no_tool_call() {
 #[serial]
 async fn test_chat_tool_call_detected_and_executed() {
     let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
-    common::register_mock_agent(
+    common::register_mock_agent_with_responses(
         &kernel,
         "chat-test-agent",
         vec![
-            tool_call_text("nonexistent-tool"),
-            "The tool is not available, but here is my answer anyway.".to_string(),
+            tool_call_response("nonexistent-tool"),
+            MockResponse::text("The tool is not available, but here is my answer anyway.")
+                .with_stop_reason(StopReason::EndTurn),
         ],
     )
     .await;
@@ -85,8 +90,8 @@ async fn test_chat_max_iterations() {
     let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
 
     // Provide 10 tool call responses; the 10th triggers the iteration cap.
-    let responses = vec![tool_call_text("loop-tool"); 10];
-    common::register_mock_agent(&kernel, "chat-test-agent", responses).await;
+    let responses = vec![tool_call_response("loop-tool"); 10];
+    common::register_mock_agent_with_responses(&kernel, "chat-test-agent", responses).await;
 
     let result = kernel
         .chat_infer_with_tools("chat-test-agent", &[], "Loop forever please")
@@ -117,12 +122,13 @@ async fn test_chat_max_iterations() {
 #[serial]
 async fn test_chat_tool_error_injected_and_llm_retries() {
     let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
-    common::register_mock_agent(
+    common::register_mock_agent_with_responses(
         &kernel,
         "chat-test-agent",
         vec![
-            tool_call_text("broken-tool"),
-            "I encountered an error but recovered with this answer.".to_string(),
+            tool_call_response("broken-tool"),
+            MockResponse::text("I encountered an error but recovered with this answer.")
+                .with_stop_reason(StopReason::EndTurn),
         ],
     )
     .await;

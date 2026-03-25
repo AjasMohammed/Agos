@@ -28,7 +28,7 @@ pub enum BgCommands {
 
     /// Follow logs for a background task
     Logs {
-        /// Name of the background task
+        /// Name or task ID (UUID) of the background task
         name: String,
 
         /// Follow the logs continuously
@@ -38,7 +38,7 @@ pub enum BgCommands {
 
     /// Kill a running background task
     Kill {
-        /// Name of the background task
+        /// Name or task ID (UUID) of the background task
         name: String,
     },
 }
@@ -60,14 +60,15 @@ pub async fn handle(client: &mut BusClient, command: BgCommands) -> anyhow::Resu
 
             let response = client.send_command(cmd).await?;
             if let KernelResponse::Success { data } = response {
-                let data = data.ok_or_else(|| anyhow::anyhow!("Missing response data"))?;
                 let task_id = data
-                    .get("task_id")
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'task_id' in response data"))?
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("'task_id' is not a string"))?
-                    .to_string();
-                println!("🚀 Background task '{}' started. ID: {}", name, task_id);
+                    .as_ref()
+                    .and_then(|d| d.get("task_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                println!(
+                    "🚀 Background task '{}' started (task_id: {}). Use 'agentctl bg logs {}' to follow.",
+                    name, task_id, name
+                );
             } else if let KernelResponse::Error { message } = response {
                 anyhow::bail!("Failed to start background task: {}", message);
             } else {

@@ -1,5 +1,8 @@
 use crate::traits::LLMCore;
-use crate::types::{InferenceResult, ModelCapabilities, TokenUsage};
+use crate::types::{
+    calculate_inference_cost, default_pricing_table, InferenceResult, ModelCapabilities,
+    ModelPricing, StopReason, TokenUsage,
+};
 use agentos_types::*;
 use async_trait::async_trait;
 use reqwest::Client;
@@ -14,11 +17,33 @@ pub struct CustomCore {
     model: String,
     base_url: String,
     capabilities: ModelCapabilities,
+    pricing: ModelPricing,
+    retry_policy: crate::retry::RetryPolicy,
+    circuit_breaker: crate::retry::CircuitBreaker,
 }
 
 impl CustomCore {
     /// Create a new Custom adapter.
     pub fn new(api_key: Option<SecretString>, model: String, base_url: String) -> Self {
+        // No entry in the default pricing table for custom providers — zero-cost fallback.
+        // Allow overriding from the default table if a "custom" entry is added in the future.
+        // Prefers exact model match over wildcard to avoid incorrect pricing.
+        let table = default_pricing_table();
+        let pricing = table
+            .iter()
+            .find(|p| p.provider == "custom" && p.model == model)
+            .or_else(|| {
+                table
+                    .iter()
+                    .find(|p| p.provider == "custom" && p.model == "*")
+            })
+            .cloned()
+            .unwrap_or(ModelPricing {
+                provider: "custom".to_string(),
+                model: model.clone(),
+                input_per_1k: 0.0,
+                output_per_1k: 0.0,
+            });
         Self {
             client: Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
@@ -29,13 +54,27 @@ impl CustomCore {
             model,
             base_url,
             capabilities: ModelCapabilities {
-                context_window_tokens: 32768, // Conservative default
+                context_window_tokens: 32768,
                 supports_images: false,
                 supports_tool_calling: false,
                 supports_json_mode: false,
                 max_output_tokens: 0,
+                supports_streaming: false,
+                supports_parallel_tools: false,
+                supports_prompt_caching: false,
+                supports_thinking: false,
+                supports_structured_output: false,
             },
+            pricing,
+            retry_policy: crate::retry::RetryPolicy::default(),
+            circuit_breaker: crate::retry::CircuitBreaker::default(),
         }
+    }
+
+    /// Override the pricing for this adapter instance.
+    pub fn with_pricing(mut self, pricing: ModelPricing) -> Self {
+        self.pricing = pricing;
+        self
     }
 
     /// Convert our internal `ContextWindow` to messages array (OpenAI style)
@@ -70,6 +109,19 @@ impl CustomCore {
 #[async_trait]
 impl LLMCore for CustomCore {
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
+        // Pre-flight: custom endpoints are often paid APIs with real context limits.
+        let estimated = self.estimate_tokens(context, &[]);
+        let max = self.capabilities.context_window_tokens;
+        if estimated > max {
+            return Err(AgentOSError::LLMError {
+                provider: "custom".to_string(),
+                reason: format!(
+                    "Estimated token count ({estimated}) exceeds model context window ({max}). \
+                     Reduce context or use a model with a larger window."
+                ),
+            });
+        }
+
         let start_time = Instant::now();
         let url = format!("{}/chat/completions", self.base_url);
         let messages = self.format_messages(context);
@@ -80,29 +132,23 @@ impl LLMCore for CustomCore {
             "stream": false
         });
 
-        let mut req = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body);
-
-        if let Some(key) = &self.api_key {
-            req = req.header("Authorization", format!("Bearer {}", key.expose_secret()));
-        }
-
-        let res = req.send().await.map_err(|e| AgentOSError::LLMError {
-            provider: "custom".to_string(),
-            reason: format!("Reqwest failed: {}", e),
-        })?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let text = res.text().await.unwrap_or_default();
-            return Err(AgentOSError::LLMError {
-                provider: "custom".to_string(),
-                reason: format!("Custom API error {}: {}", status, text),
-            });
-        }
+        let res = crate::retry::send_with_retry(
+            "custom",
+            &self.retry_policy,
+            &self.circuit_breaker,
+            || {
+                let mut req = self
+                    .client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .json(&body);
+                if let Some(key) = &self.api_key {
+                    req = req.header("Authorization", format!("Bearer {}", key.expose_secret()));
+                }
+                req
+            },
+        )
+        .await?;
 
         let json_resp: serde_json::Value =
             res.json().await.map_err(|e| AgentOSError::LLMError {
@@ -121,17 +167,35 @@ impl LLMCore for CustomCore {
             .unwrap_or(0);
         let total_tokens = json_resp["usage"]["total_tokens"].as_u64().unwrap_or(0);
 
+        // Extract stop reason from OpenAI-compatible response
+        let finish_reason = json_resp["choices"][0]["finish_reason"]
+            .as_str()
+            .unwrap_or("stop");
+        let stop_reason = match finish_reason {
+            "stop" => StopReason::EndTurn,
+            "tool_calls" => StopReason::ToolUse,
+            "length" => StopReason::MaxTokens,
+            "content_filter" => StopReason::ContentFilter,
+            other => StopReason::Other(other.to_string()),
+        };
+
+        let tokens_used = TokenUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        };
+        let cost = calculate_inference_cost(&tokens_used, &self.pricing);
+
         Ok(InferenceResult {
             text,
-            tokens_used: TokenUsage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens,
-            },
+            tokens_used,
             model: self.model.clone(),
             duration_ms: start_time.elapsed().as_millis() as u64,
             tool_calls: Vec::new(),
             uncertainty: None,
+            stop_reason,
+            cost: Some(cost),
+            cached_tokens: 0,
         })
     }
 

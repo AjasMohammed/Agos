@@ -34,6 +34,24 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
         include_str!("templates/chat_conversation.html"),
     )?;
 
+    // Notification pages and partials (UNIS Phase 2)
+    env.add_template(
+        "notifications/inbox.html",
+        include_str!("templates/notifications/inbox.html"),
+    )?;
+    env.add_template(
+        "notifications/detail.html",
+        include_str!("templates/notifications/detail.html"),
+    )?;
+    env.add_template(
+        "notifications/_notification_row.html",
+        include_str!("templates/notifications/_notification_row.html"),
+    )?;
+    env.add_template(
+        "notifications/_respond_form.html",
+        include_str!("templates/notifications/_respond_form.html"),
+    )?;
+
     // Partials
     env.add_template(
         "partials/agent_card.html",

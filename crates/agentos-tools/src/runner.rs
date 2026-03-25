@@ -2,6 +2,7 @@ use crate::agent_list::AgentListTool;
 use crate::agent_message::AgentMessageTool;
 use crate::archival_insert::ArchivalInsert;
 use crate::archival_search::ArchivalSearch;
+use crate::ask_user::AskUserTool;
 use crate::data_parser::DataParser;
 use crate::datetime::DatetimeTool;
 use crate::episodic_list::EpisodicList;
@@ -28,6 +29,7 @@ use crate::memory_search::MemorySearch;
 use crate::memory_stats::MemoryStats;
 use crate::memory_write::MemoryWrite;
 use crate::network_monitor::NetworkMonitorTool;
+use crate::notify_user::NotifyUserTool;
 use crate::procedure_create::ProcedureCreate;
 use crate::procedure_delete::ProcedureDelete;
 use crate::procedure_list::ProcedureList;
@@ -176,6 +178,8 @@ impl ToolRunner {
         self.register(Box::new(FileDiff::new()));
         self.register(Box::new(EscalationStatusTool::new()));
         self.register(Box::new(AgentListTool::new()));
+        self.register(Box::new(NotifyUserTool::new()));
+        self.register(Box::new(AskUserTool::new()));
         self.register(Box::new(TaskStatusTool::new()));
         self.register(Box::new(TaskListTool::new()));
     }

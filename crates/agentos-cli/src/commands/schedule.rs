@@ -10,7 +10,7 @@ pub enum ScheduleCommands {
         #[arg(long)]
         name: String,
 
-        /// Cron expression for the schedule
+        /// Cron expression (5-field: 'min hr dom mon dow', or 6-field with seconds: 'sec min hr dom mon dow')
         #[arg(long)]
         cron: String,
 
@@ -32,19 +32,19 @@ pub enum ScheduleCommands {
 
     /// Pause a scheduled job
     Pause {
-        /// Name of the schedule
+        /// Name or ID (UUID) of the schedule
         name: String,
     },
 
     /// Resume a paused scheduled job
     Resume {
-        /// Name of the schedule
+        /// Name or ID (UUID) of the schedule
         name: String,
     },
 
     /// Delete a scheduled job
     Delete {
-        /// Name of the schedule
+        /// Name or ID (UUID) of the schedule
         name: String,
     },
 }
@@ -68,7 +68,7 @@ pub async fn handle(client: &mut BusClient, command: ScheduleCommands) -> anyhow
             };
 
             let cmd = KernelCommand::CreateSchedule {
-                name,
+                name: name.clone(),
                 cron,
                 agent_name: agent,
                 task,
@@ -77,7 +77,10 @@ pub async fn handle(client: &mut BusClient, command: ScheduleCommands) -> anyhow
 
             let response = client.send_command(cmd).await?;
             if let KernelResponse::ScheduleId(id) = response {
-                println!("✅ Schedule created. ID: {}", id);
+                println!(
+                    "✅ Schedule '{}' created (id: {}). Use 'agentctl schedule list' to view.",
+                    name, id
+                );
             } else if let KernelResponse::Error { message } = response {
                 anyhow::bail!("Failed to create schedule: {}", message);
             } else {

@@ -43,7 +43,7 @@ description = "Optional log level filter"
 
 [input_schema.properties.level_filter.items]
 type = "string"
-enum = ["Error", "Warn", "Info", "Debug", "Trace"]
+enum = ["Error", "Warn", "Info", "Debug", "Trace", "error", "warn", "warning", "info", "debug", "trace"]
 
 [sandbox]
 network       = false

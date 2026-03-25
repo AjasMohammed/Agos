@@ -149,6 +149,38 @@ log_level = "info"
 # Loki, Datadog, or Elasticsearch). In production, set to "json".
 log_format = "text"
 
+[notifications]
+# Maximum messages stored in the user inbox.
+# When this limit is reached, the oldest read messages are purged on each write.
+max_inbox_size = 1000
+# Automatically notify user when a root task completes successfully.
+notify_on_task_complete = true
+# Automatically notify user when a root task fails.
+notify_on_task_failed = true
+
+[notifications.adapters.webhook]
+enabled = false
+url = ""
+# HMAC-SHA256 secret for X-AgentOS-Signature header (empty = no signature)
+secret = ""
+min_priority = "warning"
+max_retries = 3
+retry_delay_secs = 5
+timeout_secs = 10
+
+[notifications.adapters.desktop]
+enabled = true
+min_priority = "warning"
+notify_on_task_complete = true
+
+[notifications.adapters.slack]
+enabled = false
+webhook_url = ""
+min_priority = "warning"
+include_body = true
+max_retries = 3
+retry_delay_secs = 2
+
 [health_monitor]
 enabled = true
 check_interval_secs = 30
@@ -159,3 +191,16 @@ memory_warning_percent = 80.0
 disk_warning_percent = 85.0
 disk_critical_percent = 95.0
 gpu_vram_warning_percent = 90.0
+
+[mcp]
+# List of MCP servers to connect at kernel boot.
+# Each entry spawns a child process via stdio JSON-RPC.
+# Imported tools are registered with TrustTier::Community and subject to
+# full AgentOS capability-token and PermissionSet enforcement.
+#
+# Example:
+# [[mcp.servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+servers = []

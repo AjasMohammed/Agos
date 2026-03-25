@@ -198,6 +198,29 @@ impl Kernel {
                                             tracing::warn!(error = %e, waiter_id = %waiter_id, "Requeue failed after timeout — waiter will timeout naturally");
                                         }
                                     }
+                                    // Send timeout notification to user inbox (root tasks only).
+                                    if kernel.config.notifications.notify_on_task_failed {
+                                        if let Some(task) = kernel.scheduler.get_task(&timed_out.task_id).await {
+                                            if task.parent_task.is_none() {
+                                                let summary = format!(
+                                                    "Task timed out after {}s (limit {}s)",
+                                                    timed_out.elapsed_seconds,
+                                                    timed_out.timeout_seconds
+                                                );
+                                                kernel
+                                                    .send_completion_notification(
+                                                        &task,
+                                                        agentos_types::TaskOutcome::TimedOut,
+                                                        &summary,
+                                                        None,
+                                                        None,
+                                                        timed_out.elapsed_seconds * 1000,
+                                                        agentos_types::TraceID::new(),
+                                                    )
+                                                    .await;
+                                            }
+                                        }
+                                    }
                                     kernel.cleanup_task_subscriptions(&timed_out.task_id).await;
                                     // Release context window, intent validator state, and resource
                                     // locks held by this task — the timeout checker is the terminal
@@ -393,6 +416,11 @@ impl Kernel {
                                     kernel.sweep_expired_snapshots(
                                         Duration::from_secs(72 * 3600), // 72h (Spec §5)
                                     );
+
+                                    // Sweep expired notification waiters (blocking ask_user
+                                    // questions whose timeout has fired). Fires auto_action
+                                    // and wakes blocked tasks (Architecture Review ISSUE-6).
+                                    kernel.notification_router.sweep_expired_waiters().await;
 
                                     // Evict terminal background tasks older than 1 hour to
                                     // prevent unbounded pool growth for long-running kernels.
@@ -656,6 +684,7 @@ impl Kernel {
                 _ = self.cancellation_token.cancelled() => {
                     tracing::info!("Kernel shutdown requested, stopping supervisor");
                     join_set.abort_all();
+                    self.channel_listener_registry.stop_all().await;
                     self.audit_shutdown("cancellation_token", agentos_audit::AuditSeverity::Info);
                     break;
                 }
@@ -1408,6 +1437,61 @@ impl Kernel {
             }
 
             KernelCommand::SetLogLevel { level } => self.cmd_set_log_level(level).await,
+
+            // Notification system (UNIS Phase 1)
+            KernelCommand::SendUserNotification {
+                subject,
+                body,
+                priority,
+                kind,
+                trace_id,
+                from_agent,
+            } => {
+                self.cmd_send_user_notification(subject, body, priority, kind, trace_id, from_agent)
+                    .await
+            }
+            KernelCommand::ListNotifications { unread_only, limit } => {
+                self.cmd_list_notifications(unread_only, limit).await
+            }
+            KernelCommand::GetNotification { notification_id } => {
+                self.cmd_get_notification(notification_id).await
+            }
+            KernelCommand::MarkNotificationRead { notification_id } => {
+                self.cmd_mark_notification_read(notification_id).await
+            }
+            KernelCommand::RespondToNotification {
+                notification_id,
+                response_text,
+                channel,
+            } => {
+                self.cmd_respond_to_notification(notification_id, response_text, channel)
+                    .await
+            }
+
+            KernelCommand::ConnectChannel {
+                kind,
+                external_id,
+                display_name,
+                credential_key,
+                reply_topic,
+                server_url,
+            } => {
+                self.cmd_connect_channel(
+                    kind,
+                    external_id,
+                    display_name,
+                    credential_key,
+                    reply_topic,
+                    server_url,
+                )
+                .await
+            }
+            KernelCommand::DisconnectChannel { channel_id } => {
+                self.cmd_disconnect_channel(channel_id).await
+            }
+            KernelCommand::ListChannels => self.cmd_list_channels().await,
+            KernelCommand::TestChannel { channel_id } => self.cmd_test_channel(channel_id).await,
+            KernelCommand::McpStatus => self.cmd_mcp_status().await,
 
             KernelCommand::Shutdown => {
                 tracing::info!("Shutdown command received, initiating graceful shutdown");

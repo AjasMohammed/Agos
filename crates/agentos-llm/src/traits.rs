@@ -1,4 +1,6 @@
-use crate::types::{HealthStatus, InferenceEvent, InferenceResult, ModelCapabilities};
+use crate::types::{
+    HealthStatus, InferenceEvent, InferenceOptions, InferenceResult, ModelCapabilities,
+};
 use agentos_types::*;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -19,6 +21,19 @@ pub trait LLMCore: Send + Sync {
     ) -> Result<InferenceResult, AgentOSError> {
         let _ = tools;
         self.infer(context).await
+    }
+
+    /// Inference with full options control. This is the primary method for
+    /// agentic workflows. The default implementation ignores options and
+    /// delegates to `infer_with_tools()`.
+    async fn infer_with_options(
+        &self,
+        context: &ContextWindow,
+        tools: &[ToolManifest],
+        options: &InferenceOptions,
+    ) -> Result<InferenceResult, AgentOSError> {
+        let _ = options;
+        self.infer_with_tools(context, tools).await
     }
 
     /// Streaming inference — sends tokens incrementally as they are generated.
@@ -72,6 +87,23 @@ pub trait LLMCore: Send + Sync {
         }
     }
 
+    /// Estimate the token count for a context window + tools.
+    /// Used for pre-flight overflow detection before sending a request.
+    /// The default implementation uses a characters/4 heuristic; adapters with
+    /// access to a real tokenizer can override this for higher accuracy.
+    fn estimate_tokens(&self, context: &ContextWindow, tools: &[ToolManifest]) -> u64 {
+        let content_chars: usize = context
+            .active_entries()
+            .iter()
+            .map(|e| e.content.len())
+            .sum();
+        let tool_chars: usize = tools
+            .iter()
+            .map(|t| t.manifest.description.len() + t.manifest.name.len() + 100)
+            .sum();
+        ((content_chars + tool_chars) as f64 / 4.0).ceil() as u64
+    }
+
     /// Get the model's capabilities (context window size, etc.)
     fn capabilities(&self) -> &ModelCapabilities;
 
@@ -83,4 +115,81 @@ pub trait LLMCore: Send + Sync {
 
     /// Get the model name.
     fn model_name(&self) -> &str;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mock::MockLLMCore;
+    use agentos_types::tool::{
+        ToolCapabilities, ToolExecutor, ToolInfo, ToolOutputs, ToolSandbox, ToolSchema,
+    };
+    use agentos_types::{
+        ContextCategory, ContextEntry, ContextPartition, ContextRole, ContextWindow,
+    };
+
+    fn make_entry(role: ContextRole, content: &str) -> ContextEntry {
+        ContextEntry {
+            role,
+            content: content.to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::default(),
+            is_summary: false,
+        }
+    }
+
+    #[test]
+    fn test_estimate_tokens_heuristic() {
+        let mock = MockLLMCore::new(vec!["hello".to_string()]);
+        let mut ctx = ContextWindow::new(100);
+        // 400 chars of content → 100 tokens (chars / 4, exact)
+        ctx.push(make_entry(ContextRole::User, &"a".repeat(400)));
+        let estimate = mock.estimate_tokens(&ctx, &[]);
+        assert_eq!(estimate, 100);
+    }
+
+    #[test]
+    fn test_estimate_tokens_includes_tools() {
+        let mock = MockLLMCore::new(vec!["hello".to_string()]);
+        let ctx = ContextWindow::new(100);
+        let manifest = ToolManifest {
+            manifest: ToolInfo {
+                name: "file-reader".to_string(),         // 11 chars
+                description: "Reads a file".to_string(), // 12 chars
+                version: "1.0.0".to_string(),
+                author: "test".to_string(),
+                checksum: None,
+                author_pubkey: None,
+                signature: None,
+                trust_tier: TrustTier::Core,
+            },
+            capabilities_required: ToolCapabilities {
+                permissions: vec![],
+            },
+            capabilities_provided: ToolOutputs { outputs: vec![] },
+            intent_schema: ToolSchema {
+                input: "Any".to_string(),
+                output: "Any".to_string(),
+            },
+            input_schema: None,
+            sandbox: ToolSandbox {
+                network: false,
+                fs_write: false,
+                gpu: false,
+                max_memory_mb: 64,
+                max_cpu_ms: 1000,
+                syscalls: vec![],
+                weight: None,
+            },
+            executor: ToolExecutor::default(),
+        };
+        // name(11) + description(12) + overhead(100) = 123 chars → ceil(123/4) = 31
+        let estimate = mock.estimate_tokens(&ctx, &[manifest]);
+        assert_eq!(estimate, 31);
+    }
 }

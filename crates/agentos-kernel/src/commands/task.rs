@@ -173,36 +173,58 @@ impl Kernel {
     }
 
     pub(crate) async fn cmd_get_task_logs(&self, task_id: TaskID) -> KernelResponse {
-        match self.scheduler.get_task(&task_id).await {
-            Some(task) => {
-                let logs: Vec<String> = task
-                    .history
-                    .iter()
-                    .map(|entry| {
+        // Verify task exists first
+        if self.scheduler.get_task(&task_id).await.is_none() {
+            return KernelResponse::Error {
+                message: format!("Task '{}' not found", task_id),
+            };
+        }
+        match self.audit.query_since_for_task(&task_id, 0, 500) {
+            Ok(entries) => {
+                let logs: Vec<String> = entries
+                    .into_iter()
+                    .map(|(_, entry)| {
                         format!(
-                            "[{}] {:?} -> {:?}: {}",
+                            "[{}] {:?} {}",
                             entry.timestamp.format("%H:%M:%S"),
-                            entry.intent_type,
-                            entry.target,
-                            entry.payload.schema
+                            entry.event_type,
+                            entry.details,
                         )
                     })
                     .collect();
                 KernelResponse::TaskLogs(logs)
             }
-            None => KernelResponse::Error {
-                message: format!("Task '{}' not found", task_id),
+            Err(e) => KernelResponse::Error {
+                message: format!("Failed to query task logs: {}", e),
             },
         }
     }
 
     pub(crate) async fn cmd_cancel_task(&self, task_id: TaskID) -> KernelResponse {
+        // Fetch the task before transitioning state so we have prompt + parent info.
+        let task_snapshot = self.scheduler.get_task(&task_id).await;
         match self
             .scheduler
             .update_state(&task_id, TaskState::Cancelled)
             .await
         {
             Ok(_) => {
+                // Send cancel notification to user inbox (root tasks only).
+                if let Some(task) = task_snapshot {
+                    if task.parent_task.is_none() && self.config.notifications.notify_on_task_failed
+                    {
+                        self.send_completion_notification(
+                            &task,
+                            TaskOutcome::Cancelled,
+                            "Task was cancelled by user",
+                            None,
+                            None,
+                            0,
+                            TraceID::new(),
+                        )
+                        .await;
+                    }
+                }
                 self.cleanup_task_subscriptions(&task_id).await;
                 KernelResponse::Success { data: None }
             }
