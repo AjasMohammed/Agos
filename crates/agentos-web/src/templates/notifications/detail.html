@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<section>
+  <article id="notif-{{ notification.id }}">
+    <header>
+      <hgroup>
+        <h2>{{ notification.subject }}</h2>
+        <p>
+          <span class="badge badge-{{ notification.priority }}">{{ notification.priority | upper }}</span>
+          from {{ notification.from }} &mdash; {{ notification.created_at }}
+        </p>
+      </hgroup>
+    </header>
+
+    <div class="notification-body">
+      {{ notification.body }}
+    </div>
+
+    {% if notification.kind_tag == "question" and notification.requires_response %}
+      {% set msg = notification %}
+      {% include "notifications/_respond_form.html" %}
+    {% elif notification.response_text %}
+      <footer><em>You responded: &#34;{{ notification.response_text }}&#34;</em></footer>
+    {% endif %}
+  </article>
+
+  <p><a href="/notifications">&larr; Back to inbox</a></p>
+</section>
+{% endblock %}

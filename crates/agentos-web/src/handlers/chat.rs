@@ -187,6 +187,21 @@ pub async fn new_session(
     let store = Arc::clone(&state.chat_store);
     let sid = session_id.clone();
     let response = result.answer.clone();
+    if response.trim().is_empty() {
+        tracing::warn!(
+            target: "agentos::chat",
+            session_id = %session_id,
+            "Saving empty assistant response to chat store"
+        );
+    }
+    tracing::info!(
+        target: "agentos::chat",
+        session_id = %session_id,
+        answer_len = response.len(),
+        iterations = result.iterations,
+        tool_calls = result.tool_calls.len(),
+        "Persisting chat assistant response"
+    );
     match tokio::task::spawn_blocking(move || store.add_message(&sid, "assistant", &response)).await
     {
         Ok(Ok(())) => {}
@@ -364,6 +379,21 @@ pub async fn message_stream(
                 // Save assistant response.
                 let store = Arc::clone(&chat_store);
                 let answer = result.answer.clone();
+                if answer.trim().is_empty() {
+                    tracing::warn!(
+                        target: "agentos::chat",
+                        session_id = %sid,
+                        "Saving empty streaming assistant response to chat store"
+                    );
+                }
+                tracing::info!(
+                    target: "agentos::chat",
+                    session_id = %sid,
+                    answer_len = answer.len(),
+                    iterations = result.iterations,
+                    tool_calls = result.tool_calls.len(),
+                    "Persisting streaming chat assistant response"
+                );
                 match tokio::task::spawn_blocking(move || {
                     store.add_message(&sid, "assistant", &answer)
                 })

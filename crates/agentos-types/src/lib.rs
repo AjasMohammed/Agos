@@ -1,11 +1,13 @@
 pub mod agent;
 pub mod agent_self;
 pub mod capability;
+pub mod channel;
 pub mod context;
 pub mod error;
 pub mod event;
 pub mod ids;
 pub mod intent;
+pub mod notification;
 pub mod registry_query;
 pub mod role;
 pub mod schedule;
@@ -22,6 +24,7 @@ pub use agent_self::{AgentSelfView, BudgetSummary, SubscriptionSummary};
 pub use capability::{
     CapabilityToken, IntentTypeFlag, PermissionEntry, PermissionOp, PermissionSet,
 };
+pub use channel::{ChannelKind, RegisteredChannel};
 pub use context::{
     ContextCategory, ContextEntry, ContextMetadata, ContextPartition, ContextRole, ContextWindow,
     OverflowStrategy, TokenBudget,
@@ -31,11 +34,16 @@ pub use event::{
     EventCategory, EventMessage, EventSeverity, EventSource, EventSubscription, EventType,
     EventTypeFilter, SubscriptionPriority, ThrottlePolicy,
 };
+pub use ids::NotificationID;
 pub use ids::*;
 pub use intent::{
     ActionRiskLevel, HardwareResource, IntentCoherenceResult, IntentMessage, IntentResult,
     IntentResultStatus, IntentTarget, IntentType, SemanticPayload, SubscribePayload,
     SubscriptionDuration, UnsubscribePayload,
+};
+pub use notification::{
+    DeliveryChannel, DeliveryStatus, InteractionRequest, NotificationPriority, NotificationSource,
+    TaskOutcome, UserMessage, UserMessageKind, UserResponse,
 };
 pub use registry_query::{
     AgentRegistryQuery, AgentRegistrySnapshot, AgentSummary, EscalationQuery, EscalationSnapshot,

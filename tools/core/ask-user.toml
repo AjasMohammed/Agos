@@ -1,0 +1,52 @@
+[manifest]
+name        = "ask-user"
+version     = "1.0.0"
+description = "Ask the user a blocking question and wait for their response"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["user.interact:x"]
+
+[capabilities_provided]
+outputs = ["response", "channel", "responded_at"]
+
+[intent_schema]
+input  = "AskUserIntent"
+output = "AskUserResult"
+
+[input_schema]
+type = "object"
+required = ["question"]
+
+[input_schema.properties.question]
+type        = "string"
+description = "The question to present to the user"
+
+[input_schema.properties.options]
+type        = "array"
+description = "Optional list of predefined choices (free-text always allowed)"
+items.type  = "string"
+
+[input_schema.properties.timeout_secs]
+type        = "integer"
+description = "Seconds to wait before auto-denying (default: 300)"
+minimum     = 10
+maximum     = 86400
+
+[input_schema.properties.priority]
+type        = "string"
+enum        = ["info", "warning", "urgent", "critical"]
+description = "Notification importance level (default: info)"
+
+[input_schema.properties.auto_action]
+type        = "string"
+description = "Text returned to the agent when the timeout fires (default: auto_denied)"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 8
+max_cpu_ms    = 500
+syscalls      = []

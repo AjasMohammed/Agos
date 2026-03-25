@@ -1,0 +1,41 @@
+[manifest]
+name        = "notify-user"
+version     = "1.0.0"
+description = "Send a fire-and-forget notification to the user inbox"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["user.notify:w"]
+
+[capabilities_provided]
+outputs = ["notification_id", "status"]
+
+[intent_schema]
+input  = "NotifyUserIntent"
+output = "NotifyUserResult"
+
+[input_schema]
+type = "object"
+required = ["subject", "body"]
+
+[input_schema.properties.subject]
+type        = "string"
+description = "Short summary ≤80 chars — shown as the notification headline"
+
+[input_schema.properties.body]
+type        = "string"
+description = "Full notification body (Markdown supported)"
+
+[input_schema.properties.priority]
+type        = "string"
+enum        = ["info", "warning", "urgent", "critical"]
+description = "Notification importance level (default: info)"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 8
+max_cpu_ms    = 500
+syscalls      = []

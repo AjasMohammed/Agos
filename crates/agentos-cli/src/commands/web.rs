@@ -60,7 +60,7 @@ pub async fn handle_serve(config_path: &Path, host: &str, port: u16) -> anyhow::
     println!("Web UI: http://{}", addr);
     println!("Press Ctrl+C to shutdown.");
 
-    let server = WebServer::new(addr, kernel.clone(), Arc::clone(&allowed_tool_dirs))?;
+    let server = WebServer::new(addr, kernel.clone(), Arc::clone(&allowed_tool_dirs)).await?;
 
     let shutdown_token = CancellationToken::new();
 

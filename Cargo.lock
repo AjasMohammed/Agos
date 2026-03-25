@@ -137,12 +137,14 @@ dependencies = [
  "agentos-hal",
  "agentos-kernel",
  "agentos-llm",
+ "agentos-mcp",
  "agentos-sandbox",
  "agentos-tools",
  "agentos-types",
  "agentos-vault",
  "agentos-web",
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "ed25519-dalek",
@@ -188,6 +190,7 @@ dependencies = [
  "agentos-capability",
  "agentos-hal",
  "agentos-llm",
+ "agentos-mcp",
  "agentos-memory",
  "agentos-pipeline",
  "agentos-sandbox",
@@ -201,7 +204,9 @@ dependencies = [
  "chrono",
  "cron",
  "ed25519-dalek",
+ "futures",
  "hex",
+ "hmac",
  "jsonschema",
  "libc",
  "metrics",
@@ -214,6 +219,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "sha2",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -238,6 +244,22 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "agentos-mcp"
+version = "0.1.0"
+dependencies = [
+ "agentos-tools",
+ "agentos-types",
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
  "tracing",
 ]
 

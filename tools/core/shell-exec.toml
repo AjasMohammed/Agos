@@ -1,41 +1,51 @@
 [manifest]
-name        = "shell-exec"
-version     = "1.0.0"
+name = "shell-exec"
+version = "1.0.0"
 description = "Execute shell commands with path-restricted sandboxing (requires explicit permission)"
-author      = "agentos-core"
-trust_tier  = "core"
+author = "agentos-core"
+author_pubkey = "66ee96d2ad35e39ae0f8c9be90bd0f72826d609fe6394ecd1429c3196b79f399"
+signature = "37051a107207c15a124386a084d292b867962039b0f92c25a3d3564b5484072b25c295e08a4d9fe6f49ea50c8b01265c1b50b92c2866cdb61dfc1f849526ed08"
+trust_tier = "core"
 
 [capabilities_required]
-permissions = ["process.exec:x", "fs.user_data:rw"]
+permissions = [
+    "process.exec:x",
+    "fs.user_data:rw",
+]
 
 [capabilities_provided]
 outputs = ["content.text"]
 
 [intent_schema]
-input  = "ShellExecIntent"
+input = "ShellExecIntent"
 output = "ShellExecResult"
 
 [input_schema]
-type = "object"
 required = ["command"]
-
-[input_schema.properties.command]
-type = "string"
-description = "Shell command string to execute"
-
-[input_schema.properties.timeout_secs]
-type = "integer"
-default = 30
-minimum = 1
-description = "Execution timeout in seconds"
+type = "object"
 
 [input_schema.properties.allow_network]
-type = "boolean"
 default = false
 description = "Allow network namespace sharing inside sandbox"
+type = "boolean"
+
+[input_schema.properties.command]
+description = "Shell command string to execute"
+type = "string"
+
+[input_schema.properties.timeout_secs]
+default = 30
+description = "Execution timeout in seconds"
+minimum = 1
+type = "integer"
 
 [sandbox]
-network       = false
-fs_write      = true
+network = false
+fs_write = true
+gpu = false
 max_memory_mb = 256
-max_cpu_ms    = 30000
+max_cpu_ms = 30000
+syscalls = []
+
+[executor]
+type = "inline"

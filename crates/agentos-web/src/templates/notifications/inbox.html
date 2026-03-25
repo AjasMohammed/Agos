@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<section>
+  <hgroup>
+    <h2>Notifications</h2>
+    <p>Messages from your agents — {{ unread_count }} unread</p>
+  </hgroup>
+
+  <!-- Real-time SSE connection.  New notifications arrive as "notification-new"
+       events; the browser uses HTMX to prepend the rendered HTML row. -->
+  <div hx-ext="sse"
+       sse-connect="/notifications/stream"
+       sse-swap="notification-reload"
+       hx-trigger="sse:notification-reload"
+       hx-get="/notifications"
+       hx-target="#notification-list"
+       hx-swap="innerHTML">
+  </div>
+
+  <div id="notification-list">
+    {% for n in notifications %}
+      {% include "notifications/_notification_row.html" %}
+    {% else %}
+    <article>
+      <p>No notifications yet. Your agents will send messages here.</p>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

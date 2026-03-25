@@ -45,6 +45,197 @@ pub struct KernelConfig {
     pub preflight: PreflightConfig,
     #[serde(default)]
     pub logging: LoggingSettings,
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
+    /// MCP (Model Context Protocol) adapter configuration.
+    /// Defines external MCP server processes to connect at kernel boot.
+    #[serde(default)]
+    pub mcp: McpConfig,
+}
+
+/// Configuration for the Unified Notification and Interaction System (UNIS).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NotificationsConfig {
+    /// Maximum messages stored in the user inbox (oldest read messages purged on overflow).
+    #[serde(default = "default_max_inbox_size")]
+    pub max_inbox_size: usize,
+    /// Send a notification to the user inbox when a root task completes successfully.
+    #[serde(default = "default_true")]
+    pub notify_on_task_complete: bool,
+    /// Send a notification to the user inbox when a root task fails.
+    #[serde(default = "default_true")]
+    pub notify_on_task_failed: bool,
+    /// Pluggable delivery adapter configuration.
+    #[serde(default)]
+    pub adapters: NotificationAdaptersConfig,
+}
+
+fn default_max_inbox_size() -> usize {
+    1000
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            max_inbox_size: default_max_inbox_size(),
+            notify_on_task_complete: true,
+            notify_on_task_failed: true,
+            adapters: NotificationAdaptersConfig::default(),
+        }
+    }
+}
+
+/// Configuration for all pluggable delivery adapters.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct NotificationAdaptersConfig {
+    #[serde(default)]
+    pub webhook: WebhookAdapterConfig,
+    #[serde(default)]
+    pub desktop: DesktopAdapterConfig,
+    #[serde(default)]
+    pub slack: SlackAdapterConfig,
+}
+
+/// Outbound HTTPS webhook adapter configuration.
+///
+/// Custom `Debug` redacts the `secret` field to prevent credential exposure in logs.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct WebhookAdapterConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub url: String,
+    /// HMAC-SHA256 secret for X-AgentOS-Signature header. Empty = no signature.
+    #[serde(default)]
+    pub secret: String,
+    /// Minimum priority to deliver (info/warning/urgent/critical). Default: "warning".
+    #[serde(default = "default_warning_priority")]
+    pub min_priority: String,
+    /// Maximum delivery retry attempts. Default: 3.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    /// Seconds to wait between retries. Default: 5.
+    #[serde(default = "default_retry_delay_secs")]
+    pub retry_delay_secs: u64,
+    /// Per-request timeout in seconds. Default: 10.
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for WebhookAdapterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: String::new(),
+            secret: String::new(),
+            min_priority: default_warning_priority(),
+            max_retries: default_max_retries(),
+            retry_delay_secs: default_retry_delay_secs(),
+            timeout_secs: default_timeout_secs(),
+        }
+    }
+}
+
+impl std::fmt::Debug for WebhookAdapterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookAdapterConfig")
+            .field("enabled", &self.enabled)
+            .field("url", &self.url)
+            .field(
+                "secret",
+                &if self.secret.is_empty() {
+                    "<empty>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field("min_priority", &self.min_priority)
+            .field("max_retries", &self.max_retries)
+            .field("retry_delay_secs", &self.retry_delay_secs)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
+}
+
+/// Desktop notification adapter configuration (Linux only).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DesktopAdapterConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Minimum priority to show as desktop notification. Default: "warning".
+    #[serde(default = "default_warning_priority")]
+    pub min_priority: String,
+    /// Show task completion notifications even if they are at info priority.
+    #[serde(default = "default_true")]
+    pub notify_on_task_complete: bool,
+}
+
+impl Default for DesktopAdapterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_priority: default_warning_priority(),
+            notify_on_task_complete: true,
+        }
+    }
+}
+
+/// Slack incoming-webhook adapter configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SlackAdapterConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub webhook_url: String,
+    /// Minimum priority to send to Slack. Default: "warning".
+    #[serde(default = "default_warning_priority")]
+    pub min_priority: String,
+    /// Include full message body (true) or subject only (false). Default: true.
+    #[serde(default = "default_true")]
+    pub include_body: bool,
+    /// Maximum delivery retry attempts. Default: 3.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    /// Seconds to wait before first retry (doubles each attempt). Default: 2.
+    #[serde(default = "default_slack_retry_delay_secs")]
+    pub retry_delay_secs: u64,
+}
+
+impl Default for SlackAdapterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            webhook_url: String::new(),
+            min_priority: default_warning_priority(),
+            include_body: true,
+            max_retries: default_max_retries(),
+            retry_delay_secs: default_slack_retry_delay_secs(),
+        }
+    }
+}
+
+fn default_slack_retry_delay_secs() -> u64 {
+    2
+}
+
+fn default_warning_priority() -> String {
+    "warning".to_string()
+}
+
+fn default_max_retries() -> u32 {
+    3
+}
+
+fn default_retry_delay_secs() -> u64 {
+    5
+}
+
+fn default_timeout_secs() -> u64 {
+    10
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -535,6 +726,41 @@ impl Default for LoggingSettings {
     }
 }
 
+// ── MCP configuration ────────────────────────────────────────────────────────
+
+/// Configuration for the MCP (Model Context Protocol) adapter layer.
+///
+/// Lists external MCP server processes to connect at kernel boot. Each server
+/// is spawned as a child process connected via stdio JSON-RPC. Its tools are
+/// registered in the kernel `ToolRunner` with `TrustTier::Community`.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct McpConfig {
+    /// MCP server processes to connect at kernel boot.
+    /// Each entry spawns a child process via stdio JSON-RPC.
+    ///
+    /// Example in `config/default.toml`:
+    /// ```toml
+    /// [[mcp.servers]]
+    /// name = "filesystem"
+    /// command = "npx"
+    /// args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    /// ```
+    #[serde(default)]
+    pub servers: Vec<McpServerConfig>,
+}
+
+/// Configuration for a single external MCP server process.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpServerConfig {
+    /// Human-readable name for this server (used in log messages).
+    pub name: String,
+    /// Path or name of the executable to spawn (e.g. `"npx"`, `"python3"`).
+    pub command: String,
+    /// Arguments passed to `command` (e.g. `["-y", "@modelcontextprotocol/server-filesystem"]`).
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
 /// Load kernel configuration from a TOML file.
 pub fn load_config(path: &std::path::Path) -> Result<KernelConfig, anyhow::Error> {
     let content = std::fs::read_to_string(path)?;
@@ -546,12 +772,31 @@ pub fn load_config(path: &std::path::Path) -> Result<KernelConfig, anyhow::Error
     validate_workspace_paths(&config.tools.workspace)?;
     validate_logging_settings(&config.logging)?;
     validate_sandbox_settings(&config.kernel)?;
+    validate_notification_adapters(&config.notifications.adapters)?;
+    validate_mcp_config(&config.mcp)?;
     config
         .context_budget
         .validate()
         .map_err(|e| anyhow::anyhow!("context_budget: {}", e))?;
     warn_on_tmp_paths(&config);
     Ok(config)
+}
+
+/// Validate that all MCP server entries have non-empty name and command fields.
+fn validate_mcp_config(mcp: &McpConfig) -> Result<(), anyhow::Error> {
+    for (i, srv) in mcp.servers.iter().enumerate() {
+        if srv.name.trim().is_empty() {
+            anyhow::bail!("mcp.servers[{}]: 'name' must not be empty", i);
+        }
+        if srv.command.trim().is_empty() {
+            anyhow::bail!(
+                "mcp.servers[{}] ({}): 'command' must not be empty",
+                i,
+                srv.name
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Validate that workspace paths are absolute and not forbidden system directories.
@@ -666,6 +911,40 @@ fn validate_sandbox_settings(kernel: &KernelSettings) -> Result<(), anyhow::Erro
             "kernel.sandbox_policy is set to 'never' — all tools run unsandboxed. \
              This is NOT safe for production. Use 'trust_aware' or 'always' instead."
         );
+    }
+    Ok(())
+}
+
+fn validate_notification_adapters(
+    adapters: &NotificationAdaptersConfig,
+) -> Result<(), anyhow::Error> {
+    if adapters.webhook.enabled {
+        if adapters.webhook.url.is_empty() {
+            anyhow::bail!(
+                "notifications.adapters.webhook.enabled is true but url is empty; \
+                 set a valid HTTPS webhook URL"
+            );
+        }
+        if adapters.webhook.max_retries > 10 {
+            anyhow::bail!(
+                "notifications.adapters.webhook.max_retries is {} (max 10)",
+                adapters.webhook.max_retries
+            );
+        }
+    }
+    if adapters.slack.enabled {
+        if adapters.slack.webhook_url.is_empty() {
+            anyhow::bail!(
+                "notifications.adapters.slack.enabled is true but webhook_url is empty; \
+                 set a valid Slack incoming-webhook URL"
+            );
+        }
+        if adapters.slack.max_retries > 10 {
+            anyhow::bail!(
+                "notifications.adapters.slack.max_retries is {} (max 10)",
+                adapters.slack.max_retries
+            );
+        }
     }
     Ok(())
 }

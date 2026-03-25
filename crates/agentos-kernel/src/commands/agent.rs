@@ -6,6 +6,18 @@ use agentos_types::*;
 use secrecy::SecretString;
 use std::sync::Arc;
 
+fn is_valid_agent_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
 impl Kernel {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn cmd_connect_agent(
@@ -18,6 +30,15 @@ impl Kernel {
         test_mode: bool,
         extra_permissions: Vec<String>,
     ) -> KernelResponse {
+        if !is_valid_agent_name(&name) {
+            return KernelResponse::Error {
+                message: format!(
+                    "Invalid agent name '{}': must be alphanumeric with hyphens, underscores, or dots only, max 64 chars",
+                    name
+                ),
+            };
+        }
+
         let now = chrono::Utc::now();
 
         // Instantiate LLMCore based on provider
@@ -315,6 +336,12 @@ impl Kernel {
         {
             let mut active = self.active_llms.write().await;
             active.insert(agent_id, llm_adapter);
+        }
+
+        // Ensure the agent's home directory exists so file tools don't fail on first use.
+        let agent_home = self.data_dir.join("agents").join(&agent_name);
+        if let Err(e) = tokio::fs::create_dir_all(&agent_home).await {
+            tracing::warn!(agent_name = %agent_name, path = %agent_home.display(), error = %e, "Failed to create agent home directory");
         }
 
         // Revoke the replaced agent's vault signing key and deregister its pubkey

@@ -20,7 +20,7 @@ status: complete
 | 01 | [[01-Introduction and Philosophy]] | What AgentOS is, core principles, the Linux analogy — LLMs as CPU, tools as programs, intent as syscall |
 | 02 | [[02-Installation and First Run]] | Prerequisites, building from source, configuration, first kernel boot |
 | 03 | [[03-Architecture Overview]] | System architecture, crate dependency graph, the intent flow from CLI to tool execution |
-| 04 | [[04-CLI Reference Complete]] | All 18 `agentctl` command groups with flags, arguments, and examples |
+| 04 | [[04-CLI Reference Complete]] | All 22 `agentctl` command groups with flags, arguments, and examples — includes `notifications`, `channel`, `mcp`, and `web` |
 | 05 | [[05-Agent Management]] | Agent lifecycle, messaging, groups, identity keys, and agent registry |
 | 06 | [[06-Task System]] | Task routing, lifecycle states, background tasks, and scheduled tasks |
 | 07 | [[07-Tool System]] | Built-in tools, manifests, trust tiers (Core/Verified/Community/Blocked), signing |
@@ -37,6 +37,8 @@ status: complete
 | 18 | [[18-Advanced Operations]] | HAL, resource locks, snapshots, escalation workflows, agent identity |
 | 19 | [[19-Troubleshooting and FAQ]] | 33+ common errors with solutions, debug logging, health checks, platform notes |
 | 20 | [[20-LLM Agent Testing]] | `agent-tester` binary — LLM-driven scenario testing, feedback protocol, report format, CI integration |
+| 21 | [[21-User Notifications and Channels]] | Agent-to-operator messaging — `notify-user`, `ask-user`, delivery channels (Telegram, ntfy, email), notification inbox CLI |
+| 22 | [[22-MCP Integration]] | Bidirectional MCP bridge — connect external MCP servers to the kernel, expose AgentOS tools to Claude Desktop/Cursor, `mcp serve/list/status` CLI, auto-reconnect |
 
 ---
 
@@ -48,7 +50,7 @@ status: complete
 
 **Operator running a deployment?** See [[04-CLI Reference Complete]], [[16-Configuration Reference]], and [[19-Troubleshooting and FAQ]].
 
-**Developer building agents?** See [[05-Agent Management]], [[06-Task System]], [[07-Tool System]], and [[17-WASM Tools Development]].
+**Developer building agents?** See [[05-Agent Management]], [[06-Task System]], [[07-Tool System]], [[17-WASM Tools Development]], [[21-User Notifications and Channels]], and [[22-MCP Integration]].
 
 **Testing and evaluating AgentOS?** See [[20-LLM Agent Testing]].
 
@@ -80,3 +82,5 @@ status: complete
 | HAL | [[18-Advanced Operations]] | [[03-Architecture Overview]] |
 | Troubleshooting | [[19-Troubleshooting and FAQ]] | [[14-Audit Log]], [[04-CLI Reference Complete]] |
 | LLM Agent Testing | [[20-LLM Agent Testing]] | [[15-LLM Configuration]], [[07-Tool System]], [[08-Security Model]] |
+| Notifications | [[21-User Notifications and Channels]] | [[07-Tool System]], [[08-Security Model]], [[09-Secrets and Vault]] |
+| MCP | [[22-MCP Integration]] | [[07-Tool System]], [[08-Security Model]], [[04-CLI Reference Complete]] |

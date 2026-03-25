@@ -1,10 +1,12 @@
 use crate::chat_store::ChatStore;
+use agentos_kernel::notification_router::NotificationSsePayload;
 use agentos_kernel::Kernel;
 use dashmap::DashMap;
 use minijinja::Environment;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::broadcast;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -22,4 +24,7 @@ pub struct AppState {
     pub allowed_tool_dirs: Arc<Vec<PathBuf>>,
     /// Persistent chat session store (separate from the task scheduler).
     pub chat_store: Arc<ChatStore>,
+    /// Broadcast channel for real-time notification push to browser SSE subscribers.
+    /// The `SseDeliveryAdapter` in the kernel publishes to this sender.
+    pub notification_tx: broadcast::Sender<NotificationSsePayload>,
 }

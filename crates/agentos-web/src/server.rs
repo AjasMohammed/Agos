@@ -7,6 +7,7 @@ use crate::auth::AuthToken;
 use crate::router::build_router;
 use crate::state::AppState;
 use crate::templates::build_template_engine;
+use agentos_kernel::notification_router::SseDeliveryAdapter;
 use agentos_kernel::Kernel;
 
 pub struct WebServer {
@@ -15,7 +16,7 @@ pub struct WebServer {
 }
 
 impl WebServer {
-    pub fn new(
+    pub async fn new(
         bind_addr: SocketAddr,
         kernel: Arc<Kernel>,
         allowed_tool_dirs: Arc<Vec<std::path::PathBuf>>,
@@ -28,12 +29,22 @@ impl WebServer {
                 .map_err(|e| anyhow::anyhow!("Failed to open chat store: {}", e))?,
         );
 
+        // Create the notification broadcast channel and register the SSE adapter
+        // with the kernel's NotificationRouter so it receives real-time pushes.
+        let (notification_tx, _) = tokio::sync::broadcast::channel(256);
+        let sse_adapter = SseDeliveryAdapter::new(notification_tx.clone());
+        kernel
+            .notification_router
+            .register_adapter(Arc::new(sse_adapter))
+            .await;
+
         let state = AppState {
             kernel,
             templates,
             csrf_tokens: Arc::new(dashmap::DashMap::<String, (String, std::time::Instant)>::new()),
             allowed_tool_dirs,
             chat_store,
+            notification_tx,
         };
         Ok(Self { bind_addr, state })
     }

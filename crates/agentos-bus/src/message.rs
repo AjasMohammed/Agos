@@ -19,6 +19,9 @@ pub enum BusMessage {
 
     /// Kernel pushes a status update (for task monitoring)
     StatusUpdate(StatusUpdate),
+
+    /// Kernel pushes a new notification to all subscribers (e.g. web SSE consumer).
+    NotificationPush(agentos_types::UserMessage),
 }
 
 /// Commands from CLI to kernel that aren't task intents.
@@ -351,6 +354,75 @@ pub enum KernelCommand {
     SetLogLevel {
         level: String,
     },
+
+    // Notification system (UNIS Phase 1)
+    /// Send a fire-and-forget notification to the user.
+    /// Requires `user.notify` (write) permission when `from_agent` is set.
+    SendUserNotification {
+        subject: String,
+        body: String,
+        priority: agentos_types::NotificationPriority,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<agentos_types::UserMessageKind>,
+        trace_id: agentos_types::TraceID,
+        /// Originating agent ID — if set, `user.notify:w` permission is enforced
+        /// and the rate limiter is applied.  `None` means kernel-sourced.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from_agent: Option<agentos_types::AgentID>,
+    },
+
+    /// List notifications from the user inbox.
+    ListNotifications {
+        unread_only: bool,
+        limit: u32,
+    },
+
+    /// Fetch a single notification by ID.
+    GetNotification {
+        notification_id: agentos_types::NotificationID,
+    },
+
+    /// Mark a notification as read.
+    MarkNotificationRead {
+        notification_id: agentos_types::NotificationID,
+    },
+
+    /// Submit a response to an interactive notification (Question kind).
+    RespondToNotification {
+        notification_id: agentos_types::NotificationID,
+        response_text: String,
+        channel: agentos_types::DeliveryChannel,
+    },
+
+    // Channel management (Phase 6)
+    /// Register a new bidirectional communication channel.
+    ConnectChannel {
+        kind: agentos_types::ChannelKind,
+        /// Channel-specific external identifier (Telegram chat_id, ntfy topic, email address).
+        external_id: String,
+        display_name: String,
+        /// Vault key where the credential (bot token, password) is stored.
+        #[serde(default)]
+        credential_key: String,
+        /// ntfy reply-topic for inbound messages.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_topic: Option<String>,
+        /// ntfy server URL.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server_url: Option<String>,
+    },
+    /// Deregister a channel and stop its listener.
+    DisconnectChannel {
+        channel_id: String,
+    },
+    /// List all registered channels.
+    ListChannels,
+    /// Send a test notification to a registered channel.
+    TestChannel {
+        channel_id: String,
+    },
+    /// Query the health status of all configured MCP server connections.
+    McpStatus,
 }
 
 impl KernelCommand {
@@ -384,8 +456,12 @@ impl KernelCommand {
 /// Responses from kernel to CLI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum KernelResponse {
-    Success { data: Option<serde_json::Value> },
-    Error { message: String },
+    Success {
+        data: Option<serde_json::Value>,
+    },
+    Error {
+        message: String,
+    },
     AgentList(Vec<AgentProfile>),
     TaskList(Vec<TaskSummary>),
     TaskLogs(Vec<String>),
@@ -434,6 +510,28 @@ pub enum KernelResponse {
 
     // Hardware Abstraction Layer
     HalDeviceList(Vec<serde_json::Value>),
+
+    // Notification system (UNIS Phase 1)
+    NotificationList(Vec<agentos_types::UserMessage>),
+    NotificationSent {
+        id: agentos_types::NotificationID,
+    },
+    /// Single notification fetched by ID; `None` if not found.
+    NotificationDetail(Box<Option<agentos_types::UserMessage>>),
+
+    // Channel management (Phase 6)
+    ChannelList(Vec<agentos_types::RegisteredChannel>),
+
+    // MCP server health
+    McpServerStatusList(Vec<McpServerStatus>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerStatus {
+    pub name: String,
+    pub connected: bool,
+    pub tool_count: usize,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

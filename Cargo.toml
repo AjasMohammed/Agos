@@ -18,6 +18,7 @@ members = [
     "crates/agentos-sdk-macros",
     "crates/agentos-sdk",
     "crates/agentos-agent-tester",
+    "crates/agentos-mcp",
 ]
 
 [workspace.package]

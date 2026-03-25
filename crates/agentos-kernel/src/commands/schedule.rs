@@ -41,8 +41,19 @@ impl Kernel {
         KernelResponse::ScheduleList(self.schedule_manager.list_jobs().await)
     }
 
+    /// Resolve a schedule by name or UUID string.
+    async fn resolve_schedule(&self, name: &str) -> Option<ScheduledJob> {
+        if let Some(job) = self.schedule_manager.get_by_name(name).await {
+            return Some(job);
+        }
+        if let Ok(id) = name.parse::<ScheduleID>() {
+            return self.schedule_manager.get_job(&id).await;
+        }
+        None
+    }
+
     pub(crate) async fn cmd_pause_schedule(&self, name: String) -> KernelResponse {
-        if let Some(job) = self.schedule_manager.get_by_name(&name).await {
+        if let Some(job) = self.resolve_schedule(&name).await {
             match self.schedule_manager.pause(&job.id).await {
                 Ok(_) => {
                     self.audit_log(agentos_audit::AuditEntry {
@@ -52,7 +63,7 @@ impl Kernel {
                         agent_id: None,
                         task_id: None,
                         tool_id: None,
-                        details: serde_json::json!({ "job_name": name }),
+                        details: serde_json::json!({ "job_name": job.name }),
                         severity: agentos_audit::AuditSeverity::Info,
                         reversible: false,
                         rollback_ref: None,
@@ -65,13 +76,13 @@ impl Kernel {
             }
         } else {
             KernelResponse::Error {
-                message: format!("Schedule {} not found", name),
+                message: format!("Schedule '{}' not found", name),
             }
         }
     }
 
     pub(crate) async fn cmd_resume_schedule(&self, name: String) -> KernelResponse {
-        if let Some(job) = self.schedule_manager.get_by_name(&name).await {
+        if let Some(job) = self.resolve_schedule(&name).await {
             match self.schedule_manager.resume(&job.id).await {
                 Ok(_) => {
                     self.audit_log(agentos_audit::AuditEntry {
@@ -81,7 +92,7 @@ impl Kernel {
                         agent_id: None,
                         task_id: None,
                         tool_id: None,
-                        details: serde_json::json!({ "job_name": name }),
+                        details: serde_json::json!({ "job_name": job.name }),
                         severity: agentos_audit::AuditSeverity::Info,
                         reversible: false,
                         rollback_ref: None,
@@ -94,13 +105,13 @@ impl Kernel {
             }
         } else {
             KernelResponse::Error {
-                message: format!("Schedule {} not found", name),
+                message: format!("Schedule '{}' not found", name),
             }
         }
     }
 
     pub(crate) async fn cmd_delete_schedule(&self, name: String) -> KernelResponse {
-        if let Some(job) = self.schedule_manager.get_by_name(&name).await {
+        if let Some(job) = self.resolve_schedule(&name).await {
             match self.schedule_manager.delete(&job.id).await {
                 Ok(_) => {
                     self.audit_log(agentos_audit::AuditEntry {
@@ -110,7 +121,7 @@ impl Kernel {
                         agent_id: None,
                         task_id: None,
                         tool_id: None,
-                        details: serde_json::json!({ "job_name": name }),
+                        details: serde_json::json!({ "job_name": job.name }),
                         severity: agentos_audit::AuditSeverity::Info,
                         reversible: false,
                         rollback_ref: None,
@@ -123,7 +134,7 @@ impl Kernel {
             }
         } else {
             KernelResponse::Error {
-                message: format!("Schedule {} not found", name),
+                message: format!("Schedule '{}' not found", name),
             }
         }
     }

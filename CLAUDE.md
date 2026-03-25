@@ -34,6 +34,7 @@ crates/
   agentos-sandbox/      # Seccomp-BPF syscall filtering (Linux-only)
   agentos-wasm/         # WASM tool execution via Wasmtime
   agentos-hal/          # Hardware Abstraction Layer (system, process, network, GPU, etc.)
+  agentos-scratch/      # Agent scratchpad — markdown pages, wikilinks, backlink graph (planned)
   agentos-sdk/          # Ergonomic macros and re-exports for tool development
   agentos-sdk-macros/   # Proc-macro crate for #[tool] attribute
   agentos-web/          # Web UI server (Axum + HTMX, under development)
@@ -157,6 +158,7 @@ Default config at `config/default.toml`. Key sections:
 - `[vault]` — database path, key derivation params
 - `[audit]` — log database path, retention
 - `[tools]` — tool directories, sandbox policy
+- `[scratchpad]` — agent scratchpad settings (planned: context depth, page limits)
 
 ## Platform Notes
 
@@ -174,11 +176,14 @@ Default config at `config/default.toml`. Key sections:
 
 | Type | Directory | Purpose | Example |
 |------|-----------|---------|---------|
-| Task plans (what to build next) | `obsidian-vault/next-steps/` | Short, actionable implementation checklists | `08-Cost Tracking.md` |
-| Architecture / design decisions | `obsidian-vault/plans/` | Why we chose approach X, trade-offs, constraints | `agentos-cost-model.md` |
+| **Feature plans (primary)** | `obsidian-vault/plans/<feature>/` | **Self-contained plan directory** — master plan, research, flow, phases, subtasks all co-located | `plans/agent-scratchpad/` |
+| Simple flat design decisions | `obsidian-vault/plans/` | Single-file design rationale (1-2 phases only) | `agentos-cost-model.md` |
 | Bug fixes / issues / known problems | `obsidian-vault/roadmap/` | Track what's broken and how to fix it | update `Issues and Fixes.md` |
 | Reference docs for a system | `obsidian-vault/reference/` | How a completed system works (API, config, internals) | `Cost System.md` |
-| Data / control flow diagrams | `obsidian-vault/flows/` | Visual flow of data or control through the system | `Cost Tracking Flow.md` |
+| Data / control flow diagrams | `obsidian-vault/flows/` | Visual flow of data or control through the system (only for standalone flows not tied to a plan directory) | `Cost Tracking Flow.md` |
+| Legacy implementation checklists | `obsidian-vault/next-steps/` | Lean checklists (legacy — prefer plan directories for new work) | `08-Cost Tracking.md` |
+
+**Default for new features:** Always create a `plans/<feature-name>/` directory. This keeps the master plan, research, flow diagrams, and all phase files co-located. Only use `next-steps/` for trivial one-off checklists that don't warrant a full plan directory.
 
 ### Complex plans get their own directory
 
@@ -247,24 +252,11 @@ Each phase file (e.g., `01-episodic-auto-write.md`) must be **fully self-contain
 - **Plan directory:** 3+ phases, 5+ files, multi-week effort, needs research + flow + phases
 - **Flat files:** Simple features (1-2 phases), quick fixes, single design decision
 
-For flat files, the existing pattern still applies:
+For flat files (simple 1-2 phase features), a single `plans/agentos-<topic>.md` file is sufficient. Optionally add:
+- `reference/<System Name>.md` — the user-facing reference doc (written after implementation)
+- `flows/<Name> Flow.md` — standalone flow diagram (only if not included in the plan file itself)
 
-### How to split a simple feature across folders
-
-For simple features (1-2 phases), create docs in **multiple** folders:
-
-1. **`next-steps/`** — the implementation checklist (steps, files changed, verification)
-2. **`plans/`** — the design rationale (why this approach, what alternatives were considered)
-3. **`flows/`** — the data/control flow diagram (how data moves through the system)
-4. **`reference/`** — the user-facing reference doc (written after implementation, documents the final API/behavior)
-
-Example for "Cost Tracking":
-- `next-steps/08-Cost Tracking.md` — step-by-step implementation plan
-- `plans/agentos-cost-model.md` — design decision: per-token vs per-request, budget enforcement strategy
-- `flows/Cost Tracking Flow.md` — how cost data flows from LLM adapter → CostTracker → AuditLog
-- `reference/Cost System.md` — final reference: config keys, CLI commands, audit event types
-
-**`next-steps/` files should be lean checklists, not design documents.** Move design rationale to `plans/`, system descriptions to `reference/`, and flow diagrams to `flows/`.
+For anything with 3+ phases, always use a plan directory as described above.
 
 ### Sub-task decomposition (mandatory)
 
@@ -272,56 +264,42 @@ Example for "Cost Tracking":
 
 This is critical for context window efficiency — a single monolithic plan forces the agent to load the entire document just to find the one step it needs. Instead:
 
-1. **Create a parent plan** in `next-steps/` as a lean index that lists sub-tasks with wikilinks, status, and one-line descriptions. This file should fit comfortably in ~50 lines.
-2. **Create one file per sub-task** in `next-steps/subtasks/` named `NN-MM-Subtask Title.md` where `NN` matches the parent plan number and `MM` is the sub-task sequence (e.g., `08-01-Add CostEvent Type.md`, `08-02-Wire CostTracker to Kernel.md`).
-3. **Each sub-task file must be fully self-contained** — it should include:
+1. **Create a master plan** in `plans/<feature>/` as a lean index that lists phases with wikilinks, status, and one-line descriptions. This file should fit comfortably in ~50 lines of table content.
+2. **Create one file per phase** in the same `plans/<feature>/` directory, named `NN-<kebab-case-phase-name>.md` (e.g., `01-core-storage-engine.md`, `02-wikilink-parser-and-backlinks.md`).
+3. **Each phase file must be fully self-contained** — it should include:
    - What to do (specific steps, not vague descriptions)
    - Which files to read and modify (exact paths)
    - What types/functions are involved (names, not just crate references)
    - Expected inputs and outputs
-   - How to verify the sub-task is complete (`cargo test` commands, expected behavior)
-   - Prerequisites: wikilinks to sub-tasks that must be done first
-4. **Target 1-3 files changed per sub-task.** If a sub-task touches more than 5 files, split it further. The goal is that an agent can read the sub-task doc + the relevant source files and have everything it needs.
-5. **No forward references to unwritten context.** A sub-task must never say "see the parent plan for details" — all details the agent needs must be in the sub-task file itself.
-6. **Mark sub-task status in the parent plan** as each is completed (`planned` → `in-progress` → `complete`).
+   - How to verify the phase is complete (`cargo test` commands, expected behavior)
+   - Prerequisites: wikilinks to phases that must be done first
+4. **Target 1-5 files changed per phase.** If a phase touches more than 5-7 files, split it further. The goal is that an agent can read the phase doc + the relevant source files and have everything it needs.
+5. **No forward references to unwritten context.** A phase file must never say "see the master plan for details" — all details the agent needs must be in the phase file itself.
+6. **Mark phase status in the master plan** as each is completed (`planned` → `in-progress` → `complete`).
 
-Example parent plan (`next-steps/08-Cost Tracking.md`):
-```markdown
-## Sub-tasks
-| # | Task | File | Status |
-|---|------|------|--------|
-| 01 | [[08-01-Add CostEvent Type]] | `agentos-types/src/event.rs` | complete |
-| 02 | [[08-02-Wire CostTracker to Kernel]] | `agentos-kernel/src/cost_tracker.rs`, `kernel.rs` | in-progress |
-| 03 | [[08-03-Add Cost CLI Commands]] | `agentos-cli/src/commands/cost.rs` | planned |
-| 04 | [[08-04-Cost Audit Integration]] | `agentos-audit/src/log.rs` | planned |
+Example plan directory structure:
+```
+obsidian-vault/plans/agent-scratchpad/
+├── Agent Scratchpad Plan.md              # Master plan with phase table
+├── Agent Scratchpad Research.md          # Research/rationale
+├── Agent Scratchpad Data Flow.md         # Flow diagrams
+├── 01-core-storage-engine.md             # Phase 1 (self-contained)
+├── 02-wikilink-parser-and-backlinks.md   # Phase 2 (self-contained)
+├── 03-scratchpad-tools.md                # Phase 3 (self-contained)
+└── ...
 ```
 
-Example sub-task (`next-steps/subtasks/08-01-Add CostEvent Type.md`):
+Example master plan phase table:
 ```markdown
-# Add CostEvent Type
-
-> Add a CostEvent struct to agentos-types so the cost tracker can emit typed events.
-
-## What to Do
-1. Open `crates/agentos-types/src/event.rs`
-2. Add `CostEvent { agent_id: AgentID, model: String, input_tokens: u64, output_tokens: u64, cost_usd: f64, timestamp: DateTime<Utc> }`
-3. Derive `Serialize, Deserialize, Debug, Clone`
-4. Re-export from `crates/agentos-types/src/lib.rs`
-
-## Files Changed
-| File | Change |
-|------|--------|
-| `crates/agentos-types/src/event.rs` | Add `CostEvent` struct |
-| `crates/agentos-types/src/lib.rs` | Add `pub use event::CostEvent;` |
-
-## Prerequisites
-None — this is the first sub-task.
-
-## Verification
-`cargo test -p agentos-types` — must compile and pass.
+## Phase Overview
+| Phase | Name | Effort | Dependencies | Detail Doc | Status |
+|-------|------|--------|-------------|------------|--------|
+| 1 | Core storage engine | 2d | None | [[01-core-storage-engine]] | planned |
+| 2 | Wikilink parser & backlinks | 1.5d | Phase 1 | [[02-wikilink-parser-and-backlinks]] | planned |
+| 3 | Scratchpad tools | 2d | Phase 1, 2 | [[03-scratchpad-tools]] | planned |
 ```
 
-**Why this matters:** An agent working on sub-task 03 only needs to read `08-03-Add Cost CLI Commands.md` and the 1-2 source files it references. It does not need to load the design rationale, the flow diagram, or the other sub-tasks. This keeps context usage minimal and execution focused.
+**Why this matters:** An agent working on Phase 3 only needs to read `03-scratchpad-tools.md` and the source files it references. It does not need to load the research, the flow diagram, or the other phases. Everything is co-located in one directory but each file is independently actionable.
 
 ### Required frontmatter
 
@@ -452,8 +430,9 @@ Key types, modules, and how they interact.
 
 ### Keep the index up to date
 
-After adding a `next-steps/` file, add a row to `obsidian-vault/next-steps/Index.md`.
+After adding a new plan directory under `plans/`, ensure the master plan file has a complete phase table with status.
 Cross-link between related docs in different folders using `[[wikilinks]]`.
+For legacy `next-steps/` files, add a row to `obsidian-vault/next-steps/Index.md`.
 
 ---
 

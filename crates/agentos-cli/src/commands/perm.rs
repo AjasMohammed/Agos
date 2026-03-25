@@ -22,6 +22,7 @@ pub enum PermCommands {
         permission: String,
     },
     /// Show all permissions for an agent
+    #[command(alias = "list")]
     Show {
         /// Agent name
         agent: String,

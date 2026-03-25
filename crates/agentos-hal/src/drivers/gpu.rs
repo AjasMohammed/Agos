@@ -91,6 +91,15 @@ impl HalDriver for GpuDriver {
         ("hardware.gpu", PermissionOp::Read)
     }
 
+    /// Returns `"gpu:<card_index>"`.  Defaults to `"gpu:0"` when no index is specified.
+    fn device_key(&self, params: &Value) -> Option<String> {
+        let idx = params
+            .get("card_index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        Some(format!("gpu:{}", idx))
+    }
+
     async fn query(&self, params: Value) -> Result<Value, AgentOSError> {
         let action = params
             .get("action")

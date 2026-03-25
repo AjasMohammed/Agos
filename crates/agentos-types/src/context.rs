@@ -221,6 +221,18 @@ pub struct ContextMetadata {
     pub tool_id: Option<ToolID>,
     pub intent_id: Option<MessageID>,
     pub tokens_estimated: Option<u32>,
+    /// Provider-native tool call ID for tool result entries.
+    /// Used by LLM adapters to format tool results in the correct provider protocol
+    /// (e.g., OpenAI `tool_call_id`, Anthropic `tool_use_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// For assistant entries that made tool calls: serialized Vec<InferenceToolCall>
+    /// (fields: id, tool_name, intent_type, payload). Adapters use this to reconstruct
+    /// the provider-native assistant message format so multi-turn conversations remain
+    /// valid (OpenAI requires `tool_calls` array; Anthropic requires `tool_use` content
+    /// blocks; Gemini requires `functionCall` parts in the preceding model turn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_tool_calls: Option<serde_json::Value>,
 }
 
 impl ContextWindow {

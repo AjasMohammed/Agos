@@ -515,6 +515,74 @@ Delete a named memory block.
 
 ---
 
+### `ask-user`
+
+Ask the operator a blocking question. The task pauses in `Waiting` state until the user responds via the CLI, web UI, or any registered notification channel.
+
+| | |
+|---|---|
+| **Permission** | `user.interact:x` |
+| **Network** | No |
+| **fs_write** | No |
+
+**Input:**
+
+| Key | Type | Required | Default | Notes |
+|-----|------|----------|---------|-------|
+| `question` | string | Yes | — | The question text shown to the operator |
+| `options` | array of strings | No | — | Optional list of allowed answer choices |
+| `timeout_secs` | u64 | No | `300` | Seconds before auto-response fires (0 = no timeout) |
+| `auto_action` | string | No | `"auto_denied"` | Text injected as the answer when the timeout fires with no user response |
+| `priority` | string | No | `"info"` | Notification priority: `info`, `warning`, `urgent`, or `critical` |
+
+**Output:** Returns a `_kernel_action: "ask_user"` envelope. The kernel delivers the question to the user inbox and all registered channels, then suspends the task. When the operator responds, the response text is injected into the agent's context window and the task resumes.
+
+**Timeout behaviour:** If `timeout_secs` elapses without a response, `auto_action` is injected automatically. The default `"auto_denied"` is a safe fallback for destructive operations. An agent can have at most 3 concurrent blocking questions (additional questions are downgraded to non-blocking notifications).
+
+**Example:**
+```json
+{
+  "question": "Should I delete the 847 duplicate records?",
+  "options": ["Yes, delete them", "No, skip", "Archive instead"],
+  "timeout_secs": 600,
+  "auto_action": "No, skip",
+  "priority": "urgent"
+}
+```
+
+---
+
+### `notify-user`
+
+Fire-and-forget notification to the operator. The task continues immediately.
+
+| | |
+|---|---|
+| **Permission** | `user.notify:w` |
+| **Network** | No |
+| **fs_write** | No |
+
+**Input:**
+
+| Key | Type | Required | Default | Notes |
+|-----|------|----------|---------|-------|
+| `subject` | string | Yes | — | Short summary ≤80 chars — used as the email subject and CLI one-liner |
+| `body` | string | Yes | — | Full markdown message body |
+| `priority` | string | No | `"info"` | `info`, `warning`, `urgent`, or `critical` |
+
+**Output:** Returns a `_kernel_action: "notify_user"` envelope. The kernel delivers the message to the user inbox and all registered delivery channels.
+
+**Example:**
+```json
+{
+  "subject": "Database scan complete",
+  "body": "Scanned 12,000 rows. Found **3 anomalies** — see `anomalies.json` in the data directory.",
+  "priority": "warning"
+}
+```
+
+---
+
 ### Additional Tools (v3)
 
 The following tools were added in v3. Use `agent-manual` with `{"section": "tool-detail", "name": "<tool>"}` for full input schemas.
@@ -556,6 +624,13 @@ The following tools were added in v3. Use `agent-manual` with `{"section": "tool
 | `agent-list` | `agent.registry:r` | List registered agents and their status |
 | `task-list` | `task.query:r` | List active and recent tasks |
 | `task-status` | `task.query:r` | Inspect status of a specific task by ID |
+
+#### User Communication
+
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `ask-user` | `user.interact:x` | Ask the operator a blocking question; task pauses until answered |
+| `notify-user` | `user.notify:w` | Send a fire-and-forget notification to the operator |
 
 #### Utilities
 

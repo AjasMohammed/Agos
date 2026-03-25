@@ -53,6 +53,9 @@ status: active
 | Uncertainty & Reasoning Hints | Phase 6 | Done | parse_uncertainty + infer_reasoning_hints implemented |
 | Scratchpad Context Partition | Phase 7 | Done | active_entries() used by all adapters |
 | Spec Enforcement Hardening | Spec #2,4,5,6,8,12 | Done | [[11-Spec Enforcement Hardening]] |
+| HAL Device Registry Enforcement | V3 Gap | **Planned** | `HardwareAbstractionLayer::query()` never calls `check_access()` — see [[01-hal-registry-enforcement]] |
+| MCP Adapter Crate | V3 Gap | **Planned** | No MCP protocol implementation — see [[02-mcp-adapter]] |
+| User-Agent Communication (UNIS) | V3 Gap | **Planned** | Unified Notification & Interaction System — ask-user tool, task completion notifications, SSE/web inbox, pluggable adapters — see [[User-Agent Communication Plan]] |
 
 ---
 
@@ -131,6 +134,7 @@ graph TD
 | 49 | [[32-Logging Observability\|Logging & observability: #[instrument] spans, tools logging, silent failure elimination, JSON output + correlation IDs (4 phases)]] | ~5d | **High** |
 | 50 | [[33-Sandbox Lightweight Execution\|Sandbox lightweight execution: single-tool factory, lazy sandbox init, per-category RLIMIT_AS, tool weight classification (4 phases)]] | ~10d | **Critical** |
 | 51 | [[34-Sandbox Execution Policy\|Sandbox execution policy: trust-aware dispatch (Core=in-process, Community=sandboxed), concurrency semaphore, RAYON_NUM_THREADS=1, execution mode audit (4 phases, 4 subtasks)]] | ~5d | **Critical** |
+| 52 | [[LLM Adapter Redesign Plan|LLM adapter redesign: native tool protocols, StopReason, real streaming, retry/circuit breaker, cost attribution, provider failover, legacy cleanup (9 phases)]] | ~14d | **Critical** |
 
 ---
 

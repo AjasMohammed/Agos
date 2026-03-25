@@ -174,6 +174,7 @@ impl ContextManager {
         task_id: &TaskID,
         tool_name: &str,
         result: &serde_json::Value,
+        tool_call_id: Option<String>,
     ) -> Result<usize, AgentOSError> {
         use agentos_tools::sanitize;
 
@@ -194,6 +195,8 @@ impl ContextManager {
                     tool_id: None,
                     intent_id: None,
                     tokens_estimated: None,
+                    tool_call_id,
+                    assistant_tool_calls: None,
                 }),
                 importance,
                 pinned: false,

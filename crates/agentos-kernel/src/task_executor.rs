@@ -442,7 +442,12 @@ impl Kernel {
                 });
                 if let Err(e) = self
                     .context_manager
-                    .push_tool_result(&task.id, &skipped.tool_name, &error_result)
+                    .push_tool_result(
+                        &task.id,
+                        &skipped.tool_name,
+                        &error_result,
+                        skipped.id.clone(),
+                    )
                     .await
                 {
                     tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -523,10 +528,21 @@ impl Kernel {
                         });
                         if let Err(e) = self
                             .context_manager
-                            .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                            .push_tool_result(
+                                &task.id,
+                                &tool_call.tool_name,
+                                &error_result,
+                                tool_call.id.clone(),
+                            )
                             .await
                         {
                             tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                            consecutive_push_failures += 1;
+                            if consecutive_push_failures >= 3 {
+                                anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                            }
+                        } else {
+                            consecutive_push_failures = 0;
                         }
                         continue;
                     }
@@ -593,7 +609,12 @@ impl Kernel {
                 });
                 if let Err(e) = self
                     .context_manager
-                    .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                    .push_tool_result(
+                        &task.id,
+                        &tool_call.tool_name,
+                        &error_result,
+                        tool_call.id.clone(),
+                    )
                     .await
                 {
                     tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -623,10 +644,21 @@ impl Kernel {
                     });
                     if let Err(e) = self
                         .context_manager
-                        .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                        .push_tool_result(
+                            &task.id,
+                            &tool_call.tool_name,
+                            &error_result,
+                            tool_call.id.clone(),
+                        )
                         .await
                     {
                         tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                        consecutive_push_failures += 1;
+                        if consecutive_push_failures >= 3 {
+                            anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                        }
+                    } else {
+                        consecutive_push_failures = 0;
                     }
                     continue;
                 }
@@ -642,10 +674,21 @@ impl Kernel {
                     });
                     if let Err(e) = self
                         .context_manager
-                        .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                        .push_tool_result(
+                            &task.id,
+                            &tool_call.tool_name,
+                            &error_result,
+                            tool_call.id.clone(),
+                        )
                         .await
                     {
                         tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                        consecutive_push_failures += 1;
+                        if consecutive_push_failures >= 3 {
+                            anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                        }
+                    } else {
+                        consecutive_push_failures = 0;
                     }
                     continue;
                 }
@@ -656,10 +699,21 @@ impl Kernel {
                     });
                     if let Err(e) = self
                         .context_manager
-                        .push_tool_result(&task.id, &tool_call.tool_name, &warning)
+                        .push_tool_result(
+                            &task.id,
+                            &tool_call.tool_name,
+                            &warning,
+                            tool_call.id.clone(),
+                        )
                         .await
                     {
                         tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                        consecutive_push_failures += 1;
+                        if consecutive_push_failures >= 3 {
+                            anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                        }
+                    } else {
+                        consecutive_push_failures = 0;
                     }
                 }
                 Ok(IntentCoherenceResult::Approved) => {}
@@ -682,7 +736,12 @@ impl Kernel {
                 };
                 if let Err(e) = self
                     .context_manager
-                    .push_tool_result(&task.id, &tool_call.tool_name, &context_result)
+                    .push_tool_result(
+                        &task.id,
+                        &tool_call.tool_name,
+                        &context_result,
+                        tool_call.id.clone(),
+                    )
                     .await
                 {
                     tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -730,7 +789,12 @@ impl Kernel {
                 });
                 if let Err(e) = self
                     .context_manager
-                    .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                    .push_tool_result(
+                        &task.id,
+                        &tool_call.tool_name,
+                        &error_result,
+                        tool_call.id.clone(),
+                    )
                     .await
                 {
                     tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -768,7 +832,12 @@ impl Kernel {
                     });
                     if let Err(e) = self
                         .context_manager
-                        .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                        .push_tool_result(
+                            &task.id,
+                            &tool_call.tool_name,
+                            &error_result,
+                            tool_call.id.clone(),
+                        )
                         .await
                     {
                         tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -782,7 +851,12 @@ impl Kernel {
                     });
                     if let Err(e) = self
                         .context_manager
-                        .push_tool_result(&task.id, &tool_call.tool_name, &waiting_result)
+                        .push_tool_result(
+                            &task.id,
+                            &tool_call.tool_name,
+                            &waiting_result,
+                            tool_call.id.clone(),
+                        )
                         .await
                     {
                         tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -1217,7 +1291,12 @@ impl Kernel {
                         });
                         if let Err(e) = self
                             .context_manager
-                            .push_tool_result(&task.id, &outcome.tool_call.tool_name, &blocked)
+                            .push_tool_result(
+                                &task.id,
+                                &outcome.tool_call.tool_name,
+                                &blocked,
+                                outcome.tool_call.id.clone(),
+                            )
                             .await
                         {
                             tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -1234,7 +1313,12 @@ impl Kernel {
                     let tainted_result = serde_json::json!({ "output": wrapped });
                     if let Err(e) = self
                         .context_manager
-                        .push_tool_result(&task.id, &outcome.tool_call.tool_name, &tainted_result)
+                        .push_tool_result(
+                            &task.id,
+                            &outcome.tool_call.tool_name,
+                            &tainted_result,
+                            outcome.tool_call.id.clone(),
+                        )
                         .await
                     {
                         tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -1317,7 +1401,12 @@ impl Kernel {
                     });
                     if let Err(e) = self
                         .context_manager
-                        .push_tool_result(&task.id, &outcome.tool_call.tool_name, &error_result)
+                        .push_tool_result(
+                            &task.id,
+                            &outcome.tool_call.tool_name,
+                            &error_result,
+                            outcome.tool_call.id.clone(),
+                        )
                         .await
                     {
                         tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -1786,11 +1875,12 @@ impl Kernel {
             // --- Cost budget enforcement ---
             let budget_result = self
                 .cost_tracker
-                .record_inference(
+                .record_inference_with_cost(
                     &task.agent_id,
                     &inference.tokens_used,
                     current_llm.provider_name(),
                     current_llm.model_name(),
+                    inference.cost.as_ref(),
                 )
                 .await;
 
@@ -2128,7 +2218,24 @@ impl Kernel {
                 }
             }
 
-            // Push assistant response into context
+            // Push assistant response into context, preserving tool_calls so
+            // adapters can reconstruct the provider-native format on the next turn.
+            let assistant_tool_calls_json = if inference.tool_calls.is_empty() {
+                None
+            } else {
+                match serde_json::to_value(&inference.tool_calls) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        tracing::error!(
+                            task_id = %task.id,
+                            error = %e,
+                            "Failed to serialize tool_calls into context metadata — \
+                             multi-turn tool protocol will break on next inference"
+                        );
+                        None
+                    }
+                }
+            };
             if let Err(e) = self
                 .context_manager
                 .push_entry(
@@ -2137,7 +2244,14 @@ impl Kernel {
                         role: ContextRole::Assistant,
                         content: inference.text.clone(),
                         timestamp: chrono::Utc::now(),
-                        metadata: None,
+                        metadata: Some(ContextMetadata {
+                            tool_name: None,
+                            tool_id: None,
+                            intent_id: None,
+                            tokens_estimated: None,
+                            tool_call_id: None,
+                            assistant_tool_calls: assistant_tool_calls_json,
+                        }),
                         importance: 0.4,
                         pinned: false,
                         reference_count: 0,
@@ -2188,23 +2302,33 @@ impl Kernel {
                 });
             }
 
-            // Prefer structured tool calls from the LLM adapter when available.
-            // This avoids the fragile text→JSON→re-parse round-trip and lets
-            // providers that support native tool calling work reliably.
-            let parsed_tool_calls = if !inference.tool_calls.is_empty() {
-                inference
-                    .tool_calls
-                    .iter()
-                    .map(|tc| crate::tool_call::ToolCallRequest {
-                        tool_name: tc.tool_name.clone(),
-                        intent_type: crate::tool_call::parse_intent_type(&tc.intent_type)
-                            .unwrap_or(IntentType::Query),
-                        payload: tc.payload.clone(),
-                    })
-                    .collect()
-            } else {
-                crate::tool_call::parse_tool_calls(&inference.text)
-            };
+            // Prefer native tool calls from the adapter. Use tool_calls presence
+            // as the primary signal; StopReason is supplementary.
+            // Fallback: if the adapter returned no structured tool calls, try to parse
+            // a JSON tool call from the plain text response (for models without native
+            // function-calling support, e.g. some Ollama models).
+            let mut parsed_tool_calls: Vec<crate::tool_call::ToolCallRequest> = inference
+                .tool_calls
+                .iter()
+                .map(|tc| crate::tool_call::ToolCallRequest {
+                    id: tc.id.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    intent_type: crate::tool_call::parse_intent_type(&tc.intent_type)
+                        .unwrap_or(IntentType::Query),
+                    payload: tc.payload.clone(),
+                })
+                .collect();
+            if parsed_tool_calls.is_empty() {
+                if let Some(text_tc) = crate::tool_call::parse_tool_call_from_text(&inference.text)
+                {
+                    tracing::info!(
+                        task_id = %task.id,
+                        tool = %text_tc.tool_name,
+                        "Parsed text-mode tool call from LLM response (no native function calling)"
+                    );
+                    parsed_tool_calls.push(text_tc);
+                }
+            }
             if parsed_tool_calls.len() > 1 {
                 if self.config.kernel.tool_calls.allow_parallel {
                     self.execute_parallel_tool_calls(
@@ -2252,7 +2376,12 @@ impl Kernel {
                                 });
                                 if let Err(e) = self
                                     .context_manager
-                                    .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                                    .push_tool_result(
+                                        &task.id,
+                                        &tool_call.tool_name,
+                                        &error_result,
+                                        tool_call.id.clone(),
+                                    )
                                     .await
                                 {
                                     tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -2265,7 +2394,12 @@ impl Kernel {
                                 });
                                 if let Err(e) = self
                                     .context_manager
-                                    .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                                    .push_tool_result(
+                                        &task.id,
+                                        &tool_call.tool_name,
+                                        &error_result,
+                                        tool_call.id.clone(),
+                                    )
                                     .await
                                 {
                                     tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -2291,7 +2425,12 @@ impl Kernel {
                         };
                         if let Err(e) = self
                             .context_manager
-                            .push_tool_result(&task.id, &tool_call.tool_name, &context_result)
+                            .push_tool_result(
+                                &task.id,
+                                &tool_call.tool_name,
+                                &context_result,
+                                tool_call.id.clone(),
+                            )
                             .await
                         {
                             tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -2382,7 +2521,12 @@ impl Kernel {
                                 });
                                 if let Err(e) = self
                                     .context_manager
-                                    .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                                    .push_tool_result(
+                                        &task.id,
+                                        &tool_call.tool_name,
+                                        &error_result,
+                                        tool_call.id.clone(),
+                                    )
                                     .await
                                 {
                                     tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -2434,7 +2578,12 @@ impl Kernel {
                                 });
                                 if let Err(e) = self
                                     .context_manager
-                                    .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                                    .push_tool_result(
+                                        &task.id,
+                                        &tool_call.tool_name,
+                                        &error_result,
+                                        tool_call.id.clone(),
+                                    )
                                     .await
                                 {
                                     tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -2509,7 +2658,12 @@ impl Kernel {
                             });
                             if let Err(e) = self
                                 .context_manager
-                                .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                                .push_tool_result(
+                                    &task.id,
+                                    &tool_call.tool_name,
+                                    &error_result,
+                                    tool_call.id.clone(),
+                                )
                                 .await
                             {
                                 tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -2528,7 +2682,12 @@ impl Kernel {
                             });
                             if let Err(e) = self
                                 .context_manager
-                                .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                                .push_tool_result(
+                                    &task.id,
+                                    &tool_call.tool_name,
+                                    &error_result,
+                                    tool_call.id.clone(),
+                                )
                                 .await
                             {
                                 tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -2542,7 +2701,12 @@ impl Kernel {
                             });
                             if let Err(e) = self
                                 .context_manager
-                                .push_tool_result(&task.id, &tool_call.tool_name, &warning)
+                                .push_tool_result(
+                                    &task.id,
+                                    &tool_call.tool_name,
+                                    &warning,
+                                    tool_call.id.clone(),
+                                )
                                 .await
                             {
                                 tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -2681,7 +2845,12 @@ impl Kernel {
                             });
                             if let Err(e) = self
                                 .context_manager
-                                .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                                .push_tool_result(
+                                    &task.id,
+                                    &tool_call.tool_name,
+                                    &error_result,
+                                    tool_call.id.clone(),
+                                )
                                 .await
                             {
                                 tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -2744,7 +2913,12 @@ impl Kernel {
                             });
                             if let Err(e) = self
                                 .context_manager
-                                .push_tool_result(&task.id, &tool_call.tool_name, &waiting_result)
+                                .push_tool_result(
+                                    &task.id,
+                                    &tool_call.tool_name,
+                                    &waiting_result,
+                                    tool_call.id.clone(),
+                                )
                                 .await
                             {
                                 tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -3234,7 +3408,12 @@ impl Kernel {
 
                             match self
                                 .context_manager
-                                .push_tool_result(&task.id, &tool_call.tool_name, &tainted_result)
+                                .push_tool_result(
+                                    &task.id,
+                                    &tool_call.tool_name,
+                                    &tainted_result,
+                                    tool_call.id.clone(),
+                                )
                                 .await
                             {
                                 Ok(evicted) => {
@@ -3475,7 +3654,12 @@ impl Kernel {
                             });
                             if let Err(e) = self
                                 .context_manager
-                                .push_tool_result(&task.id, &tool_call.tool_name, &error_result)
+                                .push_tool_result(
+                                    &task.id,
+                                    &tool_call.tool_name,
+                                    &error_result,
+                                    tool_call.id.clone(),
+                                )
                                 .await
                             {
                                 tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
@@ -3595,6 +3779,24 @@ impl Kernel {
         if let Err(e) = self.scheduler.mark_started(&task.id).await {
             tracing::error!(error = %e, task_id = %task.id, "Failed to mark task as started in scheduler");
         }
+
+        self.push_status_update(task.id, TaskState::Running, "Task started".to_string());
+
+        self.audit_log(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: task_trace_id,
+            event_type: agentos_audit::AuditEventType::TaskCreated,
+            agent_id: Some(task.agent_id),
+            task_id: Some(task.id),
+            tool_id: None,
+            details: serde_json::json!({
+                "prompt_preview": task.original_prompt.chars().take(200).collect::<String>(),
+                "autonomous": task.autonomous,
+            }),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
 
         self.emit_event_with_trace(
             EventType::TaskStarted,

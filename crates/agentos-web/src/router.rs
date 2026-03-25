@@ -12,7 +12,9 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::AuthToken;
-use crate::handlers::{agents, audit, chat, dashboard, events, pipelines, secrets, tasks, tools};
+use crate::handlers::{
+    agents, audit, chat, dashboard, events, notifications, pipelines, secrets, tasks, tools,
+};
 use crate::state::AppState;
 
 /// Middleware that sets security headers on every response.
@@ -139,6 +141,24 @@ pub fn build_router(
         .route(
             "/chat/{session_id}/stream",
             axum::routing::get(chat::message_stream),
+        )
+        // Notifications (UNIS Phase 2)
+        .route("/notifications", axum::routing::get(notifications::inbox))
+        .route(
+            "/notifications/stream",
+            axum::routing::get(notifications::notification_stream),
+        )
+        .route(
+            "/notifications/unread-count",
+            axum::routing::get(notifications::unread_count),
+        )
+        .route(
+            "/notifications/{id}",
+            axum::routing::get(notifications::get_notification),
+        )
+        .route(
+            "/notifications/{id}/respond",
+            axum::routing::post(notifications::respond_to_notification),
         )
         // Audit
         .route("/audit", axum::routing::get(audit::list))

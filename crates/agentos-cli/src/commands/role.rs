@@ -8,9 +8,8 @@ pub enum RoleCommands {
     Create {
         /// Name of the role
         name: String,
-        /// Description of the role
-        #[arg(long, default_value = "")]
-        description: String,
+        /// Description of the role (optional positional)
+        description: Option<String>,
     },
     /// Delete a role
     Delete {
@@ -53,7 +52,7 @@ pub async fn handle(client: &mut BusClient, command: RoleCommands) -> anyhow::Re
     let cmd = match command {
         RoleCommands::Create { name, description } => KernelCommand::CreateRole {
             role_name: name,
-            description,
+            description: description.unwrap_or_default(),
         },
         RoleCommands::Delete { name } => KernelCommand::DeleteRole { role_name: name },
         RoleCommands::List => KernelCommand::ListRoles,

@@ -1,12 +1,15 @@
 pub mod agent;
 pub mod audit;
 pub mod background;
+pub mod channel;
 pub mod cost;
 pub mod escalation;
 pub mod event;
 pub mod hal;
 pub mod identity;
 pub mod log;
+pub mod mcp;
+pub mod notification;
 pub mod permission;
 pub mod pipeline;
 pub mod resource;

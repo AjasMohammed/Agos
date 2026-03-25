@@ -89,5 +89,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         health_monitor: HealthMonitorConfig::default(),
         preflight: PreflightConfig::default(),
         logging: Default::default(),
+        notifications: Default::default(),
+        mcp: Default::default(),
     }
 }

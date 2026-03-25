@@ -75,6 +75,34 @@ impl HalDriver for StorageDriver {
         ("hardware.storage", PermissionOp::Read)
     }
 
+    /// Returns `"storage:<path>"` when a path is provided, otherwise `"storage:default"`.
+    ///
+    /// The path component is sanitized to prevent registry key injection: only
+    /// alphanumeric characters, hyphens, underscores, dots, and forward slashes
+    /// are kept.  This ensures that agent-supplied paths cannot collide with
+    /// device keys belonging to other HAL driver namespaces (e.g. `"gpu:0"`).
+    fn device_key(&self, params: &Value) -> Option<String> {
+        let key = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|p| {
+                let sanitized: String = p
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+                    .collect();
+                format!(
+                    "storage:{}",
+                    if sanitized.is_empty() {
+                        "default"
+                    } else {
+                        &sanitized
+                    }
+                )
+            })
+            .unwrap_or_else(|| "storage:default".to_string());
+        Some(key)
+    }
+
     async fn query(&self, params: Value) -> Result<Value, AgentOSError> {
         let action = params
             .get("action")
