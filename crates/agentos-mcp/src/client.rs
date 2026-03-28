@@ -5,7 +5,7 @@ use std::sync::{
     Arc,
 };
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
 
@@ -20,6 +20,41 @@ const MCP_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// Maximum number of bytes accepted from a single MCP server response line.
 /// Prevents memory exhaustion from a malicious or malfunctioning server.
 const MAX_MCP_RESPONSE_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+
+/// Read a single newline-terminated line from `reader`, enforcing a byte limit
+/// *during* the read rather than after. This prevents a malicious server from
+/// exhausting memory by sending a very large payload without a newline.
+///
+/// Returns the number of bytes read (0 means EOF).
+async fn read_line_limited(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    buf: &mut String,
+    max_bytes: usize,
+) -> Result<usize, anyhow::Error> {
+    let mut total = 0usize;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            break; // EOF
+        }
+        let newline_pos = available.iter().position(|&b| b == b'\n');
+        let chunk_end = newline_pos.map_or(available.len(), |p| p + 1);
+        total += chunk_end;
+        if total > max_bytes {
+            anyhow::bail!("MCP server response exceeds {} byte limit", max_bytes);
+        }
+        let chunk = &available[..chunk_end];
+        buf.push_str(
+            std::str::from_utf8(chunk)
+                .map_err(|e| anyhow::anyhow!("Invalid UTF-8 from MCP server: {e}"))?,
+        );
+        reader.consume(chunk_end);
+        if newline_pos.is_some() {
+            break; // found the line terminator
+        }
+    }
+    Ok(total)
+}
 
 // ── Connection guard ──────────────────────────────────────────────────────────
 
@@ -131,7 +166,7 @@ impl McpClient {
         let mut resp_line = String::new();
         let n = tokio::time::timeout(
             std::time::Duration::from_secs(MCP_REQUEST_TIMEOUT_SECS),
-            conn.stdout.read_line(&mut resp_line),
+            read_line_limited(&mut conn.stdout, &mut resp_line, MAX_MCP_RESPONSE_BYTES),
         )
         .await
         .map_err(|_| {
@@ -143,12 +178,6 @@ impl McpClient {
 
         if n == 0 {
             anyhow::bail!("MCP server closed connection unexpectedly (server may have crashed)");
-        }
-        if resp_line.len() > MAX_MCP_RESPONSE_BYTES {
-            anyhow::bail!(
-                "MCP server response exceeds {} byte limit",
-                MAX_MCP_RESPONSE_BYTES
-            );
         }
 
         serde_json::from_str(resp_line.trim()).map_err(|e| {
@@ -188,11 +217,11 @@ impl McpClient {
         conn.stdin.write_all(req_line.as_bytes()).await?;
         conn.stdin.flush().await?;
 
-        // Read initialize response (with timeout).
+        // Read initialize response (with timeout and bounded read).
         let mut resp_line = String::new();
         let n = tokio::time::timeout(
             std::time::Duration::from_secs(MCP_REQUEST_TIMEOUT_SECS),
-            conn.stdout.read_line(&mut resp_line),
+            read_line_limited(&mut conn.stdout, &mut resp_line, MAX_MCP_RESPONSE_BYTES),
         )
         .await
         .map_err(|_| {
@@ -204,12 +233,6 @@ impl McpClient {
 
         if n == 0 {
             anyhow::bail!("MCP server closed connection during initialize handshake");
-        }
-        if resp_line.len() > MAX_MCP_RESPONSE_BYTES {
-            anyhow::bail!(
-                "MCP initialize response exceeds {} byte limit",
-                MAX_MCP_RESPONSE_BYTES
-            );
         }
 
         let resp: JsonRpcResponse = serde_json::from_str(resp_line.trim()).map_err(|e| {
