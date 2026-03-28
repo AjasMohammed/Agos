@@ -127,8 +127,35 @@ impl InboundRouter {
         // is outstanding.  External channel adapters cannot set reply_to_notification_id,
         // so this fallback is the primary path for answering ask_user questions via
         // Telegram or ntfy.
+        //
+        // Security: only auto-route from channels that have a credential_key (i.e. are
+        // authenticated). Unauthenticated channels (e.g. ntfy without an access token)
+        // could allow third-party answer injection.
         let waiting_ids = self.notification_router.waiting_question_ids().await;
         if waiting_ids.len() == 1 {
+            let channel_authenticated = self
+                .channel_registry
+                .get_by_id(&msg.channel_instance_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|ch| !ch.credential_key.is_empty())
+                .unwrap_or(false);
+
+            if !channel_authenticated {
+                tracing::warn!(
+                    channel_id = %msg.channel_instance_id,
+                    "Rejecting auto-route from unauthenticated channel"
+                );
+                self.send_reply(
+                    &msg,
+                    "This channel is not authenticated. Please reply via the web UI or CLI."
+                        .to_string(),
+                )
+                .await;
+                return Ok(());
+            }
+
             let notif_id = waiting_ids[0];
             let response = UserResponse {
                 text: msg.text.clone(),
