@@ -19,14 +19,14 @@ const MCP_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// Maximum number of bytes accepted from a single MCP server response line.
 /// Prevents memory exhaustion from a malicious or malfunctioning server.
-const MAX_MCP_RESPONSE_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+pub(crate) const MAX_MCP_RESPONSE_BYTES: usize = 10 * 1024 * 1024; // 10 MB
 
 /// Read a single newline-terminated line from `reader`, enforcing a byte limit
 /// *during* the read rather than after. This prevents a malicious server from
 /// exhausting memory by sending a very large payload without a newline.
 ///
 /// Returns the number of bytes read (0 means EOF).
-async fn read_line_limited(
+pub(crate) async fn read_line_limited(
     reader: &mut (impl AsyncBufRead + Unpin),
     buf: &mut String,
     max_bytes: usize,

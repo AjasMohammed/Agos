@@ -10,8 +10,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 
+use crate::client::{read_line_limited, MAX_MCP_RESPONSE_BYTES};
 use crate::types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpToolDef};
 
 // ── Executor trait ────────────────────────────────────────────────────────────
@@ -53,10 +54,15 @@ impl McpServer {
     pub async fn serve_stdio(&self) -> anyhow::Result<()> {
         let stdin = tokio::io::stdin();
         let stdout = tokio::io::stdout();
-        let mut reader = BufReader::new(stdin).lines();
+        let mut reader = BufReader::new(stdin);
         let mut writer = tokio::io::BufWriter::new(stdout);
 
-        while let Some(line) = reader.next_line().await? {
+        loop {
+            let mut line = String::new();
+            let n = read_line_limited(&mut reader, &mut line, MAX_MCP_RESPONSE_BYTES).await?;
+            if n == 0 {
+                break; // EOF
+            }
             let line = line.trim();
             if line.is_empty() {
                 continue;
