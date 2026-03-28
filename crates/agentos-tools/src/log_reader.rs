@@ -47,7 +47,13 @@ impl AgentTool for LogReaderTool {
         perms.grant("fs.app_logs".to_string(), true, false, false, None);
         perms.grant("fs.system_logs".to_string(), true, false, false, None);
 
-        hal.query("log", payload, &perms, Some(&context.agent_id))
-            .await
+        hal.query(
+            "log",
+            payload,
+            &perms,
+            Some(&context.agent_id),
+            Some(&context.task_id),
+        )
+        .await
     }
 }

@@ -85,10 +85,19 @@ impl DeliveryAdapter for NtfyDeliveryAdapter {
                 let actions: Vec<String> = opts
                     .iter()
                     .map(|opt| {
-                        // View action — opens the ntfy reply topic so user can reply.
+                        // Escape ntfy action-string separators in the label so
+                        // commas/semicolons in option text don't corrupt parsing.
+                        let label = opt.replace(',', "\\,").replace(';', "\\;");
+                        // Percent-encode the path segment so special characters
+                        // (/, ?, #, spaces) don't produce invalid URLs.
+                        let encoded_path = percent_encoding::utf8_percent_encode(
+                            opt,
+                            percent_encoding::NON_ALPHANUMERIC,
+                        )
+                        .to_string();
                         format!(
-                            "view, {opt}, {}/{}/{}",
-                            self.server_url, self.reply_topic, opt
+                            "view, {label}, {}/{}/{}",
+                            self.server_url, self.reply_topic, encoded_path
                         )
                     })
                     .collect();

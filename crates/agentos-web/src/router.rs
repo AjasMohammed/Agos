@@ -13,7 +13,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::AuthToken;
 use crate::handlers::{
-    agents, audit, chat, dashboard, events, notifications, pipelines, secrets, tasks, tools,
+    agent_detail, agents, audit, chat, costs, dashboard, events, notifications, pipeline_ui,
+    pipelines, secrets, tasks, tools,
 };
 use crate::state::AppState;
 
@@ -24,7 +25,7 @@ async fn add_security_headers(request: Request<axum::body::Body>, next: Next) ->
     headers.insert(
         axum::http::HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static(
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; \
              img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
         ),
     );
@@ -93,13 +94,31 @@ pub fn build_router(
             axum::routing::get(agents::list).post(agents::connect),
         )
         .route("/agents/{name}", axum::routing::delete(agents::disconnect))
+        // Agent detail
+        .route(
+            "/agents/{name}/detail",
+            axum::routing::get(agent_detail::detail),
+        )
+        .route(
+            "/agents/{name}/permissions",
+            axum::routing::post(agent_detail::grant_permission),
+        )
+        .route(
+            "/agents/{name}/permissions/revoke",
+            axum::routing::post(agent_detail::revoke_permission),
+        )
         // Tasks
         .route("/tasks", axum::routing::get(tasks::list))
         .route("/tasks/{id}", axum::routing::get(tasks::detail))
         .route("/tasks/{id}/cancel", axum::routing::post(tasks::cancel))
+        .route("/tasks/{id}/trace", axum::routing::get(tasks::trace_page))
         .route(
             "/tasks/{id}/logs/stream",
             axum::routing::get(tasks::log_stream),
+        )
+        .route(
+            "/api/tasks/{id}/trace",
+            axum::routing::get(tasks::trace_json),
         )
         // Tools
         .route(
@@ -114,8 +133,44 @@ pub fn build_router(
         )
         .route("/secrets/{name}", axum::routing::delete(secrets::revoke))
         // Pipelines
-        .route("/pipelines", axum::routing::get(pipelines::list))
+        .route("/pipelines", axum::routing::get(pipeline_ui::list))
+        .route(
+            "/pipelines/new",
+            axum::routing::get(pipeline_ui::new_builder),
+        )
+        .route(
+            "/pipelines/{name}/edit",
+            axum::routing::get(pipeline_ui::edit_builder),
+        )
+        .route(
+            "/pipelines/{name}/clone",
+            axum::routing::post(pipeline_ui::clone_pipeline),
+        )
+        .route(
+            "/pipelines/{name}/delete",
+            axum::routing::post(pipeline_ui::delete_pipeline),
+        )
         .route("/pipelines/run", axum::routing::post(pipelines::run))
+        .route(
+            "/api/pipelines",
+            axum::routing::post(pipeline_ui::save_pipeline),
+        )
+        .route(
+            "/api/pipelines/import",
+            axum::routing::post(pipeline_ui::import_yaml),
+        )
+        .route(
+            "/api/pipelines/export",
+            axum::routing::post(pipeline_ui::export_yaml),
+        )
+        .route(
+            "/api/pipelines/run",
+            axum::routing::post(pipeline_ui::run_pipeline),
+        )
+        .route(
+            "/api/pipelines/runs/{run_id}/events",
+            axum::routing::get(pipeline_ui::run_events),
+        )
         // Dashboard partials
         .route(
             "/dashboard-stats",
@@ -159,6 +214,12 @@ pub fn build_router(
         .route(
             "/notifications/{id}/respond",
             axum::routing::post(notifications::respond_to_notification),
+        )
+        // Costs
+        .route("/costs", axum::routing::get(costs::dashboard))
+        .route(
+            "/api/costs/summary",
+            axum::routing::get(costs::summary_json),
         )
         // Audit
         .route("/audit", axum::routing::get(audit::list))

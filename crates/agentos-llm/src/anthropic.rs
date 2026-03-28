@@ -864,6 +864,7 @@ mod tests {
                 author_pubkey: None,
                 signature: None,
                 trust_tier: TrustTier::Core,
+                tags: None,
             },
             capabilities_required: ToolCapabilities {
                 permissions: vec!["fs.user_data:r".to_string()],

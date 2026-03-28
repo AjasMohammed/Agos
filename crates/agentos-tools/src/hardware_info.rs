@@ -48,6 +48,7 @@ impl AgentTool for HardwareInfoTool {
             serde_json::json!({}),
             &perms,
             Some(&context.agent_id),
+            Some(&context.task_id),
         )
         .await
     }

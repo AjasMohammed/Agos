@@ -1,5 +1,6 @@
 use crate::kernel::Kernel;
 use crate::task_executor::TaskResult;
+use crate::task_summary::{deduplicate_title, generate_task_summary};
 use agentos_types::*;
 use std::collections::HashMap;
 
@@ -140,6 +141,19 @@ impl Kernel {
                 }
             }
 
+            // If this was an RPC child task, deliver the result to the blocked caller.
+            // complete_call is a no-op if the task is not an RPC child.
+            self.rpc_manager
+                .complete_call(
+                    &task.id,
+                    crate::rpc_manager::RpcResult {
+                        output: result.answer.clone(),
+                        success: true,
+                        error: None,
+                    },
+                )
+                .await;
+
             // Wake any parent tasks that were waiting on this child
             let waiters = self.scheduler.complete_dependency(task.id).await;
             for waiter_id in &waiters {
@@ -199,6 +213,11 @@ impl Kernel {
             .await;
         }
 
+        // Auto-write scratchpad note for completed task
+        if completed {
+            self.auto_write_scratchpad_note(task, "Success").await;
+        }
+
         self.cleanup_task_subscriptions(&task.id).await;
     }
 
@@ -249,6 +268,17 @@ impl Kernel {
             {
                 tracing::warn!(task_id = %task.id, error = %err, "Failed to record suspended task state");
             }
+            // Notify RPC caller if this was an RPC child task (prevents parent hang)
+            self.rpc_manager
+                .complete_call(
+                    &task.id,
+                    crate::rpc_manager::RpcResult {
+                        output: String::new(),
+                        success: false,
+                        error: Some(format!("RPC child task suspended: {}", error_message)),
+                    },
+                )
+                .await;
             self.cleanup_task_subscriptions(&task.id).await;
             return;
         }
@@ -282,6 +312,17 @@ impl Kernel {
             }
             self.background_pool
                 .set_waiting(&task.id, error_message.clone())
+                .await;
+            // Notify RPC caller if this was an RPC child task (prevents parent hang)
+            self.rpc_manager
+                .complete_call(
+                    &task.id,
+                    crate::rpc_manager::RpcResult {
+                        output: String::new(),
+                        success: false,
+                        error: Some(format!("RPC child task paused: {}", error_message)),
+                    },
+                )
                 .await;
             return;
         }
@@ -457,6 +498,22 @@ impl Kernel {
             }
         }
 
+        // Auto-write scratchpad note for failed task
+        self.auto_write_scratchpad_note(task, "Failed").await;
+
+        // If this was an RPC child task, deliver the failure to the blocked caller.
+        // complete_call is a no-op if the task is not an RPC child.
+        self.rpc_manager
+            .complete_call(
+                &task.id,
+                crate::rpc_manager::RpcResult {
+                    output: String::new(),
+                    success: false,
+                    error: Some(error_message.clone()),
+                },
+            )
+            .await;
+
         // Clean up dependency edges even on failure
         let waiters = self.scheduler.complete_dependency(task.id).await;
         for waiter_id in &waiters {
@@ -496,6 +553,89 @@ impl Kernel {
         }
 
         self.cleanup_task_subscriptions(&task.id).await;
+    }
+
+    // ── Scratchpad auto-write ────────────────────────────────────────────────
+
+    /// Generate and write a scratchpad note summarizing a completed or failed task.
+    ///
+    /// This is non-fatal: failures are logged as warnings and do not affect
+    /// the task's outcome or downstream processing.
+    async fn auto_write_scratchpad_note(&self, task: &AgentTask, outcome: &str) {
+        if !self.config.scratchpad.enabled || !self.config.scratchpad.auto_write_on_completion {
+            return;
+        }
+
+        // Fetch episodic timeline for this task
+        let episodes = match self.episodic_memory.timeline_by_task(&task.id, 200).await {
+            Ok(eps) => eps,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "Failed to fetch episodic timeline for scratchpad auto-write"
+                );
+                return;
+            }
+        };
+
+        // Skip trivial tasks
+        if episodes.len() < self.config.scratchpad.auto_write_min_steps {
+            tracing::debug!(
+                task_id = %task.id,
+                episode_count = episodes.len(),
+                min_steps = self.config.scratchpad.auto_write_min_steps,
+                "Skipping scratchpad auto-write for trivial task"
+            );
+            return;
+        }
+
+        // Get existing page titles for auto-linking and deduplication
+        let agent_id_str = task.agent_id.as_uuid().to_string();
+        let existing_pages = match self.scratchpad_store.list_pages(&agent_id_str).await {
+            Ok(pages) => pages,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "Failed to list scratchpad pages for auto-write"
+                );
+                return;
+            }
+        };
+        let existing_titles: Vec<String> = existing_pages.iter().map(|p| p.title.clone()).collect();
+
+        let summary = generate_task_summary(
+            task,
+            outcome,
+            &episodes,
+            &existing_titles,
+            self.config.scratchpad.auto_write_max_summary,
+        );
+
+        // Deduplicate title
+        let final_title = deduplicate_title(&summary.title, &existing_titles);
+
+        match self
+            .scratchpad_store
+            .write_page(&agent_id_str, &final_title, &summary.content, &summary.tags)
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(
+                    agent_id = %task.agent_id,
+                    title = %final_title,
+                    "Auto-generated scratchpad note for completed task"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "Failed to auto-write scratchpad note (non-fatal)"
+                );
+            }
+        }
     }
 
     // ── Task-completion notification helpers ─────────────────────────────────

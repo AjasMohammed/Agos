@@ -2,6 +2,7 @@ use crate::agent_registry::AgentRegistry;
 use crate::background_pool::BackgroundPool;
 use crate::config::{load_config, KernelConfig};
 use crate::context::ContextManager;
+use crate::event_dispatch::emit_signed_event;
 use crate::schedule_manager::ScheduleManager;
 use crate::scheduler::TaskScheduler;
 use crate::tool_registry::ToolRegistry;
@@ -9,12 +10,16 @@ use agentos_audit::AuditLog;
 use agentos_bus::BusServer;
 use agentos_capability::profiles::ProfileManager;
 use agentos_capability::CapabilityEngine;
+#[cfg(feature = "usb-storage")]
+use agentos_hal::drivers::usb_storage::UsbStorageDriver;
 use agentos_hal::{
+    discover_available_devices,
     drivers::{
         gpu::GpuDriver, log_reader::LogReaderDriver, network::NetworkDriver,
         process::ProcessDriver, sensor::SensorDriver, storage::StorageDriver, system::SystemDriver,
     },
-    HardwareAbstractionLayer, HardwareRegistry,
+    DeviceAccessGate, DeviceStatus, HalEventSink, HalOperation, HardwareAbstractionLayer,
+    HardwareRegistry,
 };
 use agentos_llm::LLMCore;
 use agentos_memory::Embedder;
@@ -25,11 +30,282 @@ use agentos_tools::traits::ToolExecutionContext;
 use agentos_types::*;
 use agentos_vault::{SecretsVault, ZeroizingString};
 use agentos_wasm::WasmToolExecutor;
+use async_trait::async_trait;
+use rand::RngCore;
+use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+
+struct KernelHalEventSink {
+    capability_engine: Arc<CapabilityEngine>,
+    audit: Arc<AuditLog>,
+    event_sender: tokio::sync::mpsc::Sender<agentos_types::EventMessage>,
+}
+
+struct KernelDeviceAccessGate {
+    registry: Arc<HardwareRegistry>,
+    escalation_manager: Arc<crate::escalation::EscalationManager>,
+    audit: Arc<AuditLog>,
+}
+
+impl KernelDeviceAccessGate {
+    fn new(
+        registry: Arc<HardwareRegistry>,
+        escalation_manager: Arc<crate::escalation::EscalationManager>,
+        audit: Arc<AuditLog>,
+    ) -> Self {
+        Self {
+            registry,
+            escalation_manager,
+            audit,
+        }
+    }
+
+    fn default_status_for(device_type: &str) -> DeviceStatus {
+        match device_type {
+            "cpu" | "memory" => DeviceStatus::Approved,
+            _ => DeviceStatus::Pending,
+        }
+    }
+
+    fn default_status_for_discovered_device(device_id: &str, device_type: &str) -> DeviceStatus {
+        if device_type != "block-device" {
+            return Self::default_status_for(device_type);
+        }
+
+        let Some(device_name) = device_id.strip_prefix("storage:") else {
+            return DeviceStatus::Pending;
+        };
+        let removable_path = Path::new("/sys/block").join(device_name).join("removable");
+        match std::fs::read_to_string(removable_path) {
+            Ok(value) if value.trim() == "1" => DeviceStatus::Pending,
+            Ok(_) => DeviceStatus::Approved,
+            Err(_) => DeviceStatus::Pending,
+        }
+    }
+
+    fn audit(
+        &self,
+        event_type: agentos_audit::AuditEventType,
+        severity: agentos_audit::AuditSeverity,
+        agent_id: Option<AgentID>,
+        task_id: Option<TaskID>,
+        details: serde_json::Value,
+    ) -> Result<(), AgentOSError> {
+        self.audit.append(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type,
+            agent_id,
+            task_id,
+            tool_id: None,
+            details,
+            severity,
+            reversible: false,
+            rollback_ref: None,
+        })
+    }
+}
+
+impl KernelHalEventSink {
+    fn new(
+        capability_engine: Arc<CapabilityEngine>,
+        audit: Arc<AuditLog>,
+        event_sender: tokio::sync::mpsc::Sender<agentos_types::EventMessage>,
+    ) -> Self {
+        Self {
+            capability_engine,
+            audit,
+            event_sender,
+        }
+    }
+}
+
+#[async_trait]
+impl HalEventSink for KernelHalEventSink {
+    async fn emit_driver_event(
+        &self,
+        driver_name: &str,
+        params: &Value,
+        result: &Value,
+        agent_id: Option<&AgentID>,
+    ) -> Result<(), AgentOSError> {
+        if driver_name != "usb-storage" {
+            return Ok(());
+        }
+
+        let action = params
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("list");
+
+        let Some((event_type, payload)) = ({
+            let device = result
+                .get("device")
+                .or_else(|| params.get("device"))
+                .and_then(Value::as_str);
+
+            match action {
+                "mount" => Some((
+                    EventType::DeviceMounted,
+                    json!({
+                        "driver": driver_name,
+                        "device": device,
+                        "mount_path": result.get("mount_path").and_then(Value::as_str),
+                    }),
+                )),
+                "unmount" => Some((
+                    EventType::DeviceUnmounted,
+                    json!({
+                        "driver": driver_name,
+                        "device": device,
+                    }),
+                )),
+                "eject" => Some((
+                    EventType::DeviceEjected,
+                    json!({
+                        "driver": driver_name,
+                        "device": device,
+                    }),
+                )),
+                _ => None,
+            }
+        }) else {
+            return Ok(());
+        };
+
+        emit_signed_event(
+            &self.capability_engine,
+            &self.audit,
+            &self.event_sender,
+            event_type,
+            EventSource::HardwareAbstractionLayer,
+            EventSeverity::Info,
+            payload,
+            0,
+            TraceID::new(),
+            agent_id.cloned(),
+            None,
+        );
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl DeviceAccessGate for KernelDeviceAccessGate {
+    async fn check(
+        &self,
+        agent_id: &AgentID,
+        task_id: &TaskID,
+        device_id: &str,
+        device_type: &str,
+        operation: HalOperation,
+    ) -> Result<(), AgentOSError> {
+        if self.registry.get_device_status(device_id).is_none() {
+            self.registry.register_device(
+                device_id,
+                device_type,
+                Self::default_status_for(device_type),
+            );
+        }
+
+        let Some(device) = self.registry.get_device(device_id) else {
+            return Err(AgentOSError::HalError(format!(
+                "Device '{}' was not found after registration",
+                device_id
+            )));
+        };
+
+        match device.status {
+            DeviceStatus::Approved if device.denied_to.contains(agent_id) => {
+                self.audit(
+                    agentos_audit::AuditEventType::DeviceAccessDenied,
+                    agentos_audit::AuditSeverity::Warn,
+                    Some(*agent_id),
+                    Some(*task_id),
+                    json!({
+                        "device_id": device_id,
+                        "device_type": device.device_type,
+                        "operation": operation.to_string(),
+                        "reason": "agent-specific device denial",
+                    }),
+                )?;
+                Err(AgentOSError::PermissionDenied {
+                    resource: device_id.to_string(),
+                    operation: "device_access".to_string(),
+                })
+            }
+            DeviceStatus::Approved
+                if device.granted_to.is_empty() || device.granted_to.contains(agent_id) =>
+            {
+                self.audit(
+                    agentos_audit::AuditEventType::DeviceAccessGranted,
+                    agentos_audit::AuditSeverity::Info,
+                    Some(*agent_id),
+                    Some(*task_id),
+                    json!({
+                        "device_id": device_id,
+                        "device_type": device.device_type,
+                        "operation": operation.to_string(),
+                    }),
+                )?;
+                Ok(())
+            }
+            DeviceStatus::Approved | DeviceStatus::Pending => {
+                let (escalation_id, created) = self
+                    .escalation_manager
+                    .create_device_access_escalation(
+                        *task_id,
+                        *agent_id,
+                        device_id,
+                        &operation.to_string(),
+                        TraceID::new(),
+                    )
+                    .await;
+
+                if created {
+                    self.audit(
+                        agentos_audit::AuditEventType::DeviceAccessEscalated,
+                        agentos_audit::AuditSeverity::Warn,
+                        Some(*agent_id),
+                        Some(*task_id),
+                        json!({
+                            "device_id": device_id,
+                            "device_type": device.device_type,
+                            "operation": operation.to_string(),
+                            "escalation_id": escalation_id,
+                        }),
+                    )?;
+                }
+
+                Err(AgentOSError::DeviceAccessPending {
+                    device_id: device_id.to_string(),
+                    escalation_id: escalation_id.to_string(),
+                })
+            }
+            DeviceStatus::Quarantined => {
+                self.audit(
+                    agentos_audit::AuditEventType::DeviceAccessDenied,
+                    agentos_audit::AuditSeverity::Warn,
+                    Some(*agent_id),
+                    Some(*task_id),
+                    json!({
+                        "device_id": device_id,
+                        "device_type": device.device_type,
+                        "operation": operation.to_string(),
+                        "reason": "device quarantined",
+                    }),
+                )?;
+                Err(AgentOSError::DeviceQuarantined(device_id.to_string()))
+            }
+        }
+    }
+}
 
 pub struct Kernel {
     pub config: KernelConfig,
@@ -56,6 +332,7 @@ pub struct Kernel {
     pub memory_extraction: Arc<crate::memory_extraction::MemoryExtractionEngine>,
     pub consolidation_engine: Arc<crate::consolidation::ConsolidationEngine>,
     pub memory_blocks: Arc<crate::memory_blocks::MemoryBlockStore>,
+    pub scratchpad_store: Arc<agentos_scratch::ScratchpadStore>,
     pub schedule_manager: Arc<ScheduleManager>,
     pub background_pool: Arc<BackgroundPool>,
     pub hal: Arc<HardwareAbstractionLayer>,
@@ -70,6 +347,9 @@ pub struct Kernel {
     pub injection_scanner: Arc<crate::injection_scanner::InjectionScanner>,
     pub resource_arbiter: Arc<crate::resource_arbiter::ResourceArbiter>,
     pub snapshot_manager: Arc<crate::snapshot::SnapshotManager>,
+    pub trace_collector: Arc<crate::trace_collector::TraceCollector>,
+    pub rpc_manager: Arc<crate::rpc_manager::RpcManager>,
+    pub otel: Arc<crate::otel_exporter::OtelExporter>,
     pub event_bus: Arc<crate::event_bus::EventBus>,
     /// Unified notification router — dispatches UserMessages to delivery adapters
     /// and persists them to the user inbox.
@@ -193,6 +473,101 @@ fn chat_default_permissions() -> PermissionSet {
 }
 
 const CHAT_MAX_TOOL_ITERATIONS: u32 = 10;
+
+pub fn resolve_boot_vault_passphrase(
+    config: &KernelConfig,
+) -> Result<Option<ZeroizingString>, anyhow::Error> {
+    if let Ok(passphrase) = std::env::var("AGENTOS_VAULT_PASSPHRASE") {
+        if !passphrase.trim().is_empty() {
+            return Ok(Some(ZeroizingString::new(passphrase)));
+        }
+    }
+
+    let vault_path = Path::new(&config.secrets.vault_path);
+    let passphrase_path = vault_passphrase_path(vault_path);
+
+    if passphrase_path.exists() {
+        let passphrase = std::fs::read_to_string(&passphrase_path)?;
+        let passphrase = passphrase.trim().to_string();
+        anyhow::ensure!(
+            !passphrase.is_empty(),
+            "Stored vault passphrase file is empty: {}",
+            passphrase_path.display()
+        );
+        return Ok(Some(ZeroizingString::new(passphrase)));
+    }
+
+    if SecretsVault::is_initialized(vault_path) {
+        anyhow::bail!(
+            "Vault already exists at {} but no AGENTOS_VAULT_PASSPHRASE is set and no managed passphrase file was found at {}",
+            vault_path.display(),
+            passphrase_path.display()
+        );
+    }
+
+    let auto_init_enabled = std::env::var("AGENTOS_AUTO_INIT_VAULT")
+        .ok()
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or(false);
+    if !auto_init_enabled {
+        return Ok(None);
+    }
+
+    if let Some(parent) = passphrase_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let generated = generate_vault_passphrase();
+    persist_generated_passphrase(&passphrase_path, &generated)?;
+    let persisted = std::fs::read_to_string(&passphrase_path)?;
+    let persisted = persisted.trim().to_string();
+    anyhow::ensure!(
+        !persisted.is_empty(),
+        "Stored vault passphrase file is empty: {}",
+        passphrase_path.display()
+    );
+    tracing::warn!(
+        vault_path = %vault_path.display(),
+        passphrase_path = %passphrase_path.display(),
+        "First boot detected: generated a managed vault passphrase file; this is convenience mode and should not replace an external secret manager in production"
+    );
+    Ok(Some(ZeroizingString::new(persisted)))
+}
+
+fn vault_passphrase_path(vault_path: &Path) -> PathBuf {
+    vault_path.with_extension("passphrase")
+}
+
+fn generate_vault_passphrase() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+fn persist_generated_passphrase(path: &Path, passphrase: &str) -> Result<(), anyhow::Error> {
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(passphrase.as_bytes())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = std::fs::read_to_string(path)?;
+            anyhow::ensure!(
+                !existing.trim().is_empty(),
+                "Stored vault passphrase file is empty: {}",
+                path.display()
+            );
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
+}
 
 impl Kernel {
     /// Returns the kernel data directory (used by the web server to co-locate stores).
@@ -1119,6 +1494,8 @@ impl Kernel {
         hal.register(Box::new(SensorDriver::new()));
         hal.register(Box::new(GpuDriver::new()));
         hal.register(Box::new(StorageDriver::new()));
+        #[cfg(feature = "usb-storage")]
+        hal.register(Box::new(UsbStorageDriver::new()));
 
         // Register log reader with app logs only - audit log is not exposed to agents
         let app_logs = HashMap::new();
@@ -1130,10 +1507,26 @@ impl Kernel {
         hal.register(Box::new(LogReaderDriver::new(app_logs, system_logs)));
 
         let hardware_registry = Arc::new(HardwareRegistry::new());
-        // Wire the registry into the HAL so device quarantine is enforced at the
-        // dispatch boundary. Any device-mapped driver (gpu, storage, sensor) will
-        // auto-quarantine unknown devices and deny access until an operator approves.
-        let hal = Arc::new(hal.with_registry(Arc::clone(&hardware_registry)));
+        for device in discover_available_devices() {
+            let status = KernelDeviceAccessGate::default_status_for_discovered_device(
+                &device.id,
+                &device.device_type,
+            );
+            let is_new =
+                hardware_registry.register_device(&device.id, &device.device_type, status.clone());
+            if is_new {
+                tracing::info!(
+                    device_id = %device.id,
+                    device_type = %device.device_type,
+                    status = ?status,
+                    "Registered available hardware device during kernel boot"
+                );
+            }
+        }
+        // Wire the registry into the HAL immediately for compatibility with tests
+        // and non-kernel callers; the richer approval gate is attached later once
+        // the escalation manager exists.
+        let hal = hal.with_registry(Arc::clone(&hardware_registry));
 
         // 5. Load tools (with optional CRL enforcement)
         // NOTE: Tools are loaded before the event channel exists, so boot-time
@@ -1243,11 +1636,18 @@ impl Kernel {
             &data_dir,
             shared_embedder,
         )?);
+        let scratchpad_store = Arc::new(
+            agentos_scratch::ScratchpadStore::new(&data_dir.join("scratchpad.db"))
+                .map_err(|e| anyhow::anyhow!("Scratchpad store init failed: {}", e))?,
+        );
         let mut tool_runner = ToolRunner::new_with_shared_memory(
             semantic_memory.clone(),
             episodic_memory.clone(),
             procedural_memory.clone(),
         );
+
+        // Register scratchpad tools
+        tool_runner.register_scratchpad_tools(scratchpad_store.clone());
 
         // Register WASM tools from manifests that specify executor = wasm
         let wasm_executor = WasmToolExecutor::new(&data_dir);
@@ -1462,6 +1862,14 @@ impl Kernel {
             72,               // hours
         ));
 
+        let trace_collector = Arc::new(
+            crate::trace_collector::TraceCollector::new(&data_dir.join("traces.db"))
+                .map_err(|e| anyhow::anyhow!("TraceCollector init failed: {e}"))?,
+        );
+        let otel = Arc::new(crate::otel_exporter::OtelExporter::from_config(
+            &config.otel,
+        )?);
+
         let event_bus = Arc::new(crate::event_bus::EventBus::new());
         let escalation_manager = Arc::new(crate::escalation::EscalationManager::with_state_store(
             Some(state_store.clone()),
@@ -1487,6 +1895,18 @@ impl Kernel {
         const NOTIF_CHANNEL_CAPACITY: usize = 1024;
 
         let (event_sender, event_receiver) = tokio::sync::mpsc::channel(event_channel_capacity);
+        let hal = Arc::new(
+            hal.with_device_access_gate(Arc::new(KernelDeviceAccessGate::new(
+                hardware_registry.clone(),
+                escalation_manager.clone(),
+                audit.clone(),
+            )))
+            .with_event_sink(Arc::new(KernelHalEventSink::new(
+                capability_engine.clone(),
+                audit.clone(),
+                event_sender.clone(),
+            ))),
+        );
 
         // Create tool lifecycle notification channel and inject sender into registry.
         // The kernel receives these lightweight notifications and converts them into
@@ -1623,6 +2043,7 @@ impl Kernel {
             memory_extraction,
             consolidation_engine,
             memory_blocks,
+            scratchpad_store: scratchpad_store.clone(),
             schedule_manager,
             background_pool,
             hal,
@@ -1641,6 +2062,9 @@ impl Kernel {
                 Arc::new(arbiter)
             },
             snapshot_manager,
+            trace_collector,
+            rpc_manager: Arc::new(crate::rpc_manager::RpcManager::new()),
+            otel,
             event_bus,
             notification_router,
             channel_registry,
@@ -1824,6 +2248,18 @@ impl Kernel {
         permission: String,
     ) -> Result<(), String> {
         match self.cmd_grant_permission(agent_name, permission).await {
+            agentos_bus::KernelResponse::Success { .. } => Ok(()),
+            agentos_bus::KernelResponse::Error { message } => Err(message),
+            _ => Err("Unexpected kernel response".to_string()),
+        }
+    }
+
+    pub async fn api_revoke_permission(
+        &self,
+        agent_name: String,
+        permission: String,
+    ) -> Result<(), String> {
+        match self.cmd_revoke_permission(agent_name, permission).await {
             agentos_bus::KernelResponse::Success { .. } => Ok(()),
             agentos_bus::KernelResponse::Error { message } => Err(message),
             _ => Err("Unexpected kernel response".to_string()),
@@ -2066,6 +2502,9 @@ mod preflight_tests {
             logging: Default::default(),
             notifications: Default::default(),
             mcp: Default::default(),
+            registry: Default::default(),
+            scratchpad: Default::default(),
+            otel: OtelConfig::default(),
         }
     }
 
@@ -2167,5 +2606,251 @@ mod preflight_tests {
             "Error should mention 'not writable': {}",
             msg
         );
+    }
+}
+
+#[cfg(test)]
+mod vault_bootstrap_tests {
+    use super::*;
+    use crate::config::*;
+    use agentos_audit::AuditLog;
+    use tempfile::tempdir;
+
+    fn make_test_config(root: &Path) -> KernelConfig {
+        KernelConfig {
+            kernel: KernelSettings {
+                max_concurrent_tasks: 1,
+                default_task_timeout_secs: 30,
+                context_window_max_entries: 10,
+                context_window_token_budget: 0,
+                state_db_path: root
+                    .join("data/kernel_state.db")
+                    .to_string_lossy()
+                    .into_owned(),
+                task_limits: Default::default(),
+                tool_calls: Default::default(),
+                tool_execution: Default::default(),
+                autonomous_mode: Default::default(),
+                health_port: 0,
+                per_agent_rate_limit: 0,
+                events: Default::default(),
+                sandbox_policy: Default::default(),
+                max_concurrent_sandbox_children: 4,
+            },
+            secrets: SecretsSettings {
+                vault_path: root.join("vault/vault.db").to_string_lossy().into_owned(),
+            },
+            audit: AuditSettings {
+                log_path: root.join("data/audit.db").to_string_lossy().into_owned(),
+                max_audit_entries: 0,
+                verify_last_n_entries: 0,
+            },
+            tools: ToolsSettings {
+                core_tools_dir: root.join("tools/core").to_string_lossy().into_owned(),
+                user_tools_dir: root.join("tools/user").to_string_lossy().into_owned(),
+                data_dir: root.join("data").to_string_lossy().into_owned(),
+                crl_path: None,
+                workspace: WorkspaceConfig::default(),
+            },
+            bus: BusSettings {
+                socket_path: root
+                    .join("data/agentos.sock")
+                    .to_string_lossy()
+                    .into_owned(),
+                tls: None,
+            },
+            ollama: OllamaSettings {
+                host: "http://localhost:11434".to_string(),
+                default_model: "test".to_string(),
+                request_timeout_secs: 300,
+            },
+            llm: LlmSettings::default(),
+            memory: MemorySettings::default(),
+            routing: RoutingConfig::default(),
+            context_budget: agentos_types::TokenBudget::default(),
+            health_monitor: HealthMonitorConfig::default(),
+            preflight: PreflightConfig::default(),
+            logging: Default::default(),
+            notifications: Default::default(),
+            mcp: Default::default(),
+            registry: Default::default(),
+            scratchpad: Default::default(),
+            otel: OtelConfig::default(),
+        }
+    }
+
+    #[test]
+    fn resolve_boot_vault_passphrase_generates_and_reuses_managed_file() {
+        let dir = tempdir().unwrap();
+        let config = make_test_config(dir.path());
+        unsafe {
+            std::env::set_var("AGENTOS_AUTO_INIT_VAULT", "true");
+        }
+
+        let first = resolve_boot_vault_passphrase(&config).unwrap().unwrap();
+        let passphrase_path = vault_passphrase_path(Path::new(&config.secrets.vault_path));
+        assert!(passphrase_path.exists());
+        let persisted = std::fs::read_to_string(&passphrase_path).unwrap();
+        assert_eq!(persisted, first.as_str());
+
+        std::fs::create_dir_all(Path::new(&config.audit.log_path).parent().unwrap()).unwrap();
+        std::fs::create_dir_all(Path::new(&config.secrets.vault_path).parent().unwrap()).unwrap();
+        let audit = AuditLog::open(Path::new(&config.audit.log_path)).unwrap();
+        SecretsVault::initialize(
+            Path::new(&config.secrets.vault_path),
+            &ZeroizingString::new(first.as_str().to_string()),
+            std::sync::Arc::new(audit),
+        )
+        .unwrap();
+
+        let second = resolve_boot_vault_passphrase(&config).unwrap().unwrap();
+        assert_eq!(first.as_str(), second.as_str());
+        unsafe {
+            std::env::remove_var("AGENTOS_AUTO_INIT_VAULT");
+        }
+    }
+
+    #[test]
+    fn resolve_boot_vault_passphrase_returns_none_without_auto_init_or_env() {
+        let dir = tempdir().unwrap();
+        let config = make_test_config(dir.path());
+
+        unsafe {
+            std::env::remove_var("AGENTOS_AUTO_INIT_VAULT");
+        }
+        assert!(resolve_boot_vault_passphrase(&config).unwrap().is_none());
+    }
+
+    #[test]
+    fn resolve_boot_vault_passphrase_errors_when_existing_vault_has_no_managed_passphrase() {
+        let dir = tempdir().unwrap();
+        let config = make_test_config(dir.path());
+
+        std::fs::create_dir_all(Path::new(&config.audit.log_path).parent().unwrap()).unwrap();
+        std::fs::create_dir_all(Path::new(&config.secrets.vault_path).parent().unwrap()).unwrap();
+        let audit = AuditLog::open(Path::new(&config.audit.log_path)).unwrap();
+        SecretsVault::initialize(
+            Path::new(&config.secrets.vault_path),
+            &ZeroizingString::new("manual-passphrase".to_string()),
+            std::sync::Arc::new(audit),
+        )
+        .unwrap();
+
+        let err = match resolve_boot_vault_passphrase(&config) {
+            Ok(_) => panic!("expected managed-passphrase lookup to fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("Vault already exists"));
+    }
+}
+
+#[cfg(test)]
+mod hal_device_access_gate_tests {
+    use super::*;
+    use agentos_audit::AuditLog;
+    use tempfile::tempdir;
+
+    fn make_gate() -> (
+        KernelDeviceAccessGate,
+        Arc<HardwareRegistry>,
+        Arc<crate::escalation::EscalationManager>,
+    ) {
+        let dir = tempdir().expect("temp dir");
+        let audit_path = dir.path().join("audit.db");
+        let audit = Arc::new(AuditLog::open(&audit_path).expect("audit log should open"));
+        let registry = Arc::new(HardwareRegistry::new());
+        let escalation_manager = Arc::new(crate::escalation::EscalationManager::new());
+        std::mem::forget(dir);
+
+        (
+            KernelDeviceAccessGate::new(registry.clone(), escalation_manager.clone(), audit),
+            registry,
+            escalation_manager,
+        )
+    }
+
+    #[tokio::test]
+    async fn pending_device_access_creates_escalation() {
+        let (gate, registry, escalation_manager) = make_gate();
+        registry.register_pending_device("gpu:0", "gpu");
+        let agent_id = AgentID::new();
+        let task_id = TaskID::new();
+
+        let err = gate
+            .check(&agent_id, &task_id, "gpu:0", "gpu", HalOperation::Read)
+            .await
+            .expect_err("pending device should require approval");
+
+        assert!(matches!(err, AgentOSError::DeviceAccessPending { .. }));
+        assert_eq!(escalation_manager.list_pending().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn approved_device_access_succeeds_and_quarantined_fails() {
+        let (gate, registry, _) = make_gate();
+        let agent_id = AgentID::new();
+        let task_id = TaskID::new();
+        registry.register_pending_device("sensor:thermal_zone0", "thermal-sensor");
+        registry
+            .approve_for_agent("sensor:thermal_zone0", agent_id)
+            .expect("approval should succeed");
+
+        gate.check(
+            &agent_id,
+            &task_id,
+            "sensor:thermal_zone0",
+            "thermal-sensor",
+            HalOperation::Read,
+        )
+        .await
+        .expect("approved device should pass");
+
+        registry
+            .set_device_status("sensor:thermal_zone0", DeviceStatus::Quarantined)
+            .expect("quarantine should succeed");
+        let err = gate
+            .check(
+                &agent_id,
+                &task_id,
+                "sensor:thermal_zone0",
+                "thermal-sensor",
+                HalOperation::Read,
+            )
+            .await
+            .expect_err("quarantined device should fail");
+
+        assert!(matches!(err, AgentOSError::DeviceQuarantined(_)));
+    }
+
+    #[tokio::test]
+    async fn agent_specific_deny_blocks_only_the_denied_agent() {
+        let (gate, registry, _) = make_gate();
+        let approved_agent = AgentID::new();
+        let denied_agent = AgentID::new();
+        let task_id = TaskID::new();
+        registry.register_pending_device("gpu:0", "gpu");
+        registry
+            .approve_for_agent("gpu:0", approved_agent)
+            .expect("approval should succeed");
+        registry
+            .deny_for_agent("gpu:0", denied_agent)
+            .expect("agent-specific deny should succeed");
+
+        gate.check(
+            &approved_agent,
+            &task_id,
+            "gpu:0",
+            "gpu",
+            HalOperation::Read,
+        )
+        .await
+        .expect("approved agent should still have access");
+
+        let err = gate
+            .check(&denied_agent, &task_id, "gpu:0", "gpu", HalOperation::Read)
+            .await
+            .expect_err("denied agent should be blocked");
+
+        assert!(matches!(err, AgentOSError::PermissionDenied { .. }));
     }
 }

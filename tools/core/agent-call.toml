@@ -1,0 +1,43 @@
+[manifest]
+name        = "agent-call"
+version     = "1.0.0"
+description = "Synchronously call another agent with a prompt and wait for its response. Returns the target agent's output as text. Times out after timeout_secs (default 300s)."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["agent.call:x"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "AgentCallIntent"
+output = "AgentCallResult"
+
+[input_schema]
+type = "object"
+required = ["target_agent", "prompt"]
+
+[input_schema.properties.target_agent]
+type = "string"
+description = "Name of the agent to call"
+
+[input_schema.properties.prompt]
+type = "string"
+description = "Task prompt for the target agent"
+
+[input_schema.properties.timeout_secs]
+type = "integer"
+default = 300
+minimum = 1
+maximum = 3600
+description = "Timeout in seconds before the synchronous call is aborted"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

@@ -162,6 +162,52 @@ impl Kernel {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn finish_otel_tool_span(
+        &self,
+        tool_span: crate::otel_exporter::OtelSpan,
+        task: &AgentTask,
+        tool_name: &str,
+        duration_ms: u64,
+        success: bool,
+        execution_mode: &str,
+        error: Option<&str>,
+    ) {
+        tool_span.set_string_attribute("task.id", task.id.to_string());
+        tool_span.set_string_attribute("agent.id", task.agent_id.to_string());
+        tool_span.set_string_attribute("execution.mode", execution_mode);
+        tool_span.set_bool_attribute("tool.success", success);
+        tool_span.set_i64_attribute("tool.duration_ms", duration_ms as i64);
+        if let Some(error) = error {
+            tool_span.record_error(error);
+        }
+        self.otel
+            .record_tool_metric(&task.agent_id.to_string(), tool_name, duration_ms, success);
+    }
+
+    fn record_otel_permission_denied(
+        &self,
+        parent: &crate::otel_exporter::OtelSpan,
+        task: &AgentTask,
+        tool_name: &str,
+        deny_reason: &str,
+    ) {
+        let tool_span = self.otel.start_tool_span(parent, tool_name);
+        tool_span.set_string_attribute("task.id", task.id.to_string());
+        tool_span.set_string_attribute("agent.id", task.agent_id.to_string());
+        tool_span.set_bool_attribute("tool.success", false);
+        tool_span.add_event(
+            "permission_check",
+            vec![
+                ("granted", "false".to_string()),
+                ("deny_reason", deny_reason.to_string()),
+            ],
+        );
+        tool_span.record_error(format!("Permission denied: {deny_reason}"));
+        self.otel
+            .record_tool_metric(&task.agent_id.to_string(), tool_name, 0, false);
+    }
+
     async fn handle_dynamic_event_subscription_intent(
         &self,
         task: &AgentTask,
@@ -385,10 +431,12 @@ impl Kernel {
             .map_err(|e| format!("{}", e))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_parallel_tool_calls(
         &self,
         task: &AgentTask,
         task_trace_id: &TraceID,
+        iteration_span: &crate::otel_exporter::OtelSpan,
         iteration: u32,
         mut tool_calls: Vec<crate::tool_call::ParsedToolCall>,
         tool_call_count: &mut u32,
@@ -544,6 +592,22 @@ impl Kernel {
                         } else {
                             consecutive_push_failures = 0;
                         }
+                        self.trace_collector
+                            .record_tool_call(
+                                &task.id,
+                                crate::trace_collector::TraceCollector::denied_tool_call(
+                                    &tool_call.tool_name,
+                                    tool_call.payload.clone(),
+                                    "tool_not_registered",
+                                ),
+                            )
+                            .await;
+                        self.record_otel_permission_denied(
+                            iteration_span,
+                            task,
+                            &tool_call.tool_name,
+                            "tool_not_registered",
+                        );
                         continue;
                     }
                 }
@@ -625,6 +689,22 @@ impl Kernel {
                 } else {
                     consecutive_push_failures = 0;
                 }
+                self.trace_collector
+                    .record_tool_call(
+                        &task.id,
+                        crate::trace_collector::TraceCollector::denied_tool_call(
+                            &tool_call.tool_name,
+                            tool_call.payload.clone(),
+                            "tool_not_allowed_by_capability_token",
+                        ),
+                    )
+                    .await;
+                self.record_otel_permission_denied(
+                    iteration_span,
+                    task,
+                    &tool_call.tool_name,
+                    "tool_not_allowed_by_capability_token",
+                );
                 continue;
             }
 
@@ -660,6 +740,22 @@ impl Kernel {
                     } else {
                         consecutive_push_failures = 0;
                     }
+                    self.trace_collector
+                        .record_tool_call(
+                            &task.id,
+                            crate::trace_collector::TraceCollector::denied_tool_call(
+                                &tool_call.tool_name,
+                                tool_call.payload.clone(),
+                                &denial_reason,
+                            ),
+                        )
+                        .await;
+                    self.record_otel_permission_denied(
+                        iteration_span,
+                        task,
+                        &tool_call.tool_name,
+                        &denial_reason,
+                    );
                     continue;
                 }
                 Ok(IntentCoherenceResult::Rejected { reason }) => {
@@ -690,6 +786,22 @@ impl Kernel {
                     } else {
                         consecutive_push_failures = 0;
                     }
+                    self.trace_collector
+                        .record_tool_call(
+                            &task.id,
+                            crate::trace_collector::TraceCollector::denied_tool_call(
+                                &tool_call.tool_name,
+                                tool_call.payload.clone(),
+                                &format!("coherence_rejected: {reason}"),
+                            ),
+                        )
+                        .await;
+                    self.record_otel_permission_denied(
+                        iteration_span,
+                        task,
+                        &tool_call.tool_name,
+                        &format!("coherence_rejected: {reason}"),
+                    );
                     continue;
                 }
                 Ok(IntentCoherenceResult::Suspicious { reason, .. }) => {
@@ -1011,9 +1123,13 @@ impl Kernel {
             self.config.kernel.tool_execution.default_timeout_seconds
         };
         let mut join_set = JoinSet::new();
+        #[cfg(feature = "otel")]
+        let otel_parent_context = iteration_span.parent_context();
         for call in prepared {
             let tool_runner = self.tool_runner.clone();
             let sandbox = self.sandbox.clone();
+            #[cfg(feature = "otel")]
+            let otel = self.otel.clone();
             let data_dir = self.data_dir.clone();
             let workspace_paths = self.workspace_paths.clone();
             let task_id = task.id;
@@ -1036,6 +1152,8 @@ impl Kernel {
             } else {
                 "in_process"
             };
+            #[cfg(feature = "otel")]
+            let tool_parent_context = otel_parent_context.clone();
 
             self.emit_event_with_trace(
                 EventType::ToolCallStarted,
@@ -1065,6 +1183,11 @@ impl Kernel {
             );
             join_set.spawn(
                 async move {
+                    #[cfg(feature = "otel")]
+                    let tool_span = otel
+                        .start_tool_span_from_context(tool_parent_context, &tool_call.tool_name);
+                    #[cfg(not(feature = "otel"))]
+                    let tool_span = crate::otel_exporter::OtelSpan::default();
                     let sandbox_permissions = permissions.clone();
                     let sandbox_workspace_paths = workspace_paths.clone();
                     let exec_context = ToolExecutionContext {
@@ -1139,6 +1262,21 @@ impl Kernel {
                         }
                     };
 
+                    tool_span.set_string_attribute("task.id", task_id.to_string());
+                    tool_span.set_string_attribute("agent.id", agent_id.to_string());
+                    tool_span.set_string_attribute("execution.mode", execution_mode);
+                    tool_span.set_i64_attribute(
+                        "tool.duration_ms",
+                        tool_start.elapsed().as_millis() as i64,
+                    );
+                    match &result {
+                        Ok(_) => tool_span.set_bool_attribute("tool.success", true),
+                        Err(err) => {
+                            tool_span.set_bool_attribute("tool.success", false);
+                            tool_span.record_error(err.to_string());
+                        }
+                    }
+
                     ParallelToolOutcome {
                         order,
                         tool_call,
@@ -1180,6 +1318,12 @@ impl Kernel {
                         *refresh_knowledge_blocks = true;
                     }
                     crate::metrics::record_tool_execution(
+                        &outcome.tool_call.tool_name,
+                        outcome.duration_ms,
+                        true,
+                    );
+                    self.otel.record_tool_metric(
+                        &task.agent_id.to_string(),
                         &outcome.tool_call.tool_name,
                         outcome.duration_ms,
                         true,
@@ -1351,8 +1495,27 @@ impl Kernel {
                             "Failed to record episodic memory for parallel tool result"
                         );
                     }
+                    self.trace_collector
+                        .record_tool_call(
+                            &task.id,
+                            crate::trace_collector::TraceCollector::success_tool_call(
+                                &outcome.tool_call.tool_name,
+                                outcome.tool_call.payload.clone(),
+                                context_result.clone(),
+                                outcome.duration_ms,
+                                outcome.snapshot_ref.clone(),
+                                None,
+                            ),
+                        )
+                        .await;
                 }
                 Err(e) => {
+                    self.otel.record_tool_metric(
+                        &task.agent_id.to_string(),
+                        &outcome.tool_call.tool_name,
+                        outcome.duration_ms,
+                        false,
+                    );
                     crate::metrics::record_tool_execution(
                         &outcome.tool_call.tool_name,
                         outcome.duration_ms,
@@ -1440,6 +1603,18 @@ impl Kernel {
                             "Failed to record episodic memory for failed parallel tool result"
                         );
                     }
+                    self.trace_collector
+                        .record_tool_call(
+                            &task.id,
+                            crate::trace_collector::TraceCollector::failed_tool_call(
+                                &outcome.tool_call.tool_name,
+                                outcome.tool_call.payload.clone(),
+                                &e.to_string(),
+                                outcome.duration_ms,
+                                outcome.snapshot_ref.clone(),
+                            ),
+                        )
+                        .await;
                 }
             }
         }
@@ -1453,6 +1628,7 @@ impl Kernel {
         &self,
         task: &AgentTask,
         task_trace_id: &TraceID,
+        task_span: &crate::otel_exporter::OtelSpan,
     ) -> Result<TaskResult, anyhow::Error> {
         let agent = {
             let registry = self.agent_registry.read().await;
@@ -1479,6 +1655,7 @@ impl Kernel {
 
         // `current_llm` is mutable so it can be swapped when a model downgrade is triggered.
         let mut current_llm = llm;
+        task_span.set_string_attribute("llm.model", current_llm.model_name());
         // Track whether we've already downgraded this task to avoid repeated swaps.
         let mut model_downgraded = false;
 
@@ -1525,6 +1702,13 @@ impl Kernel {
         for iteration in 0..max_iterations {
             completed_iterations = iteration + 1;
             let iteration_trace_id = TraceID::new();
+            let iteration_span = self.otel.start_iteration_span(
+                task_span,
+                completed_iterations,
+                current_llm.model_name(),
+            );
+            iteration_span.set_string_attribute("task.id", task.id.to_string());
+            iteration_span.set_string_attribute("agent.id", task.agent_id.to_string());
             let raw_context = match self.context_manager.get_context(&task.id).await {
                 Ok(ctx) => ctx,
                 Err(e) => {
@@ -1623,6 +1807,26 @@ impl Kernel {
                         ));
                     }
                 }
+
+                // Scratchpad context injection: search for related pages and inject
+                // a BFS subgraph of linked notes as a knowledge block.
+                if self.config.scratchpad.enabled {
+                    let scratchpad_blocks = self
+                        .inject_scratchpad_knowledge(
+                            &task.agent_id,
+                            &task.original_prompt,
+                            &raw_context,
+                        )
+                        .await;
+                    if !scratchpad_blocks.is_empty() {
+                        knowledge_blocks.push(scratchpad_blocks);
+                        tracing::debug!(
+                            task_id = %task.id,
+                            "Injected scratchpad context into knowledge blocks"
+                        );
+                    }
+                }
+
                 refresh_knowledge_blocks = false;
                 crate::metrics::record_retrieval_refresh_decision(true);
                 crate::metrics::record_retrieval_refresh(
@@ -1857,6 +2061,12 @@ impl Kernel {
                 inference.tokens_used.completion_tokens,
                 inference.duration_ms,
             );
+            self.otel.record_llm_request(
+                &task.agent_id.to_string(),
+                current_llm.provider_name(),
+                current_llm.model_name(),
+                inference.duration_ms,
+            );
             tracing::info!(
                 "Task {} LLM responded ({} tokens, {}ms)",
                 task.id,
@@ -1911,6 +2121,47 @@ impl Kernel {
                     reversible: false,
                     rollback_ref: None,
                 });
+            }
+            self.trace_collector
+                .begin_iteration(
+                    &task.id,
+                    iteration,
+                    current_llm.model_name(),
+                    inference.tokens_used.prompt_tokens,
+                    inference.tokens_used.completion_tokens,
+                    &format!("{:?}", inference.stop_reason),
+                    None,
+                )
+                .await;
+            iteration_span.set_i64_attribute(
+                "llm.input_tokens",
+                inference.tokens_used.prompt_tokens as i64,
+            );
+            iteration_span.set_i64_attribute(
+                "llm.output_tokens",
+                inference.tokens_used.completion_tokens as i64,
+            );
+            iteration_span.set_i64_attribute("llm.duration_ms", inference.duration_ms as i64);
+            iteration_span
+                .set_string_attribute("llm.stop_reason", format!("{:?}", inference.stop_reason));
+            let iteration_cost_usd = inference
+                .cost
+                .as_ref()
+                .map(|cost| cost.total_cost_usd)
+                .unwrap_or(0.0);
+            self.otel.record_cost(
+                &task.agent_id.to_string(),
+                current_llm.model_name(),
+                iteration_cost_usd,
+                inference.tokens_used.prompt_tokens,
+                inference.tokens_used.completion_tokens,
+            );
+            iteration_span.set_f64_attribute("llm.cost_usd", iteration_cost_usd);
+            if let Some(cost_snap) = self.cost_tracker.get_snapshot(&task.agent_id).await {
+                self.trace_collector
+                    .update_cost(&task.id, cost_snap.cost_usd)
+                    .await;
+                iteration_span.set_f64_attribute("task.cost_usd", cost_snap.cost_usd);
             }
 
             match &budget_result {
@@ -2334,6 +2585,7 @@ impl Kernel {
                     self.execute_parallel_tool_calls(
                         task,
                         task_trace_id,
+                        &iteration_span,
                         iteration,
                         parsed_tool_calls,
                         &mut tool_call_count,
@@ -2531,6 +2783,22 @@ impl Kernel {
                                 {
                                     tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                                 }
+                                self.trace_collector
+                                    .record_tool_call(
+                                        &task.id,
+                                        crate::trace_collector::TraceCollector::denied_tool_call(
+                                            &tool_call.tool_name,
+                                            tool_call.payload.clone(),
+                                            "tool_not_registered",
+                                        ),
+                                    )
+                                    .await;
+                                self.record_otel_permission_denied(
+                                    &iteration_span,
+                                    task,
+                                    &tool_call.tool_name,
+                                    "tool_not_registered",
+                                );
                             }
                             ToolAccessCheck::Unauthorized { allowed_tool_names } => {
                                 self.audit_log(agentos_audit::AuditEntry {
@@ -2588,6 +2856,22 @@ impl Kernel {
                                 {
                                     tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                                 }
+                                self.trace_collector
+                                    .record_tool_call(
+                                        &task.id,
+                                        crate::trace_collector::TraceCollector::denied_tool_call(
+                                            &tool_call.tool_name,
+                                            tool_call.payload.clone(),
+                                            "tool_not_allowed_by_capability_token",
+                                        ),
+                                    )
+                                    .await;
+                                self.record_otel_permission_denied(
+                                    &iteration_span,
+                                    task,
+                                    &tool_call.tool_name,
+                                    "tool_not_allowed_by_capability_token",
+                                );
                             }
                         }
                         continue;
@@ -2668,6 +2952,22 @@ impl Kernel {
                             {
                                 tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                             }
+                            self.trace_collector
+                                .record_tool_call(
+                                    &task.id,
+                                    crate::trace_collector::TraceCollector::denied_tool_call(
+                                        &tool_call.tool_name,
+                                        tool_call.payload.clone(),
+                                        &denial_reason,
+                                    ),
+                                )
+                                .await;
+                            self.record_otel_permission_denied(
+                                &iteration_span,
+                                task,
+                                &tool_call.tool_name,
+                                &denial_reason,
+                            );
                             continue;
                         }
                         Ok(IntentCoherenceResult::Rejected { reason }) => {
@@ -2692,6 +2992,22 @@ impl Kernel {
                             {
                                 tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                             }
+                            self.trace_collector
+                                .record_tool_call(
+                                    &task.id,
+                                    crate::trace_collector::TraceCollector::denied_tool_call(
+                                        &tool_call.tool_name,
+                                        tool_call.payload.clone(),
+                                        &format!("coherence_rejected: {reason}"),
+                                    ),
+                                )
+                                .await;
+                            self.record_otel_permission_denied(
+                                &iteration_span,
+                                task,
+                                &tool_call.tool_name,
+                                &format!("coherence_rejected: {reason}"),
+                            );
                             continue;
                         }
                         Ok(IntentCoherenceResult::Suspicious { reason, .. }) => {
@@ -3118,6 +3434,11 @@ impl Kernel {
                     );
 
                     let tool_start = std::time::Instant::now();
+                    let tool_span = self
+                        .otel
+                        .start_tool_span(&iteration_span, &tool_call.tool_name);
+                    // Capture input payload for trace before it is moved into the executor.
+                    let seq_input_json = tool_call.payload.clone();
                     let sandbox_plan = self.sandbox_plan_for_tool(&tool_call.tool_name).await;
                     let execution_mode: &'static str = if sandbox_plan.is_some() {
                         "sandbox"
@@ -3209,15 +3530,38 @@ impl Kernel {
 
                     match tool_result {
                         Ok(result) => {
+                            let seq_duration_ms = tool_start.elapsed().as_millis() as u64;
                             let memory_mutating_tool = matches!(
                                 tool_call.tool_name.as_str(),
                                 "memory-write" | "archival-insert"
                             );
                             crate::metrics::record_tool_execution(
                                 &tool_call.tool_name,
-                                tool_start.elapsed().as_millis() as u64,
+                                seq_duration_ms,
                                 true,
                             );
+                            self.finish_otel_tool_span(
+                                tool_span,
+                                task,
+                                &tool_call.tool_name,
+                                seq_duration_ms,
+                                true,
+                                execution_mode,
+                                None,
+                            );
+                            self.trace_collector
+                                .record_tool_call(
+                                    &task.id,
+                                    crate::trace_collector::TraceCollector::success_tool_call(
+                                        &tool_call.tool_name,
+                                        seq_input_json,
+                                        result.clone(),
+                                        seq_duration_ms,
+                                        snapshot_ref.clone(),
+                                        None,
+                                    ),
+                                )
+                                .await;
                             self.audit_log(agentos_audit::AuditEntry {
                                 timestamp: chrono::Utc::now(),
                                 trace_id,
@@ -3244,7 +3588,7 @@ impl Kernel {
                                         "tool_name": tool_call.tool_name,
                                         "task_id": task.id.to_string(),
                                         "agent_id": task.agent_id.to_string(),
-                                        "duration_ms": tool_start.elapsed().as_millis() as u64,
+                                        "duration_ms": seq_duration_ms,
                                         "execution_mode": execution_mode,
                                     }),
                                     chain_depth,
@@ -3543,9 +3887,31 @@ impl Kernel {
                             }
                         }
                         Err(e) => {
+                            let seq_fail_duration_ms = tool_start.elapsed().as_millis() as u64;
+                            self.finish_otel_tool_span(
+                                tool_span,
+                                task,
+                                &tool_call.tool_name,
+                                seq_fail_duration_ms,
+                                false,
+                                execution_mode,
+                                Some(&e.to_string()),
+                            );
+                            self.trace_collector
+                                .record_tool_call(
+                                    &task.id,
+                                    crate::trace_collector::TraceCollector::failed_tool_call(
+                                        &tool_call.tool_name,
+                                        seq_input_json,
+                                        &e.to_string(),
+                                        seq_fail_duration_ms,
+                                        snapshot_ref.clone(),
+                                    ),
+                                )
+                                .await;
                             crate::metrics::record_tool_execution(
                                 &tool_call.tool_name,
-                                tool_start.elapsed().as_millis() as u64,
+                                seq_fail_duration_ms,
                                 false,
                             );
                             self.audit_log(agentos_audit::AuditEntry {
@@ -3760,6 +4126,9 @@ impl Kernel {
     pub(crate) async fn execute_task(&self, task: &AgentTask) {
         let start = std::time::Instant::now();
         let task_trace_id = TraceID::new();
+        let task_span =
+            self.otel
+                .start_task_span(&task.id.to_string(), &task.agent_id.to_string(), "");
         crate::metrics::record_task_queued();
 
         // Transition to Running — bail out if the task is already terminal
@@ -3779,6 +4148,10 @@ impl Kernel {
         if let Err(e) = self.scheduler.mark_started(&task.id).await {
             tracing::error!(error = %e, task_id = %task.id, "Failed to mark task as started in scheduler");
         }
+        self.trace_collector
+            .start_task(task.id, task.agent_id, &task.original_prompt)
+            .await;
+        self.otel.adjust_active_tasks(1);
 
         self.push_status_update(task.id, TaskState::Running, "Task started".to_string());
 
@@ -3814,18 +4187,36 @@ impl Kernel {
         )
         .await;
 
-        match self.execute_task_sync(task, &task_trace_id).await {
+        match self
+            .execute_task_sync(task, &task_trace_id, &task_span)
+            .await
+        {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
+                self.trace_collector
+                    .finish_task(&task.id, "Complete", chrono::Utc::now())
+                    .await;
+                task_span.set_string_attribute("task.status", "complete");
+                task_span.set_i64_attribute("task.iterations", result.iterations as i64);
+                self.otel
+                    .record_task_metric(&task.agent_id.to_string(), "complete", duration_ms);
                 self.complete_task_success(task, &result, duration_ms, task_trace_id)
                     .await;
             }
             Err(e) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
+                self.trace_collector
+                    .finish_task(&task.id, "Failed", chrono::Utc::now())
+                    .await;
+                task_span.set_string_attribute("task.status", "failed");
+                task_span.record_error(e.to_string());
+                self.otel
+                    .record_task_metric(&task.agent_id.to_string(), "failed", duration_ms);
                 self.complete_task_failure(task, e, duration_ms, task_trace_id)
                     .await;
             }
         }
+        self.otel.adjust_active_tasks(-1);
     }
 
     /// Build the agent directory block for inclusion in compiled context.
@@ -3923,6 +4314,163 @@ impl Kernel {
             "{} [TRUNCATED: output was {} bytes, limit {} bytes — request smaller data or use pagination]",
             truncated, original_len, max_bytes
         )
+    }
+
+    /// Inject related scratchpad notes into knowledge blocks.
+    ///
+    /// Extracts topic keywords from the task prompt and recent context, searches
+    /// the scratchpad for matching pages, then walks the link graph (BFS) from
+    /// the top match to collect a subgraph of related notes.
+    ///
+    /// Returns a formatted knowledge block string, or empty string if no relevant
+    /// scratchpad pages were found.
+    async fn inject_scratchpad_knowledge(
+        &self,
+        agent_id: &AgentID,
+        task_prompt: &str,
+        context: &ContextWindow,
+    ) -> String {
+        let agent_id_str = agent_id.to_string();
+        let config = &self.config.scratchpad;
+
+        // Extract topic keywords from task prompt + recent context entries
+        let keywords = Self::extract_topic_keywords(task_prompt, context);
+        if keywords.is_empty() {
+            return String::new();
+        }
+
+        // Search scratchpad for matching pages
+        let matches = match self
+            .scratchpad_store
+            .search(&agent_id_str, &keywords, &[], 3)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::debug!(
+                    agent_id = %agent_id_str,
+                    error = %e,
+                    "Scratchpad search failed during context injection"
+                );
+                return String::new();
+            }
+        };
+
+        if matches.is_empty() {
+            return String::new();
+        }
+
+        // Use the top match as seed for graph traversal
+        let walker = agentos_scratch::GraphWalker::new(&self.scratchpad_store);
+        let subgraph = match walker
+            .subgraph(
+                &agent_id_str,
+                &matches[0].page.title,
+                config.context_depth,
+                config.max_context_pages,
+                config.max_context_bytes,
+            )
+            .await
+        {
+            Ok(sg) => sg,
+            Err(e) => {
+                tracing::debug!(
+                    agent_id = %agent_id_str,
+                    seed = %matches[0].page.title,
+                    error = %e,
+                    "Scratchpad graph traversal failed during context injection"
+                );
+                return String::new();
+            }
+        };
+
+        if subgraph.pages.is_empty() {
+            return String::new();
+        }
+
+        // Format as a knowledge block
+        let mut parts = Vec::with_capacity(subgraph.pages.len());
+        for (i, page) in subgraph.pages.iter().enumerate() {
+            let depth = subgraph.depths.get(i).copied().unwrap_or(0);
+            parts.push(format!(
+                "## {} (distance: {})\n{}",
+                page.title, depth, page.content
+            ));
+        }
+
+        format!(
+            "[SCRATCHPAD_CONTEXT]\n{}\n[/SCRATCHPAD_CONTEXT]",
+            parts.join("\n\n")
+        )
+    }
+
+    /// Extract topic keywords from the task prompt and recent context entries.
+    ///
+    /// Simple heuristic: takes significant words (>3 chars, not stopwords)
+    /// from the task prompt and last few non-system context entries.
+    fn extract_topic_keywords(task_prompt: &str, context: &ContextWindow) -> String {
+        const STOPWORDS: &[&str] = &[
+            "the", "this", "that", "with", "from", "have", "been", "will", "would", "could",
+            "should", "about", "into", "your", "what", "when", "where", "which", "there", "their",
+            "they", "them", "then", "than", "these", "those", "each", "some", "also", "just",
+            "more", "most", "only", "very", "does", "done", "here", "make", "made", "like", "over",
+            "such", "take", "back", "well", "much", "good", "need", "want", "look", "know", "help",
+            "give", "tell", "find", "work", "call", "come", "keep", "many", "long", "show", "last",
+            "same", "used", "using", "please", "sure",
+        ];
+
+        let mut words: Vec<String> = Vec::new();
+
+        // Extract from task prompt
+        for word in task_prompt.split_whitespace() {
+            let clean: String = word
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            let lower = clean.to_lowercase();
+            if lower.len() > 3 && !STOPWORDS.contains(&lower.as_str()) {
+                words.push(lower);
+            }
+        }
+
+        // Extract from last 3 non-system context entries
+        let recent_entries: Vec<&ContextEntry> = context
+            .entries
+            .iter()
+            .rev()
+            .filter(|e| e.role != ContextRole::System)
+            .take(3)
+            .collect();
+
+        for entry in recent_entries {
+            // Take first 200 chars to avoid processing huge entries
+            let snippet: String = entry.content.chars().take(200).collect();
+            for word in snippet.split_whitespace() {
+                let clean: String = word
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                let lower = clean.to_lowercase();
+                if lower.len() > 3 && !STOPWORDS.contains(&lower.as_str()) {
+                    words.push(lower);
+                }
+            }
+        }
+
+        // Deduplicate and limit, then quote each keyword for FTS5 safety
+        // (prevents `-` being interpreted as NOT operator, etc.)
+        let mut seen = std::collections::HashSet::new();
+        let unique: Vec<String> = words
+            .into_iter()
+            .filter(|w| seen.insert(w.clone()))
+            .take(10)
+            .collect();
+
+        unique
+            .iter()
+            .map(|w| format!("\"{}\"", w))
+            .collect::<Vec<_>>()
+            .join(" OR ")
     }
 }
 
@@ -4199,5 +4747,106 @@ mod tests {
             crate::config::SandboxPolicy::TrustAware,
             TrustTier::Blocked
         ));
+    }
+
+    // ── extract_topic_keywords tests ──────────────────────────────────────
+
+    fn make_context_entry(role: ContextRole, content: &str) -> ContextEntry {
+        ContextEntry {
+            role,
+            content: content.to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
+            is_summary: false,
+        }
+    }
+
+    #[test]
+    fn extract_keywords_filters_stopwords() {
+        let ctx = ContextWindow::new(10);
+        let result =
+            Kernel::extract_topic_keywords("the quick brown foxes jumped over the lazy dogs", &ctx);
+        // "the", "over" are stopwords; "quick", "brown", "foxes", "jumped", "lazy", "dogs" should survive
+        assert!(!result.contains("\"the\""));
+        assert!(!result.contains("\"over\""));
+        assert!(result.contains("\"quick\""));
+        assert!(result.contains("\"brown\""));
+        assert!(result.contains("\"foxes\""));
+    }
+
+    #[test]
+    fn extract_keywords_filters_short_words() {
+        let ctx = ContextWindow::new(10);
+        let result = Kernel::extract_topic_keywords("a is an do go API key", &ctx);
+        // Words ≤ 3 chars should be excluded (except they'd also be stopwords)
+        assert!(!result.contains("\"is\""));
+        assert!(!result.contains("\"an\""));
+    }
+
+    #[test]
+    fn extract_keywords_deduplicates() {
+        let ctx = ContextWindow::new(10);
+        let result = Kernel::extract_topic_keywords("scratchpad scratchpad scratchpad notes", &ctx);
+        // "scratchpad" should appear only once
+        let count = result.matches("\"scratchpad\"").count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn extract_keywords_limits_to_10() {
+        let ctx = ContextWindow::new(10);
+        let prompt = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november";
+        let result = Kernel::extract_topic_keywords(prompt, &ctx);
+        let keyword_count = result.matches(" OR ").count() + 1;
+        assert!(
+            keyword_count <= 10,
+            "Expected ≤ 10 keywords, got {}",
+            keyword_count
+        );
+    }
+
+    #[test]
+    fn extract_keywords_includes_context_entries() {
+        let mut ctx = ContextWindow::new(10);
+        ctx.push(make_context_entry(ContextRole::System, "system prompt"));
+        ctx.push(make_context_entry(
+            ContextRole::User,
+            "deploy kubernetes cluster",
+        ));
+        ctx.push(make_context_entry(
+            ContextRole::Assistant,
+            "checking cluster status",
+        ));
+
+        let result = Kernel::extract_topic_keywords("scaling pods", &ctx);
+        // Should include words from recent non-system entries
+        assert!(
+            result.contains("\"kubernetes\"")
+                || result.contains("\"cluster\"")
+                || result.contains("\"deploy\"")
+        );
+        // Should NOT include system prompt content
+        // (system entries are filtered out)
+    }
+
+    #[test]
+    fn extract_keywords_returns_empty_for_empty_input() {
+        let ctx = ContextWindow::new(10);
+        let result = Kernel::extract_topic_keywords("", &ctx);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_keywords_quotes_for_fts5() {
+        let ctx = ContextWindow::new(10);
+        let result = Kernel::extract_topic_keywords("error-handling patterns", &ctx);
+        // Each keyword should be double-quoted and joined with OR
+        assert!(result.contains("\"error-handling\""));
+        assert!(result.contains(" OR "));
     }
 }

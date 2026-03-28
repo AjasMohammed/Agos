@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h1>Cost Dashboard</h1>
+</div>
+
+<div class="grid">
+    <article>
+        <header>Today's Spend</header>
+        <dl class="detail-list">
+            <dt>Total Cost</dt>
+            <dd><strong>${{ total_cost_usd }}</strong></dd>
+            <dt>Total Tokens</dt>
+            <dd>{{ total_tokens }}</dd>
+            <dt>Tool Calls</dt>
+            <dd>{{ total_tool_calls }}</dd>
+            <dt>Running Tasks</dt>
+            <dd>{{ running_tasks }}</dd>
+        </dl>
+    </article>
+    <article>
+        <header>Overview</header>
+        <dl class="detail-list">
+            <dt>Tracked Agents</dt>
+            <dd>{{ agent_count }}</dd>
+        </dl>
+        {% if agent_count == 0 %}
+        <p class="muted">No agents have incurred costs yet. Connect an agent and run a task to see cost data here.</p>
+        {% endif %}
+    </article>
+</div>
+
+{% if by_agent|length > 0 %}
+<h2>Spend by Agent</h2>
+<figure>
+<table aria-label="Cost breakdown by agent">
+    <thead>
+        <tr>
+            <th>Agent</th>
+            <th>Cost (USD)</th>
+            <th>Tokens</th>
+            <th>Tool Calls</th>
+            <th>Budget Status</th>
+            <th>Period Start</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for agent in by_agent %}
+        <tr>
+            <td>
+                <a href="/agents/{{ agent.agent_name }}/detail">
+                    <strong>{{ agent.agent_name }}</strong>
+                </a>
+                <br><small class="muted" title="{{ agent.agent_id }}">{{ agent.agent_id[:8] }}</small>
+            </td>
+            <td>${{ agent.cost_usd }}</td>
+            <td>{{ agent.tokens_used }}</td>
+            <td>{{ agent.tool_calls }}</td>
+            <td>
+                {% if agent.has_cost_budget %}
+                <div class="budget-bar-wrapper" title="Cost: {{ agent.cost_pct }}% of ${{ agent.max_cost_usd_per_day }}/day">
+                    <div class="budget-bar budget-bar-{{ agent.budget_status }}"
+                         style="width: {{ agent.cost_pct if agent.cost_pct|float <= 100 else 100 }}%"></div>
+                    <small>{{ agent.cost_pct }}%</small>
+                </div>
+                {% else %}
+                <small class="muted">No limit</small>
+                {% endif %}
+                {% if agent.has_token_budget %}
+                <div class="budget-bar-wrapper" title="Tokens: {{ agent.tokens_pct }}% of {{ agent.max_tokens_per_day }}/day">
+                    <div class="budget-bar budget-bar-{{ agent.tokens_status }}"
+                         style="width: {{ agent.tokens_pct if agent.tokens_pct|float <= 100 else 100 }}%"></div>
+                    <small>{{ agent.tokens_pct }}% tokens</small>
+                </div>
+                {% endif %}
+            </td>
+            <td><small>{{ agent.period_start }}</small></td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</figure>
+
+{% if by_agent|length > 1 %}
+<h2>Cost Distribution</h2>
+<div x-data="costChart()" x-init="init()" class="cost-chart-container">
+    <div class="cost-bars" id="cost-bars">
+        <template x-for="(agent, idx) in agents" :key="agent.name">
+            <div class="cost-bar-row">
+                <span class="cost-bar-label" x-text="agent.name"></span>
+                <div class="cost-bar-track">
+                    <div class="cost-bar-fill"
+                         :style="'width:' + agent.pct + '%; background:' + colors[idx % colors.length]"
+                         :title="'$' + agent.cost"></div>
+                </div>
+                <span class="cost-bar-value" x-text="'$' + agent.cost"></span>
+            </div>
+        </template>
+    </div>
+</div>
+<script>
+function costChart() {
+    return {
+        agents: [],
+        colors: [
+            'var(--pico-color-blue-500, #3b82f6)',
+            'var(--pico-color-green-500, #22c55e)',
+            'var(--pico-color-orange-500, #f97316)',
+            'var(--pico-color-purple-500, #a855f7)',
+            'var(--pico-color-red-500, #ef4444)',
+            'var(--pico-color-cyan-500, #06b6d4)'
+        ],
+        init: function() {
+            var data = [
+                {% for agent in by_agent %}
+                { name: {{ agent.agent_name|tojson }}, cost: {{ agent.cost_usd|tojson }}, raw: {{ agent.cost_usd_raw }} },
+                {% endfor %}
+            ];
+            var maxCost = Math.max.apply(null, data.map(function(d) { return d.raw; }));
+            if (maxCost <= 0) maxCost = 1;
+            this.agents = data.map(function(d) {
+                return {
+                    name: d.name,
+                    cost: d.cost,
+                    pct: ((d.raw / maxCost) * 100).toFixed(1)
+                };
+            });
+        }
+    };
+}
+</script>
+{% endif %}
+
+{% else %}
+{% with icon="&#128176;", title="No cost data yet", message="Cost data appears here once agents begin processing tasks. Connect an agent and submit a prompt to get started." %}
+{% include "partials/empty_state.html" %}
+{% endwith %}
+{% endif %}
+
+{% endblock %}

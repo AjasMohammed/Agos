@@ -54,11 +54,13 @@ const HAL_TOOL_NAMES: &[&str] = &[
     "process-manager",
     "log-reader",
     "network-monitor",
+    "usb-storage",
 ];
 
 const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "agent-message",
     "task-delegate",
+    "agent-call",
     "agent-list",
     "task-status",
     "task-list",
@@ -305,6 +307,7 @@ fn build_hal_tool(name: &str) -> Result<Option<Box<dyn AgentTool>>, AgentOSError
         "process-manager" => Box::new(crate::process_manager::ProcessManagerTool::new()),
         "log-reader" => Box::new(crate::log_reader::LogReaderTool::new()),
         "network-monitor" => Box::new(crate::network_monitor::NetworkMonitorTool::new()),
+        "usb-storage" => Box::new(crate::usb_storage::UsbStorageTool::new()),
         _ => return Ok(None),
     };
     Ok(Some(tool))

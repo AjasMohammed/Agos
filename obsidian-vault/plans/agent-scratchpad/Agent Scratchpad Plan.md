@@ -6,7 +6,7 @@ tags:
   - v3
   - plan
 date: 2026-03-23
-status: planned
+status: in-progress
 effort: 2w
 priority: high
 ---
@@ -89,14 +89,14 @@ None of these support **freeform markdown**, **wikilinks**, **backlink graphs**,
 
 ## Phase Overview
 
-| Phase | Name | Effort | Dependencies | Detail Doc |
-|-------|------|--------|-------------|------------|
-| 1 | Core storage engine | 2d | None | [[01-core-storage-engine]] |
-| 2 | Wikilink parser & backlink index | 1.5d | Phase 1 | [[02-wikilink-parser-and-backlinks]] |
-| 3 | Scratchpad tools | 2d | Phase 1, 2 | [[03-scratchpad-tools]] |
-| 4 | Graph traversal & context injection | 2d | Phase 2, 3 | [[04-graph-context-injection]] |
-| 5 | Cross-agent knowledge sharing | 1.5d | Phase 3, 4 | [[05-cross-agent-knowledge]] |
-| 6 | Episodic auto-write integration | 1d | Phase 1, 3 | [[06-episodic-auto-write]] |
+| Phase | Name | Effort | Dependencies | Detail Doc | Status |
+|-------|------|--------|-------------|------------|--------|
+| 1 | Core storage engine | 2d | None | [[01-core-storage-engine]] | complete |
+| 2 | Wikilink parser & backlink index | 1.5d | Phase 1 | [[02-wikilink-parser-and-backlinks]] | complete |
+| 3 | Scratchpad tools | 2d | Phase 1, 2 | [[03-scratchpad-tools]] | complete |
+| 4 | Graph traversal & context injection | 2d | Phase 2, 3 | [[04-graph-context-injection]] | complete |
+| 5 | Cross-agent knowledge sharing | 1.5d | Phase 3, 4 | [[05-cross-agent-knowledge]] | complete |
+| 6 | Episodic auto-write integration | 1d | Phase 1, 3 | [[06-episodic-auto-write]] | complete |
 
 ---
 

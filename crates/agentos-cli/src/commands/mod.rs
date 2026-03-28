@@ -19,6 +19,7 @@ pub mod pipeline;
 pub mod resource;
 pub mod role;
 pub mod schedule;
+pub mod scratchpad;
 pub mod secret;
 pub mod snapshot;
 pub mod status;
@@ -49,6 +50,7 @@ pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow
         Commands::Log { command } => log::handle(client, command).await,
         Commands::Notifications { command } => notifications::handle(client, command).await,
         Commands::Channel { command } => channel::handle(client, command).await,
+        Commands::Scratchpad { command } => scratchpad::handle(client, command).await,
         _ => unreachable!(),
     }
 }

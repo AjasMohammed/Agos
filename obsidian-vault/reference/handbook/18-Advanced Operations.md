@@ -76,6 +76,73 @@ Device lifecycle changes are recorded in the audit log:
 
 The HAL registry and per-device quarantine/approve/deny workflow are fully implemented (Spec §9). The HAL driver layer (system monitoring, process manager, network monitor, GPU metrics) is under active development. The `sys-monitor`, `hardware-info`, `process-manager`, and `network-monitor` tools interact with HAL driver data.
 
+### USB Storage Driver
+
+The `UsbStorageDriver` enables agents to mount, unmount, eject, and list USB storage devices via the UDisks2 D-Bus API. It is feature-gated behind `usb-storage` and must be compiled explicitly.
+
+#### Enabling
+
+```bash
+# Build the HAL crate with USB support
+cargo build -p agentos-hal --features usb-storage
+
+# Build the kernel with USB support (propagates to HAL)
+cargo build -p agentos-kernel --features usb-storage
+```
+
+When the feature is disabled, the driver module is excluded entirely — no `zbus` dependency is pulled in.
+
+#### Actions
+
+| Action | Description | Required Params |
+|--------|-------------|-----------------|
+| `list` | List USB-backed filesystems via UDisks2 ObjectManager | None |
+| `mount` | Mount a USB filesystem with safe options (`nosuid,noexec,nodev`) | `device` |
+| `unmount` | Unmount a USB filesystem | `device` |
+| `eject` | Power off the parent USB drive | `device` |
+
+#### Usage via `agentctl`
+
+```bash
+# List all USB filesystems
+agentctl hal query usb-storage '{"action": "list"}'
+
+# Mount a USB drive partition
+agentctl hal query usb-storage '{"action": "mount", "device": "sdb1"}'
+
+# Unmount
+agentctl hal query usb-storage '{"action": "unmount", "device": "sdb1"}'
+
+# Eject (power off the drive)
+agentctl hal query usb-storage '{"action": "eject", "device": "sdb1"}'
+```
+
+#### Security
+
+- **Permission required:** `hardware.usb-storage:x` (Execute) — enforced by the HAL driver trait
+- **Device quarantine:** The HAL device registry gates access; the device key `usb-storage:<device>` must be approved for the requesting agent before any operation proceeds
+- **USB-only enforcement:** Before mount, unmount, or eject, the driver reads the UDisks2 `Drive.ConnectionBus` property and rejects any device where the bus is not `"usb"`
+- **Device name validation:** Only alphanumeric characters, hyphens (`-`), underscores (`_`), and dots (`.`) are allowed; path traversal sequences (`..`) and slashes are rejected before any D-Bus call is made
+- **Safe mount options:** All mounts use `nosuid,noexec,nodev` — agents cannot execute binaries or create device nodes on mounted USB drives
+
+#### Audit Events
+
+Successful USB operations emit events into the kernel event/audit pipeline:
+
+| Event Type | Trigger | Payload |
+|------------|---------|---------|
+| `DeviceMounted` | Successful mount | `driver`, `device`, `mount_path` |
+| `DeviceUnmounted` | Successful unmount | `driver`, `device` |
+| `DeviceEjected` | Successful eject/power-off | `driver`, `device` |
+
+These events are signed and recorded in the append-only audit log.
+
+#### Limitations
+
+- Requires a running UDisks2 daemon on the host (standard on most desktop Linux distributions)
+- Communicates via the system D-Bus — the AgentOS process must have permission to call UDisks2 methods (typically requires `polkit` authorization or running as a user in the `plugdev`/`disk` group)
+- Loopback devices report `ConnectionBus` as empty, so they are rejected by the USB-only check; only physical USB-backed block devices are accepted
+
 ---
 
 ## Resource Arbitration

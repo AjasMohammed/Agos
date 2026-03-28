@@ -44,6 +44,7 @@ fn make_blocked_manifest() -> ToolManifest {
             author_pubkey: None,
             signature: None,
             trust_tier: TrustTier::Blocked,
+            tags: None,
         },
         capabilities_required: ToolCapabilities {
             permissions: vec![],
@@ -78,6 +79,7 @@ fn make_community_manifest_with_sig(pubkey_hex: &str, sig_hex: &str) -> ToolMani
             author_pubkey: Some(pubkey_hex.to_string()),
             signature: Some(sig_hex.to_string()),
             trust_tier: TrustTier::Community,
+            tags: None,
         },
         capabilities_required: ToolCapabilities {
             permissions: vec![],

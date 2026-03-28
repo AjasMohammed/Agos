@@ -1,0 +1,70 @@
+image:
+  repository: agentos/kernel
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+  healthPort: 9091
+
+persistence:
+  enabled: true
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+
+vault:
+  existingSecret: ""
+  passphrase: ""
+
+config:
+  autoInitVault: true
+  healthPort: 9091
+  ollamaHost: http://ollama:11434
+  ollamaModel: kimi-k2.5:cloud
+  llmUrl: ""
+  openaiBaseUrl: https://api.openai.com/v1
+  anthropicBaseUrl: https://api.anthropic.com/v1
+  geminiBaseUrl: https://generativelanguage.googleapis.com/v1beta
+  otelEnabled: false
+  otelEndpoint: ""
+  otelServiceName: agentos
+  logLevel: agentos=info
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+podSecurityContext:
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: agentos.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []

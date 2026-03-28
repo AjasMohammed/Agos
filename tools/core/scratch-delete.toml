@@ -1,0 +1,32 @@
+[manifest]
+name        = "scratch-delete"
+version     = "1.0.0"
+description = "Delete a scratchpad page by title"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["scratchpad:w"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "ScratchDeleteIntent"
+output = "ScratchDeleteResult"
+
+[input_schema]
+type = "object"
+required = ["title"]
+
+[input_schema.properties.title]
+type = "string"
+description = "Page title to delete"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 15000
+syscalls      = []

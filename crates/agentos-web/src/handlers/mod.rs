@@ -1,9 +1,12 @@
+pub mod agent_detail;
 pub mod agents;
 pub mod audit;
 pub mod chat;
+pub mod costs;
 pub mod dashboard;
 pub mod events;
 pub mod notifications;
+pub mod pipeline_ui;
 pub mod pipelines;
 pub mod secrets;
 pub mod tasks;

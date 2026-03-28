@@ -1,3 +1,4 @@
+use crate::agent_call::AgentCallTool;
 use crate::agent_list::AgentListTool;
 use crate::agent_message::AgentMessageTool;
 use crate::archival_insert::ArchivalInsert;
@@ -182,10 +183,37 @@ impl ToolRunner {
         self.register(Box::new(AskUserTool::new()));
         self.register(Box::new(TaskStatusTool::new()));
         self.register(Box::new(TaskListTool::new()));
+        self.register(Box::new(AgentCallTool::new()));
     }
 
     pub fn register(&mut self, tool: Box<dyn AgentTool>) {
         self.tools.insert(tool.name().to_string(), tool);
+    }
+
+    /// Register scratchpad tools with a shared `ScratchpadStore`.
+    /// Called by the kernel after the scratchpad store is initialised.
+    pub fn register_scratchpad_tools(
+        &mut self,
+        store: std::sync::Arc<agentos_scratch::ScratchpadStore>,
+    ) {
+        self.register(Box::new(crate::scratch_write::ScratchWriteTool::new(
+            store.clone(),
+        )));
+        self.register(Box::new(crate::scratch_read::ScratchReadTool::new(
+            store.clone(),
+        )));
+        self.register(Box::new(crate::scratch_search::ScratchSearchTool::new(
+            store.clone(),
+        )));
+        self.register(Box::new(crate::scratch_links::ScratchLinksTool::new(
+            store.clone(),
+        )));
+        self.register(Box::new(crate::scratch_graph::ScratchGraphTool::new(
+            store.clone(),
+        )));
+        self.register(Box::new(crate::scratch_delete::ScratchDeleteTool::new(
+            store,
+        )));
     }
 
     /// Register the agent-manual tool with a snapshot of tool summaries.

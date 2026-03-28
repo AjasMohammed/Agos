@@ -59,6 +59,13 @@ pub(crate) enum KernelAction {
         priority: String,
         auto_action: String,
     },
+    /// Synchronous agent-to-agent RPC call — blocks until the target agent
+    /// completes the child task and returns its output.
+    AgentRpcCall {
+        target_agent: String,
+        prompt: String,
+        timeout_secs: u64,
+    },
 }
 
 /// Why an agent is requesting human escalation.
@@ -218,6 +225,19 @@ impl KernelAction {
                     auto_action,
                 })
             }
+            "agent_rpc_call" => {
+                let target_agent = value.get("target_agent")?.as_str()?.to_string();
+                let prompt = value.get("prompt")?.as_str()?.to_string();
+                let timeout_secs = value
+                    .get("timeout_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(300);
+                Some(Self::AgentRpcCall {
+                    target_agent,
+                    prompt,
+                    timeout_secs,
+                })
+            }
             other => {
                 tracing::warn!(action = %other, "Unknown _kernel_action, ignoring");
                 None
@@ -249,6 +269,7 @@ impl Kernel {
             KernelAction::MemoryBlockDelete { .. } => "memory_block_delete",
             KernelAction::NotifyUser { .. } => "notify_user",
             KernelAction::AskUser { .. } => "ask_user",
+            KernelAction::AgentRpcCall { .. } => "agent_rpc_call",
         };
 
         self.audit_log(agentos_audit::AuditEntry {
@@ -336,6 +357,14 @@ impl Kernel {
                     trace_id,
                 )
                 .await
+            }
+            KernelAction::AgentRpcCall {
+                target_agent,
+                prompt,
+                timeout_secs,
+            } => {
+                self.execute_agent_rpc_call(task, &target_agent, &prompt, timeout_secs, trace_id)
+                    .await
             }
         };
 
@@ -970,6 +999,306 @@ impl Kernel {
                 "channel": response.channel.to_string(),
                 "responded_at": response.responded_at.to_rfc3339(),
             }),
+        }
+    }
+
+    /// Execute a synchronous agent-to-agent RPC call.
+    ///
+    /// Creates a child task for the target agent, registers a pending call
+    /// in `RpcManager`, then blocks until the child completes. The child
+    /// task runs through the same `execute_task_sync` path as any other
+    /// task, preserving all security and audit guarantees.
+    async fn execute_agent_rpc_call(
+        &self,
+        task: &AgentTask,
+        target_agent: &str,
+        prompt: &str,
+        timeout_secs: u64,
+        trace_id: TraceID,
+    ) -> KernelActionResult {
+        // 1. Resolve target agent
+        let registry = self.agent_registry.read().await;
+        let target = match registry.get_by_name(target_agent) {
+            Some(a) if a.status != AgentStatus::Offline => a.clone(),
+            Some(_) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Agent '{}' is offline", target_agent)
+                    }),
+                };
+            }
+            None => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Agent '{}' not found", target_agent)
+                    }),
+                };
+            }
+        };
+        let target_permissions = registry.compute_effective_permissions(&target.id);
+        drop(registry);
+
+        // 1b. Prevent self-calls — an agent cannot RPC itself
+        if target.id == task.agent_id {
+            return KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": "An agent cannot call itself via RPC"
+                }),
+            };
+        }
+
+        // 2. Compute child permissions (intersection of parent + target)
+        let child_permissions = task.capability_token.permissions.clone();
+        let mut effective_permissions = child_permissions.intersect(&target_permissions);
+        if task.autonomous {
+            effective_permissions.grant_op("process.exec".to_string(), PermissionOp::Execute, None);
+        }
+
+        // 3. Issue capability token for child task
+        let child_task_id = TaskID::new();
+        let child_token = match self.capability_engine.issue_token(
+            child_task_id,
+            target.id,
+            task.capability_token.allowed_tools.clone(),
+            task.capability_token.allowed_intents.clone(),
+            effective_permissions,
+            Duration::from_secs(timeout_secs),
+        ) {
+            Ok(token) => token,
+            Err(e) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Failed to issue capability token: {}", e)
+                    }),
+                };
+            }
+        };
+
+        // 4. Register the RPC call in the manager (get oneshot receiver)
+        let rx = match self
+            .rpc_manager
+            .register_call(task.id, target.id, child_task_id, timeout_secs)
+            .await
+        {
+            Ok(rx) => rx,
+            Err(e) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({ "error": e.to_string() }),
+                };
+            }
+        };
+
+        // 5. Create and register the child task
+        let child_task = AgentTask {
+            id: child_task_id,
+            state: TaskState::Queued,
+            agent_id: target.id,
+            capability_token: child_token,
+            assigned_llm: None,
+            priority: task.priority,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            timeout: Duration::from_secs(timeout_secs),
+            original_prompt: prompt.to_string(),
+            history: Vec::new(),
+            parent_task: Some(task.id),
+            reasoning_hints: Some(crate::commands::task::infer_reasoning_hints(prompt)),
+            max_iterations: None,
+            trigger_source: None,
+            autonomous: task.autonomous,
+        };
+
+        self.scheduler.register_external(child_task.clone()).await;
+        self.scheduler
+            .update_state_if_not_terminal(&child_task_id, TaskState::Running)
+            .await
+            .ok();
+        self.scheduler.mark_started(&child_task_id).await.ok();
+
+        // 6. Emit audit and event
+        self.audit_log(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id,
+            event_type: agentos_audit::AuditEventType::TaskCreated,
+            agent_id: Some(target.id),
+            task_id: Some(child_task_id),
+            tool_id: None,
+            details: serde_json::json!({
+                "rpc_call": true,
+                "caller_task_id": task.id.to_string(),
+                "caller_agent_id": task.agent_id.to_string(),
+                "target_agent": target_agent,
+                "timeout_secs": timeout_secs,
+            }),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
+
+        self.emit_event_with_trace(
+            EventType::AgentRpcCallStarted,
+            EventSource::AgentMessageBus,
+            EventSeverity::Info,
+            serde_json::json!({
+                "caller_task_id": task.id.to_string(),
+                "caller_agent_id": task.agent_id.to_string(),
+                "rpc_task_id": child_task_id.to_string(),
+                "target_agent_id": target.id.to_string(),
+                "target_agent_name": target_agent,
+                "timeout_secs": timeout_secs,
+            }),
+            0,
+            Some(trace_id),
+            Some(task.agent_id),
+            Some(task.id),
+        )
+        .await;
+
+        // 7. Set caller task to Waiting while the RPC child runs
+        self.scheduler
+            .update_state_if_not_terminal(&task.id, TaskState::Waiting)
+            .await
+            .ok();
+
+        // 8. Start trace for child task
+        self.trace_collector
+            .start_task(child_task_id, target.id, prompt)
+            .await;
+
+        // 9. Execute child task. Box::pin breaks the recursive async future
+        //    cycle (execute_agent_rpc_call → execute_task_sync → tool loop →
+        //    dispatch_kernel_action → execute_agent_rpc_call).
+        let child_trace_id = TraceID::new();
+        let start = chrono::Utc::now();
+        let child_task_span = self.otel.start_task_span(
+            &child_task.id.to_string(),
+            &child_task.agent_id.to_string(),
+            &target.model,
+        );
+        self.otel.adjust_active_tasks(1);
+        let child_result =
+            Box::pin(self.execute_task_sync(&child_task, &child_trace_id, &child_task_span)).await;
+        let duration_ms = (chrono::Utc::now() - start).num_milliseconds().max(0) as u64;
+
+        // 10. Finish child trace and handle completion
+        match child_result {
+            Ok(task_result) => {
+                self.trace_collector
+                    .finish_task(&child_task_id, "Complete", chrono::Utc::now())
+                    .await;
+                child_task_span.set_string_attribute("task.status", "complete");
+                child_task_span.set_i64_attribute("task.iterations", task_result.iterations as i64);
+                self.otel.record_task_metric(
+                    &child_task.agent_id.to_string(),
+                    "complete",
+                    duration_ms,
+                );
+                self.otel.adjust_active_tasks(-1);
+                self.complete_task_success(&child_task, &task_result, duration_ms, child_trace_id)
+                    .await;
+            }
+            Err(e) => {
+                self.trace_collector
+                    .finish_task(&child_task_id, "Failed", chrono::Utc::now())
+                    .await;
+                child_task_span.set_string_attribute("task.status", "failed");
+                child_task_span.record_error(e.to_string());
+                self.otel.record_task_metric(
+                    &child_task.agent_id.to_string(),
+                    "failed",
+                    duration_ms,
+                );
+                self.otel.adjust_active_tasks(-1);
+                self.complete_task_failure(&child_task, e, duration_ms, child_trace_id)
+                    .await;
+            }
+        }
+
+        // 11. Restore caller task to Running
+        self.scheduler
+            .update_state_if_not_terminal(&task.id, TaskState::Running)
+            .await
+            .ok();
+
+        // 12. Wait for the result from the oneshot (should already be available
+        // since complete_task_success/failure calls rpc_manager.complete_call)
+        let safety_timeout = Duration::from_secs(timeout_secs.saturating_add(30));
+        let rpc_result = tokio::select! {
+            result = tokio::time::timeout(safety_timeout, rx) => {
+                match result {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(_)) => {
+                        // Sender dropped — RPC was never completed (should not happen)
+                        crate::rpc_manager::RpcResult {
+                            output: String::new(),
+                            success: false,
+                            error: Some("RPC call aborted: result channel dropped".to_string()),
+                        }
+                    }
+                    Err(_) => {
+                        // Safety timeout
+                        crate::rpc_manager::RpcResult {
+                            output: String::new(),
+                            success: false,
+                            error: Some("RPC call timed out".to_string()),
+                        }
+                    }
+                }
+            }
+            _ = self.cancellation_token.cancelled() => {
+                crate::rpc_manager::RpcResult {
+                    output: String::new(),
+                    success: false,
+                    error: Some("Kernel shutting down".to_string()),
+                }
+            }
+        };
+
+        // 13. Emit completion event
+        self.emit_event_with_trace(
+            EventType::AgentRpcCallCompleted,
+            EventSource::AgentMessageBus,
+            if rpc_result.success {
+                EventSeverity::Info
+            } else {
+                EventSeverity::Warning
+            },
+            serde_json::json!({
+                "caller_task_id": task.id.to_string(),
+                "rpc_task_id": child_task_id.to_string(),
+                "success": rpc_result.success,
+                "error": rpc_result.error,
+            }),
+            0,
+            Some(trace_id),
+            Some(task.agent_id),
+            Some(task.id),
+        )
+        .await;
+
+        if rpc_result.success {
+            KernelActionResult {
+                success: true,
+                result: serde_json::json!({
+                    "status": "rpc_complete",
+                    "target_agent": target_agent,
+                    "rpc_task_id": child_task_id.to_string(),
+                    "output": rpc_result.output,
+                }),
+            }
+        } else {
+            KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": rpc_result.error.unwrap_or_else(|| "RPC call failed".to_string()),
+                    "rpc_task_id": child_task_id.to_string(),
+                }),
+            }
         }
     }
 }

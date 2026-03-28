@@ -137,6 +137,36 @@ async fn telegram_poll_loop(
                     Ok(updates) if updates.ok => {
                         for update in updates.result {
                             offset = update.update_id + 1;
+
+                            // Acknowledge inline keyboard taps so Telegram
+                            // dismisses the loading spinner on the button.
+                            if let Some(cq) = &update.callback_query {
+                                let ack_url = format!(
+                                    "https://api.telegram.org/bot{token}/answerCallbackQuery"
+                                );
+                                match client
+                                    .post(&ack_url)
+                                    .json(&serde_json::json!({
+                                        "callback_query_id": cq.id
+                                    }))
+                                    .send()
+                                    .await
+                                {
+                                    Ok(resp) if !resp.status().is_success() => {
+                                        tracing::warn!(
+                                            "answerCallbackQuery HTTP {}",
+                                            resp.status()
+                                        );
+                                    }
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            "answerCallbackQuery request failed (details redacted)"
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+
                             let inbound =
                                 extract_inbound_message(&update, &chat_id, channel_instance_id);
                             if let Some(msg) = inbound {
@@ -325,7 +355,6 @@ struct TelegramChat {
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 struct TelegramCallbackQuery {
-    #[allow(dead_code)]
     id: String,
     #[serde(default)]
     data: Option<String>,

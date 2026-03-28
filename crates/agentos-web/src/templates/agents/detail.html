@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>{{ name }}</h1>
+        <small class="muted" title="{{ agent_id }}">{{ short_id }}</small>
+    </div>
+    <div class="page-header-actions">
+        <span class="badge badge-{{ status|lower }} badge-lg">{{ status }}</span>
+        <button class="outline secondary btn-sm"
+                hx-delete="/agents/{{ name }}"
+                hx-confirm="Disconnect agent '{{ name }}'?"
+                hx-swap="none">Disconnect</button>
+    </div>
+</div>
+
+<div class="grid">
+    <article>
+        <header>Profile</header>
+        <dl class="detail-list">
+            <dt>Provider</dt>
+            <dd>{{ provider }}</dd>
+            <dt>Model</dt>
+            <dd><code>{{ model }}</code></dd>
+            <dt>Created</dt>
+            <dd>{{ created_at }}</dd>
+            <dt>Last Active</dt>
+            <dd>{{ last_active }}</dd>
+            {% if description %}
+            <dt>Description</dt>
+            <dd>{{ description }}</dd>
+            {% endif %}
+            {% if roles|length > 0 %}
+            <dt>Roles</dt>
+            <dd>{% for role in roles %}<span class="badge badge-info">{{ role }}</span> {% endfor %}</dd>
+            {% endif %}
+            {% if public_key_hex %}
+            <dt>Public Key</dt>
+            <dd><code class="id-long" title="{{ public_key_hex }}">{{ public_key_hex[:16] }}...</code></dd>
+            {% endif %}
+        </dl>
+    </article>
+    <article>
+        <header>Cost Summary</header>
+        {% if cost %}
+        <dl class="detail-list">
+            <dt>Cost (Today)</dt>
+            <dd><strong>${{ cost.cost_usd }}</strong></dd>
+            <dt>Tokens Used</dt>
+            <dd>{{ cost.tokens_used }}</dd>
+            <dt>Tool Calls</dt>
+            <dd>{{ cost.tool_calls }}</dd>
+            {% if cost.has_cost_budget %}
+            <dt>Cost Budget</dt>
+            <dd>
+                <div class="budget-bar-wrapper" title="{{ cost.cost_pct }}% of ${{ cost.max_cost_usd_per_day }}/day">
+                    <div class="budget-bar {% if cost.cost_pct|float >= 80 %}budget-bar-warning{% else %}budget-bar-ok{% endif %}"
+                         style="width: {{ cost.cost_pct if cost.cost_pct|float <= 100 else 100 }}%"></div>
+                    <small>{{ cost.cost_pct }}% of ${{ cost.max_cost_usd_per_day }}</small>
+                </div>
+            </dd>
+            {% endif %}
+            {% if cost.has_token_budget %}
+            <dt>Token Budget</dt>
+            <dd>
+                <div class="budget-bar-wrapper" title="{{ cost.tokens_pct }}% of {{ cost.max_tokens_per_day }}/day">
+                    <div class="budget-bar {% if cost.tokens_pct|float >= 80 %}budget-bar-warning{% else %}budget-bar-ok{% endif %}"
+                         style="width: {{ cost.tokens_pct if cost.tokens_pct|float <= 100 else 100 }}%"></div>
+                    <small>{{ cost.tokens_pct }}% of {{ cost.max_tokens_per_day }}</small>
+                </div>
+            </dd>
+            {% endif %}
+        </dl>
+        {% else %}
+        <p class="muted">No cost data recorded yet for this agent.</p>
+        {% endif %}
+    </article>
+</div>
+
+<h2>Permissions <small class="muted">({{ permissions|length }} grants, {{ deny_entries|length }} deny rules)</small></h2>
+<div class="grid">
+    <div>
+        {% if permissions|length > 0 %}
+        <figure>
+        <table aria-label="Permission grants">
+            <thead>
+                <tr>
+                    <th>Resource</th>
+                    <th>R</th>
+                    <th>W</th>
+                    <th>X</th>
+                    <th>Q</th>
+                    <th>O</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for perm in permissions %}
+                <tr>
+                    <td><code>{{ perm.resource }}</code></td>
+                    <td>{% if perm.read %}r{% else %}-{% endif %}</td>
+                    <td>{% if perm.write %}w{% else %}-{% endif %}</td>
+                    <td>{% if perm.execute %}x{% else %}-{% endif %}</td>
+                    <td>{% if perm.query %}q{% else %}-{% endif %}</td>
+                    <td>{% if perm.observe %}o{% else %}-{% endif %}</td>
+                    <td>
+                        <form method="post" action="/agents/{{ name }}/permissions/revoke"
+                              hx-post="/agents/{{ name }}/permissions/revoke"
+                              hx-swap="none" style="display:inline">
+                            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                            <input type="hidden" name="permission" value="{{ perm.resource }}">
+                            <button type="submit" class="outline secondary btn-sm"
+                                    hx-confirm="Revoke '{{ perm.resource }}'?">Revoke</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </figure>
+        {% else %}
+        <p class="muted">No explicit permissions granted.</p>
+        {% endif %}
+
+        {% if deny_entries|length > 0 %}
+        <h3>Deny Rules</h3>
+        <ul>
+            {% for deny in deny_entries %}
+            <li><code>{{ deny }}</code></li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+    </div>
+    <div>
+        <article>
+            <header>Grant Permission</header>
+            <form method="post" action="/agents/{{ name }}/permissions"
+                  hx-post="/agents/{{ name }}/permissions" hx-swap="none">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <label for="perm-input">Permission string
+                    <input type="text" id="perm-input" name="permission" required
+                           placeholder="e.g. fs:/tmp:rwx" aria-describedby="perm-hint">
+                </label>
+                <small id="perm-hint" class="muted">Format: resource:path:rwxqo</small>
+                <button type="submit">Grant</button>
+            </form>
+        </article>
+    </div>
+</div>
+
+<h2>Tasks <small class="muted">({{ task_count }})</small></h2>
+{% if tasks|length > 0 %}
+<figure>
+<table aria-label="Agent tasks">
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Status</th>
+            <th>Prompt</th>
+            <th>Created</th>
+            <th>Tool Calls</th>
+            <th>Tokens</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for task in tasks %}
+        <tr>
+            <td><a href="/tasks/{{ task.id }}"><code>{{ task.id[:8] }}</code></a></td>
+            <td><span class="badge badge-{{ task.state|lower }}">{{ task.state }}</span></td>
+            <td>{{ task.prompt_preview[:60] }}{% if task.prompt_preview|length > 60 %}...{% endif %}</td>
+            <td>{{ task.created_at }}</td>
+            <td>{{ task.tool_calls }}</td>
+            <td>{{ task.tokens_used }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</figure>
+{% else %}
+<p class="muted">No tasks for this agent.</p>
+{% endif %}
+
+{% endblock %}

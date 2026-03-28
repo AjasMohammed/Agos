@@ -5,3 +5,5 @@ pub mod process;
 pub mod sensor;
 pub mod storage;
 pub mod system;
+#[cfg(feature = "usb-storage")]
+pub mod usb_storage;
