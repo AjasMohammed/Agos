@@ -1,0 +1,42 @@
+[manifest]
+name        = "scratch-graph"
+version     = "1.0.0"
+description = "Get the local subgraph around a scratchpad page via BFS traversal"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["scratchpad:r"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "ScratchGraphIntent"
+output = "ScratchGraphResult"
+
+[input_schema]
+type = "object"
+required = ["title"]
+
+[input_schema.properties.title]
+type = "string"
+description = "Center page title for graph traversal"
+
+[input_schema.properties.depth]
+type = "integer"
+default = 2
+description = "BFS traversal depth (max 5)"
+
+[input_schema.properties.max_pages]
+type = "integer"
+default = 10
+description = "Maximum pages to include in the subgraph (max 50)"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 15000
+syscalls      = []

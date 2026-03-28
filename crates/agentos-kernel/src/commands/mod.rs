@@ -15,6 +15,7 @@ pub mod pipeline;
 pub mod resource;
 pub mod role;
 pub mod schedule;
+pub mod scratch;
 pub mod secret;
 pub mod system;
 pub mod task;

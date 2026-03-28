@@ -1,0 +1,44 @@
+[manifest]
+name        = "scratch-search"
+version     = "1.0.0"
+description = "Full-text search across scratchpad pages with optional tag filter"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["scratchpad:r"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "ScratchSearchIntent"
+output = "ScratchSearchResult"
+
+[input_schema]
+type = "object"
+required = ["query"]
+
+[input_schema.properties.query]
+type = "string"
+description = "Search terms"
+
+[input_schema.properties.tags]
+type = "array"
+description = "Optional tags to filter results"
+
+[input_schema.properties.tags.items]
+type = "string"
+
+[input_schema.properties.limit]
+type = "integer"
+default = 10
+description = "Maximum number of results to return"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 15000
+syscalls      = []

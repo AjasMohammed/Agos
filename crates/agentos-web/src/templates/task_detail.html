@@ -7,6 +7,9 @@
     </div>
     <div class="page-header-actions">
         <span class="badge badge-{{ state|lower }} badge-lg">{{ state }}</span>
+        {% if state == "Complete" or state == "Failed" %}
+        <a href="/tasks/{{ task_id }}/trace" class="outline secondary btn-sm" role="button">View Trace</a>
+        {% endif %}
         {% if state == "Running" or state == "Queued" or state == "Waiting" %}
         <button class="outline secondary btn-sm"
                 hx-post="/tasks/{{ task_id }}/cancel"

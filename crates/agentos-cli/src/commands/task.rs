@@ -1,6 +1,6 @@
 use agentos_bus::client::BusClient;
 use agentos_bus::message::{KernelCommand, KernelResponse};
-use agentos_types::ids::TaskID;
+use agentos_types::ids::{AgentID, TaskID};
 use clap::Subcommand;
 use uuid::Uuid;
 
@@ -30,6 +30,26 @@ pub enum TaskCommands {
         /// Task ID
         task_id: String,
     },
+    /// Show execution trace for a completed task
+    Trace {
+        /// Task ID
+        task_id: String,
+        /// Output as raw JSON instead of formatted text
+        #[arg(long)]
+        json: bool,
+        /// Show only a specific iteration number (1-based)
+        #[arg(long)]
+        iter: Option<u32>,
+    },
+    /// List recent task execution traces
+    Traces {
+        /// Maximum number of traces to show
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        /// Filter traces by agent ID
+        #[arg(long)]
+        agent: Option<String>,
+    },
 }
 
 pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Result<()> {
@@ -50,8 +70,8 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
 
             println!(
                 "   Prompt: {}",
-                if prompt.len() > 80 {
-                    format!("{}...", &prompt[..80])
+                if prompt.chars().count() > 80 {
+                    format!("{}...", prompt.chars().take(80).collect::<String>())
                 } else {
                     prompt.clone()
                 }
@@ -120,8 +140,11 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                                 t.id,
                                 format!("{:?}", t.state),
                                 t.agent_id,
-                                if t.prompt_preview.len() > 40 {
-                                    format!("{}...", &t.prompt_preview[..40])
+                                if t.prompt_preview.chars().count() > 40 {
+                                    format!(
+                                        "{}...",
+                                        t.prompt_preview.chars().take(40).collect::<String>()
+                                    )
                                 } else {
                                     t.prompt_preview
                                 }
@@ -161,6 +184,157 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                 _ => eprintln!("❌ Unexpected response"),
             }
         }
+
+        TaskCommands::Trace {
+            task_id,
+            json,
+            iter,
+        } => {
+            let tid = TaskID::from_uuid(Uuid::parse_str(&task_id)?);
+            let response = client
+                .send_command(KernelCommand::TaskGetTrace { task_id: tid })
+                .await?;
+            match response {
+                KernelResponse::TaskTrace(trace) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&trace)?);
+                    } else {
+                        print_trace(&trace, iter);
+                    }
+                }
+                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
+                _ => eprintln!("❌ Unexpected response"),
+            }
+        }
+
+        TaskCommands::Traces { limit, agent } => {
+            let agent_id: Option<AgentID> = match agent {
+                Some(ref s) => match s.parse() {
+                    Ok(id) => Some(id),
+                    Err(_) => {
+                        eprintln!("Error: invalid agent ID '{s}'");
+                        return Ok(());
+                    }
+                },
+                None => None,
+            };
+            let response = client
+                .send_command(KernelCommand::TaskListTraces { agent_id, limit })
+                .await?;
+            match response {
+                KernelResponse::TaskTraces(summaries) => {
+                    if summaries.is_empty() {
+                        println!("No task traces found.");
+                    } else {
+                        println!(
+                            "{:<38} {:<10} {:<6} {:<8} {:<10} PROMPT",
+                            "TASK ID", "STATUS", "ITERS", "TOOLS", "TOKENS"
+                        );
+                        println!("{}", "-".repeat(95));
+                        for s in summaries {
+                            println!(
+                                "{:<38} {:<10} {:<6} {:<8} {:<10} {}",
+                                s.task_id,
+                                s.status,
+                                s.iteration_count,
+                                s.tool_call_count,
+                                s.total_tokens,
+                                if s.prompt_preview.chars().count() > 35 {
+                                    format!(
+                                        "{}...",
+                                        s.prompt_preview.chars().take(35).collect::<String>()
+                                    )
+                                } else {
+                                    s.prompt_preview
+                                }
+                            );
+                        }
+                    }
+                }
+                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
+                _ => eprintln!("❌ Unexpected response"),
+            }
+        }
     }
     Ok(())
+}
+
+fn print_trace(trace: &agentos_types::TaskTrace, only_iter: Option<u32>) {
+    println!("Task:    {}", trace.task_id);
+    println!("Agent:   {}", trace.agent_id);
+    println!("Status:  {}", trace.status);
+    println!(
+        "Started: {}",
+        trace.started_at.format("%Y-%m-%d %H:%M:%S UTC")
+    );
+    if let Some(fin) = trace.finished_at {
+        let elapsed = fin - trace.started_at;
+        println!(
+            "Elapsed: {:.1}s",
+            elapsed.num_milliseconds() as f64 / 1000.0
+        );
+    }
+    println!(
+        "Tokens:  {} in + {} out = {}",
+        trace.total_input_tokens,
+        trace.total_output_tokens,
+        trace.total_input_tokens + trace.total_output_tokens
+    );
+    if trace.total_cost_usd > 0.0 {
+        println!("Cost:    ${:.6}", trace.total_cost_usd);
+    }
+    println!("Prompt:  {}", trace.prompt_preview);
+    println!();
+
+    let iters_to_show: Vec<_> = trace
+        .iterations
+        .iter()
+        .filter(|it| only_iter.is_none_or(|n| it.iteration == n))
+        .collect();
+
+    if iters_to_show.is_empty() {
+        if let Some(n) = only_iter {
+            println!(
+                "No iteration {} found (task has {} iterations).",
+                n,
+                trace.iterations.len()
+            );
+        } else {
+            println!("No iterations recorded.");
+        }
+        return;
+    }
+
+    for it in iters_to_show {
+        println!(
+            "┌─ Iteration {} ─ {} ─ stop: {} ─ {}in/{}out",
+            it.iteration, it.model, it.stop_reason, it.input_tokens, it.output_tokens
+        );
+        if it.tool_calls.is_empty() {
+            println!("│  (no tool calls)");
+        }
+        for (i, tc) in it.tool_calls.iter().enumerate() {
+            let last = i + 1 == it.tool_calls.len();
+            let prefix = if last { "└──" } else { "├──" };
+            let status = if !tc.permission_check.granted {
+                format!(
+                    "DENIED: {}",
+                    tc.permission_check
+                        .deny_reason
+                        .as_deref()
+                        .unwrap_or("unknown")
+                )
+            } else if tc.error.is_some() {
+                format!("ERROR: {}", tc.error.as_deref().unwrap_or(""))
+            } else {
+                format!("ok ({}ms)", tc.duration_ms)
+            };
+            let inj = tc
+                .injection_score
+                .map(|s| format!(" [inj:{:.2}]", s))
+                .unwrap_or_default();
+            println!("│ {} {} — {}{}", prefix, tc.tool_name, status, inj);
+        }
+        println!("└{}", "─".repeat(70));
+    }
 }

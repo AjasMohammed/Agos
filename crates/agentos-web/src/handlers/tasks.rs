@@ -163,7 +163,7 @@ pub async fn detail(
 
             let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);
 
-            let short_id = task.id.to_string()[..8].to_string();
+            let short_id = task.id.to_string().chars().take(8).collect::<String>();
             let ctx = context! {
                 page_title => format!("Task {}", task.id),
                 breadcrumbs => vec![
@@ -182,6 +182,122 @@ pub async fn detail(
             super::render(&state.templates, "task_detail.html", ctx)
         }
         None => (axum::http::StatusCode::NOT_FOUND, "Task not found").into_response(),
+    }
+}
+
+/// Render the execution trace timeline for a completed task.
+pub async fn trace_page(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let task_id: agentos_types::TaskID = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "Invalid task ID").into_response();
+        }
+    };
+
+    match state.kernel.trace_collector.get_trace(&task_id).await {
+        Ok(Some(trace)) => {
+            let short_id = trace
+                .task_id
+                .to_string()
+                .chars()
+                .take(8)
+                .collect::<String>();
+            let short_id = short_id.as_str();
+            let iterations: Vec<_> = trace
+                .iterations
+                .iter()
+                .map(|it| {
+                    let tool_calls: Vec<_> = it
+                        .tool_calls
+                        .iter()
+                        .map(|tc| {
+                            let status = if !tc.permission_check.granted {
+                                "denied"
+                            } else if tc.error.is_some() {
+                                "error"
+                            } else {
+                                "ok"
+                            };
+                            context! {
+                                tool_name => tc.tool_name.clone(),
+                                status,
+                                duration_ms => tc.duration_ms,
+                                error => tc.error.clone().unwrap_or_default(),
+                                deny_reason => tc.permission_check.deny_reason.clone().unwrap_or_default(),
+                                injection_score => tc.injection_score.map(|s| format!("{:.2}", s)).unwrap_or_default(),
+                                has_snapshot => tc.snapshot_ref.is_some(),
+                                input_preview => {
+                                    let s = tc.input_json.to_string();
+                                    if s.chars().count() > 120 {
+                                        format!("{}…", s.chars().take(120).collect::<String>())
+                                    } else {
+                                        s
+                                    }
+                                },
+                            }
+                        })
+                        .collect();
+                    context! {
+                        num => it.iteration,
+                        model => it.model.clone(),
+                        stop_reason => it.stop_reason.clone(),
+                        input_tokens => it.input_tokens,
+                        output_tokens => it.output_tokens,
+                        tool_calls,
+                    }
+                })
+                .collect();
+
+            let elapsed_secs = trace
+                .finished_at
+                .map(|fin| (fin - trace.started_at).num_milliseconds() as f64 / 1000.0)
+                .map(|s| format!("{:.1}s", s))
+                .unwrap_or_default();
+
+            let ctx = context! {
+                page_title => format!("Trace {}", short_id),
+                breadcrumbs => vec![
+                    context! { label => "Tasks", href => "/tasks" },
+                    context! { label => format!("Task {}", short_id), href => format!("/tasks/{}", trace.task_id) },
+                    context! { label => "Trace" },
+                ],
+                task_id => trace.task_id.to_string(),
+                agent_id => trace.agent_id.to_string(),
+                status => trace.status.clone(),
+                prompt_preview => trace.prompt_preview.clone(),
+                started_at => trace.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                elapsed_secs,
+                total_input_tokens => trace.total_input_tokens,
+                total_output_tokens => trace.total_output_tokens,
+                total_cost_usd => if trace.total_cost_usd > 0.0 { format!("${:.6}", trace.total_cost_usd) } else { String::new() },
+                iterations,
+            };
+            super::render(&state.templates, "task_trace.html", ctx)
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "No trace found for this task").into_response(),
+        Err(e) => {
+            tracing::error!(task = %id, error = %e, "Failed to fetch task trace");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch trace").into_response()
+        }
+    }
+}
+
+/// JSON API — returns the raw trace for a task.
+pub async fn trace_json(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let task_id: agentos_types::TaskID = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "Invalid task ID").into_response();
+        }
+    };
+
+    match state.kernel.trace_collector.get_trace(&task_id).await {
+        Ok(Some(trace)) => axum::Json(trace).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "No trace found for this task").into_response(),
+        Err(e) => {
+            tracing::error!(task = %id, error = %e, "Failed to fetch task trace");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch trace").into_response()
+        }
     }
 }
 

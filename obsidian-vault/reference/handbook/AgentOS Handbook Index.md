@@ -79,7 +79,7 @@ status: complete
 | LLM | [[15-LLM Configuration]] | [[03-Architecture Overview]], [[06-Task System]] |
 | Config | [[16-Configuration Reference]] | [[02-Installation and First Run]] |
 | WASM Tools | [[17-WASM Tools Development]] | [[07-Tool System]], [[08-Security Model]] |
-| HAL | [[18-Advanced Operations]] | [[03-Architecture Overview]] |
+| HAL | [[18-Advanced Operations]] | [[03-Architecture Overview]], [[04-CLI Reference Complete]] |
 | Troubleshooting | [[19-Troubleshooting and FAQ]] | [[14-Audit Log]], [[04-CLI Reference Complete]] |
 | LLM Agent Testing | [[20-LLM Agent Testing]] | [[15-LLM Configuration]], [[07-Tool System]], [[08-Security Model]] |
 | Notifications | [[21-User Notifications and Channels]] | [[07-Tool System]], [[08-Security Model]], [[09-Secrets and Vault]] |

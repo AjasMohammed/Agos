@@ -75,32 +75,26 @@ impl HalDriver for StorageDriver {
         ("hardware.storage", PermissionOp::Read)
     }
 
-    /// Returns `"storage:<path>"` when a path is provided, otherwise `"storage:default"`.
-    ///
-    /// The path component is sanitized to prevent registry key injection: only
-    /// alphanumeric characters, hyphens, underscores, dots, and forward slashes
-    /// are kept.  This ensures that agent-supplied paths cannot collide with
-    /// device keys belonging to other HAL driver namespaces (e.g. `"gpu:0"`).
+    /// Aggregate list queries enumerate all block devices and therefore do not map
+    /// to one registry entry.
     fn device_key(&self, params: &Value) -> Option<String> {
-        let key = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(|p| {
-                let sanitized: String = p
-                    .chars()
-                    .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
-                    .collect();
-                format!(
-                    "storage:{}",
-                    if sanitized.is_empty() {
-                        "default"
-                    } else {
-                        &sanitized
-                    }
-                )
-            })
-            .unwrap_or_else(|| "storage:default".to_string());
-        Some(key)
+        let action = params
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or("list");
+        if action == "list" {
+            return None;
+        }
+
+        params.get("path").and_then(|v| v.as_str()).map(|path| {
+            let device_name = path
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .filter(|segment| !segment.is_empty())
+                .unwrap_or("default");
+            format!("storage:{device_name}")
+        })
     }
 
     async fn query(&self, params: Value) -> Result<Value, AgentOSError> {
@@ -125,11 +119,22 @@ impl HalDriver for StorageDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[tokio::test]
     async fn test_storage_list() {
         let driver = StorageDriver::new();
         let result = driver.query(json!({ "action": "list" })).await.unwrap();
         assert!(result["devices"].is_array());
+    }
+
+    #[test]
+    fn test_storage_list_action_has_no_single_device_key() {
+        let driver = StorageDriver::new();
+        assert_eq!(driver.device_key(&json!({ "action": "list" })), None);
+        assert_eq!(
+            driver.device_key(&json!({ "action": "inspect", "path": "/dev/sda" })),
+            Some("storage:sda".to_string())
+        );
     }
 }

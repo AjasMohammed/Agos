@@ -77,7 +77,7 @@ data_dir = "/tmp/agentos/data"
 # Each entry must be an absolute path pointing to a project or shared directory.
 # System roots (/etc, /var, /root, /home itself, /) are rejected at startup.
 # Example: allowed_paths = ["/home/user/project", "/shared/datasets"]
-allowed_paths = []
+allowed_paths = ["/media", "/run/media"]
 
 [bus]
 # Development default socket path.
@@ -149,6 +149,15 @@ log_level = "info"
 # Loki, Datadog, or Elasticsearch). In production, set to "json".
 log_format = "text"
 
+[otel]
+enabled = false
+endpoint = "http://localhost:4317"
+protocol = "grpc"
+service_name = "agentos"
+sample_rate = 1.0
+scrub_tool_inputs = true
+scrub_tool_outputs = true
+
 [notifications]
 # Maximum messages stored in the user inbox.
 # When this limit is reached, the oldest read messages are purged on each write.
@@ -191,6 +200,32 @@ memory_warning_percent = 80.0
 disk_warning_percent = 85.0
 disk_critical_percent = 95.0
 gpu_vram_warning_percent = 90.0
+
+[scratchpad]
+# Agent scratchpad — graph-aware knowledge store for agent working memory.
+enabled = true
+db_path = "scratchpad.db"
+# BFS traversal depth for context injection (0 = seed page only).
+context_depth = 2
+# Maximum pages injected into context per inference call.
+max_context_pages = 5
+# Maximum total bytes of scratchpad content injected per inference call.
+max_context_bytes = 8192
+# Maximum content size per individual page (bytes).
+max_page_size = 65536
+# Maximum pages per agent.
+max_pages_per_agent = 1000
+# Auto-generate a scratchpad note when a task completes (success or failure).
+auto_write_on_completion = true
+# Minimum episodic entries for a task to qualify (skip trivial tasks).
+auto_write_min_steps = 3
+# Maximum bytes for an auto-generated note.
+auto_write_max_summary = 2048
+
+[registry]
+# Tool registry (marketplace) URL for `agentctl tool search/add/publish`.
+# Override with AGENTOS_REGISTRY environment variable for self-hosted registries.
+url = "https://registry.agentos.dev"
 
 [mcp]
 # List of MCP servers to connect at kernel boot.

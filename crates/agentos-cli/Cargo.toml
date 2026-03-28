@@ -37,6 +37,10 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 libc = { workspace = true }
 
+[features]
+default = []
+otel = ["agentos-kernel/otel"]
+
 [dev-dependencies]
 tempfile = { workspace = true }
 agentos-audit = { path = "../agentos-audit" }

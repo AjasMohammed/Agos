@@ -18,6 +18,8 @@ pub struct PipelineSummary {
     pub description: Option<String>,
     pub step_count: usize,
     pub installed_at: String,
+    pub last_run_at: Option<String>,
+    pub last_run_status: Option<String>,
 }
 
 impl PipelineStore {
@@ -112,7 +114,29 @@ impl PipelineStore {
     pub fn list_pipelines(&self) -> Result<Vec<PipelineSummary>, AgentOSError> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn
-            .prepare("SELECT name, version, definition, installed_at FROM pipelines ORDER BY name")
+            .prepare(
+                "SELECT
+                    p.name,
+                    p.version,
+                    p.definition,
+                    p.installed_at,
+                    (
+                        SELECT r.started_at
+                        FROM pipeline_runs r
+                        WHERE r.pipeline_name = p.name
+                        ORDER BY r.started_at DESC
+                        LIMIT 1
+                    ) AS last_run_at,
+                    (
+                        SELECT r.status
+                        FROM pipeline_runs r
+                        WHERE r.pipeline_name = p.name
+                        ORDER BY r.started_at DESC
+                        LIMIT 1
+                    ) AS last_run_status
+                 FROM pipelines p
+                 ORDER BY p.name",
+            )
             .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
 
         let rows = stmt
@@ -121,13 +145,22 @@ impl PipelineStore {
                 let version: String = row.get(1)?;
                 let yaml: String = row.get(2)?;
                 let installed_at: String = row.get(3)?;
-                Ok((name, version, yaml, installed_at))
+                let last_run_at: Option<String> = row.get(4)?;
+                let last_run_status: Option<String> = row.get(5)?;
+                Ok((
+                    name,
+                    version,
+                    yaml,
+                    installed_at,
+                    last_run_at,
+                    last_run_status,
+                ))
             })
             .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
 
         let mut summaries = Vec::new();
         for row in rows {
-            let (name, version, yaml, installed_at) =
+            let (name, version, yaml, installed_at, last_run_at, last_run_status) =
                 row.map_err(|e| AgentOSError::StorageError(e.to_string()))?;
 
             let def: Result<crate::definition::PipelineDefinition, _> = serde_yaml::from_str(&yaml);
@@ -142,6 +175,8 @@ impl PipelineStore {
                 description,
                 step_count,
                 installed_at,
+                last_run_at,
+                last_run_status,
             });
         }
         Ok(summaries)

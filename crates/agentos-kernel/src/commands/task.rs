@@ -117,16 +117,37 @@ impl Kernel {
             .ok();
         self.scheduler.mark_started(&task.id).await.ok();
 
+        // Start trace accumulation before execution.
+        self.trace_collector
+            .start_task(task.id, agent.id, &task.original_prompt)
+            .await;
+
         // Execute task synchronously so the CLI gets the result
         let trace_id = TraceID::new();
-        let result = self.execute_task_sync(&task, &trace_id).await;
+        let start = std::time::Instant::now();
+        let task_span = self.otel.start_task_span(
+            &task.id.to_string(),
+            &task.agent_id.to_string(),
+            &agent.model,
+        );
+        self.otel.adjust_active_tasks(1);
+        let result = self.execute_task_sync(&task, &trace_id, &task_span).await;
         match result {
             Ok(task_result) => {
+                let duration_ms = start.elapsed().as_millis() as u64;
                 self.scheduler
                     .update_state_if_not_terminal(&task.id, TaskState::Complete)
                     .await
                     .ok();
                 self.cleanup_task_subscriptions(&task.id).await;
+                self.trace_collector
+                    .finish_task(&task.id, "Complete", chrono::Utc::now())
+                    .await;
+                task_span.set_string_attribute("task.status", "complete");
+                task_span.set_i64_attribute("task.iterations", task_result.iterations as i64);
+                self.otel
+                    .record_task_metric(&task.agent_id.to_string(), "complete", duration_ms);
+                self.otel.adjust_active_tasks(-1);
                 KernelResponse::Success {
                     data: Some(serde_json::json!({
                         "task_id": task.id.to_string(),
@@ -135,6 +156,7 @@ impl Kernel {
                 }
             }
             Err(e) => {
+                let duration_ms = start.elapsed().as_millis() as u64;
                 let msg = e.to_string();
                 let is_waiting = self
                     .scheduler
@@ -148,6 +170,17 @@ impl Kernel {
                         .update_state_if_not_terminal(&task.id, TaskState::Waiting)
                         .await
                         .ok();
+                    self.trace_collector
+                        .finish_task(&task.id, "Waiting", chrono::Utc::now())
+                        .await;
+                    task_span.set_string_attribute("task.status", "waiting");
+                    task_span.record_error(&msg);
+                    self.otel.record_task_metric(
+                        &task.agent_id.to_string(),
+                        "waiting",
+                        duration_ms,
+                    );
+                    self.otel.adjust_active_tasks(-1);
                     return KernelResponse::Success {
                         data: Some(serde_json::json!({
                             "task_id": task.id.to_string(),
@@ -162,6 +195,14 @@ impl Kernel {
                     .await
                     .ok();
                 self.cleanup_task_subscriptions(&task.id).await;
+                self.trace_collector
+                    .finish_task(&task.id, "Failed", chrono::Utc::now())
+                    .await;
+                task_span.set_string_attribute("task.status", "failed");
+                task_span.record_error(&msg);
+                self.otel
+                    .record_task_metric(&task.agent_id.to_string(), "failed", duration_ms);
+                self.otel.adjust_active_tasks(-1);
                 KernelResponse::Error { message: msg }
             }
         }
@@ -226,10 +267,39 @@ impl Kernel {
                     }
                 }
                 self.cleanup_task_subscriptions(&task_id).await;
+                // Finalise trace so the active-trace map doesn't leak the entry.
+                self.trace_collector
+                    .finish_task(&task_id, "Cancelled", chrono::Utc::now())
+                    .await;
                 KernelResponse::Success { data: None }
             }
             Err(e) => KernelResponse::Error {
                 message: e.to_string(),
+            },
+        }
+    }
+
+    pub(crate) async fn cmd_get_task_trace(&self, task_id: TaskID) -> KernelResponse {
+        match self.trace_collector.get_trace(&task_id).await {
+            Ok(Some(trace)) => KernelResponse::TaskTrace(Box::new(trace)),
+            Ok(None) => KernelResponse::Error {
+                message: format!("No trace found for task '{}'", task_id),
+            },
+            Err(e) => KernelResponse::Error {
+                message: format!("Failed to retrieve trace: {}", e),
+            },
+        }
+    }
+
+    pub(crate) async fn cmd_list_task_traces(
+        &self,
+        agent_id: Option<AgentID>,
+        limit: u32,
+    ) -> KernelResponse {
+        match self.trace_collector.list_traces(agent_id, limit).await {
+            Ok(summaries) => KernelResponse::TaskTraces(summaries),
+            Err(e) => KernelResponse::Error {
+                message: format!("Failed to list traces: {}", e),
             },
         }
     }
@@ -360,7 +430,7 @@ impl Kernel {
 }
 
 /// Infer reasoning hints from a prompt's characteristics.
-fn infer_reasoning_hints(prompt: &str) -> TaskReasoningHints {
+pub(crate) fn infer_reasoning_hints(prompt: &str) -> TaskReasoningHints {
     let word_count = prompt.split_whitespace().count();
 
     let complexity = if word_count > 200 {

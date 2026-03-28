@@ -4,7 +4,7 @@ use agentos_hal::drivers::network::NetworkDriver;
 use agentos_hal::drivers::process::ProcessDriver;
 use agentos_hal::drivers::system::SystemDriver;
 use agentos_hal::HardwareAbstractionLayer;
-use agentos_kernel::Kernel;
+use agentos_kernel::{load_config, resolve_boot_vault_passphrase, Kernel};
 use agentos_vault::ZeroizingString;
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
@@ -21,8 +21,8 @@ use commands::{
     identity::IdentityCommands, log::LogCommands, mcp::McpCommands,
     notifications::NotificationCommands, perm::PermCommands, pipeline::PipelineCommands,
     resource::ResourceCommands, role::RoleCommands, schedule::ScheduleCommands,
-    secret::SecretCommands, snapshot::SnapshotCommands, task::TaskCommands, tool::ToolCommands,
-    web::WebCommands,
+    scratchpad::ScratchpadCommands, secret::SecretCommands, snapshot::SnapshotCommands,
+    task::TaskCommands, tool::ToolCommands, web::WebCommands,
 };
 
 #[derive(Parser)]
@@ -131,6 +131,12 @@ pub enum Commands {
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCommands,
+    },
+
+    /// Manage agent scratchpad notes
+    Scratchpad {
+        #[command(subcommand)]
+        command: ScratchpadCommands,
     },
 
     /// Manage event subscriptions and view event history
@@ -261,7 +267,7 @@ async fn tokio_main() -> anyhow::Result<()> {
 
         // Offline tool subcommands run without a kernel connection
         Commands::Tool { command } if commands::tool::is_offline(&command) => {
-            commands::tool::handle_offline(command)?;
+            commands::tool::handle_offline(command).await?;
         }
 
         // MCP subcommands: `serve` and `list` are offline; `status` requires a running kernel.
@@ -564,13 +570,18 @@ async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
         anyhow::bail!("Config file not found: {}", config_str);
     }
 
-    let passphrase = ZeroizingString::new(match std::env::var("AGENTOS_VAULT_PASSPHRASE") {
-        Ok(env_pass) if !env_pass.is_empty() => env_pass,
-        _ => {
-            eprint!("Enter vault passphrase: ");
-            rpassword::read_password()?
-        }
-    });
+    let config = load_config(config_path)?;
+    let passphrase = match resolve_boot_vault_passphrase(&config) {
+        Ok(Some(passphrase)) => passphrase,
+        Ok(None) => ZeroizingString::new(match std::env::var("AGENTOS_VAULT_PASSPHRASE") {
+            Ok(env_pass) if !env_pass.is_empty() => env_pass,
+            _ => {
+                eprint!("Enter vault passphrase: ");
+                rpassword::read_password()?
+            }
+        }),
+        Err(err) => return Err(err),
+    };
 
     println!("🚀 Booting AgentOS kernel...");
 

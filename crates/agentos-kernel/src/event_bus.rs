@@ -479,6 +479,9 @@ pub fn parse_event_type(name: &str) -> Option<EventType> {
         "DeviceConnected" => Some(EventType::DeviceConnected),
         "DeviceDisconnected" => Some(EventType::DeviceDisconnected),
         "HardwareAccessGranted" => Some(EventType::HardwareAccessGranted),
+        "DeviceMounted" => Some(EventType::DeviceMounted),
+        "DeviceUnmounted" => Some(EventType::DeviceUnmounted),
+        "DeviceEjected" => Some(EventType::DeviceEjected),
         // ToolEvents
         "ToolInstalled" => Some(EventType::ToolInstalled),
         "ToolRemoved" => Some(EventType::ToolRemoved),

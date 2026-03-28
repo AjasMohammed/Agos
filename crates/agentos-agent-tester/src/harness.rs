@@ -133,6 +133,9 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         logging: Default::default(),
         notifications: Default::default(),
         mcp: Default::default(),
+        registry: Default::default(),
+        scratchpad: Default::default(),
+        otel: Default::default(),
     }
 }
 

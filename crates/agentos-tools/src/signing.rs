@@ -232,6 +232,7 @@ mod tests {
                 author_pubkey: None,
                 signature: None,
                 trust_tier,
+                tags: None,
             },
             capabilities_required: ToolCapabilities {
                 permissions: vec!["fs.read".into()],

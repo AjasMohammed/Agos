@@ -64,10 +64,26 @@ pub enum KernelCommand {
     CancelTask {
         task_id: TaskID,
     },
+    /// Retrieve the execution trace for a completed task.
+    TaskGetTrace {
+        task_id: TaskID,
+    },
+    /// List recent task traces (up to `limit`), optionally filtered by agent.
+    TaskListTraces {
+        agent_id: Option<AgentID>,
+        limit: u32,
+    },
 
     // Tool management
     ListTools,
     InstallTool {
+        manifest_path: String,
+    },
+    /// Hot-reload a tool from an already-written manifest on disk.
+    /// Used by `agentctl tool add` (registry install) and the web UI marketplace
+    /// after writing the manifest to `tools/user/<name>.toml`.
+    /// Returns the assigned ToolID on success.
+    ToolLoad {
         manifest_path: String,
     },
     RemoveTool {
@@ -423,6 +439,28 @@ pub enum KernelCommand {
     },
     /// Query the health status of all configured MCP server connections.
     McpStatus,
+
+    // Scratchpad management
+    /// List all scratchpad pages for an agent.
+    ScratchListPages {
+        agent_id: String,
+    },
+    /// Read a scratchpad page by title.
+    ScratchReadPage {
+        agent_id: String,
+        title: String,
+    },
+    /// Delete a scratchpad page.
+    ScratchDeletePage {
+        agent_id: String,
+        title: String,
+    },
+    /// Show the wikilink graph for a page.
+    ScratchGraphPage {
+        agent_id: String,
+        title: String,
+        depth: usize,
+    },
 }
 
 impl KernelCommand {
@@ -524,6 +562,10 @@ pub enum KernelResponse {
 
     // MCP server health
     McpServerStatusList(Vec<McpServerStatus>),
+
+    // Task trace / debugger
+    TaskTrace(Box<agentos_types::TaskTrace>),
+    TaskTraces(Vec<agentos_types::TaskTraceSummary>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

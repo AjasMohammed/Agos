@@ -26,7 +26,7 @@ pub enum HalCommands {
         agent: String,
     },
 
-    /// Permanently deny a device for all agents
+    /// Quarantine a device and deny access for all agents
     Deny {
         /// Device ID to deny
         device: String,
@@ -90,7 +90,7 @@ pub async fn handle(client: &mut BusClient, cmd: HalCommands) -> anyhow::Result<
                             let is_new = d.get("is_new").and_then(|v| v.as_bool()).unwrap_or(false);
                             if is_new {
                                 println!(
-                                    "Device '{}' registered as '{}' — status: Quarantined.",
+                                    "Device '{}' registered as '{}' — status: Pending.",
                                     id, device_type
                                 );
                                 println!("Use 'hal approve' to grant agent access.");
@@ -139,7 +139,7 @@ pub async fn handle(client: &mut BusClient, cmd: HalCommands) -> anyhow::Result<
                         if let Some(err) = d.get("error").and_then(|v| v.as_str()) {
                             eprintln!("Error: {}", err);
                         } else {
-                            println!("Device '{}' permanently denied.", device);
+                            println!("Device '{}' quarantined.", device);
                         }
                     }
                 }

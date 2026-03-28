@@ -61,32 +61,21 @@ impl HalDriver for SensorDriver {
         ("hardware.sensor", PermissionOp::Read)
     }
 
-    /// Returns `"sensor:<sensor_id>"` when a sensor ID is provided, otherwise `"sensor:default"`.
-    ///
-    /// The sensor ID component is sanitized to prevent registry key injection:
-    /// only alphanumeric characters, hyphens, underscores, and dots are kept.
-    /// This ensures agent-supplied IDs cannot collide with keys from other HAL
-    /// driver namespaces (e.g. `"gpu:0"`).
+    /// Aggregate temperature reads inspect all thermal zones and do not map to a
+    /// single registry entry.
     fn device_key(&self, params: &Value) -> Option<String> {
-        let key = params
+        let action = params
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or("read_temperature");
+        if action == "read_temperature" {
+            return None;
+        }
+
+        params
             .get("sensor_id")
             .and_then(|v| v.as_str())
-            .map(|id| {
-                let sanitized: String = id
-                    .chars()
-                    .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
-                    .collect();
-                format!(
-                    "sensor:{}",
-                    if sanitized.is_empty() {
-                        "default"
-                    } else {
-                        &sanitized
-                    }
-                )
-            })
-            .unwrap_or_else(|| "sensor:default".to_string());
-        Some(key)
+            .map(|id| format!("sensor:{id}"))
     }
 
     async fn query(&self, params: Value) -> Result<Value, AgentOSError> {
@@ -111,6 +100,7 @@ impl HalDriver for SensorDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[tokio::test]
     async fn test_sensor_read_temperature() {
@@ -121,5 +111,18 @@ mod tests {
             .unwrap();
         // Should succeed even if no sensors found (returns empty list)
         assert!(result["temperatures"].is_array());
+    }
+
+    #[test]
+    fn test_sensor_read_temperature_has_no_single_device_key() {
+        let driver = SensorDriver::new();
+        assert_eq!(
+            driver.device_key(&json!({ "action": "read_temperature" })),
+            None
+        );
+        assert_eq!(
+            driver.device_key(&json!({ "action": "inspect", "sensor_id": "thermal_zone0" })),
+            Some("sensor:thermal_zone0".to_string())
+        );
     }
 }

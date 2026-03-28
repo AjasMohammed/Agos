@@ -1,4 +1,4 @@
-use agentos_kernel::{load_config, Kernel};
+use agentos_kernel::{load_config, resolve_boot_vault_passphrase, Kernel};
 use agentos_vault::ZeroizingString;
 use agentos_web::WebServer;
 use clap::Subcommand;
@@ -23,15 +23,18 @@ pub enum WebCommands {
 }
 
 pub async fn handle_serve(config_path: &Path, host: &str, port: u16) -> anyhow::Result<()> {
-    let passphrase = ZeroizingString::new(match std::env::var("AGENTOS_VAULT_PASSPHRASE") {
-        Ok(env_pass) if !env_pass.is_empty() => env_pass,
-        _ => {
-            eprint!("Enter vault passphrase: ");
-            rpassword::read_password()?
-        }
-    });
-
     let config = load_config(config_path)?;
+    let passphrase = match resolve_boot_vault_passphrase(&config) {
+        Ok(Some(passphrase)) => passphrase,
+        Ok(None) => ZeroizingString::new(match std::env::var("AGENTOS_VAULT_PASSPHRASE") {
+            Ok(env_pass) if !env_pass.is_empty() => env_pass,
+            _ => {
+                eprint!("Enter vault passphrase: ");
+                rpassword::read_password()?
+            }
+        }),
+        Err(err) => return Err(err),
+    };
     // Canonicalize at startup so handler comparisons are O(1) in-memory with no blocking I/O.
     let allowed_tool_dirs: Arc<Vec<PathBuf>> = Arc::new(
         [

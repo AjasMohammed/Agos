@@ -80,6 +80,9 @@ pub enum EventType {
     DeviceConnected,
     DeviceDisconnected,
     HardwareAccessGranted,
+    DeviceMounted,
+    DeviceUnmounted,
+    DeviceEjected,
 
     // ── ToolEvents (Phase 5) ──
     ToolInstalled,
@@ -99,6 +102,11 @@ pub enum EventType {
     DelegationResponseReceived,
     MessageDeliveryFailed,
     AgentUnreachable,
+
+    // ── Agent RPC (Phase 7) ──
+    AgentRpcCallStarted,
+    AgentRpcCallCompleted,
+    AgentRpcCallTimedOut,
 
     // ── ScheduleEvents (Phase 4) ──
     CronJobFired,
@@ -164,7 +172,10 @@ impl EventType {
             | Self::SensorReadingThresholdExceeded
             | Self::DeviceConnected
             | Self::DeviceDisconnected
-            | Self::HardwareAccessGranted => EventCategory::HardwareEvents,
+            | Self::HardwareAccessGranted
+            | Self::DeviceMounted
+            | Self::DeviceUnmounted
+            | Self::DeviceEjected => EventCategory::HardwareEvents,
 
             Self::ToolInstalled
             | Self::ToolRemoved
@@ -181,7 +192,10 @@ impl EventType {
             | Self::DelegationReceived
             | Self::DelegationResponseReceived
             | Self::MessageDeliveryFailed
-            | Self::AgentUnreachable => EventCategory::AgentCommunication,
+            | Self::AgentUnreachable
+            | Self::AgentRpcCallStarted
+            | Self::AgentRpcCallCompleted
+            | Self::AgentRpcCallTimedOut => EventCategory::AgentCommunication,
 
             Self::CronJobFired
             | Self::ScheduledTaskMissed

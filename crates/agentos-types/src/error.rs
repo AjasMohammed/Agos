@@ -87,6 +87,15 @@ pub enum AgentOSError {
     #[error("HAL error: {0}")]
     HalError(String),
 
+    #[error("Device '{0}' is quarantined and access is permanently denied")]
+    DeviceQuarantined(String),
+
+    #[error("Device '{device_id}' access is pending approval (escalation: {escalation_id})")]
+    DeviceAccessPending {
+        device_id: String,
+        escalation_id: String,
+    },
+
     // Sandbox errors
     #[error("Sandbox spawn failed: {reason}")]
     SandboxSpawnFailed { reason: String },
@@ -110,6 +119,16 @@ pub enum AgentOSError {
 
     #[error("Event delivery failed: {0}")]
     EventDeliveryFailed(String),
+
+    // RPC errors
+    #[error("RPC call depth exceeded: max {max} nested calls allowed")]
+    RpcDepthExceeded { max: u32 },
+
+    #[error("RPC call aborted: caller channel dropped")]
+    RpcAborted,
+
+    #[error("RPC call failed: {0}")]
+    RpcFailed(String),
 
     // IO — wrapped in Arc so AgentOSError is Clone while preserving the error source chain.
     #[error("IO error: {0}")]

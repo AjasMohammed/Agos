@@ -110,6 +110,11 @@ pub enum AuditEventType {
     HardwareDeviceApproved,
     HardwareDeviceDenied,
     HardwareDeviceRevoked,
+    DeviceAccessGranted,
+    DeviceAccessDenied,
+    DeviceApproved,
+    DeviceQuarantined,
+    DeviceAccessEscalated,
 
     // Agent identity / pubkey events
     /// Emitted when a pubkey is successfully registered for an agent (first-time only).

@@ -1371,6 +1371,33 @@ Revoke a specific agent's access to a device.
 agentctl hal revoke gpu:0 --agent worker
 ```
 
+### `hal query`
+
+Query a HAL driver directly. The driver dispatches the request based on the JSON parameters. Currently available drivers: `usb-storage` (requires the `usb-storage` feature flag at build time).
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `driver` | `String` | Driver name (positional, e.g. `usb-storage`) |
+| `params` | `String` | JSON object with driver-specific parameters |
+
+**Examples:**
+
+```bash
+# List USB filesystems
+agentctl hal query usb-storage '{"action": "list"}'
+
+# Mount a USB partition
+agentctl hal query usb-storage '{"action": "mount", "device": "sdb1"}'
+
+# Unmount
+agentctl hal query usb-storage '{"action": "unmount", "device": "sdb1"}'
+
+# Eject (power off the drive)
+agentctl hal query usb-storage '{"action": "eject", "device": "sdb1"}'
+```
+
+> **Permission:** Requires `hardware.usb-storage:x` and the device `usb-storage:<device>` must be approved in the HAL device registry. See [[18-Advanced Operations#USB Storage Driver]] for full details.
+
 ---
 
 ## `notifications` — Manage the user notification inbox
@@ -1652,7 +1679,7 @@ agentctl perm grant monitor hardware.gpu:r
 | `snapshot` | Task snapshots | `list`, `rollback` |
 | `event` | Event subscriptions | `subscribe`, `unsubscribe`, `subscriptions list`, `subscriptions show`, `subscriptions enable`, `subscriptions disable`, `history` |
 | `identity` | Agent identities | `show`, `revoke` |
-| `hal` | Hardware device access | `list`, `register`, `approve`, `deny`, `revoke` |
+| `hal` | Hardware device access | `list`, `register`, `approve`, `deny`, `revoke`, `query` |
 | `notifications` | User notification inbox | `list`, `read`, `respond`, `watch` |
 | `channel` | External delivery channels | `connect`, `list`, `test`, `disconnect` |
 | `mcp` | MCP integration | `serve`*, `list`*, `status` |

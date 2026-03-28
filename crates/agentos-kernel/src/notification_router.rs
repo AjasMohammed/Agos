@@ -370,11 +370,10 @@ impl NotificationRouter {
             state.window_start = now;
         }
         if state.count >= RATE_LIMIT_NOTIFY_PER_MIN {
-            return Err(AgentOSError::PermissionDenied {
-                resource: "user.notify".to_string(),
-                operation: format!(
-                    "rate_limit_exceeded:max_{}_per_minute",
-                    RATE_LIMIT_NOTIFY_PER_MIN
+            return Err(AgentOSError::RateLimited {
+                detail: format!(
+                    "max {} notifications per minute for agent {}",
+                    RATE_LIMIT_NOTIFY_PER_MIN, agent_id
                 ),
             });
         }

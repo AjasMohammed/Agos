@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,15 @@ pub struct KernelConfig {
     /// Defines external MCP server processes to connect at kernel boot.
     #[serde(default)]
     pub mcp: McpConfig,
+    /// Tool registry configuration for marketplace install/publish/search.
+    #[serde(default)]
+    pub registry: RegistryConfig,
+    /// Agent scratchpad configuration (graph-aware knowledge store).
+    #[serde(default)]
+    pub scratchpad: ScratchpadConfig,
+    /// OpenTelemetry export configuration.
+    #[serde(default)]
+    pub otel: OtelConfig,
 }
 
 /// Configuration for the Unified Notification and Interaction System (UNIS).
@@ -76,6 +86,10 @@ fn default_max_inbox_size() -> usize {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_false() -> bool {
+    false
 }
 
 impl Default for NotificationsConfig {
@@ -704,6 +718,64 @@ pub struct LoggingSettings {
     pub log_format: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OtelProtocol {
+    Grpc,
+    Http,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for OtelProtocol {
+    fn default() -> Self {
+        Self::Grpc
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OtelConfig {
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+    #[serde(default = "default_otel_endpoint")]
+    pub endpoint: String,
+    #[serde(default)]
+    pub protocol: OtelProtocol,
+    #[serde(default = "default_otel_service_name")]
+    pub service_name: String,
+    #[serde(default = "default_otel_sample_rate")]
+    pub sample_rate: f64,
+    #[serde(default = "default_true")]
+    pub scrub_tool_inputs: bool,
+    #[serde(default = "default_true")]
+    pub scrub_tool_outputs: bool,
+}
+
+impl Default for OtelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_false(),
+            endpoint: default_otel_endpoint(),
+            protocol: OtelProtocol::default(),
+            service_name: default_otel_service_name(),
+            sample_rate: default_otel_sample_rate(),
+            scrub_tool_inputs: default_true(),
+            scrub_tool_outputs: default_true(),
+        }
+    }
+}
+
+fn default_otel_endpoint() -> String {
+    "http://localhost:4317".to_string()
+}
+
+fn default_otel_service_name() -> String {
+    "agentos".to_string()
+}
+
+fn default_otel_sample_rate() -> f64 {
+    1.0
+}
+
 fn default_log_dir() -> String {
     "/tmp/agentos/logs".to_string()
 }
@@ -761,6 +833,118 @@ pub struct McpServerConfig {
     pub args: Vec<String>,
 }
 
+/// Agent scratchpad configuration for the graph-aware knowledge store.
+///
+/// Controls BFS graph traversal depth and budget limits for automatic
+/// injection of related scratchpad notes into the LLM context window.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ScratchpadConfig {
+    /// Whether scratchpad context injection is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Database path (relative to `tools.data_dir` or absolute).
+    #[serde(default = "default_scratchpad_db_path")]
+    pub db_path: String,
+    /// BFS traversal depth for context injection (0 = seed page only).
+    #[serde(default = "default_scratchpad_context_depth")]
+    pub context_depth: usize,
+    /// Maximum pages injected per inference call.
+    #[serde(default = "default_scratchpad_max_context_pages")]
+    pub max_context_pages: usize,
+    /// Maximum total bytes of scratchpad content injected per inference call.
+    #[serde(default = "default_scratchpad_max_context_bytes")]
+    pub max_context_bytes: usize,
+    /// Maximum content size per individual page (bytes).
+    #[serde(default = "default_scratchpad_max_page_size")]
+    pub max_page_size: usize,
+    /// Maximum pages per agent.
+    #[serde(default = "default_scratchpad_max_pages_per_agent")]
+    pub max_pages_per_agent: usize,
+    /// Automatically generate a scratchpad note when a task completes.
+    #[serde(default = "default_true")]
+    pub auto_write_on_completion: bool,
+    /// Minimum episodic entries for a task to qualify for auto-write (skip trivial tasks).
+    #[serde(default = "default_scratchpad_auto_write_min_steps")]
+    pub auto_write_min_steps: usize,
+    /// Maximum bytes for an auto-generated scratchpad note.
+    #[serde(default = "default_scratchpad_auto_write_max_summary")]
+    pub auto_write_max_summary: usize,
+}
+
+impl Default for ScratchpadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            db_path: default_scratchpad_db_path(),
+            context_depth: default_scratchpad_context_depth(),
+            max_context_pages: default_scratchpad_max_context_pages(),
+            max_context_bytes: default_scratchpad_max_context_bytes(),
+            max_page_size: default_scratchpad_max_page_size(),
+            max_pages_per_agent: default_scratchpad_max_pages_per_agent(),
+            auto_write_on_completion: true,
+            auto_write_min_steps: default_scratchpad_auto_write_min_steps(),
+            auto_write_max_summary: default_scratchpad_auto_write_max_summary(),
+        }
+    }
+}
+
+fn default_scratchpad_db_path() -> String {
+    "scratchpad.db".to_string()
+}
+
+fn default_scratchpad_context_depth() -> usize {
+    2
+}
+
+fn default_scratchpad_max_context_pages() -> usize {
+    5
+}
+
+fn default_scratchpad_max_context_bytes() -> usize {
+    8192
+}
+
+fn default_scratchpad_max_page_size() -> usize {
+    65536 // 64 KB
+}
+
+fn default_scratchpad_max_pages_per_agent() -> usize {
+    1000
+}
+
+fn default_scratchpad_auto_write_min_steps() -> usize {
+    3
+}
+
+fn default_scratchpad_auto_write_max_summary() -> usize {
+    2048
+}
+
+/// Tool registry (marketplace) configuration.
+///
+/// Controls where `agentctl tool search/add/publish` connect to fetch and
+/// publish community tools.  Defaults to the public AgentOS registry.
+/// Override with the `AGENTOS_REGISTRY` environment variable for local or
+/// self-hosted registries.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RegistryConfig {
+    /// Base URL of the tool registry HTTP API.
+    #[serde(default = "default_registry_url")]
+    pub url: String,
+}
+
+impl Default for RegistryConfig {
+    fn default() -> Self {
+        Self {
+            url: default_registry_url(),
+        }
+    }
+}
+
+fn default_registry_url() -> String {
+    "https://registry.agentos.dev".to_string()
+}
+
 /// Load kernel configuration from a TOML file.
 pub fn load_config(path: &std::path::Path) -> Result<KernelConfig, anyhow::Error> {
     let content = std::fs::read_to_string(path)?;
@@ -771,6 +955,7 @@ pub fn load_config(path: &std::path::Path) -> Result<KernelConfig, anyhow::Error
     validate_llm_settings(&config.llm)?;
     validate_workspace_paths(&config.tools.workspace)?;
     validate_logging_settings(&config.logging)?;
+    validate_otel_config(&config.otel)?;
     validate_sandbox_settings(&config.kernel)?;
     validate_notification_adapters(&config.notifications.adapters)?;
     validate_mcp_config(&config.mcp)?;
@@ -891,6 +1076,22 @@ fn validate_logging_settings(logging: &LoggingSettings) -> Result<(), anyhow::Er
     Ok(())
 }
 
+fn validate_otel_config(otel: &OtelConfig) -> Result<(), anyhow::Error> {
+    if !(0.0..=1.0).contains(&otel.sample_rate) {
+        anyhow::bail!(
+            "otel.sample_rate must be between 0.0 and 1.0 inclusive, got {}",
+            otel.sample_rate
+        );
+    }
+    if otel.enabled && otel.endpoint.trim().is_empty() {
+        anyhow::bail!("otel.enabled is true but otel.endpoint is empty");
+    }
+    if otel.service_name.trim().is_empty() {
+        anyhow::bail!("otel.service_name must not be empty");
+    }
+    Ok(())
+}
+
 fn validate_sandbox_settings(kernel: &KernelSettings) -> Result<(), anyhow::Error> {
     if kernel.max_concurrent_sandbox_children == 0 {
         anyhow::bail!(
@@ -950,40 +1151,181 @@ fn validate_notification_adapters(
 }
 
 fn apply_env_overrides(config: &mut KernelConfig) {
-    if let Ok(host) = std::env::var("AGENTOS_OLLAMA_HOST") {
-        if !host.trim().is_empty() {
-            config.ollama.host = host;
-        }
+    apply_env_overrides_from(config, |key| std::env::var(key).ok());
+}
+
+fn apply_env_overrides_from<F>(config: &mut KernelConfig, lookup: F)
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if let Some(new_data_dir) = nonempty_env(&lookup, "AGENTOS_DATA_DIR") {
+        let old_data_dir = config.tools.data_dir.clone();
+        config.tools.data_dir = new_data_dir.clone();
+        rebase_data_dir_paths(config, &old_data_dir, &new_data_dir);
     }
 
-    if let Ok(url) = std::env::var("AGENTOS_LLM_URL") {
-        if !url.trim().is_empty() {
-            config.llm.custom_base_url = Some(url);
-        }
+    apply_string_override(
+        &lookup,
+        "AGENTOS_CORE_TOOLS_DIR",
+        &mut config.tools.core_tools_dir,
+    );
+    apply_string_override(
+        &lookup,
+        "AGENTOS_USER_TOOLS_DIR",
+        &mut config.tools.user_tools_dir,
+    );
+    apply_string_override(
+        &lookup,
+        "AGENTOS_AUDIT_LOG_PATH",
+        &mut config.audit.log_path,
+    );
+    apply_string_override(
+        &lookup,
+        "AGENTOS_VAULT_PATH",
+        &mut config.secrets.vault_path,
+    );
+    apply_string_override(
+        &lookup,
+        "AGENTOS_BUS_SOCKET_PATH",
+        &mut config.bus.socket_path,
+    );
+    apply_string_override(
+        &lookup,
+        "AGENTOS_STATE_DB_PATH",
+        &mut config.kernel.state_db_path,
+    );
+    apply_string_override(
+        &lookup,
+        "AGENTOS_MODEL_CACHE_DIR",
+        &mut config.memory.model_cache_dir,
+    );
+    apply_string_override(&lookup, "AGENTOS_OLLAMA_HOST", &mut config.ollama.host);
+    apply_string_override(
+        &lookup,
+        "AGENTOS_OLLAMA_MODEL",
+        &mut config.ollama.default_model,
+    );
+    apply_parsed_override(
+        &lookup,
+        "AGENTOS_OLLAMA_REQUEST_TIMEOUT_SECS",
+        &mut config.ollama.request_timeout_secs,
+    );
+    apply_parsed_override(
+        &lookup,
+        "AGENTOS_HEALTH_PORT",
+        &mut config.kernel.health_port,
+    );
+
+    if let Some(url) = nonempty_env(&lookup, "AGENTOS_LLM_URL") {
+        config.llm.custom_base_url = Some(url);
+    }
+    if let Some(url) = nonempty_env(&lookup, "AGENTOS_OPENAI_BASE_URL") {
+        config.llm.openai_base_url = Some(url);
+    }
+    if let Some(url) = nonempty_env(&lookup, "AGENTOS_LLM_ANTHROPIC_BASE_URL") {
+        config.llm.anthropic_base_url = Some(url);
+    }
+    if let Some(url) = nonempty_env(&lookup, "AGENTOS_LLM_GEMINI_BASE_URL") {
+        config.llm.gemini_base_url = Some(url);
     }
 
-    if let Ok(url) = std::env::var("AGENTOS_OPENAI_BASE_URL") {
-        if !url.trim().is_empty() {
-            config.llm.openai_base_url = Some(url);
+    apply_bool_override(&lookup, "AGENTOS_OTEL_ENABLED", &mut config.otel.enabled);
+    apply_string_override(&lookup, "AGENTOS_OTEL_ENDPOINT", &mut config.otel.endpoint);
+    apply_string_override(
+        &lookup,
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        &mut config.otel.endpoint,
+    );
+    apply_string_override(
+        &lookup,
+        "AGENTOS_OTEL_SERVICE_NAME",
+        &mut config.otel.service_name,
+    );
+    apply_string_override(&lookup, "OTEL_SERVICE_NAME", &mut config.otel.service_name);
+    apply_parsed_override(
+        &lookup,
+        "AGENTOS_OTEL_SAMPLE_RATE",
+        &mut config.otel.sample_rate,
+    );
+
+    apply_parsed_override(
+        &lookup,
+        "AGENTOS_LLM_MAX_TOKENS",
+        &mut config.llm.max_tokens,
+    );
+    apply_parsed_override(
+        &lookup,
+        "AGENTOS_OLLAMA_CONTEXT_WINDOW",
+        &mut config.llm.ollama_context_window,
+    );
+
+    apply_string_override(&lookup, "AGENTOS_REGISTRY", &mut config.registry.url);
+}
+
+fn nonempty_env<F>(lookup: &F, key: &str) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup(key).and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn apply_string_override<F>(lookup: &F, key: &str, target: &mut String)
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if let Some(value) = nonempty_env(lookup, key) {
+        *target = value;
+    }
+}
+
+fn apply_bool_override<F>(lookup: &F, key: &str, target: &mut bool)
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if let Some(value) = nonempty_env(lookup, key) {
+        if let Ok(parsed) = value.parse::<bool>() {
+            *target = parsed;
         }
     }
+}
 
-    if let Ok(path) = std::env::var("AGENTOS_STATE_DB_PATH") {
-        if !path.trim().is_empty() {
-            config.kernel.state_db_path = path;
+fn apply_parsed_override<F, T>(lookup: &F, key: &str, target: &mut T)
+where
+    F: Fn(&str) -> Option<String>,
+    T: std::str::FromStr,
+{
+    if let Some(value) = nonempty_env(lookup, key) {
+        if let Ok(parsed) = value.parse::<T>() {
+            *target = parsed;
         }
     }
+}
 
-    if let Ok(val) = std::env::var("AGENTOS_LLM_MAX_TOKENS") {
-        if let Ok(n) = val.trim().parse::<u32>() {
-            config.llm.max_tokens = n;
-        }
-    }
+fn rebase_data_dir_paths(config: &mut KernelConfig, old_data_dir: &str, new_data_dir: &str) {
+    rebase_runtime_path(&mut config.kernel.state_db_path, old_data_dir, new_data_dir);
+    rebase_runtime_path(&mut config.audit.log_path, old_data_dir, new_data_dir);
+    rebase_runtime_path(&mut config.secrets.vault_path, old_data_dir, new_data_dir);
+    rebase_runtime_path(&mut config.bus.socket_path, old_data_dir, new_data_dir);
+    rebase_runtime_path(&mut config.tools.core_tools_dir, old_data_dir, new_data_dir);
+    rebase_runtime_path(&mut config.tools.user_tools_dir, old_data_dir, new_data_dir);
+    rebase_runtime_path(
+        &mut config.memory.model_cache_dir,
+        old_data_dir,
+        new_data_dir,
+    );
+}
 
-    if let Ok(val) = std::env::var("AGENTOS_OLLAMA_CONTEXT_WINDOW") {
-        if let Ok(n) = val.trim().parse::<u32>() {
-            config.llm.ollama_context_window = n;
-        }
+fn rebase_runtime_path(path: &mut String, old_root: &str, new_root: &str) {
+    let old_root = Path::new(old_root);
+    let current = Path::new(path);
+    if let Ok(relative) = current.strip_prefix(old_root) {
+        *path = PathBuf::from(new_root)
+            .join(relative)
+            .to_string_lossy()
+            .into_owned();
     }
 }
 
@@ -1256,6 +1598,35 @@ default_model = "llama3.2"
     }
 
     #[test]
+    fn otel_defaults_when_section_omitted() {
+        let config: KernelConfig = toml::from_str(MINIMAL_TOML).expect("config should parse");
+        assert!(!config.otel.enabled);
+        assert_eq!(config.otel.endpoint, "http://localhost:4317");
+        assert_eq!(config.otel.protocol, OtelProtocol::Grpc);
+        assert_eq!(config.otel.service_name, "agentos");
+        assert_eq!(config.otel.sample_rate, 1.0);
+        assert!(config.otel.scrub_tool_inputs);
+        assert!(config.otel.scrub_tool_outputs);
+    }
+
+    #[test]
+    fn otel_rejects_invalid_sample_rate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad-otel.toml");
+        let toml_str = format!(
+            "{}\n[otel]\nenabled = true\nendpoint = \"http://localhost:4317\"\nsample_rate = 1.5\n",
+            MINIMAL_TOML
+        );
+        std::fs::write(&path, toml_str).unwrap();
+        let err = load_config(&path).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("otel.sample_rate must be between 0.0 and 1.0 inclusive"),
+            "expected sample_rate error, got: {err}"
+        );
+    }
+
+    #[test]
     fn sandbox_policy_defaults_to_trust_aware() {
         let config: KernelConfig = toml::from_str(MINIMAL_TOML).expect("should parse");
         assert_eq!(config.kernel.sandbox_policy, SandboxPolicy::TrustAware);
@@ -1300,6 +1671,56 @@ default_model = "llama3.2"
         assert!(
             err.to_string().contains("must be > 0"),
             "expected concurrency error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn env_overrides_rebase_data_dir_and_apply_runtime_values() {
+        let mut config: KernelConfig = toml::from_str(MINIMAL_TOML).expect("config should parse");
+        config.audit.log_path = "/tmp/agentos/data/audit.db".to_string();
+        config.secrets.vault_path = "/tmp/agentos/data/vault.db".to_string();
+        config.bus.socket_path = "/tmp/agentos/data/agentos.sock".to_string();
+        config.tools.core_tools_dir = "/tmp/agentos/data/tools/core".to_string();
+        config.tools.user_tools_dir = "/tmp/agentos/data/tools/user".to_string();
+        config.kernel.state_db_path = "/tmp/agentos/data/kernel_state.db".to_string();
+        config.memory.model_cache_dir = "/tmp/agentos/data/models".to_string();
+
+        let overrides = std::collections::HashMap::from([
+            ("AGENTOS_DATA_DIR", "/var/lib/agentos".to_string()),
+            ("AGENTOS_HEALTH_PORT", "9191".to_string()),
+            ("AGENTOS_OLLAMA_MODEL", "llama3.3".to_string()),
+            (
+                "AGENTOS_LLM_ANTHROPIC_BASE_URL",
+                "https://anthropic.internal/v1".to_string(),
+            ),
+            (
+                "AGENTOS_OPENAI_BASE_URL",
+                "https://openai.internal/v1".to_string(),
+            ),
+        ]);
+
+        apply_env_overrides_from(&mut config, |key| overrides.get(key).cloned());
+
+        assert_eq!(config.tools.data_dir, "/var/lib/agentos");
+        assert_eq!(config.audit.log_path, "/var/lib/agentos/audit.db");
+        assert_eq!(config.secrets.vault_path, "/var/lib/agentos/vault.db");
+        assert_eq!(config.bus.socket_path, "/var/lib/agentos/agentos.sock");
+        assert_eq!(config.tools.core_tools_dir, "/var/lib/agentos/tools/core");
+        assert_eq!(config.tools.user_tools_dir, "/var/lib/agentos/tools/user");
+        assert_eq!(
+            config.kernel.state_db_path,
+            "/var/lib/agentos/kernel_state.db"
+        );
+        assert_eq!(config.memory.model_cache_dir, "/var/lib/agentos/models");
+        assert_eq!(config.kernel.health_port, 9191);
+        assert_eq!(config.ollama.default_model, "llama3.3");
+        assert_eq!(
+            config.llm.anthropic_base_url.as_deref(),
+            Some("https://anthropic.internal/v1")
+        );
+        assert_eq!(
+            config.llm.openai_base_url.as_deref(),
+            Some("https://openai.internal/v1")
         );
     }
 }

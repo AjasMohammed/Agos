@@ -355,6 +355,7 @@ mod tests {
                 author_pubkey: Some("notavalidpubkey".to_string()),
                 signature: Some("notavalidsig".to_string()),
                 trust_tier: TrustTier::Community,
+                tags: None,
             },
             capabilities_required: ToolCapabilities {
                 permissions: vec![],
@@ -389,6 +390,7 @@ mod tests {
                 author_pubkey: None,
                 signature: None,
                 trust_tier: TrustTier::Core,
+                tags: None,
             },
             capabilities_required: ToolCapabilities {
                 permissions: vec![],

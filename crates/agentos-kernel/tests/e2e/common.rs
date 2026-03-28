@@ -1,7 +1,7 @@
 use agentos_bus::client::BusClient;
 use agentos_kernel::config::{
     AuditSettings, BusSettings, HealthMonitorConfig, KernelConfig, KernelSettings, LlmSettings,
-    MemorySettings, OllamaSettings, PreflightConfig, SecretsSettings, ToolsSettings,
+    MemorySettings, OllamaSettings, OtelConfig, PreflightConfig, SecretsSettings, ToolsSettings,
 };
 use agentos_kernel::Kernel;
 use agentos_llm::{MockLLMCore, MockResponse};
@@ -96,6 +96,9 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         logging: Default::default(),
         notifications: Default::default(),
         mcp: Default::default(),
+        registry: Default::default(),
+        scratchpad: Default::default(),
+        otel: OtelConfig::default(),
     }
 }
 

@@ -882,6 +882,7 @@ mod tests {
                 author_pubkey: None,
                 signature: None,
                 trust_tier: TrustTier::Core,
+                tags: None,
             },
             capabilities_required: ToolCapabilities {
                 permissions: permissions.into_iter().map(str::to_string).collect(),

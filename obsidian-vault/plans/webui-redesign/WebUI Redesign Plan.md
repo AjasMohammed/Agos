@@ -6,7 +6,7 @@ tags:
   - frontend
   - plan
 date: 2026-03-18
-status: planned
+status: in-progress
 effort: 12d
 priority: high
 ---
@@ -79,14 +79,14 @@ base.html (shell)
 
 ## Phase Overview
 
-| Phase | Name | Effort | Dependencies | Link |
-|-------|------|--------|--------------|------|
-| 01 | Layout and Navigation Shell | 2d | None | [[01-layout-navigation]] |
-| 02 | Agent Dashboard Enhancement | 2d | Phase 01 | [[02-agent-dashboard]] |
-| 03 | Task Management Enhancement | 2d | Phase 01 | [[03-task-management]] |
-| 04 | Audit Log Viewer Enhancement | 2d | Phase 01 | [[04-audit-log-viewer]] |
-| 05 | Real-Time Updates via SSE | 2d | Phases 02, 03, 04 | [[05-real-time-updates]] |
-| 06 | UX Polish: Empty States, Skeletons, Toasts, and Accessibility | 2d | Phase 01 | [[06-ux-polish]] |
+| Phase | Name | Effort | Dependencies | Link | Status |
+|-------|------|--------|--------------|------|--------|
+| 01 | Layout and Navigation Shell | 2d | None | [[01-layout-navigation]] | partial |
+| 02 | Agent Dashboard Enhancement | 2d | Phase 01 | [[02-agent-dashboard]] | partial |
+| 03 | Task Management Enhancement | 2d | Phase 01 | [[03-task-management]] | planned |
+| 04 | Audit Log Viewer Enhancement | 2d | Phase 01 | [[04-audit-log-viewer]] | planned |
+| 05 | Real-Time Updates via SSE | 2d | Phases 02, 03, 04 | [[05-real-time-updates]] | planned |
+| 06 | UX Polish: Empty States, Skeletons, Toasts, and Accessibility | 2d | Phase 01 | [[06-ux-polish]] | planned |
 
 ---
 

@@ -1,17 +1,44 @@
-{# Requires an ancestor element with x-data="{ showRun: false, selectedPipeline: '' }" (see pipelines.html) #}
+{# Requires an ancestor element with x-data containing showRun, selectedPipeline, and csrfToken. #}
 {% for pipeline in pipelines %}
 <tr>
-    <td><strong>{{ pipeline.name }}</strong></td>
+    <td>
+        <strong>{{ pipeline.name }}</strong>
+        <div><small class="muted">{{ pipeline.description|default("No description", true) }}</small></div>
+    </td>
     <td>{{ pipeline.version }}</td>
-    <td>{{ pipeline.description|default("-", true) }}</td>
     <td>{{ pipeline.step_count }}</td>
     <td>{{ pipeline.installed_at }}</td>
     <td>
+        {% if pipeline.last_run_status %}
+        <span class="badge badge-{{ pipeline.last_run_status }}">{{ pipeline.last_run_status }}</span>
+        <div><small class="muted">{{ pipeline.last_run_at|default("-", true) }}</small></div>
+        {% else %}
+        <span class="muted">Never run</span>
+        {% endif %}
+    </td>
+    <td>
+        <div class="pipeline-actions">
+        <button type="button" class="outline small"
+                data-pipeline="{{ pipeline.name }}"
+                @click="goToEdit($el.dataset.pipeline)">
+            Edit
+        </button>
         <button class="outline small"
                 data-pipeline="{{ pipeline.name }}"
                 @click="showRun = true; selectedPipeline = $el.dataset.pipeline">
             Run
         </button>
+        <button type="button" class="secondary small"
+                data-pipeline="{{ pipeline.name }}"
+                @click="clonePipeline($el.dataset.pipeline)">
+            Clone
+        </button>
+        <button type="button" class="contrast small"
+                data-pipeline="{{ pipeline.name }}"
+                @click="deletePipeline($el.dataset.pipeline)">
+            Delete
+        </button>
+        </div>
     </td>
 </tr>
 {% endfor %}
