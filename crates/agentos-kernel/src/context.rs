@@ -232,14 +232,20 @@ impl ContextManager {
 
                             match self.config.summarization_mode {
                                 SummarizationMode::Off => {
-                                    let _ = tc.window.extract_compressible(compress_count.max(1));
+                                    let extracted =
+                                        tc.window.extract_compressible(compress_count.max(1));
+                                    if !extracted.is_empty() {
+                                        tc.window.upsert_context_notice(extracted.len());
+                                    }
                                     if is_critical {
                                         tc.window.needs_checkpoint = true;
                                     }
                                     None
                                 }
                                 SummarizationMode::Concat => {
-                                    tc.window.compress_oldest(compress_count.max(1));
+                                    let count = compress_count.max(1);
+                                    tc.window.compress_oldest(count);
+                                    tc.window.upsert_context_notice(count);
                                     if is_critical {
                                         tc.window.needs_checkpoint = true;
                                     }
