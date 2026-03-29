@@ -509,6 +509,11 @@ impl Kernel {
             }
         }
 
+        // Collect tool call IDs before the vector is consumed, so we can
+        // increment reference counts after all results are pushed.
+        let parallel_tool_call_ids: Vec<String> =
+            tool_calls.iter().filter_map(|tc| tc.id.clone()).collect();
+
         // Tracks a HardLimitExceeded hit during the preparation loop so we can
         // handle it (Suspend or Kill) after the loop exits.
         let mut batch_budget_exceeded: Option<(BudgetAction, String)> = None;
@@ -1619,6 +1624,22 @@ impl Kernel {
             }
         }
 
+        // Increment reference counts for tool call IDs that were just processed.
+        // This makes the linked Assistant + ToolResult entries resist eviction.
+        if !parallel_tool_call_ids.is_empty() {
+            if let Err(e) = self
+                .context_manager
+                .increment_references(&task.id, &parallel_tool_call_ids)
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "Failed to increment reference counts for parallel tool calls"
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -1805,6 +1826,40 @@ impl Kernel {
                             "[AGENT_MEMORY_BLOCKS]\n{}\n[/AGENT_MEMORY_BLOCKS]",
                             blocks_context
                         ));
+                    }
+                }
+
+                // Agent context memory injection: per-agent self-curated document
+                // injected at every task start, loaded once (Option A: next-invocation semantics).
+                if self.config.memory.context.enabled {
+                    match self
+                        .context_memory_store
+                        .read_content(&task.agent_id.to_string())
+                        .await
+                    {
+                        Ok(Some(content)) => {
+                            knowledge_blocks.insert(0, format!(
+                                "<agent-context-memory>\nThis is your self-curated context memory. Update it with the context-memory-update tool.\n\n{}\n</agent-context-memory>",
+                                content
+                            ));
+                            tracing::debug!(
+                                task_id = %task.id,
+                                "Injected agent context memory into knowledge blocks"
+                            );
+                        }
+                        Ok(None) => {
+                            // First task or empty memory: inject bootstrapping hint
+                            knowledge_blocks.insert(0,
+                                "<agent-context-memory>\nYou have an empty context memory. As you work, use the context-memory-update tool to save important patterns, preferences, and knowledge you want to remember for future tasks. Write in markdown. Be concise.\n</agent-context-memory>".to_string()
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task.id,
+                                error = %e,
+                                "Failed to read agent context memory, skipping injection"
+                            );
+                        }
                     }
                 }
 
@@ -4054,6 +4109,22 @@ impl Kernel {
                             {
                                 tracing::warn!(task_id = %task.id, error = %record_err, "Failed to record episodic memory");
                             }
+                        }
+                    }
+
+                    // Increment reference counts for the tool call ID that was just processed.
+                    // This makes the linked Assistant + ToolResult entries resist eviction.
+                    if let Some(ref tc_id) = tool_call.id {
+                        if let Err(e) = self
+                            .context_manager
+                            .increment_references(&task.id, std::slice::from_ref(tc_id))
+                            .await
+                        {
+                            tracing::warn!(
+                                task_id = %task.id,
+                                error = %e,
+                                "Failed to increment reference counts for tool call"
+                            );
                         }
                     }
                 }
