@@ -91,6 +91,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             consolidation: Default::default(),
         },
         context_budget: Default::default(),
+        context: Default::default(),
         health_monitor: HealthMonitorConfig::default(),
         preflight: PreflightConfig::default(),
         logging: Default::default(),

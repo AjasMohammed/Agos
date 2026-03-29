@@ -1,36 +1,83 @@
+use crate::config::ContextConfig;
+use crate::cost_tracker::CostTracker;
 use agentos_types::*;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Per-task context state: the context window and the agent that owns it.
+struct TaskContext {
+    window: ContextWindow,
+    /// The agent that owns this task's context. Used by LLM summarization (Task 7).
+    #[allow(dead_code)]
+    agent_id: AgentID,
+}
+
 pub struct ContextManager {
-    /// Per-task context windows.
-    windows: RwLock<HashMap<TaskID, ContextWindow>>,
+    tasks: RwLock<HashMap<TaskID, TaskContext>>,
     max_entries: usize,
     /// Token budget per context window. 0 = no budget enforcement.
     /// Spec §11: compress at 80%, checkpoint+flush at 95%.
     token_budget: usize,
+    /// Per-agent LLM adapters. Used by LLM summarization (Task 7).
+    #[allow(dead_code)]
+    active_llms: Arc<RwLock<HashMap<AgentID, Arc<dyn agentos_llm::LLMCore>>>>,
+    /// Cost tracker for attributing summarization inference costs. Used by Task 7.
+    #[allow(dead_code)]
+    cost_tracker: Arc<CostTracker>,
+    /// Context configuration (summarization mode, etc.). Used by Task 7.
+    #[allow(dead_code)]
+    config: ContextConfig,
 }
 
 impl ContextManager {
     pub fn new(max_entries: usize) -> Self {
         Self {
-            windows: RwLock::new(HashMap::new()),
+            tasks: RwLock::new(HashMap::new()),
             max_entries,
             token_budget: 0,
+            active_llms: Arc::new(RwLock::new(HashMap::new())),
+            cost_tracker: Arc::new(CostTracker::new()),
+            config: ContextConfig::default(),
         }
     }
 
     pub fn with_token_budget(max_entries: usize, token_budget: usize) -> Self {
         Self {
-            windows: RwLock::new(HashMap::new()),
+            tasks: RwLock::new(HashMap::new()),
             max_entries,
             token_budget,
+            active_llms: Arc::new(RwLock::new(HashMap::new())),
+            cost_tracker: Arc::new(CostTracker::new()),
+            config: ContextConfig::default(),
+        }
+    }
+
+    pub fn with_full_config(
+        max_entries: usize,
+        token_budget: usize,
+        active_llms: Arc<RwLock<HashMap<AgentID, Arc<dyn agentos_llm::LLMCore>>>>,
+        cost_tracker: Arc<CostTracker>,
+        config: ContextConfig,
+    ) -> Self {
+        Self {
+            tasks: RwLock::new(HashMap::new()),
+            max_entries,
+            token_budget,
+            active_llms,
+            cost_tracker,
+            config,
         }
     }
 
     /// Create a new context window for a task with the system prompt.
     /// The system prompt is pinned with maximum importance.
-    pub async fn create_context(&self, task_id: TaskID, system_prompt: &str) -> ContextID {
+    pub async fn create_context(
+        &self,
+        task_id: TaskID,
+        agent_id: AgentID,
+        system_prompt: &str,
+    ) -> ContextID {
         let mut window =
             ContextWindow::with_strategy(self.max_entries, OverflowStrategy::SemanticEviction);
         let context_id = window.id;
@@ -48,7 +95,10 @@ impl ContextManager {
             is_summary: false,
         });
 
-        self.windows.write().await.insert(task_id, window);
+        self.tasks
+            .write()
+            .await
+            .insert(task_id, TaskContext { window, agent_id });
         context_id
     }
 
@@ -68,23 +118,23 @@ impl ContextManager {
         task_id: &TaskID,
         entry: ContextEntry,
     ) -> Result<usize, AgentOSError> {
-        let mut windows = self.windows.write().await;
-        match windows.get_mut(task_id) {
-            Some(window) => {
-                let pre_count = window.entries.len();
-                window.push(entry);
+        let mut tasks = self.tasks.write().await;
+        match tasks.get_mut(task_id) {
+            Some(tc) => {
+                let pre_count = tc.window.entries.len();
+                tc.window.push(entry);
                 let mut evicted = 0usize;
 
                 // Token budget enforcement
                 if self.token_budget > 0 {
-                    let tokens = window.estimated_tokens();
+                    let tokens = tc.window.estimated_tokens();
                     let pct = tokens * 100 / self.token_budget;
 
                     if pct >= 95 {
                         // Critical pressure: compress aggressively + flag for checkpoint
-                        let compress_count = window.entries.len() / 3;
-                        window.compress_oldest(compress_count.max(1));
-                        window.needs_checkpoint = true;
+                        let compress_count = tc.window.entries.len() / 3;
+                        tc.window.compress_oldest(compress_count.max(1));
+                        tc.window.needs_checkpoint = true;
                         tracing::warn!(
                             task_id = %task_id,
                             tokens,
@@ -93,8 +143,8 @@ impl ContextManager {
                         );
                     } else if pct >= 80 {
                         // Moderate pressure: compress oldest quarter
-                        let compress_count = window.entries.len() / 4;
-                        window.compress_oldest(compress_count.max(1));
+                        let compress_count = tc.window.entries.len() / 4;
+                        tc.window.compress_oldest(compress_count.max(1));
                         tracing::info!(
                             task_id = %task_id,
                             tokens,
@@ -106,8 +156,8 @@ impl ContextManager {
 
                 // Eviction happened if final entry count is less than pre_count + 1
                 let expected = pre_count + 1;
-                if window.entries.len() < expected {
-                    evicted = expected - window.entries.len();
+                if tc.window.entries.len() < expected {
+                    evicted = expected - tc.window.entries.len();
                 }
 
                 Ok(evicted)
@@ -121,9 +171,9 @@ impl ContextManager {
         if self.token_budget == 0 {
             return false;
         }
-        let windows = self.windows.read().await;
-        if let Some(window) = windows.get(task_id) {
-            let estimated = window.estimated_tokens();
+        let tasks = self.tasks.read().await;
+        if let Some(tc) = tasks.get(task_id) {
+            let estimated = tc.window.estimated_tokens();
             estimated >= self.token_budget
         } else {
             false
@@ -132,18 +182,21 @@ impl ContextManager {
 
     /// Get the entry count for a task's context window.
     pub async fn entry_count(&self, task_id: &TaskID) -> usize {
-        let windows = self.windows.read().await;
-        windows.get(task_id).map(|w| w.entries.len()).unwrap_or(0)
+        let tasks = self.tasks.read().await;
+        tasks
+            .get(task_id)
+            .map(|tc| tc.window.entries.len())
+            .unwrap_or(0)
     }
 
     /// Returns `true` and clears the `needs_checkpoint` flag if the context
     /// window for `task_id` has flagged a checkpoint. Call this after pushing
     /// entries to decide whether to take a snapshot.
     pub async fn drain_checkpoint_flag(&self, task_id: &TaskID) -> bool {
-        let mut windows = self.windows.write().await;
-        if let Some(window) = windows.get_mut(task_id) {
-            if window.needs_checkpoint {
-                window.needs_checkpoint = false;
+        let mut tasks = self.tasks.write().await;
+        if let Some(tc) = tasks.get_mut(task_id) {
+            if tc.window.needs_checkpoint {
+                tc.window.needs_checkpoint = false;
                 return true;
             }
         }
@@ -152,10 +205,10 @@ impl ContextManager {
 
     /// Get the full context for assembling an LLM prompt.
     pub async fn get_context(&self, task_id: &TaskID) -> Result<ContextWindow, AgentOSError> {
-        let windows = self.windows.read().await;
-        windows
+        let tasks = self.tasks.read().await;
+        tasks
             .get(task_id)
-            .cloned()
+            .map(|tc| tc.window.clone())
             .ok_or(AgentOSError::TaskNotFound(*task_id))
     }
 
@@ -217,10 +270,10 @@ impl ContextManager {
         task_id: &TaskID,
         partition: ContextPartition,
     ) -> Result<(), AgentOSError> {
-        let mut windows = self.windows.write().await;
-        match windows.get_mut(task_id) {
-            Some(window) => {
-                window.set_partition(partition);
+        let mut tasks = self.tasks.write().await;
+        match tasks.get_mut(task_id) {
+            Some(tc) => {
+                tc.window.set_partition(partition);
                 Ok(())
             }
             None => Err(AgentOSError::TaskNotFound(*task_id)),
@@ -233,10 +286,10 @@ impl ContextManager {
         task_id: &TaskID,
         window: ContextWindow,
     ) -> Result<(), AgentOSError> {
-        let mut windows = self.windows.write().await;
-        match windows.get_mut(task_id) {
-            Some(existing) => {
-                *existing = window;
+        let mut tasks = self.tasks.write().await;
+        match tasks.get_mut(task_id) {
+            Some(tc) => {
+                tc.window = window;
                 Ok(())
             }
             None => Err(AgentOSError::TaskNotFound(*task_id)),
@@ -245,6 +298,25 @@ impl ContextManager {
 
     /// Remove a task's context (on completion/failure).
     pub async fn remove_context(&self, task_id: &TaskID) {
-        self.windows.write().await.remove(task_id);
+        self.tasks.write().await.remove(task_id);
+    }
+
+    /// Increment reference counts for entries whose `tool_call_id` matches any
+    /// of the provided IDs. This marks those entries as actively referenced so
+    /// they are preserved longer during eviction.
+    pub async fn increment_references(
+        &self,
+        task_id: &TaskID,
+        tool_call_ids: &[String],
+    ) -> Result<(), AgentOSError> {
+        let mut tasks = self.tasks.write().await;
+        match tasks.get_mut(task_id) {
+            Some(tc) => {
+                tc.window
+                    .increment_references_for_tool_call_ids(tool_call_ids);
+                Ok(())
+            }
+            None => Err(AgentOSError::TaskNotFound(*task_id)),
+        }
     }
 }
