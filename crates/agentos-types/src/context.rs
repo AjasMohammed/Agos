@@ -1508,4 +1508,62 @@ mod tests {
         };
         assert!(too_high.validate().is_err());
     }
+
+    #[test]
+    fn test_extract_then_insert_summary_round_trip() {
+        let mut window = ContextWindow::new(100);
+        window.push(ContextEntry {
+            role: ContextRole::System,
+            content: "system".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: true,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::System,
+            is_summary: false,
+        });
+        for i in 0..5 {
+            window.push(ContextEntry {
+                role: if i % 2 == 0 {
+                    ContextRole::User
+                } else {
+                    ContextRole::Assistant
+                },
+                content: format!("message {}", i),
+                timestamp: chrono::Utc::now(),
+                metadata: None,
+                importance: 0.5,
+                pinned: false,
+                reference_count: 0,
+                partition: ContextPartition::Active,
+                category: ContextCategory::History,
+                is_summary: false,
+            });
+        }
+
+        assert_eq!(window.entries.len(), 6);
+
+        // Extract 3 oldest compressible
+        let extracted = window.extract_compressible(3);
+        assert_eq!(extracted.len(), 3);
+        assert_eq!(window.entries.len(), 3); // system + 2 remaining
+
+        // Insert a summary
+        window.insert_summary_entry("Summary of messages 0-2".to_string(), 3);
+        assert_eq!(window.entries.len(), 4); // system + summary + 2 remaining
+
+        // Insert notice
+        window.upsert_context_notice(3);
+        assert_eq!(window.entries.len(), 5); // system + notice + summary + 2 remaining
+
+        // Verify ordering: system, notice, summary, msg3, msg4
+        assert_eq!(window.entries[0].role, ContextRole::System);
+        assert!(!window.entries[0].is_summary);
+        assert!(window.entries[1].content.starts_with("[CONTEXT NOTE]"));
+        assert!(window.entries[2].is_summary);
+        assert_eq!(window.entries[3].content, "message 3");
+        assert_eq!(window.entries[4].content, "message 4");
+    }
 }
