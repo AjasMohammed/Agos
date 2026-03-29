@@ -89,6 +89,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             model_cache_dir: shared_model_cache_dir(),
             extraction: Default::default(),
             consolidation: Default::default(),
+            context: Default::default(),
         },
         context_budget: Default::default(),
         context: Default::default(),
