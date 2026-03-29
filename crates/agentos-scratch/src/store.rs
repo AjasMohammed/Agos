@@ -734,20 +734,25 @@ impl ScratchpadStore {
                  LIMIT ?3",
             )?;
 
-            let rows = stmt.query_map(params![query, agent_id, fetch_limit as i64], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, f64>(9)?,
-                ))
-            })?;
+            // Escape the query as an FTS5 phrase to prevent syntax errors from
+            // unbalanced quotes, parentheses, or other FTS5 operators in user input.
+            let fts5_query = format!("\"{}\"", query.replace('"', "\"\""));
+
+            let rows =
+                stmt.query_map(params![fts5_query, agent_id, fetch_limit as i64], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, f64>(9)?,
+                    ))
+                })?;
 
             let mut results = Vec::new();
             for row in rows {
