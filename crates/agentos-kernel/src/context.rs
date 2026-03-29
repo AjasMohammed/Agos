@@ -1,4 +1,4 @@
-use crate::config::ContextConfig;
+use crate::config::{ContextConfig, SummarizationMode};
 use crate::cost_tracker::CostTracker;
 use agentos_types::*;
 use std::collections::HashMap;
@@ -8,8 +8,7 @@ use tokio::sync::RwLock;
 /// Per-task context state: the context window and the agent that owns it.
 struct TaskContext {
     window: ContextWindow,
-    /// The agent that owns this task's context. Used by LLM summarization (Task 7).
-    #[allow(dead_code)]
+    /// The agent that owns this task's context. Used by LLM summarization.
     agent_id: AgentID,
 }
 
@@ -19,14 +18,11 @@ pub struct ContextManager {
     /// Token budget per context window. 0 = no budget enforcement.
     /// Spec §11: compress at 80%, checkpoint+flush at 95%.
     token_budget: usize,
-    /// Per-agent LLM adapters. Used by LLM summarization (Task 7).
-    #[allow(dead_code)]
+    /// Per-agent LLM adapters for summarization.
     active_llms: Arc<RwLock<HashMap<AgentID, Arc<dyn agentos_llm::LLMCore>>>>,
-    /// Cost tracker for attributing summarization inference costs. Used by Task 7.
-    #[allow(dead_code)]
+    /// Cost tracker for attributing summarization inference costs.
     cost_tracker: Arc<CostTracker>,
-    /// Context configuration (summarization mode, etc.). Used by Task 7.
-    #[allow(dead_code)]
+    /// Context configuration (summarization mode, etc.).
     config: ContextConfig,
 }
 
@@ -102,68 +98,263 @@ impl ContextManager {
         context_id
     }
 
+    /// Concat fallback: format entries as truncated snippets (matches legacy compress_oldest format).
+    fn summarize_entries_concat(entries: &[ContextEntry]) -> String {
+        let parts: Vec<String> = entries
+            .iter()
+            .map(|e| {
+                let label = match e.role {
+                    ContextRole::User => "User",
+                    ContextRole::Assistant => "Assistant",
+                    ContextRole::ToolResult => "ToolResult",
+                    ContextRole::System => "System",
+                };
+                let snippet = if e.content.chars().count() > 150 {
+                    format!("{}...", e.content.chars().take(150).collect::<String>())
+                } else {
+                    e.content.clone()
+                };
+                format!("[{label}]: {snippet}")
+            })
+            .collect();
+        parts.join("\n")
+    }
+
+    /// Attempt LLM-generated summarization. Returns `Ok((summary_text, inference_result))`
+    /// on success, `Err` on any failure (no adapter, LLM error, empty response).
+    async fn summarize_entries_llm(
+        entries: &[ContextEntry],
+        llm: &dyn agentos_llm::LLMCore,
+        max_input_chars: usize,
+    ) -> Result<(String, agentos_llm::InferenceResult), anyhow::Error> {
+        let mut text_parts = Vec::new();
+        let mut total_chars = 0usize;
+        for e in entries {
+            let label = match e.role {
+                ContextRole::User => "User",
+                ContextRole::Assistant => "Assistant",
+                ContextRole::ToolResult => "ToolResult",
+                ContextRole::System => "System",
+            };
+            let part = format!("[{}]: {}", label, e.content);
+            let part_chars = part.chars().count();
+            if total_chars + part_chars > max_input_chars {
+                let remaining = max_input_chars.saturating_sub(total_chars);
+                if remaining > 20 {
+                    text_parts.push(format!(
+                        "[{}]: {}...",
+                        label,
+                        e.content.chars().take(remaining).collect::<String>()
+                    ));
+                }
+                break;
+            }
+            total_chars += part_chars;
+            text_parts.push(part);
+        }
+        let messages_text = text_parts.join("\n");
+
+        let system_prompt =
+            "Summarize the following conversation messages into a concise paragraph. \
+            Preserve: key decisions, tool outputs that produced important results, error messages, \
+            and any facts the agent discovered. \
+            Discard: routine acknowledgments, redundant tool calls, and verbose formatting. \
+            Keep the summary under 300 words.";
+
+        let mut ctx = ContextWindow::new(16);
+        ctx.push(ContextEntry {
+            role: ContextRole::System,
+            content: system_prompt.to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: true,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::System,
+            is_summary: false,
+        });
+        ctx.push(ContextEntry {
+            role: ContextRole::User,
+            content: format!("Messages:\n{}", messages_text),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::Task,
+            is_summary: false,
+        });
+
+        let result = llm.infer(&ctx).await?;
+        let summary = result.text.trim().to_string();
+        if summary.is_empty() {
+            anyhow::bail!("LLM returned empty summary");
+        }
+        Ok((summary, result))
+    }
+
     /// Push an entry into a task's context window, then apply token budget
-    /// enforcement (Spec §11):
-    ///   - ≥80% of `token_budget`: compress oldest entries with a summary
-    ///   - ≥95% of `token_budget`: compress + set `window.needs_checkpoint = true`
+    /// enforcement (Spec §11) with 3-phase lock management:
     ///
-    /// Callers can check `drain_checkpoint_flag()` after pushing to learn if a
-    /// snapshot should be taken before continuing.
-    /// Push an entry into a task's context window.
+    /// **Phase 1 (lock held):** Push entry, check token budget, extract
+    /// compressible entries if LLM summarization is needed, release lock.
     ///
-    /// Returns `Ok(evicted)` where `evicted` is the number of entries compressed/evicted
-    /// by token budget enforcement (0 if no eviction occurred).
+    /// **Phase 2 (no lock):** Call LLM for summarization (or concat fallback).
+    ///
+    /// **Phase 3 (lock re-acquired):** Insert summary entry + context notice.
+    ///
+    /// Returns `Ok(0)` on success.
     pub async fn push_entry(
         &self,
         task_id: &TaskID,
         entry: ContextEntry,
     ) -> Result<usize, AgentOSError> {
-        let mut tasks = self.tasks.write().await;
-        match tasks.get_mut(task_id) {
-            Some(tc) => {
-                let pre_count = tc.window.entries.len();
-                tc.window.push(entry);
-                let mut evicted = 0usize;
+        // Phase 1: Push the entry and check if compression is needed.
+        let compression_needed: Option<(Vec<ContextEntry>, AgentID, bool)> = {
+            let mut tasks = self.tasks.write().await;
+            match tasks.get_mut(task_id) {
+                Some(tc) => {
+                    tc.window.push(entry);
 
-                // Token budget enforcement
-                if self.token_budget > 0 {
-                    let tokens = tc.window.estimated_tokens();
-                    let pct = tokens * 100 / self.token_budget;
+                    if self.token_budget > 0 {
+                        let tokens = tc.window.estimated_tokens();
+                        let pct = tokens * 100 / self.token_budget;
 
-                    if pct >= 95 {
-                        // Critical pressure: compress aggressively + flag for checkpoint
-                        let compress_count = tc.window.entries.len() / 3;
-                        tc.window.compress_oldest(compress_count.max(1));
-                        tc.window.needs_checkpoint = true;
-                        tracing::warn!(
-                            task_id = %task_id,
-                            tokens,
-                            budget = self.token_budget,
-                            "Context at 95% token budget — checkpoint flagged"
-                        );
-                    } else if pct >= 80 {
-                        // Moderate pressure: compress oldest quarter
-                        let compress_count = tc.window.entries.len() / 4;
-                        tc.window.compress_oldest(compress_count.max(1));
-                        tracing::info!(
-                            task_id = %task_id,
-                            tokens,
-                            budget = self.token_budget,
-                            "Context at 80% token budget — compressing oldest entries"
-                        );
+                        if pct >= 80 {
+                            let is_critical = pct >= 95;
+                            let compress_count = if is_critical {
+                                tc.window.entries.len() / 3
+                            } else {
+                                tc.window.entries.len() / 4
+                            };
+
+                            match self.config.summarization_mode {
+                                SummarizationMode::Off => {
+                                    let _ = tc.window.extract_compressible(compress_count.max(1));
+                                    if is_critical {
+                                        tc.window.needs_checkpoint = true;
+                                    }
+                                    None
+                                }
+                                SummarizationMode::Concat => {
+                                    tc.window.compress_oldest(compress_count.max(1));
+                                    if is_critical {
+                                        tc.window.needs_checkpoint = true;
+                                    }
+                                    tracing::info!(
+                                        task_id = %task_id,
+                                        tokens,
+                                        budget = self.token_budget,
+                                        "Context at {}% token budget — compressed (concat)",
+                                        pct
+                                    );
+                                    None
+                                }
+                                SummarizationMode::Llm => {
+                                    let extracted =
+                                        tc.window.extract_compressible(compress_count.max(1));
+                                    if is_critical {
+                                        tc.window.needs_checkpoint = true;
+                                    }
+                                    if extracted.is_empty() {
+                                        None
+                                    } else {
+                                        tracing::info!(
+                                            task_id = %task_id,
+                                            tokens,
+                                            budget = self.token_budget,
+                                            extracted = extracted.len(),
+                                            "Context at {}% token budget — attempting LLM summarization",
+                                            pct
+                                        );
+                                        Some((extracted, tc.agent_id, is_critical))
+                                    }
+                                }
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
                     }
                 }
-
-                // Eviction happened if final entry count is less than pre_count + 1
-                let expected = pre_count + 1;
-                if tc.window.entries.len() < expected {
-                    evicted = expected - tc.window.entries.len();
-                }
-
-                Ok(evicted)
+                None => return Err(AgentOSError::TaskNotFound(*task_id)),
             }
-            None => Err(AgentOSError::TaskNotFound(*task_id)),
+            // Write lock released here
+        };
+
+        // Phase 2: If entries were extracted for LLM summarization, do it without holding the lock.
+        if let Some((extracted, agent_id, _is_critical)) = compression_needed {
+            let extracted_count = extracted.len();
+
+            let summary_text = {
+                let llm_opt = {
+                    let llms = self.active_llms.read().await;
+                    llms.get(&agent_id).cloned()
+                };
+
+                match llm_opt {
+                    Some(llm) => {
+                        match Self::summarize_entries_llm(
+                            &extracted,
+                            llm.as_ref(),
+                            self.config.summarization_max_input_chars,
+                        )
+                        .await
+                        {
+                            Ok((summary, inference_result)) => {
+                                // Record summarization cost against agent budget
+                                let _budget_result = self
+                                    .cost_tracker
+                                    .record_inference_with_cost(
+                                        &agent_id,
+                                        &inference_result.tokens_used,
+                                        llm.provider_name(),
+                                        llm.model_name(),
+                                        inference_result.cost.as_ref(),
+                                    )
+                                    .await;
+                                tracing::info!(
+                                    task_id = %task_id,
+                                    entries = extracted_count,
+                                    "LLM summarization succeeded"
+                                );
+                                summary
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    error = %e,
+                                    "LLM summarization failed — falling back to concat"
+                                );
+                                Self::summarize_entries_concat(&extracted)
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            "No LLM adapter available for summarization — falling back to concat"
+                        );
+                        Self::summarize_entries_concat(&extracted)
+                    }
+                }
+            };
+
+            // Phase 3: Re-acquire lock and insert summary + notice
+            {
+                let mut tasks = self.tasks.write().await;
+                if let Some(tc) = tasks.get_mut(task_id) {
+                    tc.window
+                        .insert_summary_entry(summary_text, extracted_count);
+                    tc.window.upsert_context_notice(extracted_count);
+                }
+            }
         }
+
+        Ok(0)
     }
 
     /// Check if the token budget is fully exhausted (100%) for a task.
