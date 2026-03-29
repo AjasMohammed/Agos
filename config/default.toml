@@ -137,6 +137,16 @@ task_pct = 0.12
 # For CJK (Chinese/Japanese/Korean) workloads, use 1.5-2.0.
 chars_per_token = 4.0
 
+[context]
+# Summarization strategy when context budget compression triggers.
+# "llm" = LLM-generated summaries (best-effort, falls back to concat on failure)
+# "concat" = concatenate entry snippets (legacy behavior)
+# "off" = no summary entry — entries are silently evicted
+summarization_mode = "llm"
+# Maximum characters of entry text sent to the summarizer LLM per compression event.
+# Prevents sending enormous payloads on aggressive compression passes.
+summarization_max_input_chars = 8000
+
 [logging]
 # Directory where rolling log files are written.
 # Logs rotate daily; up to 7 days are kept.
