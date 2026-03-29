@@ -315,10 +315,10 @@ impl ContextWindow {
         }
     }
 
-    /// Extract up to `count` non-pinned, non-System entries from oldest first.
-    /// Returns the removed entries. Same selection logic as `compress_oldest`
-    /// but returns entries instead of concatenating, so the caller can
-    /// summarize them (e.g., via LLM).
+    /// Extract up to `count` non-pinned, non-System, non-summary entries
+    /// from oldest first. Returns the removed entries so the caller can
+    /// summarize them (e.g., via LLM). Unlike `compress_oldest`, this
+    /// skips existing summary entries to avoid re-summarization.
     pub fn extract_compressible(&mut self, count: usize) -> Vec<ContextEntry> {
         let mut extracted = Vec::new();
         let mut i = 0;
@@ -368,23 +368,34 @@ impl ContextWindow {
 
     /// Insert or update a context-loss notice telling the agent that entries
     /// were compressed and how to recover details via episodic memory.
-    pub fn upsert_context_notice(&mut self, compressed_count: usize) {
-        let notice_content = format!(
-            "{} {} earlier messages were compressed into a summary. \
-             To recall specific details, use memory-read with scope=episodic and your current task ID.",
-            Self::CONTEXT_NOTICE_PREFIX,
-            compressed_count,
-        );
-
-        if let Some(idx) = self
+    /// The count is cumulative: if a notice already exists, the new count is
+    /// added to the previous total.
+    pub fn upsert_context_notice(&mut self, additional_compressed: usize) {
+        // If an existing notice exists, extract its count and remove it so we can
+        // re-insert with the cumulative total.
+        let cumulative = if let Some(idx) = self
             .entries
             .iter()
             .position(|e| e.content.starts_with(Self::CONTEXT_NOTICE_PREFIX))
         {
-            self.entries[idx].content = notice_content;
-            self.entries[idx].timestamp = chrono::Utc::now();
-            return;
-        }
+            let existing = &self.entries[idx].content;
+            let prev_count: usize = existing
+                .strip_prefix(Self::CONTEXT_NOTICE_PREFIX)
+                .and_then(|s| s.trim_start().split_whitespace().next())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            self.entries.remove(idx);
+            prev_count + additional_compressed
+        } else {
+            additional_compressed
+        };
+
+        let notice_content = format!(
+            "{} {} earlier messages were compressed into a summary. \
+             To recall specific details, use memory-read with scope=episodic and your current task ID.",
+            Self::CONTEXT_NOTICE_PREFIX,
+            cumulative,
+        );
 
         let insert_pos = self
             .entries
@@ -1330,10 +1341,15 @@ mod tests {
         window.upsert_context_notice(3);
         window.upsert_context_notice(8);
 
+        // Should still be 2 entries (system + notice), not 3
         assert_eq!(window.entries.len(), 2);
         let notice = &window.entries[1];
-        assert!(notice.content.contains("8"), "Should show updated count");
-        assert!(!notice.content.contains(" 3 "), "Old count should be gone");
+        // Cumulative: 3 + 8 = 11
+        assert!(
+            notice.content.contains("11"),
+            "Should show cumulative count 11, got: {}",
+            notice.content
+        );
     }
 
     #[test]
