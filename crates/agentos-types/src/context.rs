@@ -315,6 +315,139 @@ impl ContextWindow {
         }
     }
 
+    /// Extract up to `count` non-pinned, non-System entries from oldest first.
+    /// Returns the removed entries. Same selection logic as `compress_oldest`
+    /// but returns entries instead of concatenating, so the caller can
+    /// summarize them (e.g., via LLM).
+    pub fn extract_compressible(&mut self, count: usize) -> Vec<ContextEntry> {
+        let mut extracted = Vec::new();
+        let mut i = 0;
+        while extracted.len() < count && i < self.entries.len() {
+            let e = &self.entries[i];
+            if e.role != ContextRole::System && !e.pinned {
+                extracted.push(self.entries.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        extracted
+    }
+
+    /// Insert a summary entry at the correct position (after System entries,
+    /// before non-system content). Used by the kernel's LLM summarization
+    /// path to insert the generated summary.
+    pub fn insert_summary_entry(&mut self, content: String, compressed_count: usize) {
+        let insert_pos = self
+            .entries
+            .iter()
+            .position(|e| e.role != ContextRole::System)
+            .unwrap_or(self.entries.len());
+
+        self.entries.insert(
+            insert_pos,
+            ContextEntry {
+                role: ContextRole::System,
+                content: format!(
+                    "[SUMMARY — {} messages compressed]\n{}",
+                    compressed_count, content
+                ),
+                timestamp: chrono::Utc::now(),
+                metadata: None,
+                importance: 0.3,
+                pinned: false,
+                reference_count: 0,
+                partition: ContextPartition::Active,
+                category: ContextCategory::History,
+                is_summary: true,
+            },
+        );
+    }
+
+    /// Sentinel prefix used to identify context-loss notice entries.
+    const CONTEXT_NOTICE_PREFIX: &'static str = "[CONTEXT NOTE]";
+
+    /// Insert or update a context-loss notice telling the agent that entries
+    /// were compressed and how to recover details via episodic memory.
+    pub fn upsert_context_notice(&mut self, compressed_count: usize) {
+        let notice_content = format!(
+            "{} {} earlier messages were compressed into a summary. \
+             To recall specific details, use memory-read with scope=episodic and your current task ID.",
+            Self::CONTEXT_NOTICE_PREFIX,
+            compressed_count,
+        );
+
+        if let Some(idx) = self
+            .entries
+            .iter()
+            .position(|e| e.content.starts_with(Self::CONTEXT_NOTICE_PREFIX))
+        {
+            self.entries[idx].content = notice_content;
+            self.entries[idx].timestamp = chrono::Utc::now();
+            return;
+        }
+
+        let insert_pos = self
+            .entries
+            .iter()
+            .position(|e| e.role != ContextRole::System || e.is_summary)
+            .unwrap_or(self.entries.len());
+
+        self.entries.insert(
+            insert_pos,
+            ContextEntry {
+                role: ContextRole::System,
+                content: notice_content,
+                timestamp: chrono::Utc::now(),
+                metadata: None,
+                importance: 0.9,
+                pinned: true,
+                reference_count: 0,
+                partition: ContextPartition::Active,
+                category: ContextCategory::System,
+                is_summary: false,
+            },
+        );
+    }
+
+    /// Increment `reference_count` on entries linked to the given tool call IDs.
+    ///
+    /// For each ID:
+    /// - ToolResult entries with `metadata.tool_call_id == id` are incremented.
+    /// - Assistant entries whose `metadata.assistant_tool_calls` JSON array
+    ///   contains an object with `"id": id` are incremented.
+    ///
+    /// This makes actively-referenced entries resist SemanticEviction.
+    pub fn increment_references_for_tool_call_ids(&mut self, ids: &[String]) {
+        for entry in &mut self.entries {
+            let meta = match &entry.metadata {
+                Some(m) => m,
+                None => continue,
+            };
+
+            for id in ids {
+                if entry.role == ContextRole::ToolResult {
+                    if let Some(ref tc_id) = meta.tool_call_id {
+                        if tc_id == id {
+                            entry.reference_count += 1;
+                        }
+                    }
+                }
+
+                if entry.role == ContextRole::Assistant {
+                    if let Some(ref calls_json) = meta.assistant_tool_calls {
+                        if let Some(arr) = calls_json.as_array() {
+                            for call in arr {
+                                if call.get("id").and_then(|v| v.as_str()) == Some(id) {
+                                    entry.reference_count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Push a new entry. Applies the configured overflow strategy when at capacity.
     pub fn push(&mut self, entry: ContextEntry) {
         if self.entries.len() >= self.max_entries {
@@ -996,6 +1129,335 @@ mod tests {
                 cat
             );
         }
+    }
+
+    #[test]
+    fn test_extract_compressible_returns_oldest_non_pinned() {
+        let mut window = ContextWindow::new(100);
+        window.push(ContextEntry {
+            role: ContextRole::System,
+            content: "system prompt".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: true,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::System,
+            is_summary: false,
+        });
+        window.push(ContextEntry {
+            role: ContextRole::User,
+            content: "pinned task".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.95,
+            pinned: true,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::Task,
+            is_summary: false,
+        });
+        for i in 0..3 {
+            window.push(ContextEntry {
+                role: ContextRole::Assistant,
+                content: format!("response {}", i),
+                timestamp: chrono::Utc::now(),
+                metadata: None,
+                importance: 0.5,
+                pinned: false,
+                reference_count: 0,
+                partition: ContextPartition::Active,
+                category: ContextCategory::History,
+                is_summary: false,
+            });
+        }
+        assert_eq!(window.entries.len(), 5);
+        let extracted = window.extract_compressible(2);
+        assert_eq!(extracted.len(), 2);
+        assert_eq!(extracted[0].content, "response 0");
+        assert_eq!(extracted[1].content, "response 1");
+        assert_eq!(window.entries.len(), 3);
+        assert_eq!(window.entries[2].content, "response 2");
+    }
+
+    #[test]
+    fn test_extract_compressible_skips_system_and_pinned() {
+        let mut window = ContextWindow::new(100);
+        window.push(ContextEntry {
+            role: ContextRole::System,
+            content: "sys".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: true,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::System,
+            is_summary: false,
+        });
+        window.push(ContextEntry {
+            role: ContextRole::User,
+            content: "pinned".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: true,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::Task,
+            is_summary: false,
+        });
+        let extracted = window.extract_compressible(5);
+        assert!(extracted.is_empty());
+        assert_eq!(window.entries.len(), 2);
+    }
+
+    #[test]
+    fn test_insert_summary_entry_positions_after_system() {
+        let mut window = ContextWindow::new(100);
+        window.push(ContextEntry {
+            role: ContextRole::System,
+            content: "system prompt".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: true,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::System,
+            is_summary: false,
+        });
+        window.push(ContextEntry {
+            role: ContextRole::User,
+            content: "user msg".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+
+        window.insert_summary_entry("LLM-generated summary of 3 messages".to_string(), 3);
+
+        assert_eq!(window.entries.len(), 3);
+        let summary = &window.entries[1];
+        assert!(summary.is_summary);
+        assert_eq!(summary.role, ContextRole::System);
+        assert_eq!(summary.category, ContextCategory::History);
+        assert!((summary.importance - 0.3).abs() < f32::EPSILON);
+        assert!(!summary.pinned);
+        assert!(summary.content.contains("LLM-generated summary"));
+        assert!(summary.content.contains("3 messages"));
+    }
+
+    #[test]
+    fn test_upsert_context_notice_inserts_when_absent() {
+        let mut window = ContextWindow::new(100);
+        window.push(ContextEntry {
+            role: ContextRole::System,
+            content: "system prompt".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: true,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::System,
+            is_summary: false,
+        });
+
+        window.upsert_context_notice(5);
+
+        assert_eq!(window.entries.len(), 2);
+        let notice = &window.entries[1];
+        assert!(notice.content.starts_with("[CONTEXT NOTE]"));
+        assert!(notice.content.contains("5"));
+        assert!(notice.content.contains("memory-read"));
+        assert!(notice.pinned);
+        assert!((notice.importance - 0.9).abs() < f32::EPSILON);
+        assert_eq!(notice.category, ContextCategory::System);
+        assert!(!notice.is_summary);
+    }
+
+    #[test]
+    fn test_upsert_context_notice_updates_existing() {
+        let mut window = ContextWindow::new(100);
+        window.push(ContextEntry {
+            role: ContextRole::System,
+            content: "system prompt".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: true,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::System,
+            is_summary: false,
+        });
+
+        window.upsert_context_notice(3);
+        window.upsert_context_notice(8);
+
+        assert_eq!(window.entries.len(), 2);
+        let notice = &window.entries[1];
+        assert!(notice.content.contains("8"), "Should show updated count");
+        assert!(!notice.content.contains(" 3 "), "Old count should be gone");
+    }
+
+    #[test]
+    fn test_increment_references_for_tool_call_ids() {
+        let mut window = ContextWindow::new(100);
+        window.push(ContextEntry {
+            role: ContextRole::Assistant,
+            content: "I'll read that file.".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: Some(ContextMetadata {
+                tool_name: None,
+                tool_id: None,
+                intent_id: None,
+                tokens_estimated: None,
+                tool_call_id: None,
+                assistant_tool_calls: Some(serde_json::json!([
+                    {"id": "call_123", "tool_name": "file-reader", "intent_type": "read", "payload": {}}
+                ])),
+            }),
+            importance: 0.4,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+        window.push(ContextEntry {
+            role: ContextRole::ToolResult,
+            content: "file contents here".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: Some(ContextMetadata {
+                tool_name: Some("file-reader".to_string()),
+                tool_id: None,
+                intent_id: None,
+                tokens_estimated: None,
+                tool_call_id: Some("call_123".to_string()),
+                assistant_tool_calls: None,
+            }),
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+        window.push(ContextEntry {
+            role: ContextRole::ToolResult,
+            content: "other result".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: Some(ContextMetadata {
+                tool_name: Some("shell-exec".to_string()),
+                tool_id: None,
+                intent_id: None,
+                tokens_estimated: None,
+                tool_call_id: Some("call_999".to_string()),
+                assistant_tool_calls: None,
+            }),
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+
+        window.increment_references_for_tool_call_ids(&["call_123".to_string()]);
+
+        assert_eq!(
+            window.entries[0].reference_count, 1,
+            "Assistant entry should be incremented"
+        );
+        assert_eq!(
+            window.entries[1].reference_count, 1,
+            "Matching ToolResult should be incremented"
+        );
+        assert_eq!(
+            window.entries[2].reference_count, 0,
+            "Unrelated entry should stay at 0"
+        );
+    }
+
+    #[test]
+    fn test_increment_references_makes_entry_survive_eviction() {
+        let mut window = ContextWindow::with_strategy(4, OverflowStrategy::SemanticEviction);
+        window.push(ContextEntry {
+            role: ContextRole::System,
+            content: "sys".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: true,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::System,
+            is_summary: false,
+        });
+        window.push(ContextEntry {
+            role: ContextRole::ToolResult,
+            content: "referenced result".to_string(),
+            timestamp: chrono::Utc::now() - chrono::Duration::minutes(10),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 2,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+        window.push(ContextEntry {
+            role: ContextRole::ToolResult,
+            content: "unreferenced result".to_string(),
+            timestamp: chrono::Utc::now() - chrono::Duration::minutes(5),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+        assert_eq!(window.entries.len(), 3);
+        window.push(ContextEntry {
+            role: ContextRole::Assistant,
+            content: "filler".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.4,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+        window.push(ContextEntry {
+            role: ContextRole::User,
+            content: "new entry".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+        let remaining_contents: Vec<&str> =
+            window.entries.iter().map(|e| e.content.as_str()).collect();
+        assert!(
+            remaining_contents.contains(&"referenced result"),
+            "Referenced entry should survive eviction. Remaining: {:?}",
+            remaining_contents
+        );
     }
 
     #[test]
