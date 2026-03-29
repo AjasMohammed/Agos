@@ -573,7 +573,7 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
         );
 
         self.context_manager
-            .create_context(task_id, &system_prompt)
+            .create_context(task_id, agent.id, &system_prompt)
             .await;
         self.context_manager
             .push_entry(

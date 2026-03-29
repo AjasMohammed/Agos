@@ -62,7 +62,9 @@ impl Kernel {
 
         // We initialize context with empty string; Compiler injects the true system prompt
         // into the compiled ContextWindow at each iteration.
-        self.context_manager.create_context(task.id, "").await;
+        self.context_manager
+            .create_context(task.id, task.agent_id, "")
+            .await;
 
         // 2. Push the user's prompt into context (pinned — original task is always kept)
         self.context_manager
