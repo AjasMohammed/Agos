@@ -324,7 +324,7 @@ impl ContextWindow {
         let mut i = 0;
         while extracted.len() < count && i < self.entries.len() {
             let e = &self.entries[i];
-            if e.role != ContextRole::System && !e.pinned {
+            if e.role != ContextRole::System && !e.pinned && !e.is_summary {
                 extracted.push(self.entries.remove(i));
             } else {
                 i += 1;
@@ -418,16 +418,17 @@ impl ContextWindow {
     ///
     /// This makes actively-referenced entries resist SemanticEviction.
     pub fn increment_references_for_tool_call_ids(&mut self, ids: &[String]) {
+        let unique_ids: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
         for entry in &mut self.entries {
             let meta = match &entry.metadata {
                 Some(m) => m,
                 None => continue,
             };
 
-            for id in ids {
+            for id in &unique_ids {
                 if entry.role == ContextRole::ToolResult {
                     if let Some(ref tc_id) = meta.tool_call_id {
-                        if tc_id == id {
+                        if tc_id == *id {
                             entry.reference_count += 1;
                         }
                     }
@@ -436,10 +437,11 @@ impl ContextWindow {
                 if entry.role == ContextRole::Assistant {
                     if let Some(ref calls_json) = meta.assistant_tool_calls {
                         if let Some(arr) = calls_json.as_array() {
-                            for call in arr {
-                                if call.get("id").and_then(|v| v.as_str()) == Some(id) {
-                                    entry.reference_count += 1;
-                                }
+                            if arr
+                                .iter()
+                                .any(|call| call.get("id").and_then(|v| v.as_str()) == Some(*id))
+                            {
+                                entry.reference_count += 1;
                             }
                         }
                     }
@@ -1252,6 +1254,32 @@ mod tests {
         assert!(!summary.pinned);
         assert!(summary.content.contains("LLM-generated summary"));
         assert!(summary.content.contains("3 messages"));
+    }
+
+    #[test]
+    fn test_insert_summary_entry_is_evictable() {
+        let mut window = ContextWindow::new(100);
+        window.push(ContextEntry {
+            role: ContextRole::System,
+            content: "system".to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 1.0,
+            pinned: true,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::System,
+            is_summary: false,
+        });
+
+        window.insert_summary_entry("Summary text".to_string(), 2);
+
+        let summary = &window.entries[1];
+        assert!(!summary.pinned, "Summary should not be pinned");
+        assert!(summary.is_summary, "Should be marked as summary");
+        assert_eq!(summary.role, ContextRole::System);
+        // Verify it's evictable by checking importance is low
+        assert!((summary.importance - 0.3).abs() < f32::EPSILON);
     }
 
     #[test]
