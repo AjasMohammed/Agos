@@ -1,4 +1,5 @@
 pub mod error;
+pub mod kernel_impl;
 pub mod service;
 pub mod types;
 

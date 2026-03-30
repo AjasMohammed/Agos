@@ -1,0 +1,630 @@
+//! Implementation of [`KernelService`] for the real [`Kernel`].
+//!
+//! Each method delegates to the appropriate kernel subsystem (agent_registry,
+//! scheduler, tool_registry, etc.) and converts internal types into the
+//! `Api`-prefixed DTOs defined in `crate::types`.
+
+use crate::error::ApiError;
+use crate::service::KernelService;
+use crate::types::*;
+use agentos_kernel::Kernel;
+use agentos_types::{
+    DeliveryChannel, LLMProvider, NotificationID, SecretMetadata, SecretScope, TaskID, TaskState,
+    ToolID, UserResponse,
+};
+use async_trait::async_trait;
+
+// ── Helper conversions ──────────────────────────────────────────────────────
+
+fn parse_provider(s: &str) -> Result<LLMProvider, ApiError> {
+    match s.to_lowercase().as_str() {
+        "ollama" => Ok(LLMProvider::Ollama),
+        "openai" => Ok(LLMProvider::OpenAI),
+        "anthropic" => Ok(LLMProvider::Anthropic),
+        "gemini" => Ok(LLMProvider::Gemini),
+        other => Ok(LLMProvider::Custom(other.to_string())),
+    }
+}
+
+fn parse_scope(s: &str) -> SecretScope {
+    match s.to_lowercase().as_str() {
+        "kernel" => SecretScope::Kernel,
+        "global" | "" => SecretScope::Global,
+        _ => SecretScope::Global,
+    }
+}
+
+fn agent_summary(profile: &agentos_types::AgentProfile) -> ApiAgentSummary {
+    ApiAgentSummary {
+        id: profile.id,
+        name: profile.name.clone(),
+        provider: format!("{:?}", profile.provider),
+        model: profile.model.clone(),
+        status: format!("{:?}", profile.status),
+        roles: profile.roles.clone(),
+        connected_at: profile.created_at,
+    }
+}
+
+fn tool_summary(tool: &agentos_types::RegisteredTool) -> ApiToolSummary {
+    ApiToolSummary {
+        id: tool.id,
+        name: tool.manifest.manifest.name.clone(),
+        version: tool.manifest.manifest.version.clone(),
+        description: tool.manifest.manifest.description.clone(),
+        author: tool.manifest.manifest.author.clone(),
+        trust_tier: format!("{:?}", tool.manifest.manifest.trust_tier),
+        status: format!("{:?}", tool.status),
+    }
+}
+
+// ── Implementation ──────────────────────────────────────────────────────────
+
+#[async_trait]
+impl KernelService for Kernel {
+    // ── Agents ──────────────────────────────────────────────────────────
+
+    async fn list_agents(&self) -> Result<Vec<ApiAgentSummary>, ApiError> {
+        let registry = self.agent_registry.read().await;
+        Ok(registry
+            .list_online()
+            .into_iter()
+            .map(agent_summary)
+            .collect())
+    }
+
+    async fn connect_agent(&self, req: ConnectAgentRequest) -> Result<ApiAgentSummary, ApiError> {
+        let provider = parse_provider(&req.provider)?;
+        self.api_connect_agent(
+            req.name.clone(),
+            provider,
+            req.model.clone(),
+            req.base_url.clone(),
+            req.roles.clone(),
+        )
+        .await
+        .map_err(ApiError::Internal)?;
+
+        // Read back the newly connected agent to return its summary.
+        let registry = self.agent_registry.read().await;
+        let profile = registry
+            .get_by_name(&req.name)
+            .ok_or_else(|| ApiError::Internal("Agent registered but not found".into()))?;
+        Ok(agent_summary(profile))
+    }
+
+    async fn disconnect_agent(&self, agent_id: agentos_types::AgentID) -> Result<(), ApiError> {
+        self.api_disconnect_agent(agent_id)
+            .await
+            .map_err(ApiError::Internal)
+    }
+
+    async fn get_agent_detail(&self, name: &str) -> Result<ApiAgentDetail, ApiError> {
+        let registry = self.agent_registry.read().await;
+        let profile = registry
+            .get_by_name(name)
+            .ok_or_else(|| ApiError::NotFound(format!("Agent '{}' not found", name)))?;
+
+        let summary = agent_summary(profile);
+        let effective = registry.compute_effective_permissions(&profile.id);
+        let permissions: Vec<String> = effective
+            .entries()
+            .iter()
+            .map(|e| e.resource.clone())
+            .collect();
+
+        let cost_snapshot = self.cost_tracker.get_snapshot(&profile.id).await;
+
+        // Fetch recent tasks assigned to this agent.
+        let all_tasks = self.scheduler.list_tasks().await;
+        let recent_tasks: Vec<ApiTaskSummary> = all_tasks
+            .iter()
+            .filter(|t| {
+                // Match by agent name via the agent_registry lookup.
+                let ag = registry.get_by_id(&t.agent_id);
+                ag.is_some_and(|a| a.name == name)
+            })
+            .take(10)
+            .map(|t| {
+                let agent_name = registry.get_by_id(&t.agent_id).map(|a| a.name.clone());
+                ApiTaskSummary {
+                    id: t.id,
+                    agent_name,
+                    prompt_preview: t.prompt_preview.clone(),
+                    status: format!("{:?}", t.state),
+                    created_at: t.created_at,
+                    completed_at: None,
+                }
+            })
+            .collect();
+
+        Ok(ApiAgentDetail {
+            summary,
+            permissions,
+            recent_tasks,
+            cost_snapshot,
+        })
+    }
+
+    async fn grant_permission(&self, req: PermissionRequest) -> Result<(), ApiError> {
+        self.api_grant_permission(req.agent_name, req.permission)
+            .await
+            .map_err(ApiError::Internal)
+    }
+
+    async fn revoke_permission(&self, req: PermissionRequest) -> Result<(), ApiError> {
+        self.api_revoke_permission(req.agent_name, req.permission)
+            .await
+            .map_err(ApiError::Internal)
+    }
+
+    // ── Tasks ───────────────────────────────────────────────────────────
+
+    async fn list_tasks(&self, filter: TaskFilter) -> Result<(Vec<ApiTaskSummary>, u64), ApiError> {
+        let all_tasks = self.scheduler.list_tasks().await;
+        let registry = self.agent_registry.read().await;
+
+        let mut filtered: Vec<_> = all_tasks
+            .into_iter()
+            .filter(|t| {
+                if let Some(ref status) = filter.status {
+                    let task_status = format!("{:?}", t.state).to_lowercase();
+                    if task_status != status.to_lowercase() {
+                        return false;
+                    }
+                }
+                if let Some(ref agent_name) = filter.agent_name {
+                    let matches = registry
+                        .get_by_id(&t.agent_id)
+                        .is_some_and(|a| a.name == *agent_name);
+                    if !matches {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        let total = filtered.len() as u64;
+        let offset = filter.offset.unwrap_or(0) as usize;
+        let limit = filter.limit.unwrap_or(50) as usize;
+
+        filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        let page: Vec<ApiTaskSummary> = filtered
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|t| {
+                let agent_name = registry.get_by_id(&t.agent_id).map(|a| a.name.clone());
+                ApiTaskSummary {
+                    id: t.id,
+                    agent_name,
+                    prompt_preview: t.prompt_preview.clone(),
+                    status: format!("{:?}", t.state),
+                    created_at: t.created_at,
+                    completed_at: None,
+                }
+            })
+            .collect();
+
+        Ok((page, total))
+    }
+
+    async fn get_task(&self, id: TaskID) -> Result<ApiTaskDetail, ApiError> {
+        let task = self
+            .scheduler
+            .get_task(&id)
+            .await
+            .ok_or_else(|| ApiError::NotFound(format!("Task {} not found", id)))?;
+
+        let registry = self.agent_registry.read().await;
+        let agent_name = registry.get_by_id(&task.agent_id).map(|a| a.name.clone());
+
+        Ok(ApiTaskDetail {
+            id: task.id,
+            agent_name,
+            prompt: task.original_prompt.clone(),
+            status: format!("{:?}", task.state),
+            created_at: task.created_at,
+            completed_at: None,
+        })
+    }
+
+    async fn run_task(&self, _req: RunTaskRequest) -> Result<TaskID, ApiError> {
+        Err(ApiError::Internal(
+            "Task execution via API not yet wired".into(),
+        ))
+    }
+
+    async fn cancel_task(&self, id: TaskID) -> Result<(), ApiError> {
+        self.scheduler
+            .update_state(&id, TaskState::Cancelled)
+            .await
+            .map_err(ApiError::from)?;
+        Ok(())
+    }
+
+    async fn get_task_trace(
+        &self,
+        id: TaskID,
+    ) -> Result<agentos_types::task_trace::TaskTrace, ApiError> {
+        let trace = self
+            .trace_collector
+            .get_trace(&id)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .ok_or_else(|| ApiError::NotFound(format!("Trace for task {} not found", id)))?;
+        Ok(trace)
+    }
+
+    // ── Tools ───────────────────────────────────────────────────────────
+
+    async fn list_tools(&self) -> Result<Vec<ApiToolSummary>, ApiError> {
+        let registry = self.tool_registry.read().await;
+        Ok(registry.list_all().into_iter().map(tool_summary).collect())
+    }
+
+    async fn install_tool(&self, req: InstallToolRequest) -> Result<ToolID, ApiError> {
+        self.api_install_tool(req.manifest_path.clone())
+            .await
+            .map_err(ApiError::Internal)?;
+
+        // Look up the tool that was just installed to get its ID.
+        // The manifest filename stem is typically the tool name, but the
+        // actual name comes from the manifest content. Read back from the
+        // registry by scanning for the newest entry.
+        let registry = self.tool_registry.read().await;
+        // Since we don't know the exact tool name from the path, return
+        // a best-effort ToolID by looking for the most-recently registered.
+        // In practice the caller should know the tool name.
+        let tool =
+            registry.list_all().into_iter().last().ok_or_else(|| {
+                ApiError::Internal("Tool installed but not found in registry".into())
+            })?;
+        Ok(tool.id)
+    }
+
+    async fn remove_tool(&self, name: &str) -> Result<(), ApiError> {
+        self.api_remove_tool(name.to_string())
+            .await
+            .map_err(ApiError::Internal)
+    }
+
+    // ── Secrets ─────────────────────────────────────────────────────────
+
+    async fn list_secrets(&self) -> Result<Vec<SecretMetadata>, ApiError> {
+        self.vault
+            .list()
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))
+    }
+
+    async fn set_secret(&self, req: SetSecretRequest) -> Result<(), ApiError> {
+        let scope = parse_scope(&req.scope);
+        self.api_set_secret(req.name, req.value, scope)
+            .await
+            .map_err(ApiError::Internal)
+    }
+
+    async fn revoke_secret(&self, name: &str) -> Result<(), ApiError> {
+        self.api_revoke_secret(name.to_string())
+            .await
+            .map_err(ApiError::Internal)
+    }
+
+    // ── Chat ────────────────────────────────────────────────────────────
+
+    async fn chat_send(&self, req: ChatRequest) -> Result<ChatResponse, ApiError> {
+        let history: Vec<(String, String)> = req.history;
+        let result = self
+            .chat_infer_with_tools(&req.agent_name, &history, &req.message)
+            .await
+            .map_err(ApiError::Internal)?;
+
+        let tool_calls: Vec<serde_json::Value> = result
+            .tool_calls
+            .into_iter()
+            .map(|tc| {
+                serde_json::json!({
+                    "tool_name": tc.tool_name,
+                    "intent_type": tc.intent_type,
+                    "payload": tc.payload,
+                    "result": tc.result,
+                })
+            })
+            .collect();
+
+        Ok(ChatResponse {
+            message: result.answer,
+            tool_calls,
+        })
+    }
+
+    // ── Pipelines ───────────────────────────────────────────────────────
+
+    async fn list_pipelines(&self) -> Result<Vec<ApiPipelineSummary>, ApiError> {
+        let store = self.pipeline_engine.store_arc();
+        let summaries = tokio::task::spawn_blocking(move || store.list_pipelines())
+            .await
+            .map_err(|e| ApiError::Internal(format!("Join error: {e}")))?
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        Ok(summaries
+            .into_iter()
+            .map(|s| ApiPipelineSummary {
+                name: s.name,
+                description: s.description,
+                step_count: s.step_count,
+            })
+            .collect())
+    }
+
+    async fn save_pipeline(&self, req: SavePipelineRequest) -> Result<(), ApiError> {
+        let yaml = serde_json::to_string_pretty(&req.definition)
+            .map_err(|e| ApiError::BadRequest(format!("Invalid pipeline definition: {e}")))?;
+        let store = self.pipeline_engine.store_arc();
+        let name = req.name.clone();
+        tokio::task::spawn_blocking(move || store.install_pipeline(&name, "1.0.0", &yaml))
+            .await
+            .map_err(|e| ApiError::Internal(format!("Join error: {e}")))?
+            .map_err(|e| ApiError::Internal(e.to_string()))
+    }
+
+    async fn run_pipeline(&self, req: RunPipelineRequest) -> Result<serde_json::Value, ApiError> {
+        self.run_pipeline(req.name, req.input, req.detach, req.agent_name)
+            .await
+            .map_err(ApiError::Internal)
+    }
+
+    async fn delete_pipeline(&self, name: &str) -> Result<(), ApiError> {
+        let store = self.pipeline_engine.store_arc();
+        let name_owned = name.to_string();
+        tokio::task::spawn_blocking(move || store.remove_pipeline(&name_owned))
+            .await
+            .map_err(|e| ApiError::Internal(format!("Join error: {e}")))?
+            .map_err(|e| ApiError::Internal(e.to_string()))
+    }
+
+    // ── Audit ───────────────────────────────────────────────────────────
+
+    async fn query_audit(&self, filter: AuditFilter) -> Result<Vec<AuditEntrySummary>, ApiError> {
+        let audit = self.audit.clone();
+        let limit = filter.limit.unwrap_or(50);
+
+        let entries = tokio::task::spawn_blocking(move || audit.query_recent(limit))
+            .await
+            .map_err(|e| ApiError::Internal(format!("Join error: {e}")))?
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        Ok(entries
+            .into_iter()
+            .map(|e| AuditEntrySummary {
+                timestamp: e.timestamp,
+                event_type: serde_json::to_string(&e.event_type).unwrap_or_default(),
+                agent_id: e.agent_id.map(|id| id.to_string()),
+                details: e.details.to_string(),
+            })
+            .collect())
+    }
+
+    async fn get_audit_detail(&self, trace_id: &str) -> Result<AuditEntryDetail, ApiError> {
+        let tid = trace_id
+            .parse::<agentos_types::TraceID>()
+            .map_err(|_| ApiError::BadRequest(format!("Invalid trace ID: {trace_id}")))?;
+
+        let audit = self.audit.clone();
+        let entries = tokio::task::spawn_blocking(move || audit.query_by_trace(&tid))
+            .await
+            .map_err(|e| ApiError::Internal(format!("Join error: {e}")))?
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        let entry = entries.into_iter().next().ok_or_else(|| {
+            ApiError::NotFound(format!("Audit entry for trace {} not found", trace_id))
+        })?;
+
+        Ok(AuditEntryDetail {
+            timestamp: entry.timestamp,
+            event_type: serde_json::to_string(&entry.event_type).unwrap_or_default(),
+            agent_id: entry.agent_id.map(|id| id.to_string()),
+            task_id: entry.task_id.map(|id| id.to_string()),
+            trace_id: Some(entry.trace_id.to_string()),
+            details: entry.details.to_string(),
+            metadata: entry.details,
+        })
+    }
+
+    // ── Costs ───────────────────────────────────────────────────────────
+
+    async fn get_cost_summary(&self) -> Result<Vec<CostSummaryEntry>, ApiError> {
+        let snapshots = self.cost_tracker.get_all_snapshots().await;
+        Ok(snapshots
+            .into_iter()
+            .map(|s| CostSummaryEntry {
+                agent_id: s.agent_id,
+                agent_name: s.agent_name,
+                period_start: s.period_start,
+                tokens_used: s.tokens_used,
+                cost_usd: s.cost_usd,
+                tool_calls: s.tool_calls,
+            })
+            .collect())
+    }
+
+    async fn get_agent_costs(&self, agent_name: &str) -> Result<CostSummaryEntry, ApiError> {
+        let registry = self.agent_registry.read().await;
+        let profile = registry
+            .get_by_name(agent_name)
+            .ok_or_else(|| ApiError::NotFound(format!("Agent '{}' not found", agent_name)))?;
+        let agent_id = profile.id;
+        drop(registry);
+
+        let snapshot = self
+            .cost_tracker
+            .get_snapshot(&agent_id)
+            .await
+            .ok_or_else(|| {
+                ApiError::NotFound(format!("No cost data for agent '{}'", agent_name))
+            })?;
+
+        Ok(CostSummaryEntry {
+            agent_id: snapshot.agent_id,
+            agent_name: snapshot.agent_name,
+            period_start: snapshot.period_start,
+            tokens_used: snapshot.tokens_used,
+            cost_usd: snapshot.cost_usd,
+            tool_calls: snapshot.tool_calls,
+        })
+    }
+
+    // ── Notifications ───────────────────────────────────────────────────
+
+    async fn list_notifications(
+        &self,
+        filter: NotificationFilter,
+    ) -> Result<Vec<NotificationSummary>, ApiError> {
+        let inbox = self.notification_router.inbox();
+        let unread_only = filter.unread_only.unwrap_or(false);
+        let limit = filter.limit.unwrap_or(50) as usize;
+
+        let messages = inbox
+            .list(unread_only, limit)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        Ok(messages
+            .into_iter()
+            .map(|m| NotificationSummary {
+                id: m.id,
+                subject: m.subject.clone(),
+                priority: format!("{:?}", m.priority),
+                read: m.read,
+                timestamp: m.created_at.to_rfc3339(),
+            })
+            .collect())
+    }
+
+    async fn get_notification(
+        &self,
+        id: NotificationID,
+    ) -> Result<agentos_types::UserMessage, ApiError> {
+        let inbox = self.notification_router.inbox();
+        inbox
+            .get(&id)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .ok_or_else(|| ApiError::NotFound(format!("Notification {} not found", id)))
+    }
+
+    async fn respond_to_notification(
+        &self,
+        id: NotificationID,
+        text: String,
+    ) -> Result<(), ApiError> {
+        let response = UserResponse {
+            text,
+            responded_at: chrono::Utc::now(),
+            channel: DeliveryChannel::web(),
+        };
+        self.notification_router
+            .route_response(id, response)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))
+    }
+
+    async fn get_unread_count(&self) -> Result<u64, ApiError> {
+        let inbox = self.notification_router.inbox();
+        Ok(inbox.count_unread().await as u64)
+    }
+
+    // ── Dashboard ───────────────────────────────────────────────────────
+
+    async fn get_dashboard_summary(&self) -> Result<DashboardSummary, ApiError> {
+        let online_agents = self.list_agents().await?;
+        let agent_count = {
+            let registry = self.agent_registry.read().await;
+            registry.list_all().len()
+        };
+
+        let all_tasks = self.scheduler.list_tasks().await;
+        let running = all_tasks
+            .iter()
+            .filter(|t| t.state == TaskState::Running)
+            .count();
+        let completed = all_tasks
+            .iter()
+            .filter(|t| t.state == TaskState::Complete)
+            .count();
+        let failed = all_tasks
+            .iter()
+            .filter(|t| t.state == TaskState::Failed)
+            .count();
+        let total = all_tasks.len();
+
+        let tool_count = {
+            let registry = self.tool_registry.read().await;
+            registry.list_all().len()
+        };
+
+        let uptime = chrono::Utc::now()
+            .signed_duration_since(self.started_at)
+            .to_std()
+            .unwrap_or_default();
+
+        let audit_filter = AuditFilter {
+            limit: Some(10),
+            ..Default::default()
+        };
+        let recent_audit = self.query_audit(audit_filter).await.unwrap_or_default();
+
+        let background_tasks = self.background_pool.list_running().await;
+
+        Ok(DashboardSummary {
+            agent_count,
+            online_agents,
+            task_counts: TaskCounts {
+                running,
+                completed,
+                failed,
+                total,
+            },
+            tool_count,
+            uptime_secs: uptime.as_secs(),
+            recent_audit,
+            background_task_count: background_tasks.len(),
+        })
+    }
+
+    // ── System ──────────────────────────────────────────────────────────
+
+    async fn get_status(&self) -> Result<SystemStatus, ApiError> {
+        let agent_count = {
+            let registry = self.agent_registry.read().await;
+            registry.list_online().len()
+        };
+        let task_count = self.scheduler.list_tasks().await.len();
+        let tool_count = {
+            let registry = self.tool_registry.read().await;
+            registry.list_all().len()
+        };
+        let uptime = chrono::Utc::now()
+            .signed_duration_since(self.started_at)
+            .to_std()
+            .unwrap_or_default();
+
+        Ok(SystemStatus {
+            uptime_secs: uptime.as_secs(),
+            agent_count,
+            task_count,
+            tool_count,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        })
+    }
+
+    async fn get_uptime(&self) -> std::time::Duration {
+        chrono::Utc::now()
+            .signed_duration_since(self.started_at)
+            .to_std()
+            .unwrap_or_default()
+    }
+}
