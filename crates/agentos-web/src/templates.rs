@@ -20,9 +20,18 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
         "task_detail.html",
         include_str!("templates/task_detail.html"),
     )?;
+    env.add_template("task_trace.html", include_str!("templates/task_trace.html"))?;
     env.add_template("tools.html", include_str!("templates/tools.html"))?;
     env.add_template("secrets.html", include_str!("templates/secrets.html"))?;
     env.add_template("pipelines.html", include_str!("templates/pipelines.html"))?;
+    env.add_template(
+        "pipelines/list.html",
+        include_str!("templates/pipelines/list.html"),
+    )?;
+    env.add_template(
+        "pipelines/builder.html",
+        include_str!("templates/pipelines/builder.html"),
+    )?;
     env.add_template("audit.html", include_str!("templates/audit.html"))?;
     env.add_template(
         "audit_detail.html",
@@ -32,6 +41,36 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
     env.add_template(
         "chat_conversation.html",
         include_str!("templates/chat_conversation.html"),
+    )?;
+
+    // Agent detail page
+    env.add_template(
+        "agents/detail.html",
+        include_str!("templates/agents/detail.html"),
+    )?;
+
+    // Cost dashboard
+    env.add_template(
+        "costs/dashboard.html",
+        include_str!("templates/costs/dashboard.html"),
+    )?;
+
+    // Notification pages and partials (UNIS Phase 2)
+    env.add_template(
+        "notifications/inbox.html",
+        include_str!("templates/notifications/inbox.html"),
+    )?;
+    env.add_template(
+        "notifications/detail.html",
+        include_str!("templates/notifications/detail.html"),
+    )?;
+    env.add_template(
+        "notifications/_notification_row.html",
+        include_str!("templates/notifications/_notification_row.html"),
+    )?;
+    env.add_template(
+        "notifications/_respond_form.html",
+        include_str!("templates/notifications/_respond_form.html"),
     )?;
 
     // Partials

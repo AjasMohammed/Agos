@@ -4,6 +4,7 @@ use agentos_bus::client::BusClient;
 pub mod agent;
 pub mod audit;
 pub mod bg;
+pub mod channel;
 pub mod cost;
 pub mod escalation;
 pub mod event;
@@ -11,11 +12,14 @@ pub mod hal;
 pub mod healthz;
 pub mod identity;
 pub mod log;
+pub mod mcp;
+pub mod notifications;
 pub mod perm;
 pub mod pipeline;
 pub mod resource;
 pub mod role;
 pub mod schedule;
+pub mod scratchpad;
 pub mod secret;
 pub mod snapshot;
 pub mod status;
@@ -44,6 +48,9 @@ pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow
         Commands::Identity { command } => identity::handle(client, command).await,
         Commands::Hal { command } => hal::handle(client, command).await,
         Commands::Log { command } => log::handle(client, command).await,
+        Commands::Notifications { command } => notifications::handle(client, command).await,
+        Commands::Channel { command } => channel::handle(client, command).await,
+        Commands::Scratchpad { command } => scratchpad::handle(client, command).await,
         _ => unreachable!(),
     }
 }

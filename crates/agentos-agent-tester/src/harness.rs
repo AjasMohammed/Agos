@@ -2,7 +2,7 @@ use agentos_kernel::config::{
     AuditSettings, BusSettings, HealthMonitorConfig, KernelConfig, KernelSettings, LlmSettings,
     MemorySettings, OllamaSettings, PreflightConfig, SecretsSettings, ToolsSettings,
 };
-use agentos_kernel::{parse_tool_call, Kernel};
+use agentos_kernel::{parse_intent_type, Kernel};
 use agentos_llm::{
     calculate_inference_cost, default_pricing_table, AnthropicCore, GeminiCore, LLMCore,
     MockLLMCore, ModelPricing, OllamaCore, OpenAICore,
@@ -131,6 +131,11 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         health_monitor: HealthMonitorConfig::default(),
         preflight: PreflightConfig::default(),
         logging: Default::default(),
+        notifications: Default::default(),
+        mcp: Default::default(),
+        registry: Default::default(),
+        scratchpad: Default::default(),
+        otel: Default::default(),
     }
 }
 
@@ -517,8 +522,16 @@ impl TestHarness {
             let cost = calculate_inference_cost(&tokens_used, &self.pricing);
             total_cost_usd += cost.total_cost_usd;
             total_tokens += tokens_used.total_tokens;
-            // Move text out of infer_result — no clone needed since tokens_used
-            // is the only other field we use and it has already been extracted.
+            // The harness executes one tool call per turn (matching the single-turn
+            // interaction model of test scenarios). Parallel tool calls are not needed here.
+            let native_tool_call = infer_result.tool_calls.into_iter().next().map(|tc| {
+                agentos_kernel::ToolCallRequest {
+                    id: tc.id,
+                    tool_name: tc.tool_name,
+                    intent_type: parse_intent_type(&tc.intent_type).unwrap_or(IntentType::Query),
+                    payload: tc.payload,
+                }
+            });
             let response_text = infer_result.text;
 
             let feedback_entries = parse_feedback(&response_text, &scenario.name, turn);
@@ -527,7 +540,7 @@ impl TestHarness {
                 collector.add(entry);
             }
 
-            if let Some(tool_call) = parse_tool_call(&response_text) {
+            if let Some(tool_call) = native_tool_call {
                 tool_calls_made += 1;
 
                 let tool_start = std::time::Instant::now();

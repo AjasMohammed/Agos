@@ -1,6 +1,8 @@
 use crate::kernel::Kernel;
 use crate::task_executor::TaskResult;
+use crate::task_summary::{deduplicate_title, generate_task_summary};
 use agentos_types::*;
+use std::collections::HashMap;
 
 impl Kernel {
     /// Handle successful task completion: record to episodic memory, update scheduler state,
@@ -82,6 +84,28 @@ impl Kernel {
             });
 
         if completed {
+            self.push_status_update(
+                task.id,
+                TaskState::Complete,
+                "Task completed successfully".to_string(),
+            );
+            self.audit_log(agentos_audit::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: task_trace_id,
+                event_type: agentos_audit::AuditEventType::TaskCompleted,
+                agent_id: Some(task.agent_id),
+                task_id: Some(task.id),
+                tool_id: None,
+                details: serde_json::json!({
+                    "iterations": result.iterations,
+                    "tool_calls": result.tool_call_count,
+                    "duration_ms": duration_ms,
+                    "answer_preview": Self::truncate_for_prompt_payload(&result.answer, 200),
+                }),
+                severity: agentos_audit::AuditSeverity::Info,
+                reversible: false,
+                rollback_ref: None,
+            });
             self.emit_event_with_trace(
                 EventType::TaskCompleted,
                 EventSource::TaskScheduler,
@@ -116,6 +140,19 @@ impl Kernel {
                     self.schedule_manager.emit_task_completed(&job).await;
                 }
             }
+
+            // If this was an RPC child task, deliver the result to the blocked caller.
+            // complete_call is a no-op if the task is not an RPC child.
+            self.rpc_manager
+                .complete_call(
+                    &task.id,
+                    crate::rpc_manager::RpcResult {
+                        output: result.answer.clone(),
+                        success: true,
+                        error: None,
+                    },
+                )
+                .await;
 
             // Wake any parent tasks that were waiting on this child
             let waiters = self.scheduler.complete_dependency(task.id).await;
@@ -157,6 +194,28 @@ impl Kernel {
                 task_id = %task.id,
                 "Task finished but was already in terminal state (likely timed out), skipping completion"
             );
+        }
+
+        // Send task-completion notification to user inbox (root tasks only).
+        if completed
+            && Self::is_root_task(task)
+            && self.config.notifications.notify_on_task_complete
+        {
+            self.send_completion_notification(
+                task,
+                TaskOutcome::Success,
+                &result.answer,
+                Some(result.tool_call_count),
+                Some(result.iterations),
+                duration_ms,
+                task_trace_id,
+            )
+            .await;
+        }
+
+        // Auto-write scratchpad note for completed task
+        if completed {
+            self.auto_write_scratchpad_note(task, "Success").await;
         }
 
         self.cleanup_task_subscriptions(&task.id).await;
@@ -209,6 +268,17 @@ impl Kernel {
             {
                 tracing::warn!(task_id = %task.id, error = %err, "Failed to record suspended task state");
             }
+            // Notify RPC caller if this was an RPC child task (prevents parent hang)
+            self.rpc_manager
+                .complete_call(
+                    &task.id,
+                    crate::rpc_manager::RpcResult {
+                        output: String::new(),
+                        success: false,
+                        error: Some(format!("RPC child task suspended: {}", error_message)),
+                    },
+                )
+                .await;
             self.cleanup_task_subscriptions(&task.id).await;
             return;
         }
@@ -242,6 +312,17 @@ impl Kernel {
             }
             self.background_pool
                 .set_waiting(&task.id, error_message.clone())
+                .await;
+            // Notify RPC caller if this was an RPC child task (prevents parent hang)
+            self.rpc_manager
+                .complete_call(
+                    &task.id,
+                    crate::rpc_manager::RpcResult {
+                        output: String::new(),
+                        success: false,
+                        error: Some(format!("RPC child task paused: {}", error_message)),
+                    },
+                )
                 .await;
             return;
         }
@@ -291,6 +372,8 @@ impl Kernel {
             self.cleanup_task_subscriptions(&task.id).await;
             return;
         }
+
+        self.push_status_update(task.id, TaskState::Failed, error_message.clone());
 
         // Write a direct TaskFailed audit entry with task_id, agent_id, and full
         // error details. This is separate from the EventEmitted path below so the
@@ -415,6 +498,22 @@ impl Kernel {
             }
         }
 
+        // Auto-write scratchpad note for failed task
+        self.auto_write_scratchpad_note(task, "Failed").await;
+
+        // If this was an RPC child task, deliver the failure to the blocked caller.
+        // complete_call is a no-op if the task is not an RPC child.
+        self.rpc_manager
+            .complete_call(
+                &task.id,
+                crate::rpc_manager::RpcResult {
+                    output: String::new(),
+                    success: false,
+                    error: Some(error_message.clone()),
+                },
+            )
+            .await;
+
         // Clean up dependency edges even on failure
         let waiters = self.scheduler.complete_dependency(task.id).await;
         for waiter_id in &waiters {
@@ -439,6 +538,240 @@ impl Kernel {
             }
         }
 
+        // Send task-failure notification to user inbox (root tasks only).
+        if Self::is_root_task(task) && self.config.notifications.notify_on_task_failed {
+            self.send_completion_notification(
+                task,
+                TaskOutcome::Failed,
+                &error_message,
+                None, // tool_calls not available in failure path
+                None, // iterations not available in failure path
+                duration_ms,
+                task_trace_id,
+            )
+            .await;
+        }
+
         self.cleanup_task_subscriptions(&task.id).await;
+    }
+
+    // ── Scratchpad auto-write ────────────────────────────────────────────────
+
+    /// Generate and write a scratchpad note summarizing a completed or failed task.
+    ///
+    /// This is non-fatal: failures are logged as warnings and do not affect
+    /// the task's outcome or downstream processing.
+    async fn auto_write_scratchpad_note(&self, task: &AgentTask, outcome: &str) {
+        if !self.config.scratchpad.enabled || !self.config.scratchpad.auto_write_on_completion {
+            return;
+        }
+
+        // Fetch episodic timeline for this task
+        let episodes = match self.episodic_memory.timeline_by_task(&task.id, 200).await {
+            Ok(eps) => eps,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "Failed to fetch episodic timeline for scratchpad auto-write"
+                );
+                return;
+            }
+        };
+
+        // Skip trivial tasks
+        if episodes.len() < self.config.scratchpad.auto_write_min_steps {
+            tracing::debug!(
+                task_id = %task.id,
+                episode_count = episodes.len(),
+                min_steps = self.config.scratchpad.auto_write_min_steps,
+                "Skipping scratchpad auto-write for trivial task"
+            );
+            return;
+        }
+
+        // Get existing page titles for auto-linking and deduplication
+        let agent_id_str = task.agent_id.as_uuid().to_string();
+        let existing_pages = match self.scratchpad_store.list_pages(&agent_id_str).await {
+            Ok(pages) => pages,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "Failed to list scratchpad pages for auto-write"
+                );
+                return;
+            }
+        };
+        let existing_titles: Vec<String> = existing_pages.iter().map(|p| p.title.clone()).collect();
+
+        let summary = generate_task_summary(
+            task,
+            outcome,
+            &episodes,
+            &existing_titles,
+            self.config.scratchpad.auto_write_max_summary,
+        );
+
+        // Deduplicate title
+        let final_title = deduplicate_title(&summary.title, &existing_titles);
+
+        match self
+            .scratchpad_store
+            .write_page(&agent_id_str, &final_title, &summary.content, &summary.tags)
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(
+                    agent_id = %task.agent_id,
+                    title = %final_title,
+                    "Auto-generated scratchpad note for completed task"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "Failed to auto-write scratchpad note (non-fatal)"
+                );
+            }
+        }
+    }
+
+    // ── Task-completion notification helpers ─────────────────────────────────
+
+    /// Returns `true` only for root tasks (no parent) that the user sees directly.
+    fn is_root_task(task: &AgentTask) -> bool {
+        task.parent_task.is_none()
+    }
+
+    /// Build the short subject line (≤80 chars) for a task-completion notification.
+    fn format_completion_subject(outcome: TaskOutcome, prompt: &str) -> String {
+        let (icon, verb) = match outcome {
+            TaskOutcome::Success => ("✓", "completed"),
+            TaskOutcome::Failed => ("✗", "failed"),
+            TaskOutcome::Cancelled => ("○", "cancelled"),
+            TaskOutcome::TimedOut => ("⏱", "timed out"),
+        };
+        let short_prompt: String = prompt.chars().take(50).collect();
+        let ellipsis = if prompt.chars().count() > 50 {
+            "…"
+        } else {
+            ""
+        };
+        format!("{icon} Task {verb}: {short_prompt}{ellipsis}")
+    }
+
+    /// Build the markdown body for a task-completion notification.
+    fn format_completion_body(
+        outcome: TaskOutcome,
+        prompt: &str,
+        summary: &str,
+        duration_ms: u64,
+        iterations: Option<u32>,
+        tool_calls: Option<u32>,
+        cost_usd: Option<f64>,
+    ) -> String {
+        let duration_s = duration_ms as f64 / 1000.0;
+        let iterations_str = iterations
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        let tool_calls_str = tool_calls
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        let cost_str = cost_usd
+            .map(|c| format!("${c:.4} (period)"))
+            .unwrap_or_else(|| "N/A".to_string());
+
+        format!(
+            "## Task {outcome}\n\n\
+            **Original request:** {prompt}\n\n\
+            **Summary:** {summary}\n\n\
+            | Metric | Value |\n\
+            |--------|-------|\n\
+            | Duration | {duration_s:.1}s |\n\
+            | Iterations | {iterations_str} |\n\
+            | Tool calls | {tool_calls_str} |\n\
+            | Agent cost (period) | {cost_str} |\n",
+        )
+    }
+
+    /// Deliver a `TaskComplete` `UserMessage` to the notification router.
+    ///
+    /// `tool_calls` and `iterations` are `None` when the data is not available
+    /// (e.g. failure paths where `TaskResult` was never produced).
+    ///
+    /// Non-fatal: logs a warning and continues if delivery fails.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn send_completion_notification(
+        &self,
+        task: &AgentTask,
+        outcome: TaskOutcome,
+        summary: &str,
+        tool_calls: Option<u32>,
+        iterations: Option<u32>,
+        duration_ms: u64,
+        trace_id: TraceID,
+    ) {
+        debug_assert!(
+            Self::is_root_task(task),
+            "send_completion_notification called for sub-task"
+        );
+
+        let cost_usd = self
+            .cost_tracker
+            .get_snapshot(&task.agent_id)
+            .await
+            .map(|s| s.cost_usd);
+
+        let subject = Self::format_completion_subject(outcome, &task.original_prompt);
+        let body = Self::format_completion_body(
+            outcome,
+            &task.original_prompt,
+            summary,
+            duration_ms,
+            iterations,
+            tool_calls,
+            cost_usd,
+        );
+        let priority = match outcome {
+            TaskOutcome::Success | TaskOutcome::Cancelled => NotificationPriority::Info,
+            TaskOutcome::Failed | TaskOutcome::TimedOut => NotificationPriority::Warning,
+        };
+
+        let msg = UserMessage {
+            id: NotificationID::new(),
+            from: NotificationSource::Kernel,
+            task_id: Some(task.id),
+            trace_id,
+            kind: UserMessageKind::TaskComplete {
+                task_id: task.id,
+                outcome,
+                summary: summary.chars().take(500).collect(),
+                duration_ms,
+                iterations: iterations.unwrap_or(0),
+                cost_usd,
+                tool_calls: tool_calls.unwrap_or(0),
+            },
+            priority,
+            subject,
+            body,
+            interaction: None,
+            delivery_status: HashMap::new(),
+            response: None,
+            created_at: chrono::Utc::now(),
+            expires_at: None,
+            read: false,
+            thread_id: Some(task.id.to_string()),
+            reply_to_external_id: None,
+        };
+
+        if let Err(e) = self.notification_router.deliver(msg).await {
+            tracing::warn!(
+                task_id = %task.id,
+                error = %e,
+                "Failed to send task completion notification (non-fatal)"
+            );
+        }
     }
 }

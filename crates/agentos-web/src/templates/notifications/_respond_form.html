@@ -1,0 +1,24 @@
+<form hx-post="/notifications/{{ msg.id }}/respond"
+      hx-target="#notif-{{ msg.id }}"
+      hx-swap="outerHTML">
+  {% if msg.options %}
+  <fieldset>
+    {% for option in msg.options %}
+    <label>
+      <input type="radio" name="response" value="{{ option }}" required>
+      {{ option }}
+    </label>
+    {% endfor %}
+  </fieldset>
+  {% else %}
+  <textarea name="response"
+            placeholder="Type your response…"
+            rows="3"
+            maxlength="4096"
+            required></textarea>
+  {% endif %}
+  {% if msg.expires_at %}
+  <small class="muted">Auto-action fires at {{ msg.expires_at }}</small>
+  {% endif %}
+  <button type="submit">Send Response</button>
+</form>

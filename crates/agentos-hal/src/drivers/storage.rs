@@ -75,6 +75,28 @@ impl HalDriver for StorageDriver {
         ("hardware.storage", PermissionOp::Read)
     }
 
+    /// Aggregate list queries enumerate all block devices and therefore do not map
+    /// to one registry entry.
+    fn device_key(&self, params: &Value) -> Option<String> {
+        let action = params
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or("list");
+        if action == "list" {
+            return None;
+        }
+
+        params.get("path").and_then(|v| v.as_str()).map(|path| {
+            let device_name = path
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .filter(|segment| !segment.is_empty())
+                .unwrap_or("default");
+            format!("storage:{device_name}")
+        })
+    }
+
     async fn query(&self, params: Value) -> Result<Value, AgentOSError> {
         let action = params
             .get("action")
@@ -97,11 +119,22 @@ impl HalDriver for StorageDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[tokio::test]
     async fn test_storage_list() {
         let driver = StorageDriver::new();
         let result = driver.query(json!({ "action": "list" })).await.unwrap();
         assert!(result["devices"].is_array());
+    }
+
+    #[test]
+    fn test_storage_list_action_has_no_single_device_key() {
+        let driver = StorageDriver::new();
+        assert_eq!(driver.device_key(&json!({ "action": "list" })), None);
+        assert_eq!(
+            driver.device_key(&json!({ "action": "inspect", "path": "/dev/sda" })),
+            Some("storage:sda".to_string())
+        );
     }
 }

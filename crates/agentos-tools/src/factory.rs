@@ -54,16 +54,20 @@ const HAL_TOOL_NAMES: &[&str] = &[
     "process-manager",
     "log-reader",
     "network-monitor",
+    "usb-storage",
 ];
 
 const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "agent-message",
     "task-delegate",
+    "agent-call",
     "agent-list",
     "task-status",
     "task-list",
     "shell-exec",
     "escalation-status",
+    "notify-user",
+    "ask-user",
 ];
 
 const SPECIAL_CONTEXT_TOOL_NAMES: &[&str] = &["agent-manual", "agent-self"];
@@ -188,13 +192,8 @@ fn build_memory_tool(
     data_dir: &Path,
     model_cache_dir: &Path,
 ) -> Result<Option<Box<dyn AgentTool>>, AgentOSError> {
+    // Procedural tools don't need semantic/episodic stores — early return.
     match name {
-        "episodic-list" => {
-            let episodic = Arc::new(EpisodicStore::open(data_dir)?);
-            return Ok(Some(Box::new(crate::episodic_list::EpisodicList::new(
-                episodic,
-            ))));
-        }
         "procedure-create" | "procedure-delete" | "procedure-list" | "procedure-search" => {
             let embedder = init_embedder(model_cache_dir)?;
             let procedural = Arc::new(ProceduralStore::open_with_embedder(data_dir, embedder)?);
@@ -213,14 +212,24 @@ fn build_memory_tool(
             };
             return Ok(Some(tool));
         }
-        "memory-read" | "archival-insert" | "archival-search" => {
+        _ => {}
+    }
+
+    // Open a single EpisodicStore connection shared across all episodic/memory tools.
+    // This avoids multiple SQLite connections to the same database file which can
+    // cause WAL contention under concurrent access.
+    let episodic = Arc::new(EpisodicStore::open(data_dir)?);
+
+    match name {
+        "episodic-list" => {
+            return Ok(Some(Box::new(crate::episodic_list::EpisodicList::new(
+                episodic,
+            ))));
+        }
+        "archival-insert" | "archival-search" => {
             let embedder = init_embedder(model_cache_dir)?;
             let semantic = Arc::new(SemanticStore::open_with_embedder(data_dir, embedder)?);
             let tool: Box<dyn AgentTool> = match name {
-                "memory-read" => {
-                    let episodic = Arc::new(EpisodicStore::open(data_dir)?);
-                    Box::new(crate::memory_read::MemoryRead::new(semantic, episodic))
-                }
                 "archival-insert" => {
                     Box::new(crate::archival_insert::ArchivalInsert::new(semantic))
                 }
@@ -239,9 +248,9 @@ fn build_memory_tool(
         data_dir,
         embedder.clone(),
     )?);
-    let episodic = Arc::new(EpisodicStore::open(data_dir)?);
 
     let tool: Box<dyn AgentTool> = match name {
+        "memory-read" => Box::new(crate::memory_read::MemoryRead::new(semantic, episodic)),
         "memory-search" => Box::new(crate::memory_search::MemorySearch::new(semantic, episodic)),
         "memory-write" => Box::new(crate::memory_write::MemoryWrite::new(semantic, episodic)),
         "memory-delete" => Box::new(crate::memory_delete::MemoryDelete::new(semantic, episodic)),
@@ -298,6 +307,7 @@ fn build_hal_tool(name: &str) -> Result<Option<Box<dyn AgentTool>>, AgentOSError
         "process-manager" => Box::new(crate::process_manager::ProcessManagerTool::new()),
         "log-reader" => Box::new(crate::log_reader::LogReaderTool::new()),
         "network-monitor" => Box::new(crate::network_monitor::NetworkMonitorTool::new()),
+        "usb-storage" => Box::new(crate::usb_storage::UsbStorageTool::new()),
         _ => return Ok(None),
     };
     Ok(Some(tool))
@@ -410,6 +420,8 @@ mod tests {
             "shell-exec",
             "agent-manual",
             "agent-self",
+            "notify-user",
+            "ask-user",
         ] {
             let result = build_single_tool(name, tmp.path()).unwrap();
             assert!(

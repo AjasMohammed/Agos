@@ -7,13 +7,11 @@ pub enum IdentityCommands {
     /// Show an agent's Ed25519 cryptographic identity
     Show {
         /// Agent name
-        #[arg(long)]
         agent: String,
     },
     /// Revoke an agent's cryptographic identity and permissions
     Revoke {
         /// Agent name
-        #[arg(long)]
         agent: String,
     },
 }

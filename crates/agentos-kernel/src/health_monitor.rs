@@ -139,12 +139,16 @@ async fn check_system_health(
     // ── 1. System snapshot: CPU / memory / disk ─────────────────────────────
     let system_snapshot = kernel
         .hal
-        .query("system", serde_json::Value::Null, permissions)
+        .query("system", serde_json::Value::Null, permissions, None, None)
         .await;
     match &system_snapshot {
         Ok(snapshot) => {
+            let mut cpu_metric = None;
+            let mut memory_metric = None;
+            let mut disk_metric = None;
             // CPU
             if let Some(cpu) = snapshot.get("cpu_usage_percent").and_then(|v| v.as_f64()) {
+                cpu_metric = Some(cpu);
                 let cpu = cpu as f32;
                 if cpu > thresholds.cpu_warning_percent
                     && should_emit(last_emitted, "CPUSpikeDetected", audit)
@@ -175,6 +179,7 @@ async fn check_system_health(
                 .unwrap_or(0);
             if mem_total > 0 {
                 let mem_percent = (mem_used as f32 / mem_total as f32) * 100.0;
+                memory_metric = Some(mem_percent as f64);
                 if mem_percent > thresholds.memory_warning_percent
                     && should_emit(last_emitted, "MemoryPressure", audit)
                 {
@@ -224,6 +229,11 @@ async fn check_system_health(
 
                     let used = total.saturating_sub(available);
                     let used_percent = (used as f32 / total as f32) * 100.0;
+                    disk_metric = Some(
+                        disk_metric
+                            .map(|current: f64| current.max(used_percent as f64))
+                            .unwrap_or(used_percent as f64),
+                    );
 
                     if used_percent > thresholds.disk_critical_percent {
                         critical_mounts.push(serde_json::json!({
@@ -272,6 +282,10 @@ async fn check_system_health(
                         .await;
                 }
             }
+
+            kernel
+                .otel
+                .record_health_snapshot(cpu_metric, memory_metric, disk_metric);
         }
         Err(e) => {
             tracing::warn!(error = %e, "Health monitor: failed to query system HAL driver");
@@ -281,7 +295,13 @@ async fn check_system_health(
     // ── 2. GPU VRAM — optional, silently skipped when no GPU / no VRAM data ─
     if let Ok(gpu_json) = kernel
         .hal
-        .query("gpu", serde_json::json!({"action": "list"}), permissions)
+        .query(
+            "gpu",
+            serde_json::json!({"action": "list"}),
+            permissions,
+            None,
+            None,
+        )
         .await
     {
         if let Some(devices) = gpu_json.get("devices").and_then(|d| d.as_array()) {
@@ -350,6 +370,8 @@ async fn check_system_health(
             "network",
             serde_json::json!({"action": "list"}),
             permissions,
+            None,
+            None,
         )
         .await
     {
@@ -422,7 +444,13 @@ async fn check_system_health(
     // ── 5. Sensor readings — check for threshold exceedances ─────────────────
     if let Ok(sensor_json) = kernel
         .hal
-        .query("sensor", serde_json::json!({"action": "list"}), permissions)
+        .query(
+            "sensor",
+            serde_json::json!({"action": "list"}),
+            permissions,
+            None,
+            None,
+        )
         .await
     {
         if let Some(readings) = sensor_json.get("readings").and_then(|r| r.as_array()) {

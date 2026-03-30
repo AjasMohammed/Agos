@@ -43,6 +43,13 @@ impl AgentTool for NetworkMonitorTool {
         let mut perms = agentos_types::PermissionSet::new();
         perms.grant("network.logs".to_string(), true, false, false, None);
 
-        hal.query("network", payload, &perms).await
+        hal.query(
+            "network",
+            payload,
+            &perms,
+            Some(&context.agent_id),
+            Some(&context.task_id),
+        )
+        .await
     }
 }

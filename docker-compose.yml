@@ -1,6 +1,8 @@
 services:
   agentos:
-    build: .
+    image: agentos/kernel:latest
+    build:
+      context: .
     container_name: agentos-kernel
     read_only: true
     tmpfs:
@@ -9,21 +11,39 @@ services:
     security_opt:
       - no-new-privileges:true
     environment:
-      - AGENTOS_VAULT_PASSPHRASE=${AGENTOS_VAULT_PASSPHRASE:?Set AGENTOS_VAULT_PASSPHRASE in .env or environment}
+      - AGENTOS_CONFIG=/etc/agentos/config.toml
+      - AGENTOS_AUTO_INIT_VAULT=true
+      - AGENTOS_VAULT_PASSPHRASE=${AGENTOS_VAULT_PASSPHRASE:-}
       - AGENTOS_OLLAMA_HOST=${AGENTOS_OLLAMA_HOST:-}
       - AGENTOS_LLM_URL=${AGENTOS_LLM_URL:-}
       - AGENTOS_OPENAI_BASE_URL=${AGENTOS_OPENAI_BASE_URL:-}
-      - RUST_LOG=${RUST_LOG:-}
+      - AGENTOS_OTEL_ENABLED=${AGENTOS_OTEL_ENABLED:-true}
+      - AGENTOS_OTEL_ENDPOINT=${AGENTOS_OTEL_ENDPOINT:-http://jaeger:4317}
+      - RUST_LOG=${RUST_LOG:-agentos=info}
     volumes:
       - agentos-data:/var/lib/agentos/data
       - agentos-user-tools:/var/lib/agentos/tools/user
+      - ./config/docker.toml:/etc/agentos/config.toml:ro
     ports:
       - "8080:8080"
       - "9091:9091"
     restart: unless-stopped
     depends_on:
+      jaeger:
+        condition: service_started
       ollama:
         condition: service_started
+    command: ["web", "serve", "--host", "0.0.0.0", "--port", "8080"]
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: agentos-jaeger
+    restart: unless-stopped
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"
+      - "4317:4317"
 
   ollama:
     image: ollama/ollama:latest
@@ -31,10 +51,6 @@ services:
     restart: unless-stopped
     volumes:
       - ollama-models:/root/.ollama
-    # Port 11434 is intentionally NOT exposed to the host.
-    # Uncomment for local debugging only:
-    # ports:
-    #   - "11434:11434"
 
 volumes:
   agentos-data:

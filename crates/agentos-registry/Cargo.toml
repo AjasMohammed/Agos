@@ -1,0 +1,30 @@
+[package]
+name = "agentos-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AgentOS tool marketplace registry — HTTP server for publishing, searching, and downloading community tools"
+
+[[bin]]
+name = "agentos-registry"
+path = "src/main.rs"
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+ed25519-dalek = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+toml = { workspace = true }
+hex = { workspace = true }
+tower-http = { version = "0.6", features = ["cors"] }
+
+# Reuse signing verification from agentos-tools
+agentos-tools = { path = "../agentos-tools" }
+agentos-types = { path = "../agentos-types" }

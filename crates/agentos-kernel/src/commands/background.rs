@@ -12,6 +12,13 @@ impl Kernel {
         prompt: String,
         detached: bool,
     ) -> Result<TaskID, AgentOSError> {
+        // Reject duplicate background task names to keep name-based lookup unambiguous.
+        if self.background_pool.get_by_name(&name).await.is_some() {
+            return Err(AgentOSError::KernelError {
+                reason: format!("Background task '{}' already exists", name),
+            });
+        }
+
         let registry = self.agent_registry.read().await;
         let agent = registry
             .get_by_name(&agent_name)
@@ -126,12 +133,23 @@ impl Kernel {
         KernelResponse::BackgroundPoolList(self.background_pool.list_all().await)
     }
 
+    /// Resolve a background task by name or UUID string.
+    async fn resolve_background_task(&self, name: &str) -> Option<BackgroundTask> {
+        if let Some(t) = self.background_pool.get_by_name(name).await {
+            return Some(t);
+        }
+        if let Ok(id) = name.parse::<TaskID>() {
+            return self.background_pool.get_task(&id).await;
+        }
+        None
+    }
+
     pub(crate) async fn cmd_get_background_logs(
         &self,
         name: String,
         _follow: bool,
     ) -> KernelResponse {
-        if let Some(task) = self.background_pool.get_by_name(&name).await {
+        if let Some(task) = self.resolve_background_task(&name).await {
             self.cmd_get_task_logs(task.id).await
         } else {
             KernelResponse::Error {
@@ -141,7 +159,7 @@ impl Kernel {
     }
 
     pub(crate) async fn cmd_kill_background(&self, name: String) -> KernelResponse {
-        if let Some(task) = self.background_pool.get_by_name(&name).await {
+        if let Some(task) = self.resolve_background_task(&name).await {
             match self
                 .scheduler
                 .update_state(&task.id, TaskState::Cancelled)
@@ -158,7 +176,7 @@ impl Kernel {
                         agent_id: None,
                         task_id: Some(task.id),
                         tool_id: None,
-                        details: serde_json::json!({ "bg_name": name }),
+                        details: serde_json::json!({ "bg_name": task.name }),
                         severity: agentos_audit::AuditSeverity::Info,
                         reversible: false,
                         rollback_ref: None,

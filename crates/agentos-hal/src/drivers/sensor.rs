@@ -61,6 +61,23 @@ impl HalDriver for SensorDriver {
         ("hardware.sensor", PermissionOp::Read)
     }
 
+    /// Aggregate temperature reads inspect all thermal zones and do not map to a
+    /// single registry entry.
+    fn device_key(&self, params: &Value) -> Option<String> {
+        let action = params
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or("read_temperature");
+        if action == "read_temperature" {
+            return None;
+        }
+
+        params
+            .get("sensor_id")
+            .and_then(|v| v.as_str())
+            .map(|id| format!("sensor:{id}"))
+    }
+
     async fn query(&self, params: Value) -> Result<Value, AgentOSError> {
         let action = params
             .get("action")
@@ -83,6 +100,7 @@ impl HalDriver for SensorDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[tokio::test]
     async fn test_sensor_read_temperature() {
@@ -93,5 +111,18 @@ mod tests {
             .unwrap();
         // Should succeed even if no sensors found (returns empty list)
         assert!(result["temperatures"].is_array());
+    }
+
+    #[test]
+    fn test_sensor_read_temperature_has_no_single_device_key() {
+        let driver = SensorDriver::new();
+        assert_eq!(
+            driver.device_key(&json!({ "action": "read_temperature" })),
+            None
+        );
+        assert_eq!(
+            driver.device_key(&json!({ "action": "inspect", "sensor_id": "thermal_zone0" })),
+            Some("sensor:thermal_zone0".to_string())
+        );
     }
 }

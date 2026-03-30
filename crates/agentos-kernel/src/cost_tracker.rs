@@ -1,5 +1,7 @@
 use crate::state_store::{KernelStateStore, PersistedCostSnapshot};
-use agentos_llm::{calculate_inference_cost, default_pricing_table, ModelPricing, TokenUsage};
+use agentos_llm::{
+    calculate_inference_cost, default_pricing_table, InferenceCost, ModelPricing, TokenUsage,
+};
 use agentos_types::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -329,26 +331,37 @@ impl CostTracker {
     }
 
     /// Record an inference call's token usage and cost. Returns the budget check result.
-    pub async fn record_inference(
+    ///
+    /// If `pre_computed_cost` is provided (e.g., from an adapter that computed it),
+    /// it is used directly; otherwise cost is calculated from the pricing table.
+    pub async fn record_inference_with_cost(
         &self,
         agent_id: &AgentID,
         usage: &TokenUsage,
         provider: &str,
         model: &str,
+        pre_computed_cost: Option<&InferenceCost>,
     ) -> BudgetCheckResult {
-        let pricing = self.get_pricing(provider, model).await;
-        let cost = calculate_inference_cost(usage, &pricing);
-        // Guard against NaN/Infinity from a malformed pricing table — treat as zero cost.
-        let cost_usd = if cost.total_cost_usd.is_finite() {
-            cost.total_cost_usd
+        let cost_usd = if let Some(c) = pre_computed_cost {
+            if c.total_cost_usd.is_finite() {
+                c.total_cost_usd
+            } else {
+                0.0
+            }
         } else {
-            tracing::warn!(
-                provider = %provider,
-                model = %model,
-                "Inference cost is non-finite ({}) — recording as zero",
+            let pricing = self.get_pricing(provider, model).await;
+            let cost = calculate_inference_cost(usage, &pricing);
+            if cost.total_cost_usd.is_finite() {
                 cost.total_cost_usd
-            );
-            0.0
+            } else {
+                tracing::warn!(
+                    provider = %provider,
+                    model = %model,
+                    "Inference cost is non-finite ({}) — recording as zero",
+                    cost.total_cost_usd
+                );
+                0.0
+            }
         };
         let cost_micro = (cost_usd * 1_000_000.0).max(0.0) as u64;
 
@@ -414,6 +427,19 @@ impl CostTracker {
 
         self.persist_snapshot(snapshot).await;
         result
+    }
+
+    /// Record an inference call using the pricing table for cost calculation.
+    /// Backward-compatible wrapper for `record_inference_with_cost`.
+    pub async fn record_inference(
+        &self,
+        agent_id: &AgentID,
+        usage: &TokenUsage,
+        provider: &str,
+        model: &str,
+    ) -> BudgetCheckResult {
+        self.record_inference_with_cost(agent_id, usage, provider, model, None)
+            .await
     }
 
     /// Read-only budget check against current counters — does NOT accumulate any usage.
@@ -975,5 +1001,91 @@ mod tests {
         assert_eq!(snap.tokens_used, 200);
         assert_eq!(snap.tool_calls, 1);
         assert_eq!(snap.agent_name, "persist-agent");
+    }
+
+    #[tokio::test]
+    async fn test_record_inference_with_precomputed_cost_uses_it() {
+        let tracker = CostTracker::new();
+        let agent_id = AgentID::new();
+        // Very tight cost budget — $0.011 would exceed it.
+        let budget = AgentBudget {
+            max_tokens_per_day: 1_000_000,
+            max_cost_usd_per_day: 0.01,
+            max_tool_calls_per_day: 100,
+            warn_at_pct: 80,
+            pause_at_pct: 95,
+            on_hard_limit: BudgetAction::Suspend,
+            downgrade_model: None,
+            allowed_models: vec![],
+            max_wall_time_seconds: 0,
+        };
+        tracker
+            .register_agent(agent_id, "cost-test".into(), budget)
+            .await;
+
+        let usage = TokenUsage {
+            prompt_tokens: 1000,
+            completion_tokens: 500,
+            total_tokens: 1500,
+        };
+        // Pre-computed cost that exceeds the $0.01 budget.
+        let precomputed = InferenceCost {
+            input_cost_usd: 0.003,
+            output_cost_usd: 0.0075,
+            total_cost_usd: 0.0105,
+        };
+
+        let result = tracker
+            .record_inference_with_cost(
+                &agent_id,
+                &usage,
+                "anthropic",
+                "claude-sonnet-4-6",
+                Some(&precomputed),
+            )
+            .await;
+
+        // Budget exceeded → HardLimitExceeded
+        assert!(
+            matches!(result, BudgetCheckResult::HardLimitExceeded { .. }),
+            "Expected HardLimitExceeded, got {:?}",
+            result
+        );
+        // Verify the cost was recorded correctly in the snapshot.
+        let snap = tracker.get_snapshot(&agent_id).await.unwrap();
+        assert!((snap.cost_usd - 0.0105).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn test_record_inference_with_nan_cost_records_zero() {
+        let tracker = CostTracker::new();
+        let agent_id = AgentID::new();
+        tracker
+            .register_agent(agent_id, "nan-test".into(), AgentBudget::default())
+            .await;
+
+        let usage = TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+        };
+        // NaN cost — should be sanitized to zero, not corrupt the budget counters.
+        let nan_cost = InferenceCost {
+            input_cost_usd: f64::NAN,
+            output_cost_usd: 0.0,
+            total_cost_usd: f64::NAN,
+        };
+
+        let result = tracker
+            .record_inference_with_cost(&agent_id, &usage, "test", "test", Some(&nan_cost))
+            .await;
+
+        assert_eq!(result, BudgetCheckResult::Ok);
+        let snap = tracker.get_snapshot(&agent_id).await.unwrap();
+        assert_eq!(snap.cost_usd, 0.0, "NaN cost should be sanitized to zero");
+        assert_eq!(
+            snap.tokens_used, 150,
+            "Token usage should still be recorded"
+        );
     }
 }

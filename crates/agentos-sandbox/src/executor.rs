@@ -216,8 +216,18 @@ impl SandboxExecutor {
             Some(filter)
         };
 
+        // Prepare null-terminated data_dir path for Landlock (heap allocation
+        // must happen before fork; the pre_exec closure is async-signal-safe).
+        #[cfg(target_os = "linux")]
+        let landlock_data_dir: Vec<u8> = {
+            use std::os::unix::ffi::OsStrExt;
+            let mut bytes = request.data_dir.as_os_str().as_bytes().to_vec();
+            bytes.push(0); // null-terminate for libc::open()
+            bytes
+        };
+
         // SAFETY: pre_exec runs in the forked child before exec. We only call
-        // async-signal-safe libc functions (setrlimit, prctl).
+        // async-signal-safe libc functions (setrlimit, prctl, syscall).
         unsafe {
             #[cfg(target_os = "linux")]
             let bpf_for_closure = bpf_filter.clone();
@@ -273,10 +283,26 @@ impl SandboxExecutor {
                     return Err(std::io::Error::last_os_error());
                 }
 
-                // On Linux: set no_new_privs and apply seccomp filter
+                // On Linux: apply Landlock FS write restriction, then seccomp.
+                //
+                // Order matters:
+                //   1. Landlock (calls PR_SET_NO_NEW_PRIVS internally, then restrict_self)
+                //   2. Seccomp  (also requires PR_SET_NO_NEW_PRIVS — already set, idempotent)
+                //
+                // Landlock must come before seccomp because the Landlock syscalls
+                // (landlock_create_ruleset, landlock_add_rule, landlock_restrict_self)
+                // are not in the seccomp allowlist and would be blocked if seccomp
+                // were applied first.
                 #[cfg(target_os = "linux")]
                 {
-                    // PR_SET_NO_NEW_PRIVS is required before applying seccomp
+                    // Apply Landlock FS write restriction (kernel 5.13+; degrades
+                    // gracefully to a no-op on older kernels).
+                    crate::landlock::apply_write_restriction(&landlock_data_dir)?;
+
+                    // PR_SET_NO_NEW_PRIVS is required before applying seccomp.
+                    // Already set inside apply_write_restriction, but we set it
+                    // again here so the invariant is documented and enforced even
+                    // if Landlock was skipped.
                     if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                         return Err(std::io::Error::last_os_error());
                     }

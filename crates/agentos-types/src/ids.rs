@@ -57,3 +57,5 @@ define_id!(ScheduleID);
 define_id!(RunID);
 define_id!(EventID);
 define_id!(SubscriptionID);
+define_id!(NotificationID);
+define_id!(ChannelInstanceID);

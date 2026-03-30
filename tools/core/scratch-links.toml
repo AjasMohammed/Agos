@@ -1,0 +1,38 @@
+[manifest]
+name        = "scratch-links"
+version     = "1.0.0"
+description = "Get backlinks, outlinks, or both for a scratchpad page"
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["scratchpad:r"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "ScratchLinksIntent"
+output = "ScratchLinksResult"
+
+[input_schema]
+type = "object"
+required = ["title"]
+
+[input_schema.properties.title]
+type = "string"
+description = "Page title to query links for"
+
+[input_schema.properties.direction]
+type = "string"
+enum = ["inbound", "outbound", "both"]
+default = "both"
+description = "Link direction: inbound (backlinks), outbound, or both"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 15000
+syscalls      = []

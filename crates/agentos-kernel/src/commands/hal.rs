@@ -1,4 +1,5 @@
 use crate::kernel::Kernel;
+use agentos_hal::DeviceStatus;
 use agentos_types::{EventSeverity, EventSource, EventType};
 
 impl Kernel {
@@ -28,7 +29,7 @@ impl Kernel {
     ) -> serde_json::Value {
         let is_new = self
             .hardware_registry
-            .quarantine_device(device_id, device_type);
+            .register_pending_device(device_id, device_type);
 
         if is_new {
             self.audit_log(agentos_audit::AuditEntry {
@@ -41,7 +42,7 @@ impl Kernel {
                 details: serde_json::json!({
                     "device_id": device_id,
                     "device_type": device_type,
-                    "status": "Quarantined",
+                    "status": "Pending",
                 }),
                 severity: agentos_audit::AuditSeverity::Warn,
                 reversible: false,
@@ -64,7 +65,7 @@ impl Kernel {
         serde_json::json!({
             "device_id": device_id,
             "is_new": is_new,
-            "status": "Quarantined",
+            "status": "Pending",
         })
     }
 
@@ -91,10 +92,14 @@ impl Kernel {
             .approve_for_agent(device_id, agent_id)
         {
             Ok(()) => {
+                let _ = self
+                    .escalation_manager
+                    .auto_resolve_device_escalation(device_id, Some(&agent_id), true)
+                    .await;
                 self.audit_log(agentos_audit::AuditEntry {
                     timestamp: chrono::Utc::now(),
                     trace_id: agentos_types::TraceID::new(),
-                    event_type: agentos_audit::AuditEventType::HardwareDeviceApproved,
+                    event_type: agentos_audit::AuditEventType::DeviceApproved,
                     agent_id: Some(agent_id),
                     task_id: None,
                     tool_id: None,
@@ -131,22 +136,32 @@ impl Kernel {
 
     /// Deny a device for all agents, clearing any existing grants.
     pub async fn cmd_hal_deny_device(&self, device_id: &str) -> serde_json::Value {
-        match self.hardware_registry.deny_device(device_id) {
+        match self
+            .hardware_registry
+            .set_device_status(device_id, DeviceStatus::Quarantined)
+        {
             Ok(()) => {
+                let _ = self
+                    .escalation_manager
+                    .auto_resolve_device_escalation(device_id, None, false)
+                    .await;
                 self.audit_log(agentos_audit::AuditEntry {
                     timestamp: chrono::Utc::now(),
                     trace_id: agentos_types::TraceID::new(),
-                    event_type: agentos_audit::AuditEventType::HardwareDeviceDenied,
+                    event_type: agentos_audit::AuditEventType::DeviceQuarantined,
                     agent_id: None,
                     task_id: None,
                     tool_id: None,
-                    details: serde_json::json!({ "device_id": device_id }),
+                    details: serde_json::json!({
+                        "device_id": device_id,
+                        "status": "Quarantined",
+                    }),
                     severity: agentos_audit::AuditSeverity::Warn,
                     reversible: false,
                     rollback_ref: None,
                 });
                 serde_json::json!({
-                    "status": "denied",
+                    "status": "quarantined",
                     "device_id": device_id,
                 })
             }

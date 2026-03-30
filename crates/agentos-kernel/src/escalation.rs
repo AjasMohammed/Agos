@@ -37,6 +37,9 @@ pub struct PendingEscalation {
     /// What happens automatically on expiry: Deny (default) or Approve (soft-approval).
     #[serde(default = "default_auto_action")]
     pub auto_action: AutoAction,
+    /// Optional structured metadata used by specialized workflows such as HAL approvals.
+    #[serde(default = "default_metadata")]
+    pub metadata: serde_json::Value,
     pub resolved: bool,
     pub resolution: Option<String>,
     pub resolved_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -44,6 +47,10 @@ pub struct PendingEscalation {
 
 fn default_auto_action() -> AutoAction {
     AutoAction::Deny
+}
+
+fn default_metadata() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
 }
 
 /// Manages escalation requests from agents to human operators.
@@ -160,6 +167,7 @@ impl EscalationManager {
             created_at: now,
             expires_at,
             auto_action: auto_action.unwrap_or(AutoAction::Deny),
+            metadata: default_metadata(),
             resolved: false,
             resolution: None,
             resolved_at: None,
@@ -177,7 +185,7 @@ impl EscalationManager {
         // Fire-and-forget webhook notification if configured.
         // The URL is validated before use to prevent SSRF attacks.
         if let Some(url) = self.notify_url.read().await.clone() {
-            match validate_webhook_url(&url) {
+            match crate::network_safety::validate_webhook_url_str(&url) {
                 Ok(()) => {
                     let payload = serde_json::json!({
                         "escalation_id": id,
@@ -378,6 +386,7 @@ impl EscalationManager {
             created_at: now,
             expires_at,
             auto_action: AutoAction::Approve,
+            metadata: default_metadata(),
             resolved: false,
             resolution: None,
             resolved_at: None,
@@ -394,81 +403,142 @@ impl EscalationManager {
 
         id
     }
+
+    pub async fn create_device_access_escalation(
+        &self,
+        task_id: TaskID,
+        agent_id: AgentID,
+        device_id: &str,
+        operation: &str,
+        trace_id: TraceID,
+    ) -> (u64, bool) {
+        if let Some(existing) = self.find_pending_device_access(device_id, &agent_id).await {
+            return (existing.id, false);
+        }
+
+        let mut next_id = self.next_id.write().await;
+        let id = *next_id;
+        *next_id += 1;
+
+        let now = chrono::Utc::now();
+        let expires_at = now + chrono::Duration::seconds(self.timeout_secs);
+        let escalation = PendingEscalation {
+            id,
+            task_id,
+            agent_id,
+            reason: EscalationReason::AuthorizationRequired,
+            context_summary: format!(
+                "Agent requested access to hardware device '{}' for '{}' operation.",
+                device_id, operation
+            ),
+            decision_point: format!("Approve HAL access to device '{}'", device_id),
+            options: vec!["approve".to_string(), "deny".to_string()],
+            urgency: "normal".to_string(),
+            blocking: true,
+            trace_id,
+            created_at: now,
+            expires_at,
+            auto_action: AutoAction::Deny,
+            metadata: serde_json::json!({
+                "kind": "device_access",
+                "device_id": device_id,
+                "operation": operation,
+            }),
+            resolved: false,
+            resolution: None,
+            resolved_at: None,
+        };
+
+        self.escalations.write().await.push(escalation.clone());
+        self.persist_escalation(escalation).await;
+        tracing::info!(
+            escalation_id = id,
+            task_id = %task_id,
+            device_id = %device_id,
+            "HAL device access escalation created"
+        );
+
+        (id, true)
+    }
+
+    pub async fn find_pending_device_access(
+        &self,
+        device_id: &str,
+        agent_id: &AgentID,
+    ) -> Option<PendingEscalation> {
+        self.escalations
+            .read()
+            .await
+            .iter()
+            .find(|escalation| {
+                !escalation.resolved
+                    && escalation.agent_id == *agent_id
+                    && escalation
+                        .metadata
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("device_access")
+                    && escalation
+                        .metadata
+                        .get("device_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(device_id)
+            })
+            .cloned()
+    }
+
+    pub async fn auto_resolve_device_escalation(
+        &self,
+        device_id: &str,
+        agent_id: Option<&AgentID>,
+        approved: bool,
+    ) -> usize {
+        let mut escalations = self.escalations.write().await;
+        let now = chrono::Utc::now();
+        let resolution = if approved {
+            "Approved by operator"
+        } else {
+            "Denied by operator"
+        };
+        let mut updated = Vec::new();
+
+        for escalation in escalations.iter_mut() {
+            let is_device_access = escalation
+                .metadata
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("device_access");
+            let same_device = escalation
+                .metadata
+                .get("device_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(device_id);
+            let same_agent = agent_id
+                .map(|expected| escalation.agent_id == *expected)
+                .unwrap_or(true);
+
+            if !escalation.resolved && is_device_access && same_device && same_agent {
+                escalation.resolved = true;
+                escalation.resolution = Some(resolution.to_string());
+                escalation.resolved_at = Some(now);
+                updated.push(escalation.clone());
+            }
+        }
+        drop(escalations);
+
+        let count = updated.len();
+        for escalation in updated {
+            self.persist_escalation(escalation).await;
+        }
+
+        count
+    }
 }
 
 impl Default for EscalationManager {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Validates that a webhook URL is safe to POST to, preventing SSRF attacks.
-///
-/// Rules enforced:
-/// - Scheme must be `https` (prevents cleartext credential/payload exposure)
-/// - Host must not be a loopback address (`localhost`, `127.x.x.x`, `::1`)
-/// - Host must not be in RFC 1918 private ranges (10/8, 172.16/12, 192.168/16)
-/// - Host must not be a link-local/cloud-metadata address (169.254.x.x)
-///
-/// Note: DNS rebinding attacks (where a safe hostname later resolves to a private IP)
-/// are not mitigated here. For production deployments, perform a post-resolution IP
-/// check after `tokio::net::lookup_host`.
-fn validate_webhook_url(url: &str) -> Result<(), String> {
-    // Require HTTPS to prevent plaintext exposure of the notification payload
-    if !url.starts_with("https://") {
-        return Err(format!(
-            "Webhook URL must use HTTPS scheme (got: '{}')",
-            url.split("://").next().unwrap_or(url)
-        ));
-    }
-
-    // Extract the host (between `://` and the first `/`, `?`, `#`, or `:`)
-    let after_scheme = &url["https://".len()..];
-    let host_end = after_scheme
-        .find(['/', '?', '#', ':'])
-        .unwrap_or(after_scheme.len());
-    let host = after_scheme[..host_end].to_ascii_lowercase();
-
-    if host.is_empty() {
-        return Err("Webhook URL has no host".to_string());
-    }
-
-    // Block loopback variants
-    if host == "localhost" || host.starts_with("127.") || host == "::1" || host == "[::1]" {
-        return Err(format!("Webhook URL targets a loopback address: '{host}'"));
-    }
-
-    // Block cloud instance metadata service (AWS, GCP, Azure all use 169.254.169.254)
-    if host.starts_with("169.254.") {
-        return Err(format!(
-            "Webhook URL targets a link-local/metadata address: '{host}'"
-        ));
-    }
-
-    // Block RFC 1918 private ranges: 10.0.0.0/8 and 192.168.0.0/16
-    if host.starts_with("10.") || host.starts_with("192.168.") {
-        return Err(format!("Webhook URL targets a private IP range: '{host}'"));
-    }
-
-    // Block 172.16.0.0/12 (172.16.x.x – 172.31.x.x)
-    if host.starts_with("172.") {
-        if let Some(second) = host.split('.').nth(1) {
-            if let Ok(octet) = second.parse::<u8>() {
-                if (16..=31).contains(&octet) {
-                    return Err(format!("Webhook URL targets a private IP range: '{host}'"));
-                }
-            }
-        }
-    }
-
-    // Block hostnames that contain "metadata" (common internal naming convention)
-    if host.contains("metadata") {
-        return Err(format!(
-            "Webhook URL appears to target an instance metadata service: '{host}'"
-        ));
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -733,5 +803,63 @@ mod tests {
             )
             .await;
         assert!(next > resolved_id);
+    }
+
+    #[tokio::test]
+    async fn test_create_device_access_escalation_deduplicates_by_device_and_agent() {
+        let manager = EscalationManager::new();
+        let task_id = TaskID::new();
+        let agent_id = AgentID::new();
+
+        let (first_id, created_first) = manager
+            .create_device_access_escalation(task_id, agent_id, "gpu:0", "read", TraceID::new())
+            .await;
+        let (second_id, created_second) = manager
+            .create_device_access_escalation(task_id, agent_id, "gpu:0", "read", TraceID::new())
+            .await;
+
+        assert!(created_first);
+        assert!(!created_second);
+        assert_eq!(first_id, second_id);
+        assert_eq!(manager.list_pending().await.len(), 1);
+        assert_eq!(
+            manager.list_pending().await[0].metadata["kind"].as_str(),
+            Some("device_access")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_auto_resolve_device_escalation_matches_device_and_agent() {
+        let manager = EscalationManager::new();
+        let allowed_agent = AgentID::new();
+        let other_agent = AgentID::new();
+
+        manager
+            .create_device_access_escalation(
+                TaskID::new(),
+                allowed_agent,
+                "sensor:thermal_zone0",
+                "read",
+                TraceID::new(),
+            )
+            .await;
+        manager
+            .create_device_access_escalation(
+                TaskID::new(),
+                other_agent,
+                "sensor:thermal_zone0",
+                "read",
+                TraceID::new(),
+            )
+            .await;
+
+        let resolved = manager
+            .auto_resolve_device_escalation("sensor:thermal_zone0", Some(&allowed_agent), true)
+            .await;
+
+        assert_eq!(resolved, 1);
+        let pending = manager.list_pending().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].agent_id, other_agent);
     }
 }

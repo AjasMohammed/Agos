@@ -198,6 +198,29 @@ impl Kernel {
                                             tracing::warn!(error = %e, waiter_id = %waiter_id, "Requeue failed after timeout — waiter will timeout naturally");
                                         }
                                     }
+                                    // Send timeout notification to user inbox (root tasks only).
+                                    if kernel.config.notifications.notify_on_task_failed {
+                                        if let Some(task) = kernel.scheduler.get_task(&timed_out.task_id).await {
+                                            if task.parent_task.is_none() {
+                                                let summary = format!(
+                                                    "Task timed out after {}s (limit {}s)",
+                                                    timed_out.elapsed_seconds,
+                                                    timed_out.timeout_seconds
+                                                );
+                                                kernel
+                                                    .send_completion_notification(
+                                                        &task,
+                                                        agentos_types::TaskOutcome::TimedOut,
+                                                        &summary,
+                                                        None,
+                                                        None,
+                                                        timed_out.elapsed_seconds * 1000,
+                                                        agentos_types::TraceID::new(),
+                                                    )
+                                                    .await;
+                                            }
+                                        }
+                                    }
                                     kernel.cleanup_task_subscriptions(&timed_out.task_id).await;
                                     // Release context window, intent validator state, and resource
                                     // locks held by this task — the timeout checker is the terminal
@@ -206,6 +229,23 @@ impl Kernel {
                                     kernel.context_manager.remove_context(&timed_out.task_id).await;
                                     kernel.intent_validator.remove_task(&timed_out.task_id).await;
                                     kernel.resource_arbiter.release_all_for_agent(timed_out.agent_id).await;
+                                }
+
+                                // Sweep expired RPC calls (Phase 7)
+                                let expired_rpcs = kernel.rpc_manager.sweep_expired().await;
+                                for rpc_task_id in &expired_rpcs {
+                                    kernel
+                                        .emit_event(
+                                            agentos_types::EventType::AgentRpcCallTimedOut,
+                                            agentos_types::EventSource::AgentMessageBus,
+                                            agentos_types::EventSeverity::Warning,
+                                            serde_json::json!({
+                                                "rpc_task_id": rpc_task_id.to_string(),
+                                                "reason": "rpc_timeout",
+                                            }),
+                                            0,
+                                        )
+                                        .await;
                                 }
 
                                 // Sweep expired resource locks (Spec §8)
@@ -217,6 +257,69 @@ impl Kernel {
                                 // Sweep expired escalations — auto-deny (Spec §12)
                                 let expired_escalations = kernel.escalation_manager.sweep_expired().await;
                                 for (esc_id, task_id, agent_id, blocking, auto_action) in &expired_escalations {
+                                    if matches!(auto_action, crate::escalation::AutoAction::Deny) {
+                                        if let Some(escalation) =
+                                            kernel.escalation_manager.get(*esc_id).await
+                                        {
+                                            let is_device_access = escalation
+                                                .metadata
+                                                .get("kind")
+                                                .and_then(serde_json::Value::as_str)
+                                                == Some("device_access");
+                                            if is_device_access {
+                                                if let Some(device_id) = escalation
+                                                    .metadata
+                                                    .get("device_id")
+                                                    .and_then(serde_json::Value::as_str)
+                                                {
+                                                    let deny_result = match kernel
+                                                        .hardware_registry
+                                                        .get_device(device_id)
+                                                    {
+                                                        Some(device)
+                                                            if device.status
+                                                                == agentos_hal::DeviceStatus::Approved =>
+                                                        {
+                                                            kernel.hardware_registry.deny_for_agent(
+                                                                device_id,
+                                                                *agent_id,
+                                                            )
+                                                        }
+                                                        Some(_) => kernel
+                                                            .hardware_registry
+                                                            .set_device_status(
+                                                                device_id,
+                                                                agentos_hal::DeviceStatus::Quarantined,
+                                                            ),
+                                                        None => Err(agentos_types::AgentOSError::HalError(format!(
+                                                            "Device '{}' not found while expiring escalation",
+                                                            device_id
+                                                        ))),
+                                                    };
+
+                                                    if deny_result.is_ok() {
+                                                        kernel.audit_log(agentos_audit::AuditEntry {
+                                                            timestamp: chrono::Utc::now(),
+                                                            trace_id: agentos_types::TraceID::new(),
+                                                            event_type: agentos_audit::AuditEventType::DeviceAccessDenied,
+                                                            agent_id: Some(*agent_id),
+                                                            task_id: Some(*task_id),
+                                                            tool_id: None,
+                                                            details: serde_json::json!({
+                                                                "device_id": device_id,
+                                                                "reason": "device access escalation expired",
+                                                                "escalation_id": esc_id,
+                                                            }),
+                                                            severity: agentos_audit::AuditSeverity::Warn,
+                                                            reversible: false,
+                                                            rollback_ref: None,
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     let mut task_resumed = false;
 
                                     if *blocking {
@@ -393,6 +496,11 @@ impl Kernel {
                                     kernel.sweep_expired_snapshots(
                                         Duration::from_secs(72 * 3600), // 72h (Spec §5)
                                     );
+
+                                    // Sweep expired notification waiters (blocking ask_user
+                                    // questions whose timeout has fired). Fires auto_action
+                                    // and wakes blocked tasks (Architecture Review ISSUE-6).
+                                    kernel.notification_router.sweep_expired_waiters().await;
 
                                     // Evict terminal background tasks older than 1 hour to
                                     // prevent unbounded pool growth for long-running kernels.
@@ -656,6 +764,7 @@ impl Kernel {
                 _ = self.cancellation_token.cancelled() => {
                     tracing::info!("Kernel shutdown requested, stopping supervisor");
                     join_set.abort_all();
+                    self.channel_listener_registry.stop_all().await;
                     self.audit_shutdown("cancellation_token", agentos_audit::AuditSeverity::Info);
                     break;
                 }
@@ -1139,10 +1248,15 @@ impl Kernel {
             KernelCommand::RevokeSecret { name } => self.cmd_revoke_secret(name).await,
             KernelCommand::GetTaskLogs { task_id } => self.cmd_get_task_logs(task_id).await,
             KernelCommand::CancelTask { task_id } => self.cmd_cancel_task(task_id).await,
+            KernelCommand::TaskGetTrace { task_id } => self.cmd_get_task_trace(task_id).await,
+            KernelCommand::TaskListTraces { agent_id, limit } => {
+                self.cmd_list_task_traces(agent_id, limit).await
+            }
             KernelCommand::ListTools => self.cmd_list_tools().await,
             KernelCommand::InstallTool { manifest_path } => {
                 self.cmd_install_tool(manifest_path).await
             }
+            KernelCommand::ToolLoad { manifest_path } => self.cmd_tool_load(manifest_path).await,
             KernelCommand::RemoveTool { tool_name } => self.cmd_remove_tool(tool_name).await,
             KernelCommand::GrantPermission {
                 agent_name,
@@ -1408,6 +1522,76 @@ impl Kernel {
             }
 
             KernelCommand::SetLogLevel { level } => self.cmd_set_log_level(level).await,
+
+            // Notification system (UNIS Phase 1)
+            KernelCommand::SendUserNotification {
+                subject,
+                body,
+                priority,
+                kind,
+                trace_id,
+                from_agent,
+            } => {
+                self.cmd_send_user_notification(subject, body, priority, kind, trace_id, from_agent)
+                    .await
+            }
+            KernelCommand::ListNotifications { unread_only, limit } => {
+                self.cmd_list_notifications(unread_only, limit).await
+            }
+            KernelCommand::GetNotification { notification_id } => {
+                self.cmd_get_notification(notification_id).await
+            }
+            KernelCommand::MarkNotificationRead { notification_id } => {
+                self.cmd_mark_notification_read(notification_id).await
+            }
+            KernelCommand::RespondToNotification {
+                notification_id,
+                response_text,
+                channel,
+            } => {
+                self.cmd_respond_to_notification(notification_id, response_text, channel)
+                    .await
+            }
+
+            KernelCommand::ConnectChannel {
+                kind,
+                external_id,
+                display_name,
+                credential_key,
+                reply_topic,
+                server_url,
+            } => {
+                self.cmd_connect_channel(
+                    kind,
+                    external_id,
+                    display_name,
+                    credential_key,
+                    reply_topic,
+                    server_url,
+                )
+                .await
+            }
+            KernelCommand::DisconnectChannel { channel_id } => {
+                self.cmd_disconnect_channel(channel_id).await
+            }
+            KernelCommand::ListChannels => self.cmd_list_channels().await,
+            KernelCommand::TestChannel { channel_id } => self.cmd_test_channel(channel_id).await,
+            KernelCommand::McpStatus => self.cmd_mcp_status().await,
+
+            KernelCommand::ScratchListPages { agent_id } => {
+                self.cmd_scratch_list_pages(agent_id).await
+            }
+            KernelCommand::ScratchReadPage { agent_id, title } => {
+                self.cmd_scratch_read_page(agent_id, title).await
+            }
+            KernelCommand::ScratchDeletePage { agent_id, title } => {
+                self.cmd_scratch_delete_page(agent_id, title).await
+            }
+            KernelCommand::ScratchGraphPage {
+                agent_id,
+                title,
+                depth,
+            } => self.cmd_scratch_graph_page(agent_id, title, depth).await,
 
             KernelCommand::Shutdown => {
                 tracing::info!("Shutdown command received, initiating graceful shutdown");

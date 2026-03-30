@@ -1,13 +1,19 @@
 use crate::tool_helpers;
 use crate::traits::LLMCore;
-use crate::types::{InferenceResult, InferenceToolCall, ModelCapabilities, TokenUsage};
+use crate::types::{
+    calculate_inference_cost, default_pricing_table, InferenceEvent, InferenceOptions,
+    InferenceResult, InferenceToolCall, ModelCapabilities, ModelPricing, StopReason, TokenUsage,
+    ToolChoice,
+};
 use agentos_types::*;
 use async_trait::async_trait;
+use futures::StreamExt;
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
+use tokio::sync::mpsc;
 use tracing::warn;
 
 /// OpenAI API adapter for models like gpt-4o, gpt-3.5-turbo, etc.
@@ -17,6 +23,9 @@ pub struct OpenAICore {
     model: String,
     base_url: String,
     capabilities: ModelCapabilities,
+    pricing: ModelPricing,
+    retry_policy: crate::retry::RetryPolicy,
+    circuit_breaker: crate::retry::CircuitBreaker,
 }
 
 impl OpenAICore {
@@ -27,6 +36,22 @@ impl OpenAICore {
 
     /// Create a new OpenAI adapter with a custom base URL.
     pub fn with_base_url(api_key: SecretString, model: String, base_url: String) -> Self {
+        let table = default_pricing_table();
+        let pricing = table
+            .iter()
+            .find(|p| p.provider == "openai" && p.model == model)
+            .or_else(|| {
+                table
+                    .iter()
+                    .find(|p| p.provider == "openai" && p.model == "*")
+            })
+            .cloned()
+            .unwrap_or(ModelPricing {
+                provider: "openai".to_string(),
+                model: model.clone(),
+                input_per_1k: 0.0,
+                output_per_1k: 0.0,
+            });
         Self {
             client: Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
@@ -38,12 +63,26 @@ impl OpenAICore {
             base_url,
             capabilities: ModelCapabilities {
                 context_window_tokens: 128_000,
-                supports_images: true, // Typical for modern OpenAI models
+                supports_images: true,
                 supports_tool_calling: true,
                 supports_json_mode: true,
                 max_output_tokens: 0,
+                supports_streaming: true,
+                supports_parallel_tools: true,
+                supports_prompt_caching: false,
+                supports_thinking: false,
+                supports_structured_output: true,
             },
+            pricing,
+            retry_policy: crate::retry::RetryPolicy::default(),
+            circuit_breaker: crate::retry::CircuitBreaker::default(),
         }
+    }
+
+    /// Override the pricing for this adapter instance (e.g., for custom deployments).
+    pub fn with_pricing(mut self, pricing: ModelPricing) -> Self {
+        self.pricing = pricing;
+        self
     }
 
     /// Convert our internal `ContextWindow` to OpenAI's messages array format.
@@ -51,25 +90,95 @@ impl OpenAICore {
         let mut messages = Vec::new();
 
         for entry in context.active_entries() {
-            let role = match entry.role {
-                ContextRole::User => "user",
-                ContextRole::Assistant => "assistant",
-                ContextRole::ToolResult => "user", // OpenAI doesn't have a distinct role for tool execution outputs without their specific tool call machinery, so we pass it as user/system equivalent.
-                ContextRole::System => "system",
-            };
-
-            let content = match entry.role {
+            match entry.role {
                 ContextRole::ToolResult => {
-                    // Prepend label
-                    format!("Tool Result:\n{}", entry.content)
-                }
-                _ => entry.content.clone(),
-            };
+                    // Check for native tool result metadata (provider tool_call_id).
+                    let tool_call_id = entry
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.tool_call_id.as_deref());
 
-            messages.push(json!({
-                "role": role,
-                "content": content,
-            }));
+                    if let Some(call_id) = tool_call_id {
+                        // Native OpenAI tool result: role "tool" with tool_call_id.
+                        messages.push(json!({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": entry.content,
+                        }));
+                    } else {
+                        // Legacy fallback: plain user message with prefix.
+                        messages.push(json!({
+                            "role": "user",
+                            "content": format!("Tool Result:\n{}", entry.content),
+                        }));
+                    }
+                }
+                ContextRole::System => {
+                    messages.push(json!({
+                        "role": "system",
+                        "content": entry.content,
+                    }));
+                }
+                ContextRole::User => {
+                    messages.push(json!({
+                        "role": "user",
+                        "content": entry.content,
+                    }));
+                }
+                ContextRole::Assistant => {
+                    // If this assistant turn invoked tools, reconstruct the
+                    // OpenAI-native format: {"role":"assistant","tool_calls":[...]}.
+                    // OpenAI requires the preceding assistant message to contain the
+                    // tool_calls array with matching IDs before any role:"tool" message.
+                    if let Some(Value::Array(calls)) = entry
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.assistant_tool_calls.as_ref())
+                    {
+                        let openai_tool_calls: Vec<Value> = calls
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(idx, call)| {
+                                let name = call.get("tool_name")?.as_str()?;
+                                // Use provider-native ID if available; fall back to a
+                                // unique positional ID so parallel tool calls each get
+                                // a distinct ID that the matching role:tool messages can
+                                // reference (OpenAI rejects duplicate IDs in one turn).
+                                let id = call
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| format!("call_{idx}"));
+                                let args = call
+                                    .get("payload")
+                                    .cloned()
+                                    .unwrap_or_else(|| json!({}))
+                                    .to_string();
+                                Some(json!({
+                                    "id": id,
+                                    "type": "function",
+                                    "function": {"name": name, "arguments": args},
+                                }))
+                            })
+                            .collect();
+                        let content = if entry.content.is_empty() {
+                            Value::Null
+                        } else {
+                            Value::String(entry.content.clone())
+                        };
+                        messages.push(json!({
+                            "role": "assistant",
+                            "content": content,
+                            "tool_calls": openai_tool_calls,
+                        }));
+                    } else {
+                        messages.push(json!({
+                            "role": "assistant",
+                            "content": entry.content,
+                        }));
+                    }
+                }
+            }
         }
 
         messages
@@ -259,25 +368,45 @@ impl OpenAICore {
 
         let text = Self::parse_message_content(message);
         let tool_calls = Self::parse_openai_tool_calls(message, intent_by_tool);
-        let text = tool_helpers::append_legacy_blocks(&text, &tool_calls);
+
+        // Extract stop/finish reason from OpenAI response
+        let finish_reason = json_resp["choices"][0]["finish_reason"]
+            .as_str()
+            .unwrap_or("stop");
+        let stop_reason = match finish_reason {
+            "stop" => StopReason::EndTurn,
+            "tool_calls" => StopReason::ToolUse,
+            "length" => StopReason::MaxTokens,
+            "content_filter" => StopReason::ContentFilter,
+            other => StopReason::Other(other.to_string()),
+        };
 
         let prompt_tokens = json_resp["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
         let completion_tokens = json_resp["usage"]["completion_tokens"]
             .as_u64()
             .unwrap_or(0);
         let total_tokens = json_resp["usage"]["total_tokens"].as_u64().unwrap_or(0);
+        let cached_tokens = json_resp["usage"]["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap_or(0);
+
+        let tokens_used = TokenUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        };
+        let cost = calculate_inference_cost(&tokens_used, &self.pricing);
 
         Ok(InferenceResult {
             text,
-            tokens_used: TokenUsage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens,
-            },
+            tokens_used,
             model: self.model.clone(),
             duration_ms,
             tool_calls,
             uncertainty: None,
+            stop_reason,
+            cost: Some(cost),
+            cached_tokens,
         })
     }
 }
@@ -293,34 +422,84 @@ impl LLMCore for OpenAICore {
         context: &ContextWindow,
         tools: &[ToolManifest],
     ) -> Result<InferenceResult, AgentOSError> {
+        self.infer_with_options(context, tools, &InferenceOptions::default())
+            .await
+    }
+
+    async fn infer_with_options(
+        &self,
+        context: &ContextWindow,
+        tools: &[ToolManifest],
+        options: &InferenceOptions,
+    ) -> Result<InferenceResult, AgentOSError> {
+        let estimated = self.estimate_tokens(context, tools);
+        let max = self.capabilities.context_window_tokens;
+        if estimated > max {
+            return Err(AgentOSError::LLMError {
+                provider: "openai".to_string(),
+                reason: format!(
+                    "Estimated token count ({estimated}) exceeds model context window ({max}). \
+                     Reduce context or use a model with a larger window."
+                ),
+            });
+        }
+
         let start_time = Instant::now();
         let url = format!("{}/chat/completions", self.base_url);
         let messages = self.format_messages(context);
-        let (body, intent_by_tool) = self.build_request_body(messages, tools);
 
-        let req = self
-            .client
-            .post(&url)
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.api_key.expose_secret()),
-            )
-            .header("Content-Type", "application/json")
-            .json(&body);
+        // If options disable tools, exclude them from the request body.
+        let effective_tools = if matches!(options.tool_choice, Some(ToolChoice::None)) {
+            &[][..]
+        } else {
+            tools
+        };
+        let (mut body, intent_by_tool) = self.build_request_body(messages, effective_tools);
 
-        let res = req.send().await.map_err(|e| AgentOSError::LLMError {
-            provider: "openai".to_string(),
-            reason: format!("Reqwest failed: {}", e),
-        })?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let text = res.text().await.unwrap_or_default();
-            return Err(AgentOSError::LLMError {
-                provider: "openai".to_string(),
-                reason: format!("OpenAI API error {}: {}", status, text),
-            });
+        // Apply tool_choice override.
+        match &options.tool_choice {
+            Some(ToolChoice::Auto) => {
+                body["tool_choice"] = json!("auto");
+            }
+            Some(ToolChoice::None) => {} // tools excluded above; key was never set
+            Some(ToolChoice::Required) => {
+                body["tool_choice"] = json!("required");
+            }
+            Some(ToolChoice::Specific(name)) => {
+                body["tool_choice"] = json!({"type": "function", "function": {"name": name}});
+            }
+            None => {} // leave default ("auto" if tools present)
         }
+
+        if options.json_mode {
+            body["response_format"] = json!({"type": "json_object"});
+        }
+        if let Some(temp) = options.temperature {
+            body["temperature"] = json!(temp);
+        }
+        if let Some(max_tok) = options.max_tokens {
+            body["max_tokens"] = json!(max_tok);
+        }
+        if let Some(seed) = options.seed {
+            body["seed"] = json!(seed);
+        }
+
+        let res = crate::retry::send_with_retry(
+            "openai",
+            &self.retry_policy,
+            &self.circuit_breaker,
+            || {
+                self.client
+                    .post(&url)
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", self.api_key.expose_secret()),
+                    )
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+            },
+        )
+        .await?;
 
         let json_resp: serde_json::Value =
             res.json().await.map_err(|e| AgentOSError::LLMError {
@@ -378,6 +557,253 @@ impl LLMCore for OpenAICore {
     fn model_name(&self) -> &str {
         &self.model
     }
+
+    async fn infer_stream_with_tools(
+        &self,
+        context: &ContextWindow,
+        tools: &[ToolManifest],
+        tx: mpsc::Sender<InferenceEvent>,
+    ) -> Result<(), AgentOSError> {
+        let estimated = self.estimate_tokens(context, tools);
+        let max = self.capabilities.context_window_tokens;
+        if estimated > max {
+            return Err(AgentOSError::LLMError {
+                provider: "openai".to_string(),
+                reason: format!(
+                    "Estimated token count ({estimated}) exceeds model context window ({max}). \
+                     Reduce context or use a model with a larger window."
+                ),
+            });
+        }
+
+        let start_time = Instant::now();
+        let url = format!("{}/chat/completions", self.base_url);
+        let messages = self.format_messages(context);
+        let (openai_tools, intent_by_tool) = self.build_openai_tools_payload(tools);
+
+        let mut body = json!({
+            "model": self.model,
+            "messages": messages,
+            "stream": true,
+            "stream_options": { "include_usage": true }
+        });
+        if !openai_tools.is_empty() {
+            body["tools"] = Value::Array(openai_tools);
+            body["tool_choice"] = json!("auto");
+        }
+
+        let res = self
+            .client
+            .post(&url)
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.api_key.expose_secret()),
+            )
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AgentOSError::LLMError {
+                provider: "openai".to_string(),
+                reason: format!("Reqwest failed: {}", e),
+            })?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let text = res.text().await.unwrap_or_default();
+            let err_msg = format!("OpenAI API error {}: {}", status, text);
+            let _ = tx.send(InferenceEvent::Error(err_msg.clone())).await;
+            return Err(AgentOSError::LLMError {
+                provider: "openai".to_string(),
+                reason: err_msg,
+            });
+        }
+
+        // State for accumulating the streamed response.
+        let mut full_text = String::new();
+        let mut partial_tool_calls: Vec<PartialToolCall> = Vec::new();
+        let mut usage = TokenUsage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+        };
+        let mut cached_tokens: u64 = 0;
+        let mut stop_reason = StopReason::EndTurn;
+        let mut line_buffer = String::new();
+
+        const MAX_LINE_BUFFER_BYTES: usize = 1_048_576; // 1 MB
+
+        let mut stream = res.bytes_stream();
+        'outer: while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(|e| AgentOSError::LLMError {
+                provider: "openai".to_string(),
+                reason: format!("Stream read error: {}", e),
+            })?;
+            let chunk_str = String::from_utf8_lossy(&chunk);
+            line_buffer.push_str(&chunk_str);
+
+            if line_buffer.len() > MAX_LINE_BUFFER_BYTES {
+                let err_msg = "SSE line buffer exceeded 1 MB";
+                let _ = tx.send(InferenceEvent::Error(err_msg.to_string())).await;
+                return Err(AgentOSError::LLMError {
+                    provider: "openai".to_string(),
+                    reason: err_msg.to_string(),
+                });
+            }
+
+            // Process complete SSE lines from the buffer.
+            while let Some(newline_pos) = line_buffer.find('\n') {
+                let line = line_buffer[..newline_pos].trim().to_string();
+                line_buffer = line_buffer[newline_pos + 1..].to_string();
+
+                if line.is_empty() || line.starts_with(':') {
+                    continue;
+                }
+                let data = if let Some(d) = line.strip_prefix("data: ") {
+                    d.trim()
+                } else {
+                    continue;
+                };
+                if data == "[DONE]" {
+                    break 'outer;
+                }
+                let Ok(chunk_json) = serde_json::from_str::<Value>(data) else {
+                    continue;
+                };
+
+                // Extract finish_reason if present.
+                if let Some(reason) = chunk_json["choices"][0]["finish_reason"].as_str() {
+                    stop_reason = match reason {
+                        "stop" => StopReason::EndTurn,
+                        "tool_calls" => StopReason::ToolUse,
+                        "length" => StopReason::MaxTokens,
+                        "content_filter" => StopReason::ContentFilter,
+                        other => StopReason::Other(other.to_string()),
+                    };
+                }
+
+                // Text delta.
+                if let Some(content) = chunk_json["choices"][0]["delta"]["content"].as_str() {
+                    if !content.is_empty() {
+                        full_text.push_str(content);
+                        let _ = tx.send(InferenceEvent::Token(content.to_string())).await;
+                    }
+                }
+
+                // Tool call deltas.
+                if let Some(tc_deltas) = chunk_json["choices"][0]["delta"]["tool_calls"].as_array()
+                {
+                    for tc_delta in tc_deltas {
+                        let index = tc_delta["index"].as_u64().unwrap_or(0) as usize;
+
+                        // Ensure we have a slot for this index.
+                        while partial_tool_calls.len() <= index {
+                            partial_tool_calls.push(PartialToolCall {
+                                id: None,
+                                name: String::new(),
+                                arguments_buffer: String::new(),
+                            });
+                        }
+
+                        let partial = &mut partial_tool_calls[index];
+
+                        // First delta for this index carries id and function.name.
+                        if let Some(id) = tc_delta["id"].as_str() {
+                            partial.id = Some(id.to_string());
+                        }
+                        if let Some(name) = tc_delta["function"]["name"].as_str() {
+                            partial.name = name.to_string();
+                            let _ = tx
+                                .send(InferenceEvent::ToolCallStart {
+                                    index,
+                                    id: partial.id.clone(),
+                                    tool_name: name.to_string(),
+                                })
+                                .await;
+                        }
+
+                        // Argument chunks.
+                        if let Some(args_chunk) = tc_delta["function"]["arguments"].as_str() {
+                            partial.arguments_buffer.push_str(args_chunk);
+                            let _ = tx
+                                .send(InferenceEvent::ToolCallDelta {
+                                    index,
+                                    arguments_chunk: args_chunk.to_string(),
+                                })
+                                .await;
+                        }
+                    }
+                }
+
+                // Usage in final chunk.
+                if let Some(usage_obj) = chunk_json.get("usage") {
+                    if usage_obj.is_object() && !usage_obj.is_null() {
+                        usage.prompt_tokens = usage_obj["prompt_tokens"].as_u64().unwrap_or(0);
+                        usage.completion_tokens =
+                            usage_obj["completion_tokens"].as_u64().unwrap_or(0);
+                        usage.total_tokens = usage_obj["total_tokens"].as_u64().unwrap_or(0);
+                        cached_tokens = usage_obj["prompt_tokens_details"]["cached_tokens"]
+                            .as_u64()
+                            .unwrap_or(0);
+                        let _ = tx.send(InferenceEvent::Usage(usage.clone())).await;
+                    }
+                }
+            }
+        }
+
+        // Assemble completed tool calls.
+        let mut tool_calls = Vec::new();
+        for partial in &partial_tool_calls {
+            if partial.name.is_empty() {
+                continue;
+            }
+            let payload = Self::parse_tool_call_payload(
+                &partial.name,
+                Some(&Value::String(partial.arguments_buffer.clone())),
+            );
+            let intent_type = intent_by_tool
+                .get(&partial.name)
+                .cloned()
+                .unwrap_or_else(|| "query".to_string());
+
+            let tc = InferenceToolCall {
+                id: partial.id.clone(),
+                tool_name: partial.name.clone(),
+                intent_type,
+                payload: tool_helpers::validate_payload_object(
+                    &partial.name,
+                    "openai",
+                    Some(payload),
+                ),
+            };
+            let _ = tx.send(InferenceEvent::ToolCallComplete(tc.clone())).await;
+            tool_calls.push(tc);
+        }
+
+        let duration_ms = start_time.elapsed().as_millis() as u64;
+        let cost = calculate_inference_cost(&usage, &self.pricing);
+
+        let result = InferenceResult {
+            text: full_text,
+            tokens_used: usage,
+            model: self.model.clone(),
+            duration_ms,
+            tool_calls,
+            uncertainty: None,
+            stop_reason,
+            cost: Some(cost),
+            cached_tokens,
+        };
+        let _ = tx.send(InferenceEvent::Done(result)).await;
+        Ok(())
+    }
+}
+
+/// Accumulator for a tool call being streamed in chunks (OpenAI).
+struct PartialToolCall {
+    id: Option<String>,
+    name: String,
+    arguments_buffer: String,
 }
 
 #[cfg(test)]
@@ -456,6 +882,7 @@ mod tests {
                 author_pubkey: None,
                 signature: None,
                 trust_tier: TrustTier::Core,
+                tags: None,
             },
             capabilities_required: ToolCapabilities {
                 permissions: permissions.into_iter().map(str::to_string).collect(),
@@ -595,8 +1022,6 @@ mod tests {
         assert_eq!(result.tool_calls[0].tool_name, "file-reader");
         assert_eq!(result.tool_calls[0].intent_type, "read");
         assert_eq!(result.tool_calls[0].payload["path"], "test.txt");
-        assert!(result.text.contains("\"tool\":\"file-reader\""));
-        assert!(result.text.contains("\"intent_type\":\"read\""));
         assert_eq!(result.tokens_used.total_tokens, 15);
     }
 
@@ -626,8 +1051,7 @@ mod tests {
         let result = adapter
             .parse_response_json(&response, &intent_map, 9)
             .expect("response should parse");
-        assert!(result.text.starts_with("I will read the file first."));
-        assert!(result.text.contains("\"tool\":\"file-reader\""));
+        assert_eq!(result.text, "I will read the file first.");
         assert_eq!(result.tool_calls.len(), 1);
     }
 
@@ -753,8 +1177,138 @@ mod tests {
         assert_eq!(result.tool_calls[0].intent_type, "read");
         assert_eq!(result.tool_calls[0].payload["path"], "test.txt");
         assert!(result.text.contains("Thinking before calling tool."));
-        assert!(result.text.contains("\"tool\":\"file-reader\""));
 
         server.join().expect("server thread should complete");
+    }
+
+    #[test]
+    fn test_stop_reason_tool_calls() {
+        let adapter = OpenAICore::new(SecretString::new("fake".into()), "gpt-4o".into());
+        let mut intent_map = HashMap::new();
+        intent_map.insert("file-reader".to_string(), "read".to_string());
+        let response = json!({
+            "choices": [{"message": {"content": null, "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "function": {"name": "file-reader", "arguments": "{}"}
+            }]}, "finish_reason": "tool_calls"}],
+            "usage": {}
+        });
+        let result = adapter
+            .parse_response_json(&response, &intent_map, 1)
+            .unwrap();
+        assert_eq!(result.stop_reason, crate::types::StopReason::ToolUse);
+    }
+
+    #[test]
+    fn test_stop_reason_max_tokens() {
+        let adapter = OpenAICore::new(SecretString::new("fake".into()), "gpt-4o".into());
+        let response = json!({
+            "choices": [{"message": {"content": "truncated"}, "finish_reason": "length"}],
+            "usage": {}
+        });
+        let result = adapter
+            .parse_response_json(&response, &HashMap::new(), 1)
+            .unwrap();
+        assert_eq!(result.stop_reason, crate::types::StopReason::MaxTokens);
+    }
+
+    #[test]
+    fn test_stop_reason_content_filter() {
+        let adapter = OpenAICore::new(SecretString::new("fake".into()), "gpt-4o".into());
+        let response = json!({
+            "choices": [{"message": {"content": ""}, "finish_reason": "content_filter"}],
+            "usage": {}
+        });
+        let result = adapter
+            .parse_response_json(&response, &HashMap::new(), 1)
+            .unwrap();
+        assert_eq!(result.stop_reason, crate::types::StopReason::ContentFilter);
+    }
+
+    #[test]
+    fn test_stop_reason_end_turn() {
+        let adapter = OpenAICore::new(SecretString::new("fake".into()), "gpt-4o".into());
+        let response = json!({
+            "choices": [{"message": {"content": "done"}, "finish_reason": "stop"}],
+            "usage": {}
+        });
+        let result = adapter
+            .parse_response_json(&response, &HashMap::new(), 1)
+            .unwrap();
+        assert_eq!(result.stop_reason, crate::types::StopReason::EndTurn);
+    }
+
+    #[test]
+    fn test_cached_tokens_extracted() {
+        let adapter = OpenAICore::new(SecretString::new("fake".into()), "gpt-4o".into());
+        let response = json!({
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "total_tokens": 110,
+                "prompt_tokens_details": {"cached_tokens": 80}
+            }
+        });
+        let result = adapter
+            .parse_response_json(&response, &HashMap::new(), 1)
+            .unwrap();
+        assert_eq!(result.cached_tokens, 80);
+    }
+
+    #[test]
+    fn test_format_messages_native_tool_result() {
+        let mut ctx = ContextWindow::new(5);
+        ctx.push(ContextEntry {
+            role: ContextRole::ToolResult,
+            content: r#"{"status": "ok"}"#.to_string(),
+            metadata: Some(ContextMetadata {
+                tool_name: Some("file-reader".to_string()),
+                tool_id: None,
+                intent_id: None,
+                tokens_estimated: None,
+                tool_call_id: Some("call_abc123".to_string()),
+                assistant_tool_calls: None,
+            }),
+            timestamp: chrono::Utc::now(),
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+
+        let adapter = OpenAICore::new(SecretString::new("fake".into()), "gpt-4".into());
+        let messages = adapter.format_messages(&ctx);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "tool");
+        assert_eq!(messages[0]["tool_call_id"], "call_abc123");
+        assert_eq!(messages[0]["content"], r#"{"status": "ok"}"#);
+    }
+
+    #[test]
+    fn test_format_messages_legacy_tool_result_without_metadata() {
+        let mut ctx = ContextWindow::new(5);
+        ctx.push(ContextEntry {
+            role: ContextRole::ToolResult,
+            content: "status: ok".to_string(),
+            metadata: None,
+            timestamp: chrono::Utc::now(),
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+
+        let adapter = OpenAICore::new(SecretString::new("fake".into()), "gpt-4".into());
+        let messages = adapter.format_messages(&ctx);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"], "Tool Result:\nstatus: ok");
     }
 }

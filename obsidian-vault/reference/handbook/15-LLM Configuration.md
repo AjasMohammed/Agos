@@ -200,6 +200,83 @@ agentctl secret set gemini_api_key
 
 ---
 
+---
+
+## LLM Resilience: Fallback and Retry
+
+### FallbackAdapter
+
+The `FallbackAdapter` wraps multiple `LLMCore` providers and tries them in order. If the primary provider fails (any error — network, rate limit, server error), the adapter automatically retries the same request against the next provider in the list.
+
+```
+Primary → fails → Secondary → fails → Tertiary → ...
+                                            ↓ all fail
+                                     returns last error
+```
+
+**Key behaviours:**
+
+- **Health check:** `health_check()` returns `Healthy` if *any* provider is healthy. The system is healthy as long as at least one backend is up.
+- **Capabilities:** Reported from the first (primary) provider.
+- **Streaming:** Uses an intermediate buffer channel when falling over mid-stream. Partial tokens from a failing provider are discarded before the next provider is tried, so the caller never sees a mixed stream.
+- **Model name:** Reports the primary provider's model name.
+
+The FallbackAdapter is constructed programmatically in application code (not via config). Example (Rust):
+
+```rust
+use agentos_llm::{FallbackAdapter, AnthropicAdapter, OllamaAdapter};
+
+let primary = Arc::new(AnthropicAdapter::new(...));
+let secondary = Arc::new(OllamaAdapter::new(...));
+let fallback = FallbackAdapter::new(vec![primary, secondary])?;
+```
+
+### RetryPolicy
+
+The `RetryPolicy` controls how individual provider adapters handle transient failures (rate limits, timeouts, temporary server errors) before the error propagates to the `FallbackAdapter`.
+
+**Default retry policy:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `max_retries` | 3 | Maximum retry attempts after the initial request |
+| `base_delay` | 1s | Starting delay before the first retry |
+| `max_delay` | 60s | Upper cap on any single delay |
+| `backoff_factor` | 2.0× | Exponential multiplier applied per attempt |
+
+**Delay formula:** `delay = min(base_delay × backoff_factor^attempt + jitter, max_delay)`
+
+Jitter is ±10% of the calculated delay, derived from the thread ID and clock nanoseconds to decorrelate concurrent callers hitting the same rate limit.
+
+**Retryable HTTP status codes:** `408`, `429`, `500`, `502`, `503`, `504`, `529`
+
+**Non-retryable:** `400`, `401`, `403`, `404` and other client errors. These return immediately and are NOT counted as circuit breaker failures.
+
+**`Retry-After` header:** If the server returns a `Retry-After: <seconds>` header, that value is used directly as the delay (capped at `max_delay`). This ensures correct rate-limit backoff for providers that emit this header (e.g. Anthropic 529 overload responses).
+
+### CircuitBreaker
+
+The `CircuitBreaker` protects a provider from being hammered when it is known to be down.
+
+**Default circuit breaker settings:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `failure_threshold` | 5 | Consecutive failures before the breaker trips |
+| `cooldown` | 30s | Time before a half-open probe attempt is allowed |
+
+**States:**
+
+| State | Condition | Behaviour |
+|-------|-----------|-----------|
+| **Closed** | `consecutive_failures < threshold` | All requests pass through |
+| **Open** | `consecutive_failures >= threshold` | Requests immediately return `CircuitBreaker is open` error |
+| **Half-open** | Open + `cooldown` elapsed | One probe attempt allowed. Success → Closed; Failure → Open |
+
+The breaker resets to Closed on any successful response. Client errors (4xx other than 408/429) do not increment the failure counter.
+
+---
+
 ## Related
 
 - [[16-Configuration Reference]] — full `[ollama]` and `[llm]` config sections

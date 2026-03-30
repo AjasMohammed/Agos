@@ -37,11 +37,13 @@ agentctl --config /etc/agentos/prod.toml status
 
 ## Connection Model
 
-Most commands require a running kernel and communicate over a Unix domain socket (configured in the config file under `[bus].socket_path`). Three commands are **offline** and do not require a kernel connection:
+Most commands require a running kernel and communicate over a Unix domain socket (configured in the config file under `[bus].socket_path`). The following commands are **offline** and do not require a kernel connection:
 
 - `agentctl tool keygen`
 - `agentctl tool sign`
 - `agentctl tool verify`
+- `agentctl mcp serve`
+- `agentctl mcp list`
 
 All other commands will fail with a connection error if the kernel is not running.
 
@@ -79,18 +81,24 @@ Connect a new LLM agent to the kernel.
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--provider` | `String` | *required* | LLM provider: `ollama`, `openai`, `anthropic`, `gemini`, `custom`, or `custom:<name>` |
-| `--model` | `String` | *required* | Model name (e.g. `gpt-4`, `claude-3-opus`, `llama3`) |
+| `--model` | `String` | *required* | Model name (e.g. `gpt-4`, `claude-sonnet-4-6`, `llama3`) |
 | `--name` | `String` | *required* | Agent display name (must be unique) |
 | `--base-url` | `Option<String>` | — | Custom base URL for the LLM provider endpoint |
 | `--role` | `Vec<String>` | `["general"]` | Role(s) for the agent. May be repeated. Supported: `orchestrator`, `security-monitor`, `sysops`, `memory-manager`, `tool-manager`, `general` |
+| `--grant` | `Vec<String>` | `[]` | Extra permissions to grant at connect time (format: `resource:flags`). May be repeated. |
+| `--test` | flag | `false` | Connect in test mode: agent receives an ecosystem-evaluation prompt asking for usability feedback |
 
 **Example:**
 
 ```bash
 agentctl agent connect --provider openai --model gpt-4 --name analyst-1
 
-agentctl agent connect --provider anthropic --model claude-3-opus --name orchestrator \
+agentctl agent connect --provider anthropic --model claude-sonnet-4-6 --name orchestrator \
   --role orchestrator --role security-monitor
+
+# Grant notify and interact permissions at connect time
+agentctl agent connect --provider anthropic --model claude-sonnet-4-6 --name worker \
+  --grant user.notify:w --grant user.interact:x
 ```
 
 ### `agent list`
@@ -1363,6 +1371,247 @@ Revoke a specific agent's access to a device.
 agentctl hal revoke gpu:0 --agent worker
 ```
 
+### `hal query`
+
+Query a HAL driver directly. The driver dispatches the request based on the JSON parameters. Currently available drivers: `usb-storage` (requires the `usb-storage` feature flag at build time).
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `driver` | `String` | Driver name (positional, e.g. `usb-storage`) |
+| `params` | `String` | JSON object with driver-specific parameters |
+
+**Examples:**
+
+```bash
+# List USB filesystems
+agentctl hal query usb-storage '{"action": "list"}'
+
+# Mount a USB partition
+agentctl hal query usb-storage '{"action": "mount", "device": "sdb1"}'
+
+# Unmount
+agentctl hal query usb-storage '{"action": "unmount", "device": "sdb1"}'
+
+# Eject (power off the drive)
+agentctl hal query usb-storage '{"action": "eject", "device": "sdb1"}'
+```
+
+> **Permission:** Requires `hardware.usb-storage:x` and the device `usb-storage:<device>` must be approved in the HAL device registry. See [[18-Advanced Operations#USB Storage Driver]] for full details.
+
+---
+
+## `notifications` — Manage the user notification inbox
+
+Agents can send messages to the operator via `notify-user` (fire-and-forget) and `ask-user` (blocking question). This command group manages those messages. See [[21-User Notifications and Channels]] for full details.
+
+### `notifications list`
+
+List notifications from the inbox.
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--unread` / `-u` | flag | `false` | Show only unread notifications |
+| `--limit` / `-n` | `u32` | `50` | Maximum number of notifications to return |
+
+**Example:**
+
+```bash
+agentctl notifications list
+agentctl notifications list --unread --limit 20
+```
+
+### `notifications read`
+
+Show the full body of a notification and mark it as read. For `Question` messages, also shows the question, options, and any existing response.
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `id` | `String` | Notification UUID |
+
+**Example:**
+
+```bash
+agentctl notifications read a3b2c1d0-1234-5678-9abc-def012345678
+```
+
+### `notifications respond`
+
+Submit a response to an interactive `Question` notification. If the question was blocking a task, the task resumes immediately.
+
+| Flag / Argument | Type | Description |
+|-----------------|------|-------------|
+| `id` | `String` | Notification UUID (positional) |
+| `--response` / `-r` | `String` | Your response text |
+
+**Example:**
+
+```bash
+agentctl notifications respond a3b2c1d0-... --response "Yes, proceed"
+```
+
+### `notifications watch`
+
+Poll for new notifications every 5 seconds. Silently registers existing unread notifications on first poll to avoid flooding the terminal. Press Ctrl-C to stop.
+
+*No flags.*
+
+**Example:**
+
+```bash
+agentctl notifications watch
+```
+
+---
+
+## `channel` — Manage external delivery channels
+
+Register external channels (Telegram, ntfy, email) so notifications are delivered beyond the CLI inbox. Credentials are stored in the vault; the channel record stores only non-sensitive routing metadata.
+
+### `channel connect`
+
+Register a new external delivery channel.
+
+| Flag | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `--kind` / `-k` | `String` | Yes | — | `telegram`, `ntfy`, `email`, or a custom string |
+| `--external-id` / `-e` | `String` | Yes | — | Telegram: `chat_id`; ntfy: topic name; email: to-address |
+| `--display-name` / `-d` | `String` | Yes | — | Human-readable label (e.g. `@johndoe`) |
+| `--credential-key` / `-c` | `String` | No | `""` | Vault key holding the bot token or password |
+| `--reply-topic` | `String` | No | — | ntfy only: topic to listen on for inbound replies |
+| `--server-url` | `String` | No | — | ntfy only: server URL (default: `https://ntfy.sh`) |
+
+**Example:**
+
+```bash
+# Telegram: first store token in vault, then connect
+agentctl secret set TELEGRAM_BOT_TOKEN
+agentctl channel connect --kind telegram --external-id "123456789" \
+  --display-name "@myhandle" --credential-key TELEGRAM_BOT_TOKEN
+
+# ntfy
+agentctl channel connect --kind ntfy --external-id "agentos-alerts" \
+  --display-name "ntfy/agentos-alerts"
+```
+
+### `channel list`
+
+List all registered channels with ID, kind, display name, external ID, and connection time.
+
+*No flags.*
+
+**Example:**
+
+```bash
+agentctl channel list
+```
+
+### `channel test`
+
+Send a test notification to a channel to verify delivery is working.
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `id` | `String` | Channel UUID (from `channel list`) |
+
+**Example:**
+
+```bash
+agentctl channel test a3b2c1d0-1234-5678-9abc-def012345678
+```
+
+### `channel disconnect`
+
+Remove a registered channel.
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `id` | `String` | Channel UUID (from `channel list`) |
+
+**Example:**
+
+```bash
+agentctl channel disconnect a3b2c1d0-1234-5678-9abc-def012345678
+```
+
+---
+
+## `mcp` — Model Context Protocol integration
+
+Bidirectional MCP bridge. `serve` and `list` are **offline** commands. `status` requires a running kernel.
+
+See [[22-MCP Integration]] for the full feature guide including configuration, security model, and Claude Desktop setup.
+
+### `mcp serve` (offline)
+
+Expose all registered AgentOS tools as an MCP server over stdin/stdout. Intended for use with Claude Desktop, Cursor, and any MCP-compatible client.
+
+```bash
+# Used by MCP clients automatically (stdio transport)
+agentctl mcp serve
+
+# Test from the shell
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | agentctl mcp serve
+```
+
+No flags. The command reads tool manifests directly from disk — no running kernel required.
+
+### `mcp list` (offline)
+
+List all MCP servers configured in the current config file. Shows config values only — does not check live connection state.
+
+```bash
+agentctl mcp list
+agentctl --config /etc/agentos/prod.toml mcp list
+```
+
+### `mcp status`
+
+Query the running kernel for live health of all configured MCP server connections. Requires a running kernel.
+
+```bash
+agentctl mcp status
+```
+
+**Output:**
+
+```
+NAME                 STATUS       TOOLS    LAST ERROR
+----------------------------------------------------------------------
+filesystem           connected    8        -
+web-search           disconnected 0        MCP server 'web-search' reconnect failed: ...
+```
+
+| Column | Description |
+|--------|-------------|
+| `NAME` | Server name from `config.mcp.servers[*].name` |
+| `STATUS` | `connected` or `disconnected` |
+| `TOOLS` | Tool count registered from this server at boot |
+| `LAST ERROR` | Last connection-level error, or `-` if none |
+
+---
+
+## `web` — Start the web UI server
+
+### `web serve`
+
+Start the AgentOS web UI. Boots the kernel internally and serves the dashboard at the given address. The vault passphrase is resolved from `AGENTOS_VAULT_PASSPHRASE` or via interactive prompt.
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--port` | `u16` | `8080` | Port to bind on |
+| `--host` | `String` | `"127.0.0.1"` | IP address to bind on |
+
+**Example:**
+
+```bash
+agentctl web serve
+agentctl web serve --port 3000 --host 0.0.0.0
+```
+
+The server prints `Web UI: http://<host>:<port>` on startup. Press Ctrl-C to shut down both the web server and the kernel gracefully. SIGTERM is also handled (for systemd).
+
+> **Note:** `web serve` boots its own embedded kernel. Do not run both `agentctl start` and `agentctl web serve` simultaneously — they would conflict on the bus socket and vault.
+
 ---
 
 ## Permission Reference Table
@@ -1383,8 +1632,15 @@ Permissions follow the format `<resource>:<flags>` where flags are `r` (read), `
 | `cron.jobs` | View scheduled | Create new | Delete / run |
 | `memory.semantic` | Read | Write | — |
 | `memory.episodic` | Read | — | — |
+| `memory.blocks` | Read blocks | Write blocks | — |
+| `memory.procedural` | Read procedures | Write procedures | — |
 | `agent.message` | Receive msgs | — | Send msgs |
 | `agent.broadcast` | Receive | — | Broadcast |
+| `agent.delegate` | — | — | Delegate subtasks |
+| `agent.registry` | List agents | — | — |
+| `task.query` | Query tasks | — | — |
+| `user.notify` | — | Send notifications | — |
+| `user.interact` | — | — | Ask blocking questions |
 
 **Examples:**
 
@@ -1423,6 +1679,10 @@ agentctl perm grant monitor hardware.gpu:r
 | `snapshot` | Task snapshots | `list`, `rollback` |
 | `event` | Event subscriptions | `subscribe`, `unsubscribe`, `subscriptions list`, `subscriptions show`, `subscriptions enable`, `subscriptions disable`, `history` |
 | `identity` | Agent identities | `show`, `revoke` |
-| `hal` | Hardware device access | `list`, `register`, `approve`, `deny`, `revoke` |
+| `hal` | Hardware device access | `list`, `register`, `approve`, `deny`, `revoke`, `query` |
+| `notifications` | User notification inbox | `list`, `read`, `respond`, `watch` |
+| `channel` | External delivery channels | `connect`, `list`, `test`, `disconnect` |
+| `mcp` | MCP integration | `serve`*, `list`*, `status` |
+| `web` | Web UI server | `serve` |
 
 *\* Offline commands — do not require a running kernel.*

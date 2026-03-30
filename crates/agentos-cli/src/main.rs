@@ -4,7 +4,7 @@ use agentos_hal::drivers::network::NetworkDriver;
 use agentos_hal::drivers::process::ProcessDriver;
 use agentos_hal::drivers::system::SystemDriver;
 use agentos_hal::HardwareAbstractionLayer;
-use agentos_kernel::Kernel;
+use agentos_kernel::{load_config, resolve_boot_vault_passphrase, Kernel};
 use agentos_vault::ZeroizingString;
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
@@ -12,15 +12,17 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 mod commands;
 use commands::{
-    agent::AgentCommands, audit::AuditCommands, bg::BgCommands, cost::CostCommands,
-    escalation::EscalationCommands, event::EventCommands, hal::HalCommands,
-    identity::IdentityCommands, log::LogCommands, perm::PermCommands, pipeline::PipelineCommands,
+    agent::AgentCommands, audit::AuditCommands, bg::BgCommands, channel::ChannelCommands,
+    cost::CostCommands, escalation::EscalationCommands, event::EventCommands, hal::HalCommands,
+    identity::IdentityCommands, log::LogCommands, mcp::McpCommands,
+    notifications::NotificationCommands, perm::PermCommands, pipeline::PipelineCommands,
     resource::ResourceCommands, role::RoleCommands, schedule::ScheduleCommands,
-    secret::SecretCommands, snapshot::SnapshotCommands, task::TaskCommands, tool::ToolCommands,
-    web::WebCommands,
+    scratchpad::ScratchpadCommands, secret::SecretCommands, snapshot::SnapshotCommands,
+    task::TaskCommands, tool::ToolCommands, web::WebCommands,
 };
 
 #[derive(Parser)]
@@ -40,6 +42,9 @@ pub struct Cli {
 pub enum Commands {
     /// Boot the AgentOS kernel
     Start,
+
+    /// Gracefully shut down the running kernel
+    Stop,
 
     /// Manage LLM agents
     Agent {
@@ -128,6 +133,12 @@ pub enum Commands {
         command: SnapshotCommands,
     },
 
+    /// Manage agent scratchpad notes
+    Scratchpad {
+        #[command(subcommand)]
+        command: ScratchpadCommands,
+    },
+
     /// Manage event subscriptions and view event history
     Event {
         #[command(subcommand)]
@@ -163,6 +174,24 @@ pub enum Commands {
         /// Health server port
         #[arg(long, default_value_t = 9091)]
         port: u16,
+    },
+
+    /// View and respond to agent notifications
+    Notifications {
+        #[command(subcommand)]
+        command: NotificationCommands,
+    },
+
+    /// Manage bidirectional notification channels (Telegram, ntfy, email)
+    Channel {
+        #[command(subcommand)]
+        command: ChannelCommands,
+    },
+
+    /// MCP (Model Context Protocol) adapter — import/export tools via the standard protocol
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
     },
 }
 
@@ -238,11 +267,50 @@ async fn tokio_main() -> anyhow::Result<()> {
 
         // Offline tool subcommands run without a kernel connection
         Commands::Tool { command } if commands::tool::is_offline(&command) => {
-            commands::tool::handle_offline(command)?;
+            commands::tool::handle_offline(command).await?;
+        }
+
+        // MCP subcommands: `serve` and `list` are offline; `status` requires a running kernel.
+        Commands::Mcp {
+            command: McpCommands::Status,
+        } => {
+            let config_path = Path::new(&cli.config);
+            if !config_path.exists() {
+                anyhow::bail!("Config file not found: {}", cli.config);
+            }
+            let config = agentos_kernel::config::load_config(config_path)?;
+            let mut bus_client = BusClient::connect(Path::new(&config.bus.socket_path)).await?;
+            commands::mcp::cmd_mcp_status(&mut bus_client).await?;
+        }
+        Commands::Mcp { command } => {
+            commands::mcp::handle(command, &cli.config).await?;
         }
 
         Commands::Healthz { port } => {
             commands::healthz::handle(port).await?;
+        }
+
+        Commands::Stop => {
+            let config_path = Path::new(&cli.config);
+            if !config_path.exists() {
+                anyhow::bail!("Config file not found: {}", cli.config);
+            }
+            let config = agentos_kernel::config::load_config(config_path)?;
+            let mut client = BusClient::connect(Path::new(&config.bus.socket_path)).await?;
+            match client
+                .send_command(agentos_bus::KernelCommand::Shutdown)
+                .await?
+            {
+                agentos_bus::KernelResponse::Success { .. } => {
+                    println!("Kernel shutdown initiated.");
+                }
+                agentos_bus::KernelResponse::Error { message } => {
+                    anyhow::bail!("Shutdown failed: {}", message);
+                }
+                other => {
+                    anyhow::bail!("Unexpected response: {:?}", other);
+                }
+            }
         }
 
         other => {
@@ -301,6 +369,27 @@ fn init_logging(cfg: &agentos_kernel::config::LoggingSettings) {
     // Leak the guard so it lives for the entire process.
     std::mem::forget(guard);
 
+    // Helper: builds a chat log layer that captures `agentos::chat` target events
+    // into a dedicated `chat.log` file. Uses a macro to avoid generic type mismatch
+    // between the JSON and text subscriber stacks.
+    macro_rules! make_chat_layer {
+        ($log_dir:expr) => {{
+            let chat_appender = tracing_appender::rolling::daily($log_dir, "chat.log");
+            let (chat_nb, chat_guard) = tracing_appender::non_blocking(chat_appender);
+            std::mem::forget(chat_guard);
+            tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_file(true)
+                .with_line_number(true)
+                .with_ansi(false)
+                .with_writer(chat_nb)
+                .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+                    metadata.target().starts_with("agentos::chat")
+                }))
+        }};
+    }
+
     // Each format branch moves `non_blocking` exactly once.
     if use_json {
         tracing_subscriber::registry()
@@ -321,6 +410,7 @@ fn init_logging(cfg: &agentos_kernel::config::LoggingSettings) {
                     .with_ansi(false)
                     .with_writer(non_blocking),
             )
+            .with(make_chat_layer!(&cfg.log_dir))
             .init();
     } else {
         tracing_subscriber::registry()
@@ -341,6 +431,7 @@ fn init_logging(cfg: &agentos_kernel::config::LoggingSettings) {
                     .with_ansi(false)
                     .with_writer(non_blocking),
             )
+            .with(make_chat_layer!(&cfg.log_dir))
             .init();
     }
 }
@@ -479,13 +570,18 @@ async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
         anyhow::bail!("Config file not found: {}", config_str);
     }
 
-    let passphrase = ZeroizingString::new(match std::env::var("AGENTOS_VAULT_PASSPHRASE") {
-        Ok(env_pass) if !env_pass.is_empty() => env_pass,
-        _ => {
-            eprint!("Enter vault passphrase: ");
-            rpassword::read_password()?
-        }
-    });
+    let config = load_config(config_path)?;
+    let passphrase = match resolve_boot_vault_passphrase(&config) {
+        Ok(Some(passphrase)) => passphrase,
+        Ok(None) => ZeroizingString::new(match std::env::var("AGENTOS_VAULT_PASSPHRASE") {
+            Ok(env_pass) if !env_pass.is_empty() => env_pass,
+            _ => {
+                eprint!("Enter vault passphrase: ");
+                rpassword::read_password()?
+            }
+        }),
+        Err(err) => return Err(err),
+    };
 
     println!("🚀 Booting AgentOS kernel...");
 

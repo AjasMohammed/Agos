@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block content %}
+<div x-data="pipelineList({{ csrf_token|tojson }})">
+    <div class="page-header">
+        <div>
+            <h1>Pipeline Builder</h1>
+            <p class="page-meta">{{ pipelines|length }} saved workflows</p>
+        </div>
+        <div class="pipeline-toolbar">
+            <a href="/pipelines/new" role="button">New Pipeline</a>
+        </div>
+    </div>
+
+    <article class="pipeline-intro">
+        <p>Build YAML-backed agent workflows visually, save them into the existing pipeline engine, and launch runs without dropping into the CLI.</p>
+    </article>
+
+    <figure>
+        <table aria-label="Saved pipelines">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Version</th>
+                    <th>Steps</th>
+                    <th>Saved</th>
+                    <th>Last Run</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody hx-get="/pipelines?partial=list" hx-trigger="every 10s" hx-swap="innerHTML">
+                {% include "partials/pipeline_row.html" %}
+            </tbody>
+        </table>
+    </figure>
+
+    {% if pipelines|length == 0 %}
+    {% with icon="&#8658;", title="No pipelines saved yet", message="Start a visual workflow, connect agent and tool nodes, then save the generated YAML into the pipeline store." %}
+    {% include "partials/empty_state.html" %}
+    {% endwith %}
+    {% endif %}
+
+    <dialog :open="showRun" @close="showRun = false" aria-labelledby="run-pipeline-title" role="dialog">
+        <article>
+            <header>
+                <button aria-label="Close dialog" rel="prev" @click="showRun = false"></button>
+                <h3 id="run-pipeline-title">Run Pipeline</h3>
+            </header>
+            <form method="post" action="/pipelines/run">
+                <input type="hidden" name="_csrf" :value="csrfToken">
+                <input type="hidden" name="pipeline_name" :value="selectedPipeline">
+                <label for="agent-name">Agent Name
+                    <input id="agent-name" name="agent_name" required aria-required="true"
+                           placeholder="Connected agent to govern the pipeline">
+                </label>
+                <label for="pipeline-input">Input
+                    <textarea id="pipeline-input" name="input" required aria-required="true"
+                              rows="4" placeholder="Pipeline input..."></textarea>
+                </label>
+                <button type="submit">Run Pipeline</button>
+            </form>
+        </article>
+    </dialog>
+</div>
+<script>
+function pipelineList(csrfToken) {
+    return {
+        showRun: false,
+        selectedPipeline: '',
+        csrfToken: csrfToken,
+        goToEdit(name) {
+            window.location.href = '/pipelines/' + encodeURIComponent(name) + '/edit';
+        },
+        async postAction(url) {
+            var response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                    'X-CSRF-Token': this.csrfToken
+                },
+                body: new URLSearchParams({ _csrf: this.csrfToken }).toString()
+            });
+            if (!response.ok) {
+                var message = await response.text();
+                window.dispatchEvent(new CustomEvent('show-toast', { detail: { message: message || 'Pipeline action failed', type: 'error' } }));
+                return;
+            }
+            window.location.reload();
+        },
+        clonePipeline(name) {
+            this.postAction('/pipelines/' + encodeURIComponent(name) + '/clone');
+        },
+        deletePipeline(name) {
+            if (!window.confirm('Delete pipeline ' + name + '?')) return;
+            this.postAction('/pipelines/' + encodeURIComponent(name) + '/delete');
+        }
+    };
+}
+</script>
+{% endblock %}

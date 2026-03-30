@@ -110,6 +110,11 @@ pub enum AuditEventType {
     HardwareDeviceApproved,
     HardwareDeviceDenied,
     HardwareDeviceRevoked,
+    DeviceAccessGranted,
+    DeviceAccessDenied,
+    DeviceApproved,
+    DeviceQuarantined,
+    DeviceAccessEscalated,
 
     // Agent identity / pubkey events
     /// Emitted when a pubkey is successfully registered for an agent (first-time only).
@@ -129,6 +134,26 @@ pub enum AuditEventType {
     /// Emitted at kernel startup when the audit hash chain fails verification,
     /// indicating possible tampering with historical audit entries.
     AuditChainTampered,
+
+    // User notification system (UNIS Phase 1)
+    /// Emitted when a UserMessage is created and stored in the inbox.
+    NotificationSent,
+    /// Emitted when a notification is successfully delivered via a channel adapter.
+    NotificationDelivered,
+    /// Emitted when a notification is marked read by the user.
+    NotificationRead,
+    /// Emitted when the user responds to an interactive (Question) notification.
+    UserResponseReceived,
+    /// Emitted when a notification question times out and the auto_action fires.
+    NotificationAutoActioned,
+
+    // Bidirectional channel management (UNIS Phase 6)
+    /// Emitted when a user connects a new bidirectional channel (Telegram, ntfy, …).
+    ChannelConnected,
+    /// Emitted when a user disconnects a bidirectional channel.
+    ChannelDisconnected,
+    /// Emitted when a message is received from a user via an inbound channel.
+    InboundMessageReceived,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

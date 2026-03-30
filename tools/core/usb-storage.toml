@@ -1,0 +1,67 @@
+[manifest]
+name        = "usb-storage"
+version     = "1.0.0"
+description = "Mount, unmount, and eject USB storage devices via UDisks2 D-Bus API."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["hardware.usb-storage:x"]
+
+[capabilities_provided]
+outputs = ["hardware.storage"]
+
+[intent_schema]
+input  = "UsbStorageIntent"
+output = "UsbStorageResult"
+
+[input_schema]
+type = "object"
+description = "USB storage operation"
+
+[input_schema.properties.action]
+type = "string"
+enum = ["list", "mount", "unmount", "eject"]
+default = "list"
+description = "Operation: list USB filesystems, mount a device, unmount, or eject (power-off)"
+
+[input_schema.properties.device]
+type = "string"
+description = "Block device ID (e.g. 'sdb1', 'nvme0n1p1'). Required for mount/unmount/eject; ignored for list."
+pattern = "^[a-zA-Z0-9._-]*$"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 128
+max_cpu_ms    = 10000
+syscalls      = []
+
+[examples]
+"List USB filesystems" = """
+{
+  "action": "list"
+}
+"""
+
+"Mount a USB drive" = """
+{
+  "action": "mount",
+  "device": "sdb1"
+}
+"""
+
+"Unmount a device" = """
+{
+  "action": "unmount",
+  "device": "sdb1"
+}
+"""
+
+"Eject a USB drive" = """
+{
+  "action": "eject",
+  "device": "sdb1"
+}
+"""

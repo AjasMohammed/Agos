@@ -91,6 +91,24 @@ impl HalDriver for GpuDriver {
         ("hardware.gpu", PermissionOp::Read)
     }
 
+    /// Aggregate list queries inspect all GPUs and do not target a single device key.
+    /// Device-scoped actions can opt into `"gpu:<card_index>"`.
+    fn device_key(&self, params: &Value) -> Option<String> {
+        let action = params
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or("list");
+        if action == "list" {
+            return None;
+        }
+
+        let idx = params
+            .get("card_index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        Some(format!("gpu:{}", idx))
+    }
+
     async fn query(&self, params: Value) -> Result<Value, AgentOSError> {
         let action = params
             .get("action")
@@ -113,11 +131,22 @@ impl HalDriver for GpuDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[tokio::test]
     async fn test_gpu_list() {
         let driver = GpuDriver::new();
         let result = driver.query(json!({ "action": "list" })).await.unwrap();
         assert!(result["devices"].is_array());
+    }
+
+    #[test]
+    fn test_gpu_list_action_has_no_single_device_key() {
+        let driver = GpuDriver::new();
+        assert_eq!(driver.device_key(&json!({ "action": "list" })), None);
+        assert_eq!(
+            driver.device_key(&json!({ "action": "inspect", "card_index": 2 })),
+            Some("gpu:2".to_string())
+        );
     }
 }

@@ -16,3 +16,8 @@ tracing.workspace = true
 sysinfo.workspace = true
 regex.workspace = true
 chrono.workspace = true
+zbus = { workspace = true, optional = true }
+
+[features]
+default = []
+usb-storage = ["dep:zbus"]

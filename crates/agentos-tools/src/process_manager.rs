@@ -64,6 +64,13 @@ impl AgentTool for ProcessManagerTool {
             }
         }
 
-        hal.query("process", payload, &perms).await
+        hal.query(
+            "process",
+            payload,
+            &perms,
+            Some(&context.agent_id),
+            Some(&context.task_id),
+        )
+        .await
     }
 }

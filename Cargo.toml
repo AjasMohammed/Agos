@@ -18,6 +18,9 @@ members = [
     "crates/agentos-sdk-macros",
     "crates/agentos-sdk",
     "crates/agentos-agent-tester",
+    "crates/agentos-mcp",
+    "crates/agentos-registry",
+    "crates/agentos-scratch",
 ]
 
 [workspace.package]
@@ -106,3 +109,4 @@ sysinfo = "0.33"
 
 # Unicode normalization (for injection scanner homoglyph bypass prevention)
 unicode-normalization = "0.1"
+zbus = { version = "5", default-features = false, features = ["tokio"] }

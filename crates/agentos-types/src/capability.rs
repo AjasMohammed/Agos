@@ -648,6 +648,55 @@ mod tests {
         assert!(!intersected.check("events.stream", PermissionOp::Observe));
     }
 
+    // ─── Cross-agent scratchpad permission tests ───
+
+    #[test]
+    fn test_scratchpad_cross_agent_specific() {
+        let mut perms = PermissionSet::new();
+        perms.grant("scratchpad".into(), true, false, false, None);
+        perms.grant("scratch.cross:agent-2".into(), true, false, false, None);
+
+        // Own scratchpad — allowed
+        assert!(perms.check("scratchpad", PermissionOp::Read));
+        // Cross-agent read of agent-2 — allowed
+        assert!(perms.check("scratch.cross:agent-2", PermissionOp::Read));
+        // Cross-agent read of agent-3 — denied (not granted)
+        assert!(!perms.check("scratch.cross:agent-3", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_scratchpad_cross_agent_wildcard() {
+        let mut perms = PermissionSet::new();
+        perms.grant("scratchpad".into(), true, false, false, None);
+        // Wildcard: grant prefix "scratch.cross:" — matches all agents via prefix matching
+        perms.grant("scratch.cross:".into(), true, false, false, None);
+
+        assert!(perms.check("scratch.cross:agent-1", PermissionOp::Read));
+        assert!(perms.check("scratch.cross:agent-2", PermissionOp::Read));
+        assert!(perms.check("scratch.cross:any-agent", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_scratchpad_cross_agent_write_denied() {
+        let mut perms = PermissionSet::new();
+        // Only grant read, not write, for cross-agent
+        perms.grant("scratch.cross:agent-2".into(), true, false, false, None);
+
+        assert!(perms.check("scratch.cross:agent-2", PermissionOp::Read));
+        assert!(!perms.check("scratch.cross:agent-2", PermissionOp::Write));
+    }
+
+    #[test]
+    fn test_scratchpad_cross_agent_deny_overrides() {
+        let mut perms = PermissionSet::new();
+        perms.grant("scratch.cross:".into(), true, false, false, None);
+        // Explicitly deny a specific agent
+        perms.deny("scratch.cross:agent-secret".into());
+
+        assert!(perms.check("scratch.cross:agent-1", PermissionOp::Read));
+        assert!(!perms.check("scratch.cross:agent-secret", PermissionOp::Read));
+    }
+
     #[test]
     fn test_grant_does_not_wipe_query_on_upsert() {
         let mut perms = PermissionSet::new();

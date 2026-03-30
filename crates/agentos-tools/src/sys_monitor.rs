@@ -53,6 +53,13 @@ impl AgentTool for SysMonitorTool {
             "Self-granted permissions must be a subset of required_permissions()"
         );
 
-        hal.query("system", serde_json::json!({}), &perms).await
+        hal.query(
+            "system",
+            serde_json::json!({}),
+            &perms,
+            Some(&context.agent_id),
+            Some(&context.task_id),
+        )
+        .await
     }
 }

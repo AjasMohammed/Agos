@@ -88,6 +88,9 @@ pub struct ToolInfo {
     /// Defaults to `Community` if omitted.
     #[serde(default)]
     pub trust_tier: TrustTier,
+    /// Searchable tags for marketplace discovery (e.g. ["github", "code-review"]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

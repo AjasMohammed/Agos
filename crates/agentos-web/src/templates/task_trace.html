@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Trace <code class="id-long">{{ task_id[:8] }}</code></h1>
+        <small class="muted">{{ task_id }}</small>
+    </div>
+    <div class="page-header-actions">
+        <span class="badge badge-{{ status|lower }} badge-lg">{{ status }}</span>
+        <a href="/tasks/{{ task_id }}" class="outline secondary btn-sm" role="button">Task Detail</a>
+        <a href="/api/tasks/{{ task_id }}/trace" class="outline secondary btn-sm" role="button" target="_blank">JSON</a>
+    </div>
+</div>
+
+<div class="grid">
+    <article>
+        <header>Summary</header>
+        <dl class="detail-list">
+            <dt>Agent</dt>
+            <dd><code title="{{ agent_id }}">{{ agent_id[:8] }}</code></dd>
+            <dt>Started</dt>
+            <dd>{{ started_at }}</dd>
+            {% if elapsed_secs %}<dt>Elapsed</dt><dd>{{ elapsed_secs }}</dd>{% endif %}
+            <dt>Iterations</dt>
+            <dd>{{ iterations|length }}</dd>
+            <dt>Tokens</dt>
+            <dd>{{ total_input_tokens }} in / {{ total_output_tokens }} out</dd>
+            {% if total_cost_usd %}<dt>Cost</dt><dd>{{ total_cost_usd }}</dd>{% endif %}
+        </dl>
+    </article>
+    <article>
+        <header>Prompt</header>
+        <pre class="prompt-pre">{{ prompt_preview }}</pre>
+    </article>
+</div>
+
+{% if iterations %}
+<h2>Execution Timeline <small class="muted">({{ iterations|length }} iterations)</small></h2>
+<div class="trace-timeline">
+    {% for it in iterations %}
+    <details class="trace-iteration" {% if loop.last %}open{% endif %}>
+        <summary class="trace-iter-header">
+            <span class="trace-iter-num">#{{ it.num }}</span>
+            <span class="trace-iter-model muted">{{ it.model }}</span>
+            <span class="trace-iter-stop badge badge-info">{{ it.stop_reason }}</span>
+            <span class="trace-iter-tokens muted">{{ it.input_tokens }}↑ {{ it.output_tokens }}↓</span>
+            {% if it.tool_calls %}
+            <span class="trace-iter-tools muted">{{ it.tool_calls|length }} tool call{% if it.tool_calls|length != 1 %}s{% endif %}</span>
+            {% endif %}
+        </summary>
+        {% if it.tool_calls %}
+        <div class="trace-tool-list">
+            {% for tc in it.tool_calls %}
+            <div class="trace-tool-call trace-tool-{{ tc.status }}">
+                <div class="trace-tool-header">
+                    <span class="trace-tool-name">{{ tc.tool_name }}</span>
+                    <span class="trace-tool-status badge badge-{% if tc.status == 'ok' %}complete{% elif tc.status == 'denied' %}warning{% else %}error{% endif %}">
+                        {{ tc.status }}
+                    </span>
+                    {% if tc.duration_ms > 0 %}<span class="trace-tool-dur muted">{{ tc.duration_ms }}ms</span>{% endif %}
+                    {% if tc.injection_score %}<span class="trace-tool-inj muted" title="Injection score">⚠ {{ tc.injection_score }}</span>{% endif %}
+                    {% if tc.has_snapshot %}<span class="trace-tool-snap muted" title="Snapshot taken">📸</span>{% endif %}
+                </div>
+                {% if tc.input_preview %}
+                <div class="trace-tool-input muted"><code>{{ tc.input_preview }}</code></div>
+                {% endif %}
+                {% if tc.status == 'denied' and tc.deny_reason %}
+                <div class="trace-tool-error">Permission denied: {{ tc.deny_reason }}</div>
+                {% elif tc.status == 'error' and tc.error %}
+                <div class="trace-tool-error">{{ tc.error }}</div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="trace-tool-list muted"><em>No tool calls in this iteration.</em></div>
+        {% endif %}
+    </details>
+    {% endfor %}
+</div>
+{% else %}
+<p class="muted">No iteration data recorded for this task.</p>
+{% endif %}
+
+<style>
+.trace-timeline { display: flex; flex-direction: column; gap: 0.5rem; }
+.trace-iteration { border: 1px solid var(--pico-muted-border-color); border-radius: var(--pico-border-radius); }
+.trace-iter-header { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; padding: 0.5rem 0.75rem; cursor: pointer; list-style: none; }
+.trace-iter-header::-webkit-details-marker { display: none; }
+.trace-iter-num { font-weight: bold; min-width: 2rem; }
+.trace-iter-model { font-size: 0.85em; }
+.trace-iter-tokens, .trace-iter-tools { font-size: 0.8em; }
+.trace-tool-list { padding: 0.5rem 1rem 0.75rem; display: flex; flex-direction: column; gap: 0.35rem; }
+.trace-tool-call { padding: 0.4rem 0.6rem; border-radius: var(--pico-border-radius); border-left: 3px solid var(--pico-muted-border-color); }
+.trace-tool-ok { border-left-color: var(--pico-ins-color, #1d9e47); }
+.trace-tool-error { border-left-color: var(--pico-del-color, #d8372a); }
+.trace-tool-denied { border-left-color: var(--pico-color-amber-500, #d97706); }
+.trace-tool-header { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.trace-tool-name { font-weight: 600; font-family: var(--pico-font-family-monospace); }
+.trace-tool-dur, .trace-tool-inj, .trace-tool-snap { font-size: 0.8em; }
+.trace-tool-input { font-size: 0.8em; margin-top: 0.2rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.trace-tool-error { font-size: 0.85em; color: var(--pico-del-color, #d8372a); margin-top: 0.2rem; }
+</style>
+{% endblock %}

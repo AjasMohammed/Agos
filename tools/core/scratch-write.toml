@@ -1,0 +1,44 @@
+[manifest]
+name        = "scratch-write"
+version     = "1.0.0"
+description = "Write a markdown page to the agent's scratchpad. Use [[Page Title]] to link pages."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["scratchpad:w"]
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "ScratchWriteIntent"
+output = "ScratchWriteResult"
+
+[input_schema]
+type = "object"
+required = ["title", "content"]
+
+[input_schema.properties.title]
+type = "string"
+maxLength = 256
+description = "Page title (unique within your scratchpad)"
+
+[input_schema.properties.content]
+type = "string"
+description = "Markdown content. Use [[Page Title]] to link to other pages."
+
+[input_schema.properties.tags]
+type = "array"
+description = "Optional tags for categorization"
+
+[input_schema.properties.tags.items]
+type = "string"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 15000
+syscalls      = []

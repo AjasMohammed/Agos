@@ -98,11 +98,11 @@ cargo run --bin agentos-cli -- --config config/production.toml start
 ### Docker Deployment
 
 ```bash
-# 1. Copy the env template and set a strong vault passphrase
+# 1. Copy the env template
 cp .env.example .env
-# Edit .env and set AGENTOS_VAULT_PASSPHRASE
+# Optional: set AGENTOS_VAULT_PASSPHRASE for an explicit vault secret
 
-# 2. Start AgentOS + Ollama
+# 2. Start AgentOS + Jaeger + Ollama
 docker compose up -d
 
 # 3. Check health
@@ -111,8 +111,13 @@ curl http://localhost:9091/healthz
 
 The compose stack uses:
 - A **read-only root filesystem** with tmpfs mounts for `/tmp` and `/run`
-- **Named volumes** (`agentos-data`, `agentos-user-tools`) for persistent state
-- `config/docker.toml` — pre-configured for the container network (Ollama reachable as `http://ollama:11434`)
+- **Named volumes** for persistent kernel data and user-installed tools
+- `config/docker.toml` — pre-configured for the container runtime paths
+- **Jaeger** on `http://localhost:16686` for trace inspection
+
+If `AGENTOS_AUTO_INIT_VAULT=true` and `AGENTOS_VAULT_PASSPHRASE` is not set, AgentOS generates a managed passphrase file next to the vault database inside the persistent volume. That is a convenience mode for quick deployments, not the strongest at-rest isolation model, so production setups should prefer an externally supplied secret.
+
+For Linux seccomp sandboxing inside containers, some environments may require additional container privileges. If seccomp-BPF is unavailable, AgentOS falls back safely and logs a warning.
 
 See [docs/guide/07-configuration.md](docs/guide/07-configuration.md) for full configuration reference.
 
