@@ -21,6 +21,8 @@ members = [
     "crates/agentos-mcp",
     "crates/agentos-registry",
     "crates/agentos-scratch",
+    "crates/agentos-web",
+    "crates/agentos-api",
 ]
 
 [workspace.package]
