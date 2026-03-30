@@ -18,9 +18,23 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-axum = { workspace = true }
-axum-extra = { version = "0.12", features = ["cookie"] }
+axum = { workspace = true, features = ["macros"] }
+axum-extra = { version = "0.12", features = ["cookie", "typed-header"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
+tower_governor = "0.8"
+hmac = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+futures = "0.3"
+bytes = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
+serial_test = "3.4.0"
+toml = { workspace = true }
+agentos-kernel = { path = "../agentos-kernel" }
+agentos-vault = { path = "../agentos-vault" }
+agentos-types = { path = "../agentos-types" }
