@@ -168,7 +168,7 @@ The LLM calls tools using a structured block that the harness parses:
 
 ```
 [TOOL_CALL]
-{"tool": "memory-write", "input": {"key": "foo", "value": "bar", "tier": "working"}}
+{"tool": "memory-write", "intent_type": "write", "payload": {"key": "foo", "value": "bar", "tier": "working"}}
 [/TOOL_CALL]
 ```
 

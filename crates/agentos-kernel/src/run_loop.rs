@@ -1578,6 +1578,31 @@ impl Kernel {
             KernelCommand::TestChannel { channel_id } => self.cmd_test_channel(channel_id).await,
             KernelCommand::McpStatus => self.cmd_mcp_status().await,
 
+            // Context memory
+            KernelCommand::ContextMemoryRead { agent_id } => {
+                self.cmd_context_memory_read(agent_id).await
+            }
+            KernelCommand::ContextMemoryUpdate {
+                agent_id,
+                content,
+                reason,
+            } => {
+                self.cmd_context_memory_update(agent_id, content, reason)
+                    .await
+            }
+            KernelCommand::ContextMemoryHistory { agent_id, limit } => {
+                self.cmd_context_memory_history(agent_id, limit).await
+            }
+            KernelCommand::ContextMemoryRollback { agent_id, version } => {
+                self.cmd_context_memory_rollback(agent_id, version).await
+            }
+            KernelCommand::ContextMemoryClear { agent_id } => {
+                self.cmd_context_memory_clear(agent_id).await
+            }
+            KernelCommand::ContextMemorySet { agent_id, content } => {
+                self.cmd_context_memory_set(agent_id, content).await
+            }
+
             KernelCommand::ScratchListPages { agent_id } => {
                 self.cmd_scratch_list_pages(agent_id).await
             }

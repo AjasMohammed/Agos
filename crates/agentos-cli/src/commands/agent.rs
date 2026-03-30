@@ -63,6 +63,11 @@ pub enum AgentCommands {
         #[command(subcommand)]
         command: AgentGroupCommands,
     },
+    /// Manage agent context memory
+    Memory {
+        #[command(subcommand)]
+        command: AgentMemoryCommands,
+    },
     /// Broadcast a message to a group
     Broadcast {
         /// Sender agent name
@@ -72,6 +77,43 @@ pub enum AgentCommands {
         group: String,
         /// Message content
         content: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AgentMemoryCommands {
+    /// Show the current context memory for an agent
+    Show {
+        /// Agent name or ID
+        agent: String,
+    },
+    /// Show context memory version history
+    History {
+        /// Agent name or ID
+        agent: String,
+        /// Number of versions to show
+        #[arg(long, default_value = "10")]
+        limit: u32,
+    },
+    /// Rollback to a specific version
+    Rollback {
+        /// Agent name or ID
+        agent: String,
+        /// Version number to restore
+        version: u32,
+    },
+    /// Clear the agent's context memory
+    Clear {
+        /// Agent name or ID
+        agent: String,
+    },
+    /// Set context memory from a file
+    Set {
+        /// Agent name or ID
+        agent: String,
+        /// Path to markdown file
+        #[arg(long)]
+        file: String,
     },
 }
 
@@ -248,6 +290,9 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                 _ => eprintln!("❌ Unexpected response"),
             }
         }
+        AgentCommands::Memory { command } => {
+            handle_memory(client, command).await?;
+        }
         AgentCommands::Broadcast {
             from,
             group,
@@ -272,6 +317,141 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                 }
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
                 _ => eprintln!("❌ Unexpected response"),
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_memory(client: &mut BusClient, command: AgentMemoryCommands) -> anyhow::Result<()> {
+    match command {
+        AgentMemoryCommands::Show { agent } => {
+            let response = client
+                .send_command(KernelCommand::ContextMemoryRead {
+                    agent_id: agent.clone(),
+                })
+                .await?;
+            match response {
+                KernelResponse::Success { data } => {
+                    if let Some(data) = data {
+                        let version = data.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let token_count = data
+                            .get("token_count")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let content = data.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                        if version == 0 || content.is_empty() {
+                            println!("Agent '{}' has no context memory set.", agent);
+                        } else {
+                            println!(
+                                "Agent '{}' context memory (v{}, {} tokens):\n",
+                                agent, version, token_count
+                            );
+                            println!("{}", content);
+                        }
+                    }
+                }
+                KernelResponse::Error { message } => eprintln!("Error: {}", message),
+                _ => eprintln!("Unexpected response"),
+            }
+        }
+        AgentMemoryCommands::History { agent, limit } => {
+            let response = client
+                .send_command(KernelCommand::ContextMemoryHistory {
+                    agent_id: agent.clone(),
+                    limit,
+                })
+                .await?;
+            match response {
+                KernelResponse::Success { data } => {
+                    if let Some(data) = data {
+                        let versions = data
+                            .get("versions")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        if versions.is_empty() {
+                            println!("No version history for agent '{}'.", agent);
+                        } else {
+                            println!("{:<8} {:<10} {:<25} REASON", "VERSION", "TOKENS", "UPDATED");
+                            println!("{}", "-".repeat(60));
+                            for v in versions {
+                                let ver = v.get("version").and_then(|x| x.as_u64()).unwrap_or(0);
+                                let tokens =
+                                    v.get("token_count").and_then(|x| x.as_u64()).unwrap_or(0);
+                                let updated =
+                                    v.get("updated_at").and_then(|x| x.as_str()).unwrap_or("-");
+                                let reason =
+                                    v.get("reason").and_then(|x| x.as_str()).unwrap_or("-");
+                                println!("{:<8} {:<10} {:<25} {}", ver, tokens, updated, reason);
+                            }
+                        }
+                    }
+                }
+                KernelResponse::Error { message } => eprintln!("Error: {}", message),
+                _ => eprintln!("Unexpected response"),
+            }
+        }
+        AgentMemoryCommands::Rollback { agent, version } => {
+            let response = client
+                .send_command(KernelCommand::ContextMemoryRollback {
+                    agent_id: agent.clone(),
+                    version,
+                })
+                .await?;
+            match response {
+                KernelResponse::Success { data } => {
+                    let new_ver = data
+                        .as_ref()
+                        .and_then(|d| d.get("new_version"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    println!(
+                        "Rolled back agent '{}' to version {} (new version: {})",
+                        agent, version, new_ver
+                    );
+                }
+                KernelResponse::Error { message } => eprintln!("Error: {}", message),
+                _ => eprintln!("Unexpected response"),
+            }
+        }
+        AgentMemoryCommands::Clear { agent } => {
+            let response = client
+                .send_command(KernelCommand::ContextMemoryClear {
+                    agent_id: agent.clone(),
+                })
+                .await?;
+            match response {
+                KernelResponse::Success { .. } => {
+                    println!("Context memory cleared for agent '{}'.", agent);
+                }
+                KernelResponse::Error { message } => eprintln!("Error: {}", message),
+                _ => eprintln!("Unexpected response"),
+            }
+        }
+        AgentMemoryCommands::Set { agent, file } => {
+            let content = std::fs::read_to_string(&file)
+                .map_err(|e| anyhow::anyhow!("Failed to read file '{}': {}", file, e))?;
+            let response = client
+                .send_command(KernelCommand::ContextMemorySet {
+                    agent_id: agent.clone(),
+                    content,
+                })
+                .await?;
+            match response {
+                KernelResponse::Success { data } => {
+                    let tokens = data
+                        .as_ref()
+                        .and_then(|d| d.get("token_count"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    println!(
+                        "Context memory set for agent '{}' ({} tokens).",
+                        agent, tokens
+                    );
+                }
+                KernelResponse::Error { message } => eprintln!("Error: {}", message),
+                _ => eprintln!("Unexpected response"),
             }
         }
     }

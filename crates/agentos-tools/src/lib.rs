@@ -6,6 +6,8 @@ pub mod agent_self;
 pub mod archival_insert;
 pub mod archival_search;
 pub mod ask_user;
+pub mod context_memory_read;
+pub mod context_memory_update;
 pub mod data_parser;
 pub mod datetime;
 pub mod episodic_list;

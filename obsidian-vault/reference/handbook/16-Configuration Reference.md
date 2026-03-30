@@ -37,6 +37,7 @@ Core kernel operational limits.
 | `context_window_token_budget` | integer | `32000` | `32000` | Token budget for a single context window before eviction |
 | `health_port` | integer | _(absent)_ | `9091` | HTTP port for the health check endpoint (production only) |
 | `state_db_path` | string | `/tmp/agentos/data/kernel_state.db` | `/var/lib/agentos/data/kernel_state.db` | SQLite DB for persisted runtime state (tasks, escalations, cost snapshots) |
+| `sandbox_policy` | string | `trust_aware` | `trust_aware` | Sandbox enforcement mode: `trust_aware` (Core tools in-process, Community/Verified sandboxed), `always` (all sandbox-eligible tools sandboxed), `never` (no sandboxing — development only, NOT for production) |
 
 ---
 
@@ -179,6 +180,7 @@ Ollama local LLM server settings.
 |---|---|---|---|---|
 | `host` | string | `http://localhost:11434` | `http://ollama.service.consul:11434` | Base URL of the Ollama server. Override with `AGENTOS_OLLAMA_HOST`. |
 | `default_model` | string | `llama3.2` | `llama3.2` | Default model name used when none is specified at agent connect time |
+| `request_timeout_secs` | integer | `300` | `300` | HTTP request timeout for Ollama inference calls (seconds). Cloud-proxied models and large local models with many tools may need 300-600s. |
 
 ---
 
@@ -273,6 +275,164 @@ System health monitoring thresholds (development config).
 | `disk_warning_percent` | float | `85.0` | Disk usage percentage that triggers a warning |
 | `disk_critical_percent` | float | `95.0` | Disk usage percentage that triggers a critical alert |
 | `gpu_vram_warning_percent` | float | `90.0` | GPU VRAM usage percentage that triggers a warning |
+
+---
+
+## `[context]`
+
+Context window summarization settings. Controls how the kernel compresses context entries when the token budget is exceeded.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `summarization_mode` | string | `"llm"` | Context compression mode: `"llm"` (LLM-generated summaries, falls back to concat on failure), `"concat"` (concatenate entry snippets, legacy behavior), or `"off"` (entries silently evicted, no summary) |
+| `summarization_max_input_chars` | integer | `8000` | Maximum characters of entry text sent to the summarizer LLM per compression event. Prevents sending enormous payloads on aggressive compression passes. |
+
+---
+
+## `[logging]`
+
+Rolling file and stderr log configuration. Logs rotate daily with up to 7 days retained.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `log_dir` | string | `"/tmp/agentos/logs"` | Directory where rolling log files are written. Set to `""` to disable file logging (stderr only). |
+| `log_level` | string | `"info"` | Minimum log level: `trace`, `debug`, `info`, `warn`, `error`. Can be overridden at runtime with `RUST_LOG` or `agentctl log set-level`. |
+| `log_format` | string | `"text"` | Output format: `"text"` (human-readable) or `"json"` (structured, for log aggregators like Loki, Datadog, or Elasticsearch). Use `"json"` in production. |
+
+---
+
+## `[otel]`
+
+OpenTelemetry distributed tracing export.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Enable OpenTelemetry trace/metric export |
+| `endpoint` | string | `"http://localhost:4317"` | OTLP collector endpoint URL |
+| `protocol` | string | `"grpc"` | Export protocol: `"grpc"` or `"http"` |
+| `service_name` | string | `"agentos"` | Service name attached to all exported traces and metrics |
+| `sample_rate` | float | `1.0` | Trace sampling rate from 0.0 (no traces) to 1.0 (all traces) |
+| `scrub_tool_inputs` | bool | `true` | Redact tool input payloads in trace spans (recommended for production to avoid leaking secrets) |
+| `scrub_tool_outputs` | bool | `true` | Redact tool output payloads in trace spans |
+
+---
+
+## `[notifications]`
+
+Agent notification inbox and delivery settings.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `max_inbox_size` | integer | `1000` | Maximum messages stored per agent inbox. When reached, oldest read messages are purged on each write. |
+| `notify_on_task_complete` | bool | `true` | Automatically notify user when a root task completes successfully |
+| `notify_on_task_failed` | bool | `true` | Automatically notify user when a root task fails |
+
+### `[notifications.adapters.webhook]`
+
+HTTP webhook notification adapter for external integrations.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Enable webhook delivery |
+| `url` | string | `""` | Webhook endpoint URL to POST notifications to |
+| `secret` | string | `""` | HMAC-SHA256 secret for the `X-AgentOS-Signature` header (empty = no signature) |
+| `min_priority` | string | `"warning"` | Minimum priority level to deliver: `info`, `warning`, `error`, `critical` |
+| `max_retries` | integer | `3` | Maximum retry attempts on delivery failure |
+| `retry_delay_secs` | integer | `5` | Seconds to wait between retry attempts |
+| `timeout_secs` | integer | `10` | HTTP request timeout per delivery attempt |
+
+### `[notifications.adapters.desktop]`
+
+Native desktop notification adapter (libnotify / macOS Notification Center).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `true` | Enable desktop notifications |
+| `min_priority` | string | `"warning"` | Minimum priority level to display |
+| `notify_on_task_complete` | bool | `true` | Show a desktop notification when a task completes |
+
+### `[notifications.adapters.slack]`
+
+Slack incoming webhook notification adapter.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Enable Slack delivery |
+| `webhook_url` | string | `""` | Slack incoming webhook URL |
+| `min_priority` | string | `"warning"` | Minimum priority level to deliver |
+| `include_body` | bool | `true` | Include message body text in the Slack post |
+| `max_retries` | integer | `3` | Maximum retry attempts on delivery failure |
+| `retry_delay_secs` | integer | `2` | Seconds to wait between retry attempts |
+
+---
+
+## `[memory.context]`
+
+Per-agent self-curated context memory. Injected into the context window at every task start, allowing agents to maintain persistent notes across tasks.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `true` | Enable per-agent context memory |
+| `max_tokens` | integer | `4096` | Token budget for context memory content injected per task |
+| `max_versions` | integer | `50` | Maximum version history entries to retain per agent |
+| `db_path` | string | `"context_memory.db"` | SQLite database path (relative to `data_dir`) |
+| `max_episodes_per_cycle` | integer | `500` | Maximum episodes to process in a single consolidation cycle |
+
+---
+
+## `[scratchpad]`
+
+Agent scratchpad — a graph-aware knowledge store for agent working memory. Supports wikilink-connected pages with BFS traversal for automatic context injection.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `true` | Enable the agent scratchpad subsystem |
+| `db_path` | string | `"scratchpad.db"` | SQLite database path (relative to `data_dir`) |
+| `context_depth` | integer | `2` | BFS wikilink traversal depth for context injection (0 = seed page only) |
+| `max_context_pages` | integer | `5` | Maximum pages injected into context per inference call |
+| `max_context_bytes` | integer | `8192` | Maximum total bytes of scratchpad content injected per inference call |
+| `max_page_size` | integer | `65536` (64 KiB) | Maximum content size per individual page (bytes) |
+| `max_pages_per_agent` | integer | `1000` | Maximum pages an agent can create |
+| `auto_write_on_completion` | bool | `true` | Auto-generate a scratchpad note when a task completes (success or failure) |
+| `auto_write_min_steps` | integer | `3` | Minimum episodic entries for a task to qualify for auto-write (skips trivial tasks) |
+| `auto_write_max_summary` | integer | `2048` | Maximum bytes for an auto-generated summary note |
+
+---
+
+## `[registry]`
+
+Tool registry marketplace configuration for `agentctl tool search/add/publish`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `url` | string | `"https://registry.agentos.dev"` | Tool registry marketplace URL. Override with `AGENTOS_REGISTRY` environment variable for self-hosted registries. |
+
+---
+
+## `[mcp]` and `[[mcp.servers]]`
+
+Model Context Protocol server configuration. Each entry spawns a child process via stdio JSON-RPC at kernel boot. Imported tools are registered with `TrustTier::Community` and subject to full AgentOS capability-token and `PermissionSet` enforcement.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `servers` | array of tables | `[]` (empty) | MCP server definitions. Each entry has the keys below. |
+
+Each `[[mcp.servers]]` entry:
+
+| Key | Type | Description |
+|---|---|---|
+| `name` | string | Unique identifier for the MCP server (used in logs and tool prefixes) |
+| `command` | string | Executable to spawn (e.g., `"npx"`, `"python"`, `"node"`) |
+| `args` | array of strings | Command-line arguments passed to the spawned process |
+
+**Example:**
+
+```toml
+[[mcp.servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+```
 
 ---
 

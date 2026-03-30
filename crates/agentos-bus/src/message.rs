@@ -440,6 +440,37 @@ pub enum KernelCommand {
     /// Query the health status of all configured MCP server connections.
     McpStatus,
 
+    // Agent context memory
+    /// Read an agent's context memory document.
+    ContextMemoryRead {
+        agent_id: String,
+    },
+    /// Write/replace an agent's context memory document.
+    ContextMemoryUpdate {
+        agent_id: String,
+        content: String,
+        reason: Option<String>,
+    },
+    /// List context memory version history.
+    ContextMemoryHistory {
+        agent_id: String,
+        limit: u32,
+    },
+    /// Rollback to a specific version (creates a new version).
+    ContextMemoryRollback {
+        agent_id: String,
+        version: u32,
+    },
+    /// Clear the agent's context memory.
+    ContextMemoryClear {
+        agent_id: String,
+    },
+    /// Set context memory from external content (bootstrap).
+    ContextMemorySet {
+        agent_id: String,
+        content: String,
+    },
+
     // Scratchpad management
     /// List all scratchpad pages for an agent.
     ScratchListPages {

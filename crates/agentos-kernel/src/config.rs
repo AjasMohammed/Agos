@@ -621,6 +621,48 @@ pub struct MemorySettings {
     pub extraction: crate::memory_extraction::ExtractionConfig,
     #[serde(default)]
     pub consolidation: crate::consolidation::ConsolidationConfig,
+    #[serde(default)]
+    pub context: ContextMemoryConfig,
+}
+
+/// Per-agent context memory configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContextMemoryConfig {
+    /// Enable context memory injection.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Maximum token budget per agent's context memory document.
+    #[serde(default = "default_context_memory_max_tokens")]
+    pub max_tokens: usize,
+    /// Maximum versions retained in history per agent.
+    #[serde(default = "default_context_memory_max_versions")]
+    pub max_versions: usize,
+    /// Database file name (relative to data_dir).
+    #[serde(default = "default_context_memory_db_path")]
+    pub db_path: String,
+}
+
+fn default_context_memory_max_tokens() -> usize {
+    4096
+}
+
+fn default_context_memory_max_versions() -> usize {
+    50
+}
+
+fn default_context_memory_db_path() -> String {
+    "context_memory.db".to_string()
+}
+
+impl Default for ContextMemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_tokens: default_context_memory_max_tokens(),
+            max_versions: default_context_memory_max_versions(),
+            db_path: default_context_memory_db_path(),
+        }
+    }
 }
 
 impl Default for MemorySettings {
@@ -629,6 +671,7 @@ impl Default for MemorySettings {
             model_cache_dir: default_model_cache_dir(),
             extraction: crate::memory_extraction::ExtractionConfig::default(),
             consolidation: crate::consolidation::ConsolidationConfig::default(),
+            context: ContextMemoryConfig::default(),
         }
     }
 }

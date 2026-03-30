@@ -1,0 +1,35 @@
+[manifest]
+name        = "context-memory-update"
+version     = "1.0.0"
+description = "Update your persistent context memory — a markdown document injected into your context window at the start of every future task. Use this to save patterns, preferences, and knowledge for your future self."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["memory.context:w"]
+
+[capabilities_provided]
+outputs = ["context.text"]
+
+[intent_schema]
+input  = "ContextMemoryUpdateIntent"
+output = "ContextMemoryUpdateResult"
+
+[input_schema]
+type     = "object"
+required = ["content"]
+
+[input_schema.properties.content]
+type        = "string"
+description = "Markdown content for your persistent context memory. This replaces the entire document. Be concise — you have a token budget."
+
+[input_schema.properties.reason]
+type        = "string"
+description = "Brief explanation of why this update was made (stored in version history)."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 5000

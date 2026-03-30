@@ -14,6 +14,8 @@ pub enum ToolCategory {
 }
 
 const STATELESS_TOOL_NAMES: &[&str] = &[
+    "context-memory-read",
+    "context-memory-update",
     "datetime",
     "think",
     "file-reader",
@@ -167,6 +169,10 @@ pub fn build_single_tool_with_model_cache_and_weight(
 
 fn build_stateless_tool(name: &str) -> Result<Option<Box<dyn AgentTool>>, AgentOSError> {
     let tool: Box<dyn AgentTool> = match name {
+        "context-memory-read" => Box::new(crate::context_memory_read::ContextMemoryReadTool::new()),
+        "context-memory-update" => {
+            Box::new(crate::context_memory_update::ContextMemoryUpdateTool::new())
+        }
         "datetime" => Box::new(crate::datetime::DatetimeTool::new()),
         "think" => Box::new(crate::think::ThinkTool::new()),
         "file-reader" => Box::new(crate::file_reader::FileReader::new()),

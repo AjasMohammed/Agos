@@ -381,7 +381,7 @@ impl ContextWindow {
             let existing = &self.entries[idx].content;
             let prev_count: usize = existing
                 .strip_prefix(Self::CONTEXT_NOTICE_PREFIX)
-                .and_then(|s| s.trim_start().split_whitespace().next())
+                .and_then(|s| s.split_whitespace().next())
                 .and_then(|n| n.parse().ok())
                 .unwrap_or(0);
             self.entries.remove(idx);

@@ -113,6 +113,8 @@ cargo build --target wasm32-wasip1 --release
 
 ## Python WASM Tool
 
+> **Status:** Python-to-WASM compilation via py2wasm is planned but not yet implemented. Currently, only Rust WASM tools targeting `wasm32-wasip1` are supported.
+
 Python tools can be compiled to WASM with **py2wasm** (Nuitka-based) or run inside a WASM Python interpreter.
 
 ### Install py2wasm

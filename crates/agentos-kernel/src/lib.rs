@@ -8,6 +8,7 @@ pub mod consolidation;
 pub mod context;
 pub mod context_compiler;
 pub mod context_injector;
+pub mod context_memory_store;
 pub mod core_manifests;
 pub mod cost_tracker;
 pub mod escalation;
