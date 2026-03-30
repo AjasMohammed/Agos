@@ -42,6 +42,9 @@ reports/
 *~
 .DS_Store
 
+# Git worktrees
+.worktrees/
+
 # Environment Variables
 .env
 .env.*
