@@ -42,7 +42,7 @@ pub(crate) fn emit_signed_event(
 
     let event = EventMessage {
         id: event_id,
-        event_type,
+        event_type: event_type.clone(),
         source,
         payload: payload.clone(),
         severity,
@@ -92,12 +92,15 @@ pub(crate) fn emit_signed_event(
     // Count before the send attempt — the event has been emitted regardless of delivery.
     crate::metrics::record_event_emitted();
 
+    // Capture event_type before try_send consumes `event`.
+    let event_type_debug = format!("{:?}", event.event_type);
+
     // Push into the event channel for the EventDispatcher to process.
     if let Err(e) = event_sender.try_send(event) {
         crate::metrics::record_event_dropped();
         tracing::warn!(
             error = %e,
-            event_type = ?event_type,
+            event_type = %event_type_debug,
             "Event channel full — event dropped (increase kernel.events.channel_capacity under load)"
         );
         // Write directly to the audit log — never re-emit through the event system
@@ -110,7 +113,7 @@ pub(crate) fn emit_signed_event(
             task_id,
             tool_id: None,
             details: serde_json::json!({
-                "dropped_event_type": format!("{:?}", event_type),
+                "dropped_event_type": event_type_debug,
                 "error": e.to_string(),
                 "hint": "Increase kernel.events.channel_capacity in config if this recurs",
             }),
@@ -556,7 +559,7 @@ impl Kernel {
             max_iterations: None,
             trigger_source: Some(TriggerSource {
                 event_id: event.id,
-                event_type: event.event_type,
+                event_type: event.event_type.clone(),
                 subscription_id: sub.id,
                 chain_depth: event.chain_depth,
             }),
