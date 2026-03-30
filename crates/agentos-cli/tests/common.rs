@@ -84,6 +84,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             model_cache_dir: shared_model_cache_dir(),
             extraction: Default::default(),
             consolidation: Default::default(),
+            context: Default::default(),
         },
         context_budget: Default::default(),
         health_monitor: HealthMonitorConfig::default(),
@@ -94,5 +95,6 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         registry: Default::default(),
         scratchpad: Default::default(),
         otel: Default::default(),
+        context: Default::default(),
     }
 }

@@ -22,19 +22,21 @@ The HAL (`crates/agentos-hal`) provides a device registry that controls which ag
 ### Device Lifecycle
 
 ```
-Detected → Quarantined → Approved (for specific agents)
-                       → Denied   (blocked for all agents)
+Detected → Pending → Approved    (approved for specific agents)
+                   → Quarantined (hard-denied for all agents)
 ```
 
 State transitions:
 
 | Transition | Operation |
 |---|---|
-| Any → Quarantined | Device detected for the first time |
-| Quarantined → Approved | Administrator approves the device for one or more agents |
-| Approved → Quarantined | Last approved agent's access is revoked |
-| Any → Denied | Administrator explicitly blocks the device |
-| Denied → _(no transition)_ | Denied devices cannot be approved; re-register to reset |
+| Any → Pending | Device detected for the first time (awaiting approval) |
+| Pending → Approved | Administrator approves the device for one or more agents |
+| Pending → Quarantined | Administrator explicitly blocks the device |
+| Approved → Quarantined | Last approved agent's access is revoked, or administrator blocks the device |
+| Quarantined → _(no transition)_ | Quarantined devices cannot be re-approved. The `register_device` method is idempotent and does not reset existing state, so there is currently no code path to move a device out of `Quarantined`. |
+
+> **Per-agent denial:** The implementation also supports `deny_for_agent(device_id, agent_id)`, which adds granular per-agent denial on an otherwise `Approved` device. Denied agent IDs are tracked in a `denied_to` set on the device entry. This allows blocking a specific agent from a device without quarantining it for all agents.
 
 ### Device ID Format
 

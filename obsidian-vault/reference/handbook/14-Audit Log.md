@@ -22,7 +22,7 @@ The audit log is an append-only SQLite database stored at the path configured by
 Key properties:
 
 - **Append-only** — entries are never deleted by normal operation (only pruned by retention policy)
-- **61 event types** across 15 categories, covering the full agent lifecycle
+- **83 event types** across 18 categories, covering the full agent lifecycle
 - **Merkle chain** — tamper-evident via `prev_hash` / `entry_hash` columns
 - **WAL journal mode** — concurrent reads during writes
 
@@ -52,7 +52,7 @@ Details are truncated to 30 characters in the terminal. Use `agentctl audit expo
 
 ## Audit Event Types
 
-All 61 event types, grouped by category:
+All 83 event types, grouped by category:
 
 ### Task Lifecycle
 
@@ -190,6 +190,83 @@ All 61 event types, grouped by category:
 | `HardwareDeviceDenied` | A device is denied for all agents |
 | `HardwareDeviceRevoked` | An agent's access to a device is revoked |
 
+### Device Access
+
+| Event Type | When |
+|---|---|
+| `DeviceAccessGranted` | An agent is granted access to a device |
+| `DeviceAccessDenied` | An agent's device access request is denied |
+| `DeviceApproved` | A device is approved for use |
+| `DeviceQuarantined` | A device is placed in quarantine |
+| `DeviceAccessEscalated` | A device access request is escalated for human review |
+
+### Pubkey Events
+
+| Event Type | When |
+|---|---|
+| `PubkeyRegistered` | An Ed25519 public key is registered for a tool or agent |
+| `PubkeyRegistrationDenied` | A public key registration attempt is rejected |
+
+### Testing
+
+| Event Type | When |
+|---|---|
+| `TestFindingCaptured` | A test finding is recorded by the agent tester harness |
+
+### Proxy Tokens
+
+| Event Type | When |
+|---|---|
+| `ProxyTokensRevoked` | All active proxy tokens are revoked (e.g., during vault lockdown) |
+
+### Audit Integrity
+
+| Event Type | When |
+|---|---|
+| `AuditChainTampered` | Merkle hash chain verification detects a tampered entry |
+
+### User Notifications (UNIS)
+
+| Event Type | When |
+|---|---|
+| `NotificationSent` | A notification is dispatched to a user |
+| `NotificationDelivered` | A notification is confirmed delivered |
+| `NotificationRead` | A user reads a notification |
+| `UserResponseReceived` | A user responds to a notification or escalation |
+| `NotificationAutoActioned` | A notification is auto-actioned after timeout |
+
+### Bidirectional Channels
+
+| Event Type | When |
+|---|---|
+| `ChannelConnected` | A bidirectional communication channel is established |
+| `ChannelDisconnected` | A bidirectional channel is disconnected |
+| `InboundMessageReceived` | An inbound message is received on a channel |
+
+### Agent Context Memory
+
+| Event Type | When |
+|---|---|
+| `ContextMemoryUpdated` | An agent's context memory document is updated |
+
+### Kernel Config
+
+| Event Type | When |
+|---|---|
+| `KernelConfigChanged` | A kernel configuration value is changed at runtime |
+
+### Event System
+
+| Event Type | When |
+|---|---|
+| `EventChannelFull` | An event channel's buffer is full; events may be dropped |
+
+### Agent Lifecycle
+
+| Event Type | When |
+|---|---|
+| `AgentReconnected` | A previously disconnected agent reconnects to the kernel |
+
 ---
 
 ## Severity Levels
@@ -298,7 +375,7 @@ Each audit record contains the following fields:
 |---|---|---|
 | `timestamp` | `DateTime<Utc>` | RFC 3339 timestamp of the event |
 | `trace_id` | `TraceID` | UUID linking related events in a single trace |
-| `event_type` | `AuditEventType` | One of the 61 event type variants |
+| `event_type` | `AuditEventType` | One of the 83 event type variants |
 | `agent_id` | `Option<AgentID>` | The agent that triggered the event |
 | `task_id` | `Option<TaskID>` | The task context for the event |
 | `tool_id` | `Option<ToolID>` | The tool involved, if any |

@@ -92,7 +92,7 @@ Semantic violations do not hard-block by default — they are elevated to the ri
 
 Every LLM output and every tool result is scanned for injection attempts before it enters the agent's context window.
 
-The **InjectionScanner** runs 26 regex patterns across 8 threat categories (see [[#Injection Scanner]] for full details). Content that matches is wrapped in taint tags:
+The **InjectionScanner** runs 28 regex patterns across 9 threat categories (see [[#Injection Scanner]] for full details). Content that matches is wrapped in taint tags:
 
 ```
 <user_data taint="high" source="external:web" patterns="role_override_ignore,context_jailbreak">
@@ -169,13 +169,23 @@ This enforces the **principle of least authority** across the full task tree.
 
 ### Permission Format
 
-Permissions use the format `<resource>:<ops>` where `ops` are `r`, `w`, `x`:
+Permissions use the format `<resource>:<ops>` where `ops` are `r`, `w`, `x`, `q`, `o`:
+
+| Op | Meaning |
+|----|---------|
+| `r` | Read |
+| `w` | Write |
+| `x` | Execute |
+| `q` | Query |
+| `o` | Observe |
 
 ```
-fs:/home/user/:rw         Read and write files under /home/user/
-network.outbound:x        Make outbound network connections
-memory.semantic:rw        Read and write semantic memory
-fs.user_data:r            Read user data namespace (abstract resource)
+fs:/home/user/:rw           Read and write files under /home/user/
+network.outbound:x          Make outbound network connections
+memory.semantic:rw           Read and write semantic memory
+fs.user_data:r               Read user data namespace (abstract resource)
+escalation.pending:rq        Read and query pending escalations
+agent.metrics:o              Observe agent metrics
 ```
 
 ### Zero-Permissions Default
@@ -254,6 +264,8 @@ Network resource checks automatically block **Server-Side Request Forgery** (SSR
 - IPv6-mapped IPv4 private: `::ffff:192.168.x.x`
 - Case-variation bypasses: `LOCALHOST`, `LocalHost`, `HTTP://127.0.0.1/`
 
+**DNS rebinding protection:** The implementation performs `lookup_host` on hostnames to verify that resolved IP addresses are not internal, preventing DNS rebinding attacks where a public hostname initially resolves to a public IP but later resolves to a private/loopback address.
+
 ---
 
 ## Roles (RBAC)
@@ -303,7 +315,7 @@ The injection scanner runs on every LLM output and every piece of external conte
 ### How It Works
 
 1. Content is **NFKC-normalized** — Unicode homoglyphs (e.g. `ｉｇｎｏｒｅ` → `ignore`) are collapsed to canonical form so regex patterns cannot be evaded by substituting visually-identical characters
-2. 26 regex patterns are applied
+2. 28 regex patterns are applied
 3. Any match is flagged in a `ScanResult` with `is_suspicious: true` and the matched pattern names
 4. The `max_threat` level (Low / Medium / High) is computed across all matches
 
@@ -313,7 +325,8 @@ The injection scanner runs on every LLM output and every piece of external conte
 |----------|----------|--------|---------|
 | **Role override** | 6 | High | "ignore all previous instructions", "you are now", "forget your rules" |
 | **System prompt exfiltration** | 2 | Medium–High | "repeat your system prompt", "what are your instructions" |
-| **Delimiter injection** | 7 | Medium–High | `[SYSTEM]`, `<admin>`, fake JSON tool calls, ChatML `<\|im_start\|>` tokens |
+| **Delimiter injection** | 7 | Medium–High | `[SYSTEM]`, `<admin>`, fake JSON tool calls |
+| **ChatML special tokens** | 2 | High | ChatML `<\|im_start\|>` / `<\|im_end\|>` tokens injected to manipulate turn boundaries |
 | **Encoded payloads** | 3 | Medium–High | base64 instruction blocks, `execute the following base64` |
 | **Privilege escalation** | 2 | Medium–High | `sudo`, "grant yourself admin permissions" |
 | **Data exfiltration** | 2 | Low–Medium | "send results to http://...", `curl https://` |

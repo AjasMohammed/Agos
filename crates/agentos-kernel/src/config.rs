@@ -41,6 +41,8 @@ pub struct KernelConfig {
     #[serde(default)]
     pub context_budget: agentos_types::TokenBudget,
     #[serde(default)]
+    pub context: ContextConfig,
+    #[serde(default)]
     pub health_monitor: HealthMonitorConfig,
     #[serde(default)]
     pub preflight: PreflightConfig,
@@ -619,6 +621,48 @@ pub struct MemorySettings {
     pub extraction: crate::memory_extraction::ExtractionConfig,
     #[serde(default)]
     pub consolidation: crate::consolidation::ConsolidationConfig,
+    #[serde(default)]
+    pub context: ContextMemoryConfig,
+}
+
+/// Per-agent context memory configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContextMemoryConfig {
+    /// Enable context memory injection.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Maximum token budget per agent's context memory document.
+    #[serde(default = "default_context_memory_max_tokens")]
+    pub max_tokens: usize,
+    /// Maximum versions retained in history per agent.
+    #[serde(default = "default_context_memory_max_versions")]
+    pub max_versions: usize,
+    /// Database file name (relative to data_dir).
+    #[serde(default = "default_context_memory_db_path")]
+    pub db_path: String,
+}
+
+fn default_context_memory_max_tokens() -> usize {
+    4096
+}
+
+fn default_context_memory_max_versions() -> usize {
+    50
+}
+
+fn default_context_memory_db_path() -> String {
+    "context_memory.db".to_string()
+}
+
+impl Default for ContextMemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_tokens: default_context_memory_max_tokens(),
+            max_versions: default_context_memory_max_versions(),
+            db_path: default_context_memory_db_path(),
+        }
+    }
 }
 
 impl Default for MemorySettings {
@@ -627,6 +671,7 @@ impl Default for MemorySettings {
             model_cache_dir: default_model_cache_dir(),
             extraction: crate::memory_extraction::ExtractionConfig::default(),
             consolidation: crate::consolidation::ConsolidationConfig::default(),
+            context: ContextMemoryConfig::default(),
         }
     }
 }
@@ -918,6 +963,49 @@ fn default_scratchpad_auto_write_min_steps() -> usize {
 
 fn default_scratchpad_auto_write_max_summary() -> usize {
     2048
+}
+
+/// Context window management configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContextConfig {
+    /// Summarization strategy when context budget compression triggers.
+    /// - `llm`: Use the agent's LLM adapter for real summarization (falls back to concat on error)
+    /// - `concat`: Concatenate entry snippets (legacy behavior)
+    /// - `off`: No summary entry created; entries are silently evicted
+    #[serde(default = "default_summarization_mode")]
+    pub summarization_mode: SummarizationMode,
+    /// Maximum characters of entry text sent to the summarizer LLM per compression event.
+    #[serde(default = "default_summarization_max_input_chars")]
+    pub summarization_max_input_chars: usize,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            summarization_mode: SummarizationMode::default(),
+            summarization_max_input_chars: default_summarization_max_input_chars(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SummarizationMode {
+    /// LLM-generated summaries (best-effort, falls back to concat).
+    #[default]
+    Llm,
+    /// Concatenate entry snippets (legacy behavior).
+    Concat,
+    /// No summary — entries are silently evicted.
+    Off,
+}
+
+fn default_summarization_mode() -> SummarizationMode {
+    SummarizationMode::Llm
+}
+
+fn default_summarization_max_input_chars() -> usize {
+    8000
 }
 
 /// Tool registry (marketplace) configuration.

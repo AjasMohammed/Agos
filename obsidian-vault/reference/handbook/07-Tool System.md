@@ -347,13 +347,14 @@ Make outbound HTTP requests with automatic SSRF protection.
 | `secret_headers` | object | No | — | Values use `$SECRET_NAME` syntax resolved from ProxyVault |
 | `body` | any | No | — | Object/array → JSON body; string → raw body |
 | `timeout_ms` | u64 | No | `10000` | Per-request timeout |
+| `follow_redirects` | bool | No | `false` | Follow HTTP redirects (up to 10 hops; SSRF-checked per hop) |
 
 **Output:**
 ```json
 { "status": 200, "headers": { "content-type": "application/json" }, "body": {}, "latency_ms": 42, "truncated": false }
 ```
 
-**Restrictions:** SSRF protection blocks loopback addresses, RFC1918 private IP ranges, link-local addresses, `localhost`, and `.local` hostnames. Response body is capped at 10 MiB (`truncated: true` flag set when exceeded). Redirects are not followed.
+**Restrictions:** SSRF protection blocks loopback addresses, RFC1918 private IP ranges, link-local addresses, `localhost`, and `.local` hostnames. Response body is capped at 10 MiB (`truncated: true` flag set when exceeded). Redirects are not followed by default, but the tool accepts an optional `follow_redirects` parameter (boolean, default `false`). When enabled, up to 10 redirects are followed with SSRF checks applied on each hop.
 
 **Secret injection:** Headers in `secret_headers` use `$VAR_NAME` syntax:
 ```json
@@ -617,11 +618,23 @@ The following tools were added in v3. Use `agent-manual` with `{"section": "tool
 |------|------------|-------------|
 | `web-fetch` | `network.outbound:x` | Fetch a web page and extract text content (HTML stripped) |
 
+#### Scratchpad
+
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `scratch-read` | `agent.scratch:r` | Read a scratchpad page |
+| `scratch-write` | `agent.scratch:w` | Write/update a scratchpad page |
+| `scratch-search` | `agent.scratch:r` | Search scratchpad pages |
+| `scratch-delete` | `agent.scratch:w` | Delete a scratchpad page |
+| `scratch-links` | `agent.scratch:r` | List wikilinks for a page |
+| `scratch-graph` | `agent.scratch:r` | Show wikilink graph traversal |
+
 #### Agent Coordination
 
 | Tool | Permission | Description |
 |------|------------|-------------|
 | `agent-list` | `agent.registry:r` | List registered agents and their status |
+| `agent-call` | `agent.rpc:x` | Invoke another agent via RPC |
 | `task-list` | `task.query:r` | List active and recent tasks |
 | `task-status` | `task.query:r` | Inspect status of a specific task by ID |
 
@@ -631,6 +644,25 @@ The following tools were added in v3. Use `agent-manual` with `{"section": "tool
 |------|------------|-------------|
 | `ask-user` | `user.interact:x` | Ask the operator a blocking question; task pauses until answered |
 | `notify-user` | `user.notify:w` | Send a fire-and-forget notification to the operator |
+
+#### Context Memory
+
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `context-memory-read` | `agent.context:r` | Read agent's context memory |
+| `context-memory-update` | `agent.context:w` | Update agent's context memory |
+
+#### Escalation
+
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `escalation-status` | `escalation.pending:rq` | Query pending escalation status |
+
+#### Hardware
+
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `usb-storage` | `hardware.usb:rx` | Access USB storage devices |
 
 #### Utilities
 

@@ -72,6 +72,20 @@ agentctl start
 
 ---
 
+## `stop` — Shut down the AgentOS kernel
+
+Gracefully shuts down the running kernel. The kernel completes in-flight operations, closes the bus socket, and exits.
+
+*No flags or arguments.*
+
+**Example:**
+
+```bash
+agentctl stop
+```
+
+---
+
 ## `agent` — Manage LLM agents
 
 ### `agent connect`
@@ -189,6 +203,80 @@ Broadcast a message to all agents in a group.
 agentctl agent broadcast --from orchestrator analysts "Begin analysis phase"
 ```
 
+### `agent memory show`
+
+Show the current context memory for an agent.
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `agent` | `String` | Agent name (positional) |
+
+**Example:**
+
+```bash
+agentctl agent memory show analyst-1
+```
+
+### `agent memory history`
+
+Show the context memory version history for an agent.
+
+| Flag / Argument | Type | Default | Description |
+|-----------------|------|---------|-------------|
+| `agent` | `String` | *required* | Agent name (positional) |
+| `--limit` | `u32` | — | Maximum number of history entries to show |
+
+**Example:**
+
+```bash
+agentctl agent memory history analyst-1
+agentctl agent memory history analyst-1 --limit 10
+```
+
+### `agent memory rollback`
+
+Rollback an agent's context memory to a specific version.
+
+| Flag / Argument | Type | Description |
+|-----------------|------|-------------|
+| `agent` | `String` | Agent name (positional) |
+| `--version` | `u64` | Version number to rollback to |
+
+**Example:**
+
+```bash
+agentctl agent memory rollback analyst-1 --version 3
+```
+
+### `agent memory clear`
+
+Clear an agent's context memory entirely.
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `agent` | `String` | Agent name (positional) |
+
+**Example:**
+
+```bash
+agentctl agent memory clear analyst-1
+```
+
+### `agent memory set`
+
+Set an agent's context memory from a file.
+
+| Flag / Argument | Type | Description |
+|-----------------|------|-------------|
+| `agent` | `String` | Agent name (positional) |
+| `--file` | `String` | Path to a file containing the context memory content |
+
+**Example:**
+
+```bash
+agentctl agent memory set analyst-1 --file memory-snapshot.json
+```
+
 ---
 
 ## `task` — Manage tasks
@@ -236,6 +324,41 @@ View the execution logs for a specific task.
 
 ```bash
 agentctl task logs a3b2c1d0-1234-5678-9abc-def012345678
+```
+
+### `task trace`
+
+Show the execution trace for a completed task. Includes tool calls, LLM inferences, and timing data.
+
+| Flag / Argument | Type | Default | Description |
+|-----------------|------|---------|-------------|
+| `task_id` | `String` | *required* | Task UUID (positional) |
+| `--json` | flag | `false` | Output the trace as JSON |
+| `--iter` | `Option<u32>` | — | Filter to a specific iteration number |
+
+**Example:**
+
+```bash
+agentctl task trace a3b2c1d0-1234-5678-9abc-def012345678
+agentctl task trace a3b2c1d0-1234-5678-9abc-def012345678 --json
+agentctl task trace a3b2c1d0-1234-5678-9abc-def012345678 --iter 2
+```
+
+### `task traces`
+
+List recent task execution traces.
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--limit` | `u32` | — | Maximum number of traces to show |
+| `--agent` | `Option<String>` | — | Filter traces by agent name |
+
+**Example:**
+
+```bash
+agentctl task traces
+agentctl task traces --limit 20
+agentctl task traces --agent analyst-1
 ```
 
 ### `task cancel`
@@ -1147,6 +1270,73 @@ agentctl snapshot rollback --task a3b2c1d0-...
 
 ---
 
+## `scratchpad` — Manage agent scratchpad pages
+
+The scratchpad provides Obsidian-inspired markdown pages with wikilink support for agent working memory. Each agent has its own scratchpad namespace.
+
+### `scratchpad list`
+
+List all scratchpad pages for an agent.
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--agent` | `String` | Agent name |
+
+**Example:**
+
+```bash
+agentctl scratchpad list --agent analyst-1
+```
+
+### `scratchpad read`
+
+Read a scratchpad page by title.
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--title` | `String` | Page title |
+| `--agent` | `String` | Agent name |
+
+**Example:**
+
+```bash
+agentctl scratchpad read --title "Research Notes" --agent analyst-1
+```
+
+### `scratchpad delete`
+
+Delete a scratchpad page.
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--title` | `String` | Page title |
+| `--agent` | `String` | Agent name |
+
+**Example:**
+
+```bash
+agentctl scratchpad delete --title "Scratch" --agent analyst-1
+```
+
+### `scratchpad graph`
+
+Show the wikilink graph for a scratchpad page, including backlinks and forward links.
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--title` | `String` | *required* | Page title |
+| `--agent` | `String` | *required* | Agent name |
+| `--depth` | `u32` | `1` | Graph traversal depth |
+
+**Example:**
+
+```bash
+agentctl scratchpad graph --title "Research Notes" --agent analyst-1
+agentctl scratchpad graph --title "Research Notes" --agent analyst-1 --depth 3
+```
+
+---
+
 ## `event` — Manage event subscriptions and view event history
 
 The event system supports subscription-based reactive messaging with filters, throttling, and priority levels.
@@ -1397,6 +1587,37 @@ agentctl hal query usb-storage '{"action": "eject", "device": "sdb1"}'
 ```
 
 > **Permission:** Requires `hardware.usb-storage:x` and the device `usb-storage:<device>` must be approved in the HAL device registry. See [[18-Advanced Operations#USB Storage Driver]] for full details.
+
+---
+
+## `healthz` — Kernel health check
+
+Check if the kernel health endpoint is responding. Designed for use by Docker HEALTHCHECK, load balancers, and monitoring probes.
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--port` | `u16` | `9091` | Port the health endpoint is listening on |
+
+**Example:**
+
+```bash
+agentctl healthz
+agentctl healthz --port 9091
+```
+
+---
+
+## `log` — Control runtime logging
+
+Controls the kernel's runtime logging configuration, including log level and format. Changes take effect immediately without a restart.
+
+*Refer to the kernel's logging documentation for supported levels and formats.*
+
+**Example:**
+
+```bash
+agentctl log
+```
 
 ---
 
@@ -1662,8 +1883,9 @@ agentctl perm grant monitor hardware.gpu:r
 | Group | Description | Subcommands |
 |-------|-------------|-------------|
 | `start` | Boot the kernel | — |
-| `agent` | Manage LLM agents | `connect`, `list`, `disconnect`, `message`, `messages`, `group create`, `broadcast` |
-| `task` | Manage tasks | `run`, `list`, `logs`, `cancel` |
+| `stop` | Shut down the kernel | — |
+| `agent` | Manage LLM agents | `connect`, `list`, `disconnect`, `message`, `messages`, `group create`, `broadcast`, `memory show`, `memory history`, `memory rollback`, `memory clear`, `memory set` |
+| `task` | Manage tasks | `run`, `list`, `logs`, `trace`, `traces`, `cancel` |
 | `tool` | Manage tools | `list`, `install`, `remove`, `keygen`*, `sign`*, `verify`* |
 | `secret` | Manage encrypted vault | `set`, `list`, `revoke`, `rotate`, `lockdown` |
 | `perm` | Manage permissions | `grant`, `revoke`, `show`, `profile create`, `profile delete`, `profile list`, `profile assign` |
@@ -1677,9 +1899,12 @@ agentctl perm grant monitor hardware.gpu:r
 | `resource` | Manage resource locks | `list`, `release`, `contention`, `release-all` |
 | `escalation` | Human approval requests | `list`, `get`, `resolve` |
 | `snapshot` | Task snapshots | `list`, `rollback` |
+| `scratchpad` | Agent scratchpad pages | `list`, `read`, `delete`, `graph` |
 | `event` | Event subscriptions | `subscribe`, `unsubscribe`, `subscriptions list`, `subscriptions show`, `subscriptions enable`, `subscriptions disable`, `history` |
 | `identity` | Agent identities | `show`, `revoke` |
 | `hal` | Hardware device access | `list`, `register`, `approve`, `deny`, `revoke`, `query` |
+| `healthz` | Kernel health check | — |
+| `log` | Control runtime logging | — |
 | `notifications` | User notification inbox | `list`, `read`, `respond`, `watch` |
 | `channel` | External delivery channels | `connect`, `list`, `test`, `disconnect` |
 | `mcp` | MCP integration | `serve`*, `list`*, `status` |

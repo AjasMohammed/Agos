@@ -66,6 +66,16 @@ pub(crate) enum KernelAction {
         prompt: String,
         timeout_secs: u64,
     },
+    /// Update the agent's self-curated context memory document.
+    ContextMemoryUpdate {
+        agent_id: String,
+        content: String,
+        reason: Option<String>,
+    },
+    /// Read the agent's current context memory document.
+    ContextMemoryRead {
+        agent_id: String,
+    },
 }
 
 /// Why an agent is requesting human escalation.
@@ -238,6 +248,23 @@ impl KernelAction {
                     timeout_secs,
                 })
             }
+            "context_memory_update" => {
+                let agent_id = value.get("agent_id")?.as_str()?.to_string();
+                let content = value.get("content")?.as_str()?.to_string();
+                let reason = value
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                Some(Self::ContextMemoryUpdate {
+                    agent_id,
+                    content,
+                    reason,
+                })
+            }
+            "context_memory_read" => {
+                let agent_id = value.get("agent_id")?.as_str()?.to_string();
+                Some(Self::ContextMemoryRead { agent_id })
+            }
             other => {
                 tracing::warn!(action = %other, "Unknown _kernel_action, ignoring");
                 None
@@ -270,6 +297,8 @@ impl Kernel {
             KernelAction::NotifyUser { .. } => "notify_user",
             KernelAction::AskUser { .. } => "ask_user",
             KernelAction::AgentRpcCall { .. } => "agent_rpc_call",
+            KernelAction::ContextMemoryUpdate { .. } => "context_memory_update",
+            KernelAction::ContextMemoryRead { .. } => "context_memory_read",
         };
 
         self.audit_log(agentos_audit::AuditEntry {
@@ -365,6 +394,111 @@ impl Kernel {
             } => {
                 self.execute_agent_rpc_call(task, &target_agent, &prompt, timeout_secs, trace_id)
                     .await
+            }
+            KernelAction::ContextMemoryUpdate {
+                agent_id,
+                content,
+                reason,
+            } => {
+                // Injection scanning (spec §9)
+                let scan = self.injection_scanner.scan(&content);
+                if scan.max_threat == Some(crate::injection_scanner::ThreatLevel::High) {
+                    self.audit_log(AuditEntry {
+                        timestamp: Utc::now(),
+                        trace_id,
+                        event_type: AuditEventType::RiskEscalation,
+                        agent_id: Some(task.agent_id),
+                        task_id: Some(task.id),
+                        tool_id: None,
+                        details: serde_json::json!({
+                            "source": "context_memory_update",
+                            "threat": "high",
+                            "agent_id": agent_id,
+                        }),
+                        severity: AuditSeverity::Security,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": "Content rejected: high-confidence injection pattern detected.",
+                        }),
+                    };
+                }
+
+                match self
+                    .context_memory_store
+                    .write(&agent_id, &content, reason.as_deref())
+                    .await
+                {
+                    Ok(entry) => {
+                        self.audit_log(AuditEntry {
+                            timestamp: Utc::now(),
+                            trace_id,
+                            event_type: AuditEventType::ContextMemoryUpdated,
+                            agent_id: Some(task.agent_id),
+                            task_id: Some(task.id),
+                            tool_id: None,
+                            details: serde_json::json!({
+                                "agent_id": entry.agent_id,
+                                "version": entry.version,
+                                "token_count": entry.token_count,
+                                "reason": reason,
+                            }),
+                            severity: AuditSeverity::Info,
+                            reversible: true,
+                            rollback_ref: Some(format!(
+                                "context_memory:{}:{}",
+                                entry.agent_id,
+                                entry.version.saturating_sub(1)
+                            )),
+                        });
+                        KernelActionResult {
+                            success: true,
+                            result: serde_json::json!({
+                                "updated": true,
+                                "version": entry.version,
+                                "token_count": entry.token_count,
+                                "message": "Context memory updated. Changes take effect on your next task.",
+                            }),
+                        }
+                    }
+                    Err(e) => KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": e.to_string(),
+                        }),
+                    },
+                }
+            }
+            KernelAction::ContextMemoryRead { agent_id } => {
+                match self.context_memory_store.read(&agent_id).await {
+                    Ok(Some(entry)) => KernelActionResult {
+                        success: true,
+                        result: serde_json::json!({
+                            "content": entry.content,
+                            "version": entry.version,
+                            "token_count": entry.token_count,
+                            "updated_at": entry.updated_at.to_rfc3339(),
+                        }),
+                    },
+                    Ok(None) => KernelActionResult {
+                        success: true,
+                        result: serde_json::json!({
+                            "content": "",
+                            "version": 0,
+                            "token_count": 0,
+                            "message": "No context memory set yet. Use context-memory-update to create one.",
+                        }),
+                    },
+                    Err(e) => KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": e.to_string(),
+                        }),
+                    },
+                }
             }
         };
 

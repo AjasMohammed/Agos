@@ -332,6 +332,7 @@ pub struct Kernel {
     pub memory_extraction: Arc<crate::memory_extraction::MemoryExtractionEngine>,
     pub consolidation_engine: Arc<crate::consolidation::ConsolidationEngine>,
     pub memory_blocks: Arc<crate::memory_blocks::MemoryBlockStore>,
+    pub context_memory_store: Arc<crate::context_memory_store::ContextMemoryStore>,
     pub scratchpad_store: Arc<agentos_scratch::ScratchpadStore>,
     pub schedule_manager: Arc<ScheduleManager>,
     pub background_pool: Arc<BackgroundPool>,
@@ -1776,10 +1777,8 @@ impl Kernel {
             config.kernel.max_concurrent_tasks,
             Some(state_store.clone()),
         ));
-        let context_manager = Arc::new(ContextManager::with_token_budget(
-            config.kernel.context_window_max_entries,
-            config.kernel.context_window_token_budget,
-        ));
+        let active_llms: Arc<RwLock<HashMap<AgentID, Arc<dyn LLMCore>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
         let mut context_budget = config.context_budget.clone();
         if let Err(e) = context_budget.validate() {
             tracing::warn!("Invalid context budget config: {} — using defaults", e);
@@ -1795,7 +1794,6 @@ impl Kernel {
             config.routing.strategy.clone(),
             config.routing.rules.clone(),
         ));
-        let active_llms = Arc::new(RwLock::new(HashMap::new()));
         let message_bus = Arc::new(crate::agent_message_bus::AgentMessageBus::new());
         let profile_manager = Arc::new(ProfileManager::new());
         let retrieval_gate = Arc::new(crate::retrieval_gate::RetrievalGate::new(5));
@@ -1818,6 +1816,12 @@ impl Kernel {
             config.memory.consolidation.clone(),
         ));
         let memory_blocks = Arc::new(crate::memory_blocks::MemoryBlockStore::open(&data_dir)?);
+        let context_memory_store = Arc::new(crate::context_memory_store::ContextMemoryStore::open(
+            &data_dir.join(&config.memory.context.db_path),
+            config.memory.context.max_tokens,
+            config.memory.context.max_versions,
+            config.context_budget.chars_per_token,
+        )?);
         let schedule_manager = Arc::new(ScheduleManager::new());
         let background_pool = Arc::new(BackgroundPool::new());
 
@@ -1877,6 +1881,14 @@ impl Kernel {
         let cost_tracker = Arc::new(crate::cost_tracker::CostTracker::with_state_store(Some(
             state_store.clone(),
         )));
+
+        let context_manager = Arc::new(ContextManager::with_full_config(
+            config.kernel.context_window_max_entries,
+            config.kernel.context_window_token_budget,
+            active_llms.clone(),
+            cost_tracker.clone(),
+            config.context.clone(),
+        ));
 
         let restored_tasks = scheduler.restore_from_store().await?;
         let restored_escalations = escalation_manager.restore_from_store().await?;
@@ -2043,6 +2055,7 @@ impl Kernel {
             memory_extraction,
             consolidation_engine,
             memory_blocks,
+            context_memory_store,
             scratchpad_store: scratchpad_store.clone(),
             schedule_manager,
             background_pool,
@@ -2494,6 +2507,7 @@ mod preflight_tests {
             memory: MemorySettings::default(),
             routing: RoutingConfig::default(),
             context_budget: agentos_types::TokenBudget::default(),
+            context: ContextConfig::default(),
             health_monitor: HealthMonitorConfig::default(),
             preflight: PreflightConfig {
                 min_free_disk_mb: min_free_mb,
@@ -2668,6 +2682,7 @@ mod vault_bootstrap_tests {
             memory: MemorySettings::default(),
             routing: RoutingConfig::default(),
             context_budget: agentos_types::TokenBudget::default(),
+            context: ContextConfig::default(),
             health_monitor: HealthMonitorConfig::default(),
             preflight: PreflightConfig::default(),
             logging: Default::default(),
