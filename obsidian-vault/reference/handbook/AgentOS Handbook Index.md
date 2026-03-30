@@ -20,7 +20,7 @@ status: complete
 | 01 | [[01-Introduction and Philosophy]] | What AgentOS is, core principles, the Linux analogy — LLMs as CPU, tools as programs, intent as syscall |
 | 02 | [[02-Installation and First Run]] | Prerequisites, building from source, configuration, first kernel boot |
 | 03 | [[03-Architecture Overview]] | System architecture, crate dependency graph, the intent flow from CLI to tool execution |
-| 04 | [[04-CLI Reference Complete]] | All 22 `agentctl` command groups with flags, arguments, and examples — includes `notifications`, `channel`, `mcp`, and `web` |
+| 04 | [[04-CLI Reference Complete]] | All 27 `agentctl` command groups with flags, arguments, and examples — includes `stop`, `scratchpad`, `healthz`, `log`, `notifications`, `channel`, `mcp`, and `web` |
 | 05 | [[05-Agent Management]] | Agent lifecycle, messaging, groups, identity keys, and agent registry |
 | 06 | [[06-Task System]] | Task routing, lifecycle states, background tasks, and scheduled tasks |
 | 07 | [[07-Tool System]] | Built-in tools, manifests, trust tiers (Core/Verified/Community/Blocked), signing |

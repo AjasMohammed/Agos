@@ -154,6 +154,10 @@ pub enum AuditEventType {
     ChannelDisconnected,
     /// Emitted when a message is received from a user via an inbound channel.
     InboundMessageReceived,
+
+    // Agent context memory
+    /// Emitted when an agent's context memory is created, updated, rolled back, or cleared.
+    ContextMemoryUpdated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

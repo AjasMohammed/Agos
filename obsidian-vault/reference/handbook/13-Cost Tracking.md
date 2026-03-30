@@ -84,7 +84,7 @@ Each agent is registered with an `AgentBudget` that defines limits and enforceme
 | `max_tool_calls_per_day` | integer | Tool call limit per 24-hour period. `0` = unlimited. |
 | `warn_at_pct` | integer | Percentage at which a `BudgetWarning` alert is fired (e.g. `80` = warn at 80%). |
 | `pause_at_pct` | integer | Percentage at which the task is paused or a model downgrade is attempted (e.g. `95`). |
-| `on_hard_limit` | enum | Action taken when 100% of a limit is reached: `Suspend` or `Kill`. |
+| `on_hard_limit` | enum | Action taken when 100% of a limit is reached: `Suspend`, `NotifyOnly`, or `Kill`. |
 | `downgrade_model` | struct (optional) | If set, pause-threshold events trigger a model downgrade instead of pausing. |
 | `allowed_models` | list (optional) | If non-empty, only listed model names are permitted. Any other model is blocked before inference. |
 | `max_wall_time_seconds` | integer | Wall-clock time limit per task. `0` = unlimited. |
@@ -99,7 +99,7 @@ After every inference call and tool invocation, the tracker returns a `BudgetChe
 | `Warning` | Usage crossed `warn_at_pct` on any resource. | Fire `BudgetWarning` event; continue execution. |
 | `PauseRequired` | Usage crossed `pause_at_pct` and no downgrade model is configured. | Take checkpoint snapshot; suspend task. |
 | `ModelDowngradeRecommended` | Usage crossed `pause_at_pct` and a `downgrade_model` is configured. | Switch subsequent LLM calls to the cheaper model; continue task. |
-| `HardLimitExceeded` | Usage hit 100% of any limit. | Apply `on_hard_limit` action (`Suspend` or `Kill`). |
+| `HardLimitExceeded` | Usage hit 100% of any limit. | Apply `on_hard_limit` action (`Suspend`, `NotifyOnly`, or `Kill`). |
 | `ModelNotAllowed` | Agent attempted to use a model not in `allowed_models`. | Block the inference call before it is sent. |
 | `WallTimeExceeded` | Task elapsed time exceeded `max_wall_time_seconds`. | Kill the task. |
 

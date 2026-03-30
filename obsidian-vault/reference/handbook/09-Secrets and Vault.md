@@ -205,7 +205,7 @@ agentctl secret lockdown
 **What it does:**
 1. Invalidates all currently-issued proxy tokens (agents can no longer access any secrets)
 2. Blocks the kernel from issuing new proxy tokens for any secret
-3. Writes a `VaultLockdown` event to the audit log
+3. Writes a `SecretRevoked` event (with lockdown details in the payload) to the audit log
 4. Does **not** delete the encrypted values — secrets can be recovered after the kernel restarts with the correct passphrase
 
 **When to use it:**
@@ -260,11 +260,11 @@ All vault operations are logged to the audit trail:
 
 | Event | Trigger |
 |-------|---------|
-| `SecretSet` | `agentctl secret set` |
+| `SecretCreated` | `agentctl secret set` |
 | `SecretAccessed` | Kernel decrypts a value for agent use |
 | `SecretRotated` | `agentctl secret rotate` |
 | `SecretRevoked` | `agentctl secret revoke` |
-| `VaultLockdown` | `agentctl secret lockdown` |
+| `SecretRevoked` (with lockdown payload) | `agentctl secret lockdown` — lockdown uses the `SecretRevoked` audit event type with lockdown details in the payload; `VaultLockdown` is not a distinct event type |
 
 Audit entries include the secret name, scope, requesting agent/tool, and timestamp. Secret values are never written to the audit log.
 

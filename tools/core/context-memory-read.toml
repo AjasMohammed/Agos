@@ -1,0 +1,26 @@
+[manifest]
+name        = "context-memory-read"
+version     = "1.0.0"
+description = "Read your current context memory document — review it before deciding to update."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["memory.context:r"]
+
+[capabilities_provided]
+outputs = ["context.text"]
+
+[intent_schema]
+input  = "ContextMemoryReadIntent"
+output = "ContextMemoryReadResult"
+
+[input_schema]
+type = "object"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 5000

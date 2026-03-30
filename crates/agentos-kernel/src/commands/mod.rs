@@ -2,6 +2,7 @@ pub mod agent;
 pub mod audit;
 pub mod background;
 pub mod channel;
+pub mod context_memory;
 pub mod cost;
 pub mod escalation;
 pub mod event;

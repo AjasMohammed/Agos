@@ -332,6 +332,7 @@ pub struct Kernel {
     pub memory_extraction: Arc<crate::memory_extraction::MemoryExtractionEngine>,
     pub consolidation_engine: Arc<crate::consolidation::ConsolidationEngine>,
     pub memory_blocks: Arc<crate::memory_blocks::MemoryBlockStore>,
+    pub context_memory_store: Arc<crate::context_memory_store::ContextMemoryStore>,
     pub scratchpad_store: Arc<agentos_scratch::ScratchpadStore>,
     pub schedule_manager: Arc<ScheduleManager>,
     pub background_pool: Arc<BackgroundPool>,
@@ -1815,6 +1816,12 @@ impl Kernel {
             config.memory.consolidation.clone(),
         ));
         let memory_blocks = Arc::new(crate::memory_blocks::MemoryBlockStore::open(&data_dir)?);
+        let context_memory_store = Arc::new(crate::context_memory_store::ContextMemoryStore::open(
+            &data_dir.join(&config.memory.context.db_path),
+            config.memory.context.max_tokens,
+            config.memory.context.max_versions,
+            config.context_budget.chars_per_token,
+        )?);
         let schedule_manager = Arc::new(ScheduleManager::new());
         let background_pool = Arc::new(BackgroundPool::new());
 
@@ -2048,6 +2055,7 @@ impl Kernel {
             memory_extraction,
             consolidation_engine,
             memory_blocks,
+            context_memory_store,
             scratchpad_store: scratchpad_store.clone(),
             schedule_manager,
             background_pool,

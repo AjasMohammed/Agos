@@ -434,6 +434,42 @@ Pinned entries (importance = 1.0) bypass eviction and are always included.
 
 ---
 
+## Additional Memory Tools
+
+Beyond the tier-specific tools documented above, the memory system provides the following tools:
+
+### Procedural Memory Tools
+
+| Tool | Permission | Description |
+|------|-----------|-------------|
+| `procedure-search` | `memory.procedural:r` | Search procedures by query |
+| `procedure-create` | `memory.procedural:w` | Create a new procedure |
+| `procedure-list` | `memory.procedural:r` | List all procedures |
+| `procedure-delete` | `memory.procedural:w` | Delete a procedure |
+
+### Episodic Memory Tools
+
+| Tool | Permission | Description |
+|------|-----------|-------------|
+| `episodic-list` | `memory.episodic:r` | List recent episodes |
+
+### General Memory Tools
+
+| Tool | Permission | Description |
+|------|-----------|-------------|
+| `memory-read` | `memory:r` | Read a specific memory entry |
+| `memory-delete` | `memory:w` | Delete a memory entry |
+| `memory-stats` | `memory:r` | Show memory system statistics |
+
+### Context Memory Tools
+
+| Tool | Permission | Description |
+|------|-----------|-------------|
+| `context-memory-read` | `agent.context:r` | Read agent's context memory document |
+| `context-memory-update` | `agent.context:w` | Update agent's context memory document |
+
+---
+
 ## Full Configuration Reference
 
 ### `[memory]`

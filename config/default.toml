@@ -122,6 +122,13 @@ enabled = true
 min_pattern_occurrences = 3
 task_completions_trigger = 100
 time_trigger_hours = 24
+
+[memory.context]
+# Per-agent self-curated context memory — injected into context window at every task start.
+enabled = true
+max_tokens = 4096
+max_versions = 50
+db_path = "context_memory.db"
 max_episodes_per_cycle = 500
 
 [context_budget]

@@ -32,139 +32,136 @@ The `EventBus` (`crates/agentos-kernel/src/event_bus.rs`) is a pure subscription
 
 ## Event Types
 
-Every event has an `AuditEventType` recorded in the audit log and a corresponding `EventType` used for subscription matching. The full set of event types, grouped by category:
+> **Note:** Event types (`EventType`) are what agents subscribe to at runtime. These are distinct from audit event types (`AuditEventType` in the audit log), which track internal kernel operations. See [[14-Audit Log]] for the audit event types.
 
-### Task Lifecycle
+The `EventType` enum (`agentos-types/src/event.rs`) defines **72 event types** across **11 categories**. Each event belongs to exactly one `EventCategory`, which agents can use for category-level subscriptions.
+
+### AgentLifecycle
 
 | Event | Description |
 |-------|-------------|
-| `TaskCreated` | A new task was queued. |
-| `TaskStateChanged` | A task transitioned between states (e.g., Queued → Running). |
+| `AgentAdded` | An agent was registered with the kernel. |
+| `AgentRemoved` | An agent was unregistered from the kernel. |
+| `AgentPermissionGranted` | A permission was granted to an agent. |
+| `AgentPermissionRevoked` | A permission was revoked from an agent. |
+
+### TaskLifecycle
+
+| Event | Description |
+|-------|-------------|
+| `TaskStarted` | A task began execution. |
 | `TaskCompleted` | A task completed successfully. |
 | `TaskFailed` | A task failed after exhausting retries. |
-| `TaskTimeout` | A task was killed because it exceeded its timeout. |
+| `TaskTimedOut` | A task was killed because it exceeded its timeout. |
+| `TaskSuspended` | A task was suspended (e.g., waiting for escalation approval). |
+| `TaskDelegated` | A task was delegated to another agent. |
+| `TaskRetrying` | A failed task is being retried. |
+| `TaskDeadlockDetected` | A circular dependency was detected between tasks. |
+| `TaskPreempted` | A lower-priority task was preempted by a higher-priority one. |
 
-### Intent Processing
-
-| Event | Description |
-|-------|-------------|
-| `IntentReceived` | An intent message arrived at the kernel. |
-| `IntentRouted` | The intent was routed to an agent. |
-| `IntentCompleted` | Intent processing completed successfully. |
-| `IntentFailed` | Intent processing failed. |
-
-### Capability and Permissions
+### SecurityEvents
 
 | Event | Description |
 |-------|-------------|
-| `PermissionGranted` | A permission was granted to an agent. |
-| `PermissionRevoked` | A permission was revoked from an agent. |
-| `PermissionDenied` | An operation was denied due to insufficient permissions. |
-| `TokenIssued` | A capability token was issued for a task. |
-| `TokenExpired` | A capability token expired. |
+| `PromptInjectionAttempt` | A prompt injection attack was detected. |
+| `CapabilityViolation` | An operation was attempted without a valid capability token. |
+| `UnauthorizedToolAccess` | A tool was invoked without the required permissions. |
+| `SecretsAccessAttempt` | An unauthorized attempt to read secrets from the vault. |
+| `SandboxEscapeAttempt` | A sandboxed tool attempted to escape its confinement. |
+| `AuditLogTamperAttempt` | An attempt to modify or delete audit log entries was detected. |
+| `AgentImpersonationAttempt` | An agent attempted to impersonate another agent. |
+| `UnverifiedToolInstalled` | A tool was installed without a valid signature. |
 
-### Tool Lifecycle
+### MemoryEvents
+
+| Event | Description |
+|-------|-------------|
+| `ContextWindowNearLimit` | The context window is approaching its token limit. |
+| `ContextWindowExhausted` | The context window has reached its maximum capacity. |
+| `EpisodicMemoryWritten` | A new episodic memory entry was persisted. |
+| `SemanticMemoryConflict` | A semantic memory write conflicts with an existing entry. |
+| `MemorySearchFailed` | A memory search query returned no results or errored. |
+| `WorkingMemoryEviction` | An entry was evicted from working memory due to capacity limits. |
+
+### SystemHealth
+
+| Event | Description |
+|-------|-------------|
+| `CPUSpikeDetected` | CPU usage exceeded the configured threshold. |
+| `MemoryPressure` | System memory usage is critically high. |
+| `DiskSpaceLow` | Available disk space is below the warning threshold. |
+| `DiskSpaceCritical` | Available disk space is below the critical threshold. |
+| `ProcessCrashed` | A monitored process terminated unexpectedly. |
+| `NetworkInterfaceDown` | A network interface became unavailable. |
+| `ContainerResourceQuotaExceeded` | A container exceeded its resource quota. |
+| `KernelSubsystemError` | An internal kernel subsystem encountered an error. |
+| `BudgetWarning` | An agent crossed the `warn_at_pct` budget threshold. |
+| `BudgetExhausted` | An agent hit a hard budget limit. |
+
+### HardwareEvents
+
+| Event | Description |
+|-------|-------------|
+| `GPUAvailable` | A GPU became available for compute tasks. |
+| `GPUMemoryPressure` | GPU memory usage is critically high. |
+| `SensorReadingThresholdExceeded` | A hardware sensor reading exceeded its configured threshold. |
+| `DeviceConnected` | A hardware device was connected to the system. |
+| `DeviceDisconnected` | A hardware device was disconnected. |
+| `HardwareAccessGranted` | An agent was granted access to a hardware device. |
+| `DeviceMounted` | A device was mounted and made available. |
+| `DeviceUnmounted` | A device was unmounted. |
+| `DeviceEjected` | A device was safely ejected from the system. |
+
+### ToolEvents
 
 | Event | Description |
 |-------|-------------|
 | `ToolInstalled` | A tool was registered in the tool registry. |
 | `ToolRemoved` | A tool was removed from the registry. |
-| `ToolExecutionStarted` | A tool invocation began. |
-| `ToolExecutionCompleted` | A tool invocation completed successfully. |
 | `ToolExecutionFailed` | A tool invocation failed. |
+| `ToolSandboxViolation` | A tool violated its sandbox policy. |
+| `ToolResourceQuotaExceeded` | A tool exceeded its allocated resource quota. |
+| `ToolChecksumMismatch` | A tool's checksum did not match the expected value. |
+| `ToolRegistryUpdated` | The tool registry was updated (e.g., new manifests loaded). |
+| `ToolCallStarted` | A tool invocation began. |
+| `ToolCallCompleted` | A tool invocation completed successfully. |
 
-### Agent Lifecycle
-
-| Event | Description |
-|-------|-------------|
-| `AgentConnected` | An agent connected to the kernel. |
-| `AgentDisconnected` | An agent disconnected. |
-
-### LLM Inference
-
-| Event | Description |
-|-------|-------------|
-| `LLMInferenceStarted` | An LLM inference call began. |
-| `LLMInferenceCompleted` | An LLM inference call completed. |
-| `LLMInferenceError` | An LLM inference call failed. |
-
-### Secrets
+### AgentCommunication
 
 | Event | Description |
 |-------|-------------|
-| `SecretCreated` | A new secret was stored in the vault. |
-| `SecretAccessed` | A secret was read from the vault. |
-| `SecretRevoked` | A secret was permanently deleted. |
-| `SecretRotated` | A secret's value was updated. |
+| `DirectMessageReceived` | A direct message was received from another agent. |
+| `BroadcastReceived` | A broadcast message was received. |
+| `DelegationReceived` | A task delegation request was received. |
+| `DelegationResponseReceived` | A response to a delegation request was received. |
+| `MessageDeliveryFailed` | A message could not be delivered to the target agent. |
+| `AgentUnreachable` | The target agent is not connected or not responding. |
 
-### System
-
-| Event | Description |
-|-------|-------------|
-| `KernelStarted` | The kernel process started. |
-| `KernelShutdown` | The kernel began graceful shutdown. |
-| `KernelSubsystemRestarted` | An internal subsystem was restarted. |
-
-### Schedule
+### AgentRPC
 
 | Event | Description |
 |-------|-------------|
-| `ScheduledJobCreated` | A cron/interval job was registered. |
-| `ScheduledJobFired` | A scheduled job triggered. |
-| `ScheduledJobPaused` | A scheduled job was paused. |
-| `ScheduledJobResumed` | A paused scheduled job was resumed. |
-| `ScheduledJobDeleted` | A scheduled job was removed. |
+| `AgentRpcCallStarted` | An inter-agent RPC call was initiated. |
+| `AgentRpcCallCompleted` | An inter-agent RPC call completed successfully. |
+| `AgentRpcCallTimedOut` | An inter-agent RPC call exceeded its timeout. |
 
-### Background Tasks
+### ScheduleEvents
 
 | Event | Description |
 |-------|-------------|
-| `BackgroundTaskStarted` | A background task began execution. |
-| `BackgroundTaskCompleted` | A background task completed. |
-| `BackgroundTaskFailed` | A background task failed. |
-| `BackgroundTaskKilled` | A background task was forcibly terminated. |
+| `CronJobFired` | A cron-scheduled job triggered. |
+| `ScheduledTaskMissed` | A scheduled task missed its execution window. |
+| `ScheduledTaskCompleted` | A scheduled task completed successfully. |
+| `ScheduledTaskFailed` | A scheduled task failed. |
 
-### Budget
-
-| Event | Description |
-|-------|-------------|
-| `BudgetWarning` | An agent crossed the `warn_at_pct` budget threshold. |
-| `BudgetExceeded` | An agent hit a hard budget limit. |
-
-### Risk and Security
+### ExternalEvents
 
 | Event | Description |
 |-------|-------------|
-| `RiskEscalation` | An operation was escalated for human approval. |
-| `ActionForbidden` | A high-risk action was blocked. |
-
-### Snapshots
-
-| Event | Description |
-|-------|-------------|
-| `SnapshotTaken` | A checkpoint snapshot was created. |
-| `SnapshotRestored` | The kernel restored from a snapshot. |
-| `SnapshotExpired` | A snapshot was deleted due to age (>72 hours). |
-
-### Cost Attribution
-
-| Event | Description |
-|-------|-------------|
-| `CostAttribution` | Structured cost data for a completed inference call was logged. |
-
-### Event System Internals
-
-| Event | Description |
-|-------|-------------|
-| `EventEmitted` | An event was emitted and pushed to the event channel. |
-| `EventSubscriptionCreated` | A new event subscription was registered. |
-| `EventSubscriptionRemoved` | An event subscription was removed. |
-| `EventDelivered` | An event was successfully delivered to a subscribing agent (task created). |
-| `EventThrottled` | An event was suppressed by the subscription's throttle policy. |
-| `EventFilterRejected` | An event did not match a subscription's payload filter. |
-| `EventLoopDetected` | An event was dropped because it exceeded the maximum chain depth. |
-| `EventTriggeredTask` | A subscription caused a task to be created for an agent. |
-| `EventTriggerFailed` | Attempting to create a triggered task failed. |
+| `WebhookReceived` | An incoming webhook was received by the kernel. |
+| `ExternalFileChanged` | A watched external file was modified. |
+| `ExternalAPIEvent` | An event was received from an external API integration. |
+| `ExternalAlertReceived` | An alert was received from an external monitoring system. |
 
 ---
 
@@ -295,14 +292,14 @@ Output format:
 ```
 TIMESTAMP                  EVENT TYPE                     SEVERITY   DEPTH
 2026-03-17T10:12:01Z       TaskCompleted                  Info       0
-2026-03-17T10:12:02Z       CostAttribution                Info       0
-2026-03-17T10:12:02Z       EventTriggeredTask             Info       1
+2026-03-17T10:12:02Z       BudgetWarning                  Warning    0
+2026-03-17T10:12:02Z       ToolCallCompleted              Info       1
 ```
 
 Columns:
 - **TIMESTAMP** — RFC3339 timestamp of when the event was emitted.
-- **EVENT TYPE** — the `AuditEventType` name.
-- **SEVERITY** — `Info`, `Warning`, `Critical`, etc.
+- **EVENT TYPE** — the `EventType` variant name.
+- **SEVERITY** — `Info`, `Warning`, `Critical`.
 - **DEPTH** — chain depth (0 = directly emitted by kernel; >0 = triggered by a prior event).
 
 ---
