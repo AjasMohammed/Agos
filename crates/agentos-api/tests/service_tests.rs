@@ -108,6 +108,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         registry: Default::default(),
         scratchpad: Default::default(),
         otel: agentos_kernel::config::OtelConfig::default(),
+        api: Default::default(),
     }
 }
 
