@@ -334,6 +334,7 @@ pub struct Kernel {
     pub memory_blocks: Arc<crate::memory_blocks::MemoryBlockStore>,
     pub context_memory_store: Arc<crate::context_memory_store::ContextMemoryStore>,
     pub scratchpad_store: Arc<agentos_scratch::ScratchpadStore>,
+    pub skill_registry: Arc<RwLock<agentos_skills::SkillRegistry>>,
     pub schedule_manager: Arc<ScheduleManager>,
     pub background_pool: Arc<BackgroundPool>,
     pub hal: Arc<HardwareAbstractionLayer>,
@@ -398,9 +399,10 @@ pub struct Kernel {
     /// Pre-canonicalized workspace paths from `tools.workspace.allowed_paths`.
     pub(crate) workspace_paths: Vec<PathBuf>,
     pub started_at: chrono::DateTime<chrono::Utc>,
-    /// Shared handles to all live MCP server connections, keyed by config order.
-    /// Used by `cmd_mcp_status()` to report live connection state.
-    pub mcp_handles: Arc<RwLock<Vec<Arc<agentos_mcp::McpServerHandle>>>>,
+    /// MCP supervisor managing all server connections with health monitoring.
+    pub mcp_supervisor: Arc<agentos_mcp::McpSupervisor>,
+    /// MCP security gate for output validation, rate limiting, and audit logging.
+    pub mcp_security_gate: Arc<agentos_mcp::McpSecurityGate>,
     /// Token used to signal graceful shutdown to all kernel loops.
     pub cancellation_token: CancellationToken,
     /// Set to `true` once the first `KernelShutdown` audit entry has been written.
@@ -1595,7 +1597,7 @@ impl Kernel {
                 match path.canonicalize() {
                     Ok(canonical) => Some(canonical),
                     Err(e) => {
-                        tracing::warn!(
+                        tracing::debug!(
                             path = %p,
                             error = %e,
                             "Workspace path could not be canonicalized at startup; skipping"
@@ -1701,66 +1703,194 @@ impl Kernel {
             tool_runner.register_agent_self(tool_names);
         }
 
-        // 6.5 Connect to configured MCP servers and register their tools.
-        //
-        // Each MCP server is spawned as a child process via `McpServerHandle::spawn()`,
-        // which adds transparent reconnection on connection-level failures.
-        // Failures are logged as warnings and do not abort boot — a missing MCP server
-        // should not take down the whole kernel.
-        let mut mcp_handles_vec: Vec<Arc<agentos_mcp::McpServerHandle>> = Vec::new();
+        // 6.5 Initialize MCP supervisor and security gate.
+        let kernel_cancellation_token = CancellationToken::new();
+        let (mcp_event_tx, mut mcp_event_rx) = tokio::sync::mpsc::channel(100);
+        let mcp_cancellation = kernel_cancellation_token.child_token();
+        let mcp_supervisor = Arc::new(agentos_mcp::McpSupervisor::new(
+            mcp_event_tx,
+            mcp_cancellation.clone(),
+        ));
+        let mcp_security_gate = Arc::new(agentos_mcp::McpSecurityGate::new(
+            audit.clone(),
+            1024 * 1024, // 1MB default
+        ));
+
+        // 6.6 Spawn all configured MCP servers in parallel.
+        let mut mcp_add_tasks = Vec::new();
         for mcp_cfg in &config.mcp.servers {
-            match agentos_mcp::McpServerHandle::spawn(
-                mcp_cfg.name.clone(),
-                mcp_cfg.command.clone(),
-                mcp_cfg.args.clone(),
-            )
-            .await
-            {
-                Ok(handle) => match handle.list_tools().await {
-                    Ok(tool_defs) => {
-                        // Snapshot existing tools before registration to prevent any MCP
-                        // tool from shadowing an existing AgentOS core tool.
-                        let mut seen: std::collections::HashSet<String> =
-                            tool_runner.list_tools().into_iter().collect();
-                        let mut registered = 0usize;
-                        for tool_def in tool_defs {
-                            // Reject any MCP tool that would shadow an existing AgentOS tool
-                            // or a tool already registered from this same server (duplicate
-                            // name within one server's tool list).
-                            if seen.contains(&tool_def.name) {
-                                tracing::warn!(
-                                    mcp_server = %mcp_cfg.name,
-                                    tool = %tool_def.name,
-                                    "Skipping MCP tool — name conflicts with existing tool"
-                                );
-                                continue;
-                            }
-                            seen.insert(tool_def.name.clone());
-                            let adapter =
-                                agentos_mcp::McpToolAdapter::new(Arc::clone(&handle), tool_def);
-                            tool_runner.register(Box::new(adapter));
-                            registered += 1;
-                        }
-                        handle.set_tool_count(registered);
-                        tracing::info!(
-                            mcp_server = %mcp_cfg.name,
-                            tools_registered = registered,
-                            "MCP server connected"
-                        );
-                        mcp_handles_vec.push(handle);
-                    }
-                    Err(e) => tracing::warn!(
-                        mcp_server = %mcp_cfg.name,
-                        error = %e,
-                        "Failed to list tools from MCP server"
-                    ),
-                },
-                Err(e) => tracing::warn!(
+            if let Err(e) = mcp_cfg.validate() {
+                tracing::error!(
                     mcp_server = %mcp_cfg.name,
                     error = %e,
-                    "Failed to connect to MCP server — skipping"
-                ),
+                    "Invalid MCP server config — skipping"
+                );
+                continue;
             }
+            let supervisor = Arc::clone(&mcp_supervisor);
+            let security_gate = Arc::clone(&mcp_security_gate);
+            let cfg = mcp_cfg.clone();
+
+            let task = tokio::spawn(async move {
+                let transport_factory: Option<Arc<dyn agentos_mcp::McpTransportFactory>>;
+                let transport: Arc<dyn agentos_mcp::McpTransport> = match (&cfg.command, &cfg.url) {
+                    (Some(cmd), None) => {
+                        // Create a factory so the supervisor can respawn on reconnect.
+                        let factory =
+                            Arc::new(agentos_mcp::transport::stdio::StdioTransportFactory::new(
+                                format!("stdio:{}", cfg.name),
+                                cmd.clone(),
+                                cfg.args.clone(),
+                                cfg.env.clone(),
+                                cfg.working_dir.clone(),
+                                cfg.timeout_secs,
+                            ));
+                        transport_factory = Some(factory);
+
+                        match agentos_mcp::transport::stdio::StdioTransport::spawn(
+                            format!("stdio:{}", cfg.name),
+                            cmd.clone(),
+                            cfg.args.clone(),
+                            cfg.env.clone(),
+                            cfg.working_dir.clone(),
+                            cfg.timeout_secs,
+                        )
+                        .await
+                        {
+                            Ok(t) => Arc::new(t),
+                            Err(e) => {
+                                tracing::warn!(
+                                    mcp_server = %cfg.name,
+                                    error = %e,
+                                    "Failed to spawn MCP transport"
+                                );
+                                return (cfg.name.clone(), Vec::new());
+                            }
+                        }
+                    }
+                    (None, Some(url)) => {
+                        // HTTP is stateless — no factory needed.
+                        transport_factory = None;
+                        match agentos_mcp::transport::http::StreamableHttpTransport::new(
+                            format!("http:{}", cfg.name),
+                            url.clone(),
+                            cfg.auth_token.clone(),
+                            cfg.timeout_secs,
+                        ) {
+                            Ok(t) => Arc::new(t),
+                            Err(e) => {
+                                tracing::warn!(
+                                    mcp_server = %cfg.name,
+                                    error = %e,
+                                    "Failed to create HTTP transport"
+                                );
+                                return (cfg.name.clone(), Vec::new());
+                            }
+                        }
+                    }
+                    _ => {
+                        tracing::warn!(
+                            mcp_server = %cfg.name,
+                            "MCP server config must have either 'command' or 'url'"
+                        );
+                        return (cfg.name.clone(), Vec::new());
+                    }
+                };
+
+                let resolved_config = agentos_mcp::McpServerResolvedConfig {
+                    name: cfg.name.clone(),
+                    timeout_secs: cfg.timeout_secs.unwrap_or(30),
+                    auto_reconnect: cfg.auto_reconnect,
+                    health_check_interval_secs: cfg.health_check_interval_secs,
+                };
+
+                let policy = agentos_mcp::McpServerPolicy {
+                    name: cfg.name.clone(),
+                    max_response_bytes: cfg.max_response_bytes.unwrap_or(1024 * 1024),
+                    allowed_tools: cfg.allowed_tools.clone(),
+                    denied_tools: cfg.denied_tools.clone(),
+                    rate_limit_rpm: cfg.rate_limit_rpm.unwrap_or(60),
+                };
+
+                // Register security policy unconditionally — even if the server
+                // fails to connect now, the health loop may reconnect it later.
+                security_gate.register_server_policy(policy).await;
+
+                match supervisor
+                    .add_server_with_factory(resolved_config, transport, transport_factory)
+                    .await
+                {
+                    Ok(tools) => {
+                        tracing::info!(
+                            mcp_server = %cfg.name,
+                            tools = tools.len(),
+                            "MCP server connected"
+                        );
+                        (cfg.name.clone(), tools)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            mcp_server = %cfg.name,
+                            error = %e,
+                            "MCP server connection failed"
+                        );
+                        (cfg.name.clone(), Vec::new())
+                    }
+                }
+            });
+            mcp_add_tasks.push(task);
+        }
+
+        // Wait for all servers to complete and register their tools.
+        let mut seen: std::collections::HashSet<String> =
+            tool_runner.list_tools().into_iter().collect();
+        for task in mcp_add_tasks {
+            if let Ok((server_name, tools)) = task.await {
+                for tool_def in tools {
+                    if seen.contains(&tool_def.name) {
+                        tracing::warn!(
+                            mcp_server = %server_name,
+                            tool = %tool_def.name,
+                            "Skipping MCP tool — name conflicts with existing tool"
+                        );
+                        continue;
+                    }
+                    seen.insert(tool_def.name.clone());
+                    let adapter = agentos_mcp::McpToolAdapter::new(
+                        Arc::clone(&mcp_supervisor),
+                        Arc::clone(&mcp_security_gate),
+                        server_name.clone(),
+                        tool_def,
+                    );
+                    tool_runner.register(Box::new(adapter));
+                }
+            }
+        }
+
+        // 6.7 Spawn health check loop.
+        let _health_loop_handle = mcp_supervisor.spawn_health_loop();
+
+        // 6.8 Forward MCP lifecycle events to audit log.
+        {
+            tokio::spawn(async move {
+                while let Some(event) = mcp_event_rx.recv().await {
+                    match &event {
+                        agentos_mcp::McpLifecycleEvent::ServerConnected { name, tool_count } => {
+                            tracing::info!(server = %name, tools = tool_count, "MCP lifecycle: connected");
+                        }
+                        agentos_mcp::McpLifecycleEvent::ServerDisconnected { name, error } => {
+                            tracing::warn!(server = %name, error = %error, "MCP lifecycle: disconnected");
+                        }
+                        agentos_mcp::McpLifecycleEvent::ServerReconnecting { name, attempt } => {
+                            tracing::info!(server = %name, attempt = attempt, "MCP lifecycle: reconnecting");
+                        }
+                        agentos_mcp::McpLifecycleEvent::ServerStopped { name } => {
+                            tracing::info!(server = %name, "MCP lifecycle: stopped");
+                        }
+                        agentos_mcp::McpLifecycleEvent::ToolCallCompleted { .. } => {}
+                    }
+                }
+            });
         }
 
         let tool_runner = Arc::new(tool_runner);
@@ -2030,6 +2160,32 @@ impl Kernel {
             .run(),
         );
 
+        // Build skill registry, loading from configured skill directories.
+        let skill_registry = {
+            let mut sr = agentos_skills::SkillRegistry::new();
+            let core_skills_dir = Path::new(&config.skills.core_skills_dir);
+            let user_skills_dir = Path::new(&config.skills.user_skills_dir);
+            match sr.load_from_dir(core_skills_dir) {
+                Ok(n) if n > 0 => {
+                    tracing::info!(count = n, dir = %core_skills_dir.display(), "Loaded core skills")
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, dir = %core_skills_dir.display(), "Failed to scan core skills directory")
+                }
+            }
+            match sr.load_from_dir(user_skills_dir) {
+                Ok(n) if n > 0 => {
+                    tracing::info!(count = n, dir = %user_skills_dir.display(), "Loaded user skills")
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, dir = %user_skills_dir.display(), "Failed to scan user skills directory")
+                }
+            }
+            Arc::new(RwLock::new(sr))
+        };
+
         let kernel = Kernel {
             config,
             audit,
@@ -2057,6 +2213,7 @@ impl Kernel {
             memory_blocks,
             context_memory_store,
             scratchpad_store: scratchpad_store.clone(),
+            skill_registry,
             schedule_manager,
             background_pool,
             hal,
@@ -2098,11 +2255,12 @@ impl Kernel {
             per_agent_rate_limiter: Arc::new(tokio::sync::Mutex::new(
                 crate::rate_limit::PerAgentRateLimiter::new(per_agent_rate_limit),
             )),
-            mcp_handles: Arc::new(RwLock::new(mcp_handles_vec)),
+            mcp_supervisor,
+            mcp_security_gate,
             data_dir,
             workspace_paths,
             started_at: chrono::Utc::now(),
-            cancellation_token: CancellationToken::new(),
+            cancellation_token: kernel_cancellation_token,
             shutdown_audited: std::sync::atomic::AtomicBool::new(false),
         };
 
@@ -2519,6 +2677,7 @@ mod preflight_tests {
             registry: Default::default(),
             scratchpad: Default::default(),
             otel: OtelConfig::default(),
+            api: Default::default(),
         }
     }
 
@@ -2691,6 +2850,7 @@ mod vault_bootstrap_tests {
             registry: Default::default(),
             scratchpad: Default::default(),
             otel: OtelConfig::default(),
+            api: Default::default(),
         }
     }
 

@@ -1626,6 +1626,13 @@ impl Kernel {
                     data: Some(serde_json::json!({ "status": "shutting_down" })),
                 }
             }
+
+            // Skills management
+            KernelCommand::SkillInstall { path } => self.cmd_skill_install(path).await,
+            KernelCommand::SkillRemove { name } => self.cmd_skill_remove(name).await,
+            KernelCommand::SkillList => self.cmd_skill_list().await,
+            KernelCommand::SkillRun { name, input } => self.cmd_skill_run(name, input).await,
+            KernelCommand::SkillStatus { name } => self.cmd_skill_status(name).await,
         }
     }
 
