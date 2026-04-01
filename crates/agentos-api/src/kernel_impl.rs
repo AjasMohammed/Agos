@@ -412,7 +412,9 @@ impl KernelService for Kernel {
     }
 
     async fn run_pipeline(&self, req: RunPipelineRequest) -> Result<serde_json::Value, ApiError> {
-        self.run_pipeline(req.name, req.input, req.detach, req.agent_name)
+        // Use fully qualified syntax to call the inherent Kernel::run_pipeline,
+        // not the KernelService trait method (which would recurse).
+        Kernel::run_pipeline(self, req.name, req.input, req.detach, req.agent_name)
             .await
             .map_err(ApiError::Internal)
     }
