@@ -2676,6 +2676,7 @@ mod preflight_tests {
             mcp: Default::default(),
             registry: Default::default(),
             scratchpad: Default::default(),
+            skills: Default::default(),
             otel: OtelConfig::default(),
             api: Default::default(),
         }
@@ -2849,6 +2850,7 @@ mod vault_bootstrap_tests {
             mcp: Default::default(),
             registry: Default::default(),
             scratchpad: Default::default(),
+            skills: Default::default(),
             otel: OtelConfig::default(),
             api: Default::default(),
         }
