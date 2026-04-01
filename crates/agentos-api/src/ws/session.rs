@@ -71,11 +71,12 @@ impl WsSession {
             ClientFrame::ChatSend {
                 session_id,
                 message,
+                agent_name,
             } => {
                 // Non-streaming for now — send the full response as ChatDone.
                 let req = crate::types::ChatRequest {
                     session_id: session_id.clone(),
-                    agent_name: String::new(), // will use session's agent
+                    agent_name,
                     message,
                     history: Vec::new(),
                 };
@@ -131,6 +132,39 @@ impl WsSession {
                             .send(ServerFrame::Error {
                                 code: "BAD_REQUEST".into(),
                                 message: format!("Invalid task ID: {task_id}"),
+                            })
+                            .await;
+                    }
+                }
+            }
+
+            ClientFrame::NotificationRespond { id, text } => {
+                let parsed: Result<agentos_types::NotificationID, _> = id.parse();
+                match parsed {
+                    Ok(nid) => match service.respond_to_notification(nid, text).await {
+                        Ok(()) => {
+                            let _ = self
+                                .send(ServerFrame::Event {
+                                    channel: "notifications".into(),
+                                    event: "notification.responded".into(),
+                                    data: serde_json::json!({ "id": id }),
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = self
+                                .send(ServerFrame::Error {
+                                    code: e.error_code().to_string(),
+                                    message: e.to_string(),
+                                })
+                                .await;
+                        }
+                    },
+                    Err(_) => {
+                        let _ = self
+                            .send(ServerFrame::Error {
+                                code: "BAD_REQUEST".into(),
+                                message: format!("Invalid notification ID: {id}"),
                             })
                             .await;
                     }

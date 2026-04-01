@@ -1,4 +1,4 @@
-//! HTTP router — maps all `/v1/*` routes to handler functions with middleware.
+//! HTTP router — maps all `/api/v1/*` routes to handler functions with middleware.
 //!
 //! The middleware stack (outermost → innermost on requests):
 //! 1. Rate limiting (tower-governor)
@@ -62,58 +62,67 @@ pub fn build_router(
 ) -> Result<Router, String> {
     // ── Public routes (no auth via header — WS uses query param) ────────
     let public_routes = Router::new()
-        .route("/v1/health", get(system::health))
-        .route("/v1/ws", get(ws::ws_upgrade));
+        .route("/api/v1/health", get(system::health))
+        .route("/api/v1/ws", get(ws::ws_upgrade));
 
     // ── Protected routes (require Bearer token) ─────────────────────────
     let protected_routes = Router::new()
         // System
-        .route("/v1/status", get(system::status))
+        .route("/api/v1/status", get(system::status))
         // OpenAI-compatible chat
-        .route("/v1/chat/completions", post(chat::completions))
+        .route("/api/v1/chat/completions", post(chat::completions))
         // Agents
-        .route("/v1/agents", get(agents::list).post(agents::connect))
+        .route("/api/v1/agents", get(agents::list).post(agents::connect))
         .route(
-            "/v1/agents/{name}",
+            "/api/v1/agents/{name}",
             get(agents::detail).delete(agents::disconnect),
         )
         .route(
-            "/v1/agents/{name}/permissions",
+            "/api/v1/agents/{name}/permissions",
             post(agents::grant_permission),
         )
         .route(
-            "/v1/agents/{name}/permissions/revoke",
+            "/api/v1/agents/{name}/permissions/revoke",
             post(agents::revoke_permission),
         )
         // Tasks
-        .route("/v1/tasks", get(tasks::list))
-        .route("/v1/tasks/run", post(tasks::run))
-        .route("/v1/tasks/{id}", get(tasks::get))
-        .route("/v1/tasks/{id}/cancel", post(tasks::cancel))
-        .route("/v1/tasks/{id}/trace", get(tasks::trace))
+        .route("/api/v1/tasks", get(tasks::list))
+        .route("/api/v1/tasks/run", post(tasks::run))
+        .route("/api/v1/tasks/{id}", get(tasks::get))
+        .route("/api/v1/tasks/{id}/cancel", post(tasks::cancel))
+        .route("/api/v1/tasks/{id}/trace", get(tasks::trace))
         // Tools
-        .route("/v1/tools", get(tools::list).post(tools::install))
-        .route("/v1/tools/{name}", get(tools::get).delete(tools::remove))
-        // Pipelines
-        .route("/v1/pipelines", get(pipelines::list).post(pipelines::save))
-        .route("/v1/pipelines/{name}", delete(pipelines::delete))
-        .route("/v1/pipelines/{name}/run", post(pipelines::run))
-        // Secrets
-        .route("/v1/secrets", get(secrets::list).post(secrets::set))
-        .route("/v1/secrets/{name}", delete(secrets::revoke))
-        // Audit
-        .route("/v1/audit/logs", get(audit::logs))
-        .route("/v1/audit/logs/{trace_id}", get(audit::detail))
-        .route("/v1/audit/verify", get(audit::verify))
-        // Costs
-        .route("/v1/costs/summary", get(costs::summary))
-        .route("/v1/costs/agents/{name}", get(costs::agent_costs))
-        // Notifications
-        .route("/v1/notifications", get(notifications::list))
-        .route("/v1/notifications/unread", get(notifications::unread_count))
-        .route("/v1/notifications/{id}", get(notifications::get))
+        .route("/api/v1/tools", get(tools::list).post(tools::install))
         .route(
-            "/v1/notifications/{id}/respond",
+            "/api/v1/tools/{name}",
+            get(tools::get).delete(tools::remove),
+        )
+        // Pipelines
+        .route(
+            "/api/v1/pipelines",
+            get(pipelines::list).post(pipelines::save),
+        )
+        .route("/api/v1/pipelines/{name}", delete(pipelines::delete))
+        .route("/api/v1/pipelines/{name}/run", post(pipelines::run))
+        // Secrets
+        .route("/api/v1/secrets", get(secrets::list).post(secrets::set))
+        .route("/api/v1/secrets/{name}", delete(secrets::revoke))
+        // Audit
+        .route("/api/v1/audit/logs", get(audit::logs))
+        .route("/api/v1/audit/logs/{trace_id}", get(audit::detail))
+        .route("/api/v1/audit/verify", get(audit::verify))
+        // Costs
+        .route("/api/v1/costs/summary", get(costs::summary))
+        .route("/api/v1/costs/agents/{name}", get(costs::agent_costs))
+        // Notifications
+        .route("/api/v1/notifications", get(notifications::list))
+        .route(
+            "/api/v1/notifications/unread",
+            get(notifications::unread_count),
+        )
+        .route("/api/v1/notifications/{id}", get(notifications::get))
+        .route(
+            "/api/v1/notifications/{id}/respond",
             post(notifications::respond),
         )
         // Apply auth middleware to all protected routes.

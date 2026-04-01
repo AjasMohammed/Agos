@@ -6,6 +6,7 @@
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
+use axum::Extension;
 use axum::Json;
 use chrono::Utc;
 use futures::stream;
@@ -13,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 
+use super::require_permission;
+use crate::auth::AuthenticatedKey;
 use crate::error::ApiError;
 use crate::service::KernelService;
 use crate::types::ChatRequest;
@@ -138,8 +141,10 @@ fn generate_id() -> String {
 /// `POST /v1/chat/completions` — OpenAI-compatible chat completion.
 pub async fn completions(
     State(svc): State<Arc<dyn KernelService>>,
+    Extension(key): Extension<AuthenticatedKey>,
     Json(req): Json<OpenAIChatRequest>,
 ) -> Result<axum::response::Response, ApiError> {
+    require_permission(&key, "chat:w")?;
     let agent_name = parse_model(&req.model);
     let (history, user_message) = messages_to_history(&req.messages);
 

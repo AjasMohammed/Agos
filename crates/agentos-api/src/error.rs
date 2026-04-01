@@ -29,6 +29,12 @@ pub enum ApiError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
+
+    #[error("Rate limited: {0}")]
+    RateLimited(String),
 }
 
 impl ApiError {
@@ -40,6 +46,8 @@ impl ApiError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            Self::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
         }
     }
 
@@ -51,6 +59,8 @@ impl ApiError {
             Self::BadRequest(_) => "BAD_REQUEST",
             Self::Conflict(_) => "CONFLICT",
             Self::Internal(_) => "INTERNAL_ERROR",
+            Self::NotImplemented(_) => "NOT_IMPLEMENTED",
+            Self::RateLimited(_) => "RATE_LIMITED",
         }
     }
 }
@@ -81,7 +91,7 @@ impl From<agentos_types::AgentOSError> for ApiError {
             agentos_types::AgentOSError::TokenExpired => Self::Unauthorized,
             agentos_types::AgentOSError::ToolBlocked { .. } => Self::Forbidden(err.to_string()),
             agentos_types::AgentOSError::SchemaValidation(_) => Self::BadRequest(err.to_string()),
-            agentos_types::AgentOSError::RateLimited { .. } => Self::Conflict(err.to_string()),
+            agentos_types::AgentOSError::RateLimited { .. } => Self::RateLimited(err.to_string()),
             _ => Self::Internal(err.to_string()),
         }
     }

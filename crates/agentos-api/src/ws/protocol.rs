@@ -22,7 +22,16 @@ pub enum ClientFrame {
 
     /// Send a chat message to an agent.
     #[serde(rename = "chat.send")]
-    ChatSend { session_id: String, message: String },
+    ChatSend {
+        session_id: String,
+        message: String,
+        #[serde(default)]
+        agent_name: String,
+    },
+
+    /// Respond to a notification.
+    #[serde(rename = "notification.respond")]
+    NotificationRespond { id: String, text: String },
 
     /// Cancel an in-progress chat response.
     #[serde(rename = "chat.cancel")]

@@ -14,3 +14,29 @@ pub mod secrets;
 pub mod system;
 pub mod tasks;
 pub mod tools;
+
+use crate::auth::AuthenticatedKey;
+use crate::error::ApiError;
+
+/// Check that the authenticated key has the required permission.
+///
+/// Permission format: `"resource:op"` where `op` is a single char like `r` or `w`.
+/// Empty permissions on the key means full access (backwards compat with bootstrap key).
+pub fn require_permission(key: &AuthenticatedKey, perm: &str) -> Result<(), ApiError> {
+    if key.0.permissions.is_empty() {
+        // Empty permissions = full access (backwards compat with bootstrap key)
+        return Ok(());
+    }
+    let required_resource = perm.split(':').next().unwrap_or(perm);
+    let required_op = perm.split(':').nth(1).unwrap_or("r");
+    for p in &key.0.permissions {
+        let res = p.split(':').next().unwrap_or(p);
+        let op = p.split(':').nth(1).unwrap_or("r");
+        if (res == required_resource || res == "*")
+            && op.contains(required_op.chars().next().unwrap_or('r'))
+        {
+            return Ok(());
+        }
+    }
+    Err(ApiError::Forbidden(format!("Missing permission: {perm}")))
+}

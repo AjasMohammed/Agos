@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -146,9 +147,11 @@ impl ApiKeyStore {
             }
         }
 
-        // Verify HMAC.
+        // Verify HMAC (constant-time comparison via `subtle` crate).
         let expected = Self::hmac_key(&secret, key);
-        if !constant_time_eq(&expected, &record.key_hash) {
+        if expected.ct_eq(&record.key_hash).into() {
+            // match — continue
+        } else {
             return None;
         }
 
@@ -201,18 +204,6 @@ impl ApiKeyStore {
         mac.update(key.as_bytes());
         mac.finalize().into_bytes().to_vec()
     }
-}
-
-/// Constant-time comparison to prevent timing attacks.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 #[cfg(test)]

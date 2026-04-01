@@ -107,6 +107,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         mcp: Default::default(),
         registry: Default::default(),
         scratchpad: Default::default(),
+        skills: Default::default(),
         otel: agentos_kernel::config::OtelConfig::default(),
         api: Default::default(),
     }
@@ -370,7 +371,7 @@ fn test_api_error_from_permission_denied() {
     );
 }
 
-/// AgentOSError::RateLimited maps to ApiError::Conflict.
+/// AgentOSError::RateLimited maps to ApiError::RateLimited.
 #[test]
 fn test_api_error_from_rate_limited() {
     use agentos_api::ApiError;
@@ -381,8 +382,8 @@ fn test_api_error_from_rate_limited() {
     };
     let api_err = ApiError::from(err);
     assert!(
-        matches!(api_err, ApiError::Conflict(_)),
-        "expected Conflict, got: {api_err:?}"
+        matches!(api_err, ApiError::RateLimited(_)),
+        "expected RateLimited, got: {api_err:?}"
     );
 }
 

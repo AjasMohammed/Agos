@@ -14,6 +14,56 @@ use agentos_types::{
 };
 use async_trait::async_trait;
 
+// ── Stable string serialization helpers ─────────────────────────────────────
+
+fn provider_str(p: &LLMProvider) -> &str {
+    match p {
+        LLMProvider::Ollama => "ollama",
+        LLMProvider::OpenAI => "openai",
+        LLMProvider::Anthropic => "anthropic",
+        LLMProvider::Gemini => "gemini",
+        LLMProvider::Custom(s) => s.as_str(),
+    }
+}
+
+fn status_str(s: &agentos_types::AgentStatus) -> &str {
+    match s {
+        agentos_types::AgentStatus::Online => "online",
+        agentos_types::AgentStatus::Idle => "idle",
+        agentos_types::AgentStatus::Busy => "busy",
+        agentos_types::AgentStatus::Offline => "offline",
+    }
+}
+
+fn task_state_str(s: &TaskState) -> &str {
+    match s {
+        TaskState::Queued => "queued",
+        TaskState::Running => "running",
+        TaskState::Waiting => "waiting",
+        TaskState::Suspended => "suspended",
+        TaskState::Complete => "complete",
+        TaskState::Failed => "failed",
+        TaskState::Cancelled => "cancelled",
+    }
+}
+
+fn trust_tier_str(t: &agentos_types::TrustTier) -> &str {
+    match t {
+        agentos_types::TrustTier::Core => "core",
+        agentos_types::TrustTier::Verified => "verified",
+        agentos_types::TrustTier::Community => "community",
+        agentos_types::TrustTier::Blocked => "blocked",
+    }
+}
+
+fn tool_status_str(s: &agentos_types::ToolStatus) -> &str {
+    match s {
+        agentos_types::ToolStatus::Available => "available",
+        agentos_types::ToolStatus::Running => "running",
+        agentos_types::ToolStatus::Disabled => "disabled",
+    }
+}
+
 // ── Helper conversions ──────────────────────────────────────────────────────
 
 fn parse_provider(s: &str) -> Result<LLMProvider, ApiError> {
@@ -38,9 +88,9 @@ fn agent_summary(profile: &agentos_types::AgentProfile) -> ApiAgentSummary {
     ApiAgentSummary {
         id: profile.id,
         name: profile.name.clone(),
-        provider: format!("{:?}", profile.provider),
+        provider: provider_str(&profile.provider).to_string(),
         model: profile.model.clone(),
-        status: format!("{:?}", profile.status),
+        status: status_str(&profile.status).to_string(),
         roles: profile.roles.clone(),
         connected_at: profile.created_at,
     }
@@ -53,8 +103,8 @@ fn tool_summary(tool: &agentos_types::RegisteredTool) -> ApiToolSummary {
         version: tool.manifest.manifest.version.clone(),
         description: tool.manifest.manifest.description.clone(),
         author: tool.manifest.manifest.author.clone(),
-        trust_tier: format!("{:?}", tool.manifest.manifest.trust_tier),
-        status: format!("{:?}", tool.status),
+        trust_tier: trust_tier_str(&tool.manifest.manifest.trust_tier).to_string(),
+        status: tool_status_str(&tool.status).to_string(),
     }
 }
 
@@ -131,7 +181,7 @@ impl KernelService for Kernel {
                     id: t.id,
                     agent_name,
                     prompt_preview: t.prompt_preview.clone(),
-                    status: format!("{:?}", t.state),
+                    status: task_state_str(&t.state).to_string(),
                     created_at: t.created_at,
                     completed_at: None,
                 }
@@ -168,7 +218,7 @@ impl KernelService for Kernel {
             .into_iter()
             .filter(|t| {
                 if let Some(ref status) = filter.status {
-                    let task_status = format!("{:?}", t.state).to_lowercase();
+                    let task_status = task_state_str(&t.state);
                     if task_status != status.to_lowercase() {
                         return false;
                     }
@@ -201,7 +251,7 @@ impl KernelService for Kernel {
                     id: t.id,
                     agent_name,
                     prompt_preview: t.prompt_preview.clone(),
-                    status: format!("{:?}", t.state),
+                    status: task_state_str(&t.state).to_string(),
                     created_at: t.created_at,
                     completed_at: None,
                 }
@@ -225,14 +275,14 @@ impl KernelService for Kernel {
             id: task.id,
             agent_name,
             prompt: task.original_prompt.clone(),
-            status: format!("{:?}", task.state),
+            status: task_state_str(&task.state).to_string(),
             created_at: task.created_at,
             completed_at: None,
         })
     }
 
     async fn run_task(&self, _req: RunTaskRequest) -> Result<TaskID, ApiError> {
-        Err(ApiError::Internal(
+        Err(ApiError::NotImplemented(
             "Task execution via API not yet wired".into(),
         ))
     }
@@ -270,19 +320,9 @@ impl KernelService for Kernel {
             .await
             .map_err(ApiError::Internal)?;
 
-        // Look up the tool that was just installed to get its ID.
-        // The manifest filename stem is typically the tool name, but the
-        // actual name comes from the manifest content. Read back from the
-        // registry by scanning for the newest entry.
-        let registry = self.tool_registry.read().await;
-        // Since we don't know the exact tool name from the path, return
-        // a best-effort ToolID by looking for the most-recently registered.
-        // In practice the caller should know the tool name.
-        let tool =
-            registry.list_all().into_iter().last().ok_or_else(|| {
-                ApiError::Internal("Tool installed but not found in registry".into())
-            })?;
-        Ok(tool.id)
+        // Placeholder ID: `api_install_tool` does not yet return the tool ID
+        // directly. Return a new UUID; the caller can look up the tool by name.
+        Ok(ToolID::new())
     }
 
     async fn remove_tool(&self, name: &str) -> Result<(), ApiError> {
@@ -497,7 +537,7 @@ impl KernelService for Kernel {
             .map(|m| NotificationSummary {
                 id: m.id,
                 subject: m.subject.clone(),
-                priority: format!("{:?}", m.priority),
+                priority: m.priority.to_string(),
                 read: m.read,
                 timestamp: m.created_at.to_rfc3339(),
             })
