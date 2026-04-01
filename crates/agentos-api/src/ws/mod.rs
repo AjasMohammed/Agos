@@ -1,7 +1,7 @@
 //! WebSocket endpoint — channel subscriptions, real-time events, bidirectional
 //! actions (chat, task cancel).
 //!
-//! Upgrade at `GET /v1/ws?token=agos_<key>`.
+//! Upgrade at `GET /api/v1/ws?token=agos_<key>`.
 
 pub mod broadcaster;
 pub mod protocol;

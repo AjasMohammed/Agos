@@ -4,7 +4,21 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
+use agentos_types::TaskState;
+
 use super::protocol::ServerFrame;
+
+fn task_state_str(s: &TaskState) -> &str {
+    match s {
+        TaskState::Queued => "queued",
+        TaskState::Running => "running",
+        TaskState::Waiting => "waiting",
+        TaskState::Suspended => "suspended",
+        TaskState::Complete => "complete",
+        TaskState::Failed => "failed",
+        TaskState::Cancelled => "cancelled",
+    }
+}
 
 /// Entry tracking a single subscription.
 struct BroadcastEntry {
@@ -95,13 +109,13 @@ impl WsBroadcaster {
             loop {
                 match status_rx.recv().await {
                     Ok(update) => {
+                        let state = task_state_str(&update.state);
                         let data = serde_json::json!({
                             "task_id": update.task_id.to_string(),
-                            "state": format!("{:?}", update.state),
+                            "state": state,
                             "message": update.message,
                         });
-                        let event_name =
-                            format!("task.{}", format!("{:?}", update.state).to_lowercase());
+                        let event_name = format!("task.{state}");
                         self.broadcast("tasks", &event_name, data.clone()).await;
 
                         // Also broadcast to the specific task channel

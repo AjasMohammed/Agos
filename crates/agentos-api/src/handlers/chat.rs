@@ -1,6 +1,6 @@
 //! OpenAI-compatible chat completion endpoint.
 //!
-//! `POST /v1/chat/completions` accepts the standard OpenAI request format
+//! `POST /api/v1/chat/completions` accepts the standard OpenAI request format
 //! and returns either a full response or SSE stream in OpenAI chunk format.
 
 use axum::extract::State;
@@ -138,7 +138,11 @@ fn generate_id() -> String {
 
 // ── Handler ─────────────────────────────────────────────────────────────────
 
-/// `POST /v1/chat/completions` — OpenAI-compatible chat completion.
+/// `POST /api/v1/chat/completions` — OpenAI-compatible chat completion.
+///
+/// NOTE: This endpoint intentionally follows the OpenAI response format for
+/// client library compatibility, so it does NOT use the standard `{ "data": ... }`
+/// envelope that other endpoints use.
 pub async fn completions(
     State(svc): State<Arc<dyn KernelService>>,
     Extension(key): Extension<AuthenticatedKey>,
