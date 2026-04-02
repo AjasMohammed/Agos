@@ -272,6 +272,49 @@ impl CapabilityEngine {
         crate::token::verify_token_signature(&self.signing_key, token)
     }
 
+    /// Issue a capability token for a child agent scoped to the intersection of
+    /// `parent_token`'s permissions and `requested`. Returns `Err` if the parent
+    /// token is invalid, expired, or the intersection is empty.
+    pub fn scope_for_child(
+        &self,
+        parent_token: &CapabilityToken,
+        requested: &PermissionSet,
+        ttl: Duration,
+    ) -> Result<CapabilityToken, AgentOSError> {
+        // 1. Verify parent token signature
+        if !self.verify_signature(parent_token) {
+            return Err(AgentOSError::InvalidToken {
+                reason: "Parent token has invalid HMAC signature".into(),
+            });
+        }
+
+        // 2. Check parent token expiry
+        if chrono::Utc::now() > parent_token.expires_at {
+            return Err(AgentOSError::TokenExpired);
+        }
+
+        // 3. Intersect parent permissions with what the child requested
+        let intersection = parent_token.permissions.intersect(requested);
+
+        // 4. Reject empty intersection — child asked for nothing the parent has
+        if intersection.is_empty() {
+            return Err(AgentOSError::PermissionDenied {
+                resource: "child_permissions".into(),
+                operation: "child requested permissions not held by parent".into(),
+            });
+        }
+
+        // 5. Issue a fresh token for the same agent/task scoped to the intersection
+        self.issue_token(
+            parent_token.task_id,
+            parent_token.agent_id,
+            parent_token.allowed_tools.clone(),
+            parent_token.allowed_intents.clone(),
+            intersection,
+            ttl,
+        )
+    }
+
     /// Sign arbitrary bytes using the kernel's HMAC-SHA256 signing key.
     /// Used by the EventBus to sign `EventMessage` signatures.
     pub fn sign_data(&self, data: &[u8]) -> Vec<u8> {
@@ -522,6 +565,100 @@ mod tests {
 
         // Token signed by engine1 must fail verification on engine2 (different key)
         assert!(!engine2.verify_signature(&token));
+    }
+
+    #[test]
+    fn test_scope_for_child_intersects_permissions() {
+        let engine = CapabilityEngine::new();
+        let agent_id = AgentID::new();
+        let task_id = TaskID::new();
+
+        // Parent has read + write + shell (fs.user_data = rw, shell.exec = x)
+        let mut parent_perms = PermissionSet::new();
+        parent_perms.grant("fs.user_data".into(), true, true, false, None); // read + write
+        parent_perms.grant("shell.exec".into(), false, false, true, None); // execute (shell)
+        engine.register_agent(agent_id, parent_perms.clone());
+
+        let parent_token = engine
+            .issue_token(
+                task_id,
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read, IntentTypeFlag::Write]),
+                parent_perms,
+                Duration::from_secs(300),
+            )
+            .unwrap();
+
+        // Child requests read + shell + network (network not in parent)
+        let mut child_requested = PermissionSet::new();
+        child_requested.grant("fs.user_data".into(), true, false, false, None); // read only
+        child_requested.grant("shell.exec".into(), false, false, true, None); // execute
+        child_requested.grant("network.outbound".into(), false, false, true, None); // NOT in parent
+
+        let child_token = engine
+            .scope_for_child(&parent_token, &child_requested, Duration::from_secs(300))
+            .unwrap();
+
+        // Verify child token is properly signed
+        assert!(engine.verify_signature(&child_token));
+
+        let child_perms = &child_token.permissions;
+        // read on fs.user_data — in both parent and child request
+        assert!(
+            child_perms.check("fs.user_data", PermissionOp::Read),
+            "child should have read on fs.user_data"
+        );
+        // shell execute — in both parent and child request
+        assert!(
+            child_perms.check("shell.exec", PermissionOp::Execute),
+            "child should have shell execute"
+        );
+        // network — NOT in parent, must be excluded
+        assert!(
+            !child_perms.check("network.outbound", PermissionOp::Execute),
+            "network not in parent — must be excluded"
+        );
+        // write on fs.user_data — in parent but NOT requested by child
+        assert!(
+            !child_perms.check("fs.user_data", PermissionOp::Write),
+            "write not requested by child — must be excluded"
+        );
+    }
+
+    #[test]
+    fn test_scope_for_child_empty_intersection_errors() {
+        let engine = CapabilityEngine::new();
+        let agent_id = AgentID::new();
+        let task_id = TaskID::new();
+
+        let mut parent_perms = PermissionSet::new();
+        parent_perms.grant("fs.user_data".into(), true, false, false, None);
+        engine.register_agent(agent_id, parent_perms.clone());
+
+        let parent_token = engine
+            .issue_token(
+                task_id,
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                parent_perms,
+                Duration::from_secs(300),
+            )
+            .unwrap();
+
+        // Child requests something the parent doesn't have
+        let mut child_requested = PermissionSet::new();
+        child_requested.grant("network.outbound".into(), false, false, true, None);
+        child_requested.grant("shell.exec".into(), false, false, true, None);
+
+        let result =
+            engine.scope_for_child(&parent_token, &child_requested, Duration::from_secs(300));
+        assert!(result.is_err(), "empty intersection should return error");
+        assert!(
+            matches!(result, Err(AgentOSError::PermissionDenied { .. })),
+            "should be PermissionDenied error"
+        );
     }
 
     #[test]

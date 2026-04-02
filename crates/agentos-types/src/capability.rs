@@ -348,6 +348,11 @@ impl PermissionSet {
         }
     }
 
+    /// Return true if this set has no grant entries (deny entries are ignored).
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub fn intersect(&self, other: &PermissionSet) -> Self {
         let mut intersected = Self::new();
         for e in &self.entries {
