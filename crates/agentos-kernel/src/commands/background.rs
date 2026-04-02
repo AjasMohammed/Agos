@@ -73,6 +73,8 @@ impl Kernel {
             max_iterations: None,
             trigger_source: None,
             autonomous: true,
+            parent_task_id: None,
+            spawn_depth: 0,
         };
 
         self.background_pool

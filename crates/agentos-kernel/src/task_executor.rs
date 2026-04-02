@@ -4633,6 +4633,8 @@ mod tests {
             max_iterations,
             trigger_source: None,
             autonomous: false,
+            parent_task_id: None,
+            spawn_depth: 0,
         }
     }
 
