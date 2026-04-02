@@ -6,12 +6,12 @@
 use crate::message::BusMessage;
 use crate::transport::{read_message, write_message};
 use agentos_types::AgentOSError;
+use rustls_pki_types::pem::PemObject;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls_pki_types::pem::PemObject;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
