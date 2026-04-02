@@ -22,6 +22,8 @@ pub struct TaskScheduler {
     dependency_graph: RwLock<TaskDependencyGraph>,
     /// Optional persistence backend for crash-safe task state restoration.
     state_store: Option<Arc<KernelStateStore>>,
+    /// Maps parent task IDs to their spawned child task IDs (for cascade-cancel).
+    child_map: RwLock<HashMap<TaskID, Vec<TaskID>>>,
 }
 
 #[derive(Eq, PartialEq)]
@@ -113,6 +115,7 @@ impl TaskScheduler {
             tasks: RwLock::new(HashMap::new()),
             dependency_graph: RwLock::new(TaskDependencyGraph::new()),
             state_store,
+            child_map: RwLock::new(HashMap::new()),
         }
     }
 
@@ -419,6 +422,28 @@ impl TaskScheduler {
         }
 
         timed_out
+    }
+
+    // --- Child-Map Methods ---
+
+    /// Register a child task under its parent for cascade-cancel.
+    pub async fn register_child(&self, parent_id: TaskID, child_id: TaskID) {
+        self.child_map
+            .write()
+            .await
+            .entry(parent_id)
+            .or_default()
+            .push(child_id);
+    }
+
+    /// Return all child task IDs registered under a parent.
+    pub async fn get_children(&self, task_id: &TaskID) -> Vec<TaskID> {
+        self.child_map
+            .read()
+            .await
+            .get(task_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     // --- Dependency Graph Methods ---
