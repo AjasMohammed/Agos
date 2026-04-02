@@ -13,13 +13,13 @@ priority: high
 
 # CLI Reference
 
-> Exhaustive reference for every `agentctl` command, subcommand, flag, and option — extracted directly from the clap definitions in `crates/agentos-cli/src/`.
+> Exhaustive reference for every `agentos` command, subcommand, flag, and option — extracted directly from the clap definitions in `crates/agentos-cli/src/`.
 
 ---
 
 ## Global Options
 
-These options apply to every `agentctl` invocation.
+These options apply to every `agentos` invocation.
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
@@ -30,7 +30,7 @@ These options apply to every `agentctl` invocation.
 **Example:**
 
 ```bash
-agentctl --config /etc/agentos/prod.toml status
+agentos --config /etc/agentos/prod.toml status
 ```
 
 ---
@@ -39,11 +39,11 @@ agentctl --config /etc/agentos/prod.toml status
 
 Most commands require a running kernel and communicate over a Unix domain socket (configured in the config file under `[bus].socket_path`). The following commands are **offline** and do not require a kernel connection:
 
-- `agentctl tool keygen`
-- `agentctl tool sign`
-- `agentctl tool verify`
-- `agentctl mcp serve`
-- `agentctl mcp list`
+- `agentos tool keygen`
+- `agentos tool sign`
+- `agentos tool verify`
+- `agentos mcp serve`
+- `agentos mcp list`
 
 All other commands will fail with a connection error if the kernel is not running.
 
@@ -63,11 +63,11 @@ The vault passphrase is resolved from:
 
 ```bash
 # Interactive passphrase prompt
-agentctl start
+agentos start
 
 # Via environment variable (CI/scripts)
 export AGENTOS_VAULT_PASSPHRASE="my-secret"
-agentctl start
+agentos start
 ```
 
 ---
@@ -81,7 +81,7 @@ Gracefully shuts down the running kernel. The kernel completes in-flight operati
 **Example:**
 
 ```bash
-agentctl stop
+agentos stop
 ```
 
 ---
@@ -105,13 +105,13 @@ Connect a new LLM agent to the kernel.
 **Example:**
 
 ```bash
-agentctl agent connect --provider openai --model gpt-4 --name analyst-1
+agentos agent connect --provider openai --model gpt-4 --name analyst-1
 
-agentctl agent connect --provider anthropic --model claude-sonnet-4-6 --name orchestrator \
+agentos agent connect --provider anthropic --model claude-sonnet-4-6 --name orchestrator \
   --role orchestrator --role security-monitor
 
 # Grant notify and interact permissions at connect time
-agentctl agent connect --provider anthropic --model claude-sonnet-4-6 --name worker \
+agentos agent connect --provider anthropic --model claude-sonnet-4-6 --name worker \
   --grant user.notify:w --grant user.interact:x
 ```
 
@@ -124,7 +124,7 @@ List all connected agents. Displays name, provider, and model.
 **Example:**
 
 ```bash
-agentctl agent list
+agentos agent list
 ```
 
 ### `agent disconnect`
@@ -138,7 +138,7 @@ Disconnect an agent by name.
 **Example:**
 
 ```bash
-agentctl agent disconnect analyst-1
+agentos agent disconnect analyst-1
 ```
 
 ### `agent message`
@@ -154,7 +154,7 @@ Send a direct message from one agent to another.
 **Example:**
 
 ```bash
-agentctl agent message --from orchestrator analyst-1 "Summarize the latest logs"
+agentos agent message --from orchestrator analyst-1 "Summarize the latest logs"
 ```
 
 ### `agent messages`
@@ -169,7 +169,7 @@ List recent messages for an agent.
 **Example:**
 
 ```bash
-agentctl agent messages analyst-1 --last 25
+agentos agent messages analyst-1 --last 25
 ```
 
 ### `agent group create`
@@ -184,7 +184,7 @@ Create a named agent group for broadcast messaging.
 **Example:**
 
 ```bash
-agentctl agent group create analysts --members "analyst-1,analyst-2,analyst-3"
+agentos agent group create analysts --members "analyst-1,analyst-2,analyst-3"
 ```
 
 ### `agent broadcast`
@@ -200,7 +200,7 @@ Broadcast a message to all agents in a group.
 **Example:**
 
 ```bash
-agentctl agent broadcast --from orchestrator analysts "Begin analysis phase"
+agentos agent broadcast --from orchestrator analysts "Begin analysis phase"
 ```
 
 ### `agent memory show`
@@ -214,7 +214,7 @@ Show the current context memory for an agent.
 **Example:**
 
 ```bash
-agentctl agent memory show analyst-1
+agentos agent memory show analyst-1
 ```
 
 ### `agent memory history`
@@ -229,8 +229,8 @@ Show the context memory version history for an agent.
 **Example:**
 
 ```bash
-agentctl agent memory history analyst-1
-agentctl agent memory history analyst-1 --limit 10
+agentos agent memory history analyst-1
+agentos agent memory history analyst-1 --limit 10
 ```
 
 ### `agent memory rollback`
@@ -245,7 +245,7 @@ Rollback an agent's context memory to a specific version.
 **Example:**
 
 ```bash
-agentctl agent memory rollback analyst-1 --version 3
+agentos agent memory rollback analyst-1 --version 3
 ```
 
 ### `agent memory clear`
@@ -259,7 +259,7 @@ Clear an agent's context memory entirely.
 **Example:**
 
 ```bash
-agentctl agent memory clear analyst-1
+agentos agent memory clear analyst-1
 ```
 
 ### `agent memory set`
@@ -274,7 +274,7 @@ Set an agent's context memory from a file.
 **Example:**
 
 ```bash
-agentctl agent memory set analyst-1 --file memory-snapshot.json
+agentos agent memory set analyst-1 --file memory-snapshot.json
 ```
 
 ---
@@ -294,10 +294,10 @@ Submit a task prompt for execution. If `--agent` is omitted, the kernel auto-rou
 
 ```bash
 # Auto-routed
-agentctl task run "Summarize the server logs from today"
+agentos task run "Summarize the server logs from today"
 
 # Assigned to a specific agent
-agentctl task run --agent analyst-1 "Find anomalies in the auth logs"
+agentos task run --agent analyst-1 "Find anomalies in the auth logs"
 ```
 
 ### `task list`
@@ -309,7 +309,7 @@ List all tasks with their ID, state, assigned agent, and prompt preview.
 **Example:**
 
 ```bash
-agentctl task list
+agentos task list
 ```
 
 ### `task logs`
@@ -323,7 +323,7 @@ View the execution logs for a specific task.
 **Example:**
 
 ```bash
-agentctl task logs a3b2c1d0-1234-5678-9abc-def012345678
+agentos task logs a3b2c1d0-1234-5678-9abc-def012345678
 ```
 
 ### `task trace`
@@ -339,9 +339,9 @@ Show the execution trace for a completed task. Includes tool calls, LLM inferenc
 **Example:**
 
 ```bash
-agentctl task trace a3b2c1d0-1234-5678-9abc-def012345678
-agentctl task trace a3b2c1d0-1234-5678-9abc-def012345678 --json
-agentctl task trace a3b2c1d0-1234-5678-9abc-def012345678 --iter 2
+agentos task trace a3b2c1d0-1234-5678-9abc-def012345678
+agentos task trace a3b2c1d0-1234-5678-9abc-def012345678 --json
+agentos task trace a3b2c1d0-1234-5678-9abc-def012345678 --iter 2
 ```
 
 ### `task traces`
@@ -356,9 +356,9 @@ List recent task execution traces.
 **Example:**
 
 ```bash
-agentctl task traces
-agentctl task traces --limit 20
-agentctl task traces --agent analyst-1
+agentos task traces
+agentos task traces --limit 20
+agentos task traces --agent analyst-1
 ```
 
 ### `task cancel`
@@ -372,7 +372,7 @@ Cancel a running task.
 **Example:**
 
 ```bash
-agentctl task cancel a3b2c1d0-1234-5678-9abc-def012345678
+agentos task cancel a3b2c1d0-1234-5678-9abc-def012345678
 ```
 
 ---
@@ -388,7 +388,7 @@ List all installed tools with name, version, trust tier, and description.
 **Example:**
 
 ```bash
-agentctl tool list
+agentos tool list
 ```
 
 ### `tool install`
@@ -402,7 +402,7 @@ Install a tool from its manifest file. The kernel validates the trust tier and s
 **Example:**
 
 ```bash
-agentctl tool install tools/user/my-tool.toml
+agentos tool install tools/user/my-tool.toml
 ```
 
 ### `tool remove`
@@ -416,7 +416,7 @@ Remove an installed tool by name.
 **Example:**
 
 ```bash
-agentctl tool remove my-tool
+agentos tool remove my-tool
 ```
 
 ### `tool keygen` (offline)
@@ -430,7 +430,7 @@ Generate a new Ed25519 keypair for tool signing. **Does not require a running ke
 **Example:**
 
 ```bash
-agentctl tool keygen --output my-keys.json
+agentos tool keygen --output my-keys.json
 ```
 
 The output file contains `pubkey`, `seed`, and `algorithm` fields. Keep the seed secret — only distribute the public key.
@@ -448,10 +448,10 @@ Sign a tool manifest with an Ed25519 private key. **Does not require a running k
 **Example:**
 
 ```bash
-agentctl tool sign --manifest tools/user/my-tool.toml --key my-keys.json
+agentos tool sign --manifest tools/user/my-tool.toml --key my-keys.json
 
 # Write to a separate file
-agentctl tool sign --manifest my-tool.toml --key my-keys.json --output my-tool-signed.toml
+agentos tool sign --manifest my-tool.toml --key my-keys.json --output my-tool-signed.toml
 ```
 
 ### `tool verify` (offline)
@@ -465,7 +465,7 @@ Verify the Ed25519 signature on a tool manifest. **Does not require a running ke
 **Example:**
 
 ```bash
-agentctl tool verify tools/user/my-tool.toml
+agentos tool verify tools/user/my-tool.toml
 ```
 
 ---
@@ -486,8 +486,8 @@ Store a secret. The value is entered interactively (hidden input) — never pass
 **Example:**
 
 ```bash
-agentctl secret set OPENAI_API_KEY
-agentctl secret set SLACK_TOKEN --scope agent:notifier
+agentos secret set OPENAI_API_KEY
+agentos secret set SLACK_TOKEN --scope agent:notifier
 ```
 
 ### `secret list`
@@ -499,7 +499,7 @@ List all stored secrets (metadata only — values are never shown).
 **Example:**
 
 ```bash
-agentctl secret list
+agentos secret list
 ```
 
 ### `secret revoke`
@@ -513,7 +513,7 @@ Delete a secret from the vault.
 **Example:**
 
 ```bash
-agentctl secret revoke OLD_API_KEY
+agentos secret revoke OLD_API_KEY
 ```
 
 ### `secret rotate`
@@ -527,7 +527,7 @@ Replace a secret's value. The new value is entered interactively (hidden input).
 **Example:**
 
 ```bash
-agentctl secret rotate OPENAI_API_KEY
+agentos secret rotate OPENAI_API_KEY
 ```
 
 ### `secret lockdown`
@@ -539,7 +539,7 @@ Emergency vault lockdown: revokes all proxy tokens and blocks new issuance. Use 
 **Example:**
 
 ```bash
-agentctl secret lockdown
+agentos secret lockdown
 ```
 
 ---
@@ -559,8 +559,8 @@ Grant a permission to an agent. Optionally set an expiration.
 **Example:**
 
 ```bash
-agentctl perm grant analyst-1 fs.user_data:rw
-agentctl perm grant worker network.outbound:x --expires 3600
+agentos perm grant analyst-1 fs.user_data:rw
+agentos perm grant worker network.outbound:x --expires 3600
 ```
 
 ### `perm revoke`
@@ -575,7 +575,7 @@ Revoke a permission from an agent.
 **Example:**
 
 ```bash
-agentctl perm revoke analyst-1 fs.user_data:rw
+agentos perm revoke analyst-1 fs.user_data:rw
 ```
 
 ### `perm show`
@@ -589,7 +589,7 @@ Show all permissions currently held by an agent.
 **Example:**
 
 ```bash
-agentctl perm show analyst-1
+agentos perm show analyst-1
 ```
 
 ### `perm profile create`
@@ -605,7 +605,7 @@ Create a reusable permission profile.
 **Example:**
 
 ```bash
-agentctl perm profile create reader "Read-only access" fs.user_data:r fs.app_logs:r
+agentos perm profile create reader "Read-only access" fs.user_data:r fs.app_logs:r
 ```
 
 ### `perm profile delete`
@@ -619,7 +619,7 @@ Delete a permission profile.
 **Example:**
 
 ```bash
-agentctl perm profile delete reader
+agentos perm profile delete reader
 ```
 
 ### `perm profile list`
@@ -631,7 +631,7 @@ List all permission profiles.
 **Example:**
 
 ```bash
-agentctl perm profile list
+agentos perm profile list
 ```
 
 ### `perm profile assign`
@@ -646,7 +646,7 @@ Assign a permission profile to an agent. Grants all permissions defined in the p
 **Example:**
 
 ```bash
-agentctl perm profile assign analyst-1 reader
+agentos perm profile assign analyst-1 reader
 ```
 
 ---
@@ -667,7 +667,7 @@ Create a new role.
 **Example:**
 
 ```bash
-agentctl role create log-reader --description "Can read all log files"
+agentos role create log-reader --description "Can read all log files"
 ```
 
 ### `role delete`
@@ -681,7 +681,7 @@ Delete a role.
 **Example:**
 
 ```bash
-agentctl role delete log-reader
+agentos role delete log-reader
 ```
 
 ### `role list`
@@ -693,7 +693,7 @@ List all roles with their descriptions and permissions.
 **Example:**
 
 ```bash
-agentctl role list
+agentos role list
 ```
 
 ### `role grant`
@@ -708,8 +708,8 @@ Grant a permission to a role.
 **Example:**
 
 ```bash
-agentctl role grant log-reader fs.app_logs:r
-agentctl role grant log-reader fs.system_logs:r
+agentos role grant log-reader fs.app_logs:r
+agentos role grant log-reader fs.system_logs:r
 ```
 
 ### `role revoke`
@@ -724,7 +724,7 @@ Revoke a permission from a role.
 **Example:**
 
 ```bash
-agentctl role revoke log-reader fs.system_logs:r
+agentos role revoke log-reader fs.system_logs:r
 ```
 
 ### `role assign`
@@ -739,7 +739,7 @@ Assign a role to an agent.
 **Example:**
 
 ```bash
-agentctl role assign analyst-1 log-reader
+agentos role assign analyst-1 log-reader
 ```
 
 ### `role remove`
@@ -754,7 +754,7 @@ Remove a role from an agent.
 **Example:**
 
 ```bash
-agentctl role remove analyst-1 log-reader
+agentos role remove analyst-1 log-reader
 ```
 
 ---
@@ -776,7 +776,7 @@ Create a recurring job on a cron schedule.
 **Example:**
 
 ```bash
-agentctl schedule create \
+agentos schedule create \
   --name daily-report \
   --cron "0 0 * * * *" \
   --agent analyst \
@@ -793,7 +793,7 @@ List all scheduled jobs with their cron expression, agent, state, next run time,
 **Example:**
 
 ```bash
-agentctl schedule list
+agentos schedule list
 ```
 
 ### `schedule pause`
@@ -807,7 +807,7 @@ Pause a scheduled job (prevents next execution).
 **Example:**
 
 ```bash
-agentctl schedule pause daily-report
+agentos schedule pause daily-report
 ```
 
 ### `schedule resume`
@@ -821,7 +821,7 @@ Resume a paused scheduled job.
 **Example:**
 
 ```bash
-agentctl schedule resume daily-report
+agentos schedule resume daily-report
 ```
 
 ### `schedule delete`
@@ -835,7 +835,7 @@ Delete a scheduled job permanently.
 **Example:**
 
 ```bash
-agentctl schedule delete daily-report
+agentos schedule delete daily-report
 ```
 
 ---
@@ -858,7 +858,7 @@ Launch a one-shot background task.
 **Example:**
 
 ```bash
-agentctl bg run --name process-data --agent worker --task "Process all CSV files" --detach
+agentos bg run --name process-data --agent worker --task "Process all CSV files" --detach
 ```
 
 ### `bg list`
@@ -870,7 +870,7 @@ List all background tasks with name, agent, state, start time, and completion ti
 **Example:**
 
 ```bash
-agentctl bg list
+agentos bg list
 ```
 
 ### `bg logs`
@@ -885,8 +885,8 @@ View logs for a background task.
 **Example:**
 
 ```bash
-agentctl bg logs process-data
-agentctl bg logs process-data --follow
+agentos bg logs process-data
+agentos bg logs process-data --follow
 ```
 
 ### `bg kill`
@@ -900,7 +900,7 @@ Kill a running background task.
 **Example:**
 
 ```bash
-agentctl bg kill process-data
+agentos bg kill process-data
 ```
 
 ---
@@ -914,7 +914,7 @@ Displays kernel uptime, connected agent count, active tasks, installed tools, an
 **Example:**
 
 ```bash
-agentctl status
+agentos status
 ```
 
 ---
@@ -934,7 +934,7 @@ View recent audit log entries.
 **Example:**
 
 ```bash
-agentctl audit logs --last 100
+agentos audit logs --last 100
 ```
 
 ### `audit verify`
@@ -948,8 +948,8 @@ Verify the Merkle hash chain integrity of the audit log. Detects any tampering o
 **Example:**
 
 ```bash
-agentctl audit verify
-agentctl audit verify --from 1000
+agentos audit verify
+agentos audit verify --from 1000
 ```
 
 ### `audit snapshots`
@@ -963,7 +963,7 @@ List context snapshots for a specific task.
 **Example:**
 
 ```bash
-agentctl audit snapshots --task a3b2c1d0-1234-5678-9abc-def012345678
+agentos audit snapshots --task a3b2c1d0-1234-5678-9abc-def012345678
 ```
 
 ### `audit export`
@@ -978,8 +978,8 @@ Export the full audit chain as JSONL.
 **Example:**
 
 ```bash
-agentctl audit export --output audit-dump.jsonl
-agentctl audit export --limit 500
+agentos audit export --output audit-dump.jsonl
+agentos audit export --limit 500
 ```
 
 ### `audit rollback`
@@ -994,7 +994,7 @@ Roll back a task's context to a saved snapshot.
 **Example:**
 
 ```bash
-agentctl audit rollback --task a3b2c1d0-... --snapshot snap_0003
+agentos audit rollback --task a3b2c1d0-... --snapshot snap_0003
 ```
 
 ---
@@ -1014,7 +1014,7 @@ Install a pipeline from a YAML definition file.
 **Example:**
 
 ```bash
-agentctl pipeline install pipelines/data-processing.yaml
+agentos pipeline install pipelines/data-processing.yaml
 ```
 
 ### `pipeline list`
@@ -1026,7 +1026,7 @@ List all installed pipelines with name, version, step count, and description.
 **Example:**
 
 ```bash
-agentctl pipeline list
+agentos pipeline list
 ```
 
 ### `pipeline run`
@@ -1042,8 +1042,8 @@ Execute a pipeline with an input string.
 **Example:**
 
 ```bash
-agentctl pipeline run data-processing --input "Process Q1 reports"
-agentctl pipeline run data-processing --input "Process Q1 reports" --detach
+agentos pipeline run data-processing --input "Process Q1 reports"
+agentos pipeline run data-processing --input "Process Q1 reports" --detach
 ```
 
 ### `pipeline status`
@@ -1058,7 +1058,7 @@ Get the status of a specific pipeline run, including per-step results.
 **Example:**
 
 ```bash
-agentctl pipeline status data-processing --run-id abc123
+agentos pipeline status data-processing --run-id abc123
 ```
 
 ### `pipeline logs`
@@ -1074,7 +1074,7 @@ View step-level logs for a pipeline run.
 **Example:**
 
 ```bash
-agentctl pipeline logs data-processing --run-id abc123 --step parse-csv
+agentos pipeline logs data-processing --run-id abc123 --step parse-csv
 ```
 
 ### `pipeline remove`
@@ -1088,7 +1088,7 @@ Remove an installed pipeline.
 **Example:**
 
 ```bash
-agentctl pipeline remove data-processing
+agentos pipeline remove data-processing
 ```
 
 ---
@@ -1106,8 +1106,8 @@ Show cost report with token usage, USD cost, and tool calls — per agent and to
 **Example:**
 
 ```bash
-agentctl cost show
-agentctl cost show --agent analyst-1
+agentos cost show
+agentos cost show --agent analyst-1
 ```
 
 ### `cost retrieval`
@@ -1119,7 +1119,7 @@ Show retrieval refresh/reuse efficiency metrics — how often the kernel refresh
 **Example:**
 
 ```bash
-agentctl cost retrieval
+agentos cost retrieval
 ```
 
 ---
@@ -1137,7 +1137,7 @@ List all currently held resource locks with resource ID, mode, holder, and TTL.
 **Example:**
 
 ```bash
-agentctl resource list
+agentos resource list
 ```
 
 ### `resource release`
@@ -1152,7 +1152,7 @@ Forcibly release a specific resource lock.
 **Example:**
 
 ```bash
-agentctl resource release --resource "/data/reports.csv" --agent analyst-1
+agentos resource release --resource "/data/reports.csv" --agent analyst-1
 ```
 
 ### `resource contention`
@@ -1164,7 +1164,7 @@ Show resource contention statistics: which resources have waiters and blocked ag
 **Example:**
 
 ```bash
-agentctl resource contention
+agentos resource contention
 ```
 
 ### `resource release-all`
@@ -1178,7 +1178,7 @@ Release all resource locks held by an agent.
 **Example:**
 
 ```bash
-agentctl resource release-all --agent worker
+agentos resource release-all --agent worker
 ```
 
 ---
@@ -1198,8 +1198,8 @@ List escalations. By default, shows only pending (unresolved) escalations.
 **Example:**
 
 ```bash
-agentctl escalation list
-agentctl escalation list --all
+agentos escalation list
+agentos escalation list --all
 ```
 
 ### `escalation get`
@@ -1213,7 +1213,7 @@ Show full details of a specific escalation including reason, urgency, blocking s
 **Example:**
 
 ```bash
-agentctl escalation get 42
+agentos escalation get 42
 ```
 
 ### `escalation resolve`
@@ -1228,8 +1228,8 @@ Resolve an escalation with a decision. If the escalation was blocking a task, th
 **Example:**
 
 ```bash
-agentctl escalation resolve 42 --decision "Approved"
-agentctl escalation resolve 42 -d "Denied"
+agentos escalation resolve 42 --decision "Approved"
+agentos escalation resolve 42 -d "Denied"
 ```
 
 ---
@@ -1249,7 +1249,7 @@ List all snapshots for a task.
 **Example:**
 
 ```bash
-agentctl snapshot list --task a3b2c1d0-1234-5678-9abc-def012345678
+agentos snapshot list --task a3b2c1d0-1234-5678-9abc-def012345678
 ```
 
 ### `snapshot rollback`
@@ -1264,8 +1264,8 @@ Roll back a task to a specific snapshot or the latest one.
 **Example:**
 
 ```bash
-agentctl snapshot rollback --task a3b2c1d0-... --snapshot snap_0002
-agentctl snapshot rollback --task a3b2c1d0-...
+agentos snapshot rollback --task a3b2c1d0-... --snapshot snap_0002
+agentos snapshot rollback --task a3b2c1d0-...
 ```
 
 ---
@@ -1285,7 +1285,7 @@ List all scratchpad pages for an agent.
 **Example:**
 
 ```bash
-agentctl scratchpad list --agent analyst-1
+agentos scratchpad list --agent analyst-1
 ```
 
 ### `scratchpad read`
@@ -1300,7 +1300,7 @@ Read a scratchpad page by title.
 **Example:**
 
 ```bash
-agentctl scratchpad read --title "Research Notes" --agent analyst-1
+agentos scratchpad read --title "Research Notes" --agent analyst-1
 ```
 
 ### `scratchpad delete`
@@ -1315,7 +1315,7 @@ Delete a scratchpad page.
 **Example:**
 
 ```bash
-agentctl scratchpad delete --title "Scratch" --agent analyst-1
+agentos scratchpad delete --title "Scratch" --agent analyst-1
 ```
 
 ### `scratchpad graph`
@@ -1331,8 +1331,8 @@ Show the wikilink graph for a scratchpad page, including backlinks and forward l
 **Example:**
 
 ```bash
-agentctl scratchpad graph --title "Research Notes" --agent analyst-1
-agentctl scratchpad graph --title "Research Notes" --agent analyst-1 --depth 3
+agentos scratchpad graph --title "Research Notes" --agent analyst-1
+agentos scratchpad graph --title "Research Notes" --agent analyst-1 --depth 3
 ```
 
 ---
@@ -1356,9 +1356,9 @@ Subscribe an agent to an event type with optional filtering and throttling.
 **Example:**
 
 ```bash
-agentctl event subscribe --agent analyst --event AgentAdded
+agentos event subscribe --agent analyst --event AgentAdded
 
-agentctl event subscribe --agent monitor --event CPUSpikeDetected \
+agentos event subscribe --agent monitor --event CPUSpikeDetected \
   --filter "cpu_percent > 90 AND severity == Critical" \
   --throttle "once_per:30s" \
   --priority high
@@ -1375,7 +1375,7 @@ Remove an event subscription.
 **Example:**
 
 ```bash
-agentctl event unsubscribe a3b2c1d0-1234-5678-9abc-def012345678
+agentos event unsubscribe a3b2c1d0-1234-5678-9abc-def012345678
 ```
 
 ### `event subscriptions list`
@@ -1389,8 +1389,8 @@ List all subscriptions, optionally filtered by agent.
 **Example:**
 
 ```bash
-agentctl event subscriptions list
-agentctl event subscriptions list --agent analyst
+agentos event subscriptions list
+agentos event subscriptions list --agent analyst
 ```
 
 ### `event subscriptions show`
@@ -1404,7 +1404,7 @@ Show full details of a subscription.
 **Example:**
 
 ```bash
-agentctl event subscriptions show --id a3b2c1d0-...
+agentos event subscriptions show --id a3b2c1d0-...
 ```
 
 ### `event subscriptions enable`
@@ -1418,7 +1418,7 @@ Re-enable a disabled subscription.
 **Example:**
 
 ```bash
-agentctl event subscriptions enable --id a3b2c1d0-...
+agentos event subscriptions enable --id a3b2c1d0-...
 ```
 
 ### `event subscriptions disable`
@@ -1432,7 +1432,7 @@ Disable a subscription without removing it.
 **Example:**
 
 ```bash
-agentctl event subscriptions disable --id a3b2c1d0-...
+agentos event subscriptions disable --id a3b2c1d0-...
 ```
 
 ### `event history`
@@ -1446,8 +1446,8 @@ View recent event history.
 **Example:**
 
 ```bash
-agentctl event history
-agentctl event history --last 100
+agentos event history
+agentos event history --last 100
 ```
 
 ---
@@ -1467,7 +1467,7 @@ Show an agent's cryptographic identity: public key and signing key status.
 **Example:**
 
 ```bash
-agentctl identity show --agent analyst-1
+agentos identity show --agent analyst-1
 ```
 
 ### `identity revoke`
@@ -1481,7 +1481,7 @@ Revoke an agent's cryptographic identity and all associated permissions. This is
 **Example:**
 
 ```bash
-agentctl identity revoke --agent compromised-agent
+agentos identity revoke --agent compromised-agent
 ```
 
 ---
@@ -1499,7 +1499,7 @@ List all registered hardware devices with their ID, type, status, and number of 
 **Example:**
 
 ```bash
-agentctl hal list
+agentos hal list
 ```
 
 ### `hal register`
@@ -1514,7 +1514,7 @@ Register a new hardware device. The device enters quarantine pending approval.
 **Example:**
 
 ```bash
-agentctl hal register --id gpu:0 --type nvidia-rtx-4090
+agentos hal register --id gpu:0 --type nvidia-rtx-4090
 ```
 
 ### `hal approve`
@@ -1529,7 +1529,7 @@ Approve a quarantined device for a specific agent.
 **Example:**
 
 ```bash
-agentctl hal approve gpu:0 --agent worker
+agentos hal approve gpu:0 --agent worker
 ```
 
 ### `hal deny`
@@ -1543,7 +1543,7 @@ Permanently deny a device for all agents. The device cannot be approved until re
 **Example:**
 
 ```bash
-agentctl hal deny usb:1
+agentos hal deny usb:1
 ```
 
 ### `hal revoke`
@@ -1558,7 +1558,7 @@ Revoke a specific agent's access to a device.
 **Example:**
 
 ```bash
-agentctl hal revoke gpu:0 --agent worker
+agentos hal revoke gpu:0 --agent worker
 ```
 
 ### `hal query`
@@ -1574,16 +1574,16 @@ Query a HAL driver directly. The driver dispatches the request based on the JSON
 
 ```bash
 # List USB filesystems
-agentctl hal query usb-storage '{"action": "list"}'
+agentos hal query usb-storage '{"action": "list"}'
 
 # Mount a USB partition
-agentctl hal query usb-storage '{"action": "mount", "device": "sdb1"}'
+agentos hal query usb-storage '{"action": "mount", "device": "sdb1"}'
 
 # Unmount
-agentctl hal query usb-storage '{"action": "unmount", "device": "sdb1"}'
+agentos hal query usb-storage '{"action": "unmount", "device": "sdb1"}'
 
 # Eject (power off the drive)
-agentctl hal query usb-storage '{"action": "eject", "device": "sdb1"}'
+agentos hal query usb-storage '{"action": "eject", "device": "sdb1"}'
 ```
 
 > **Permission:** Requires `hardware.usb-storage:x` and the device `usb-storage:<device>` must be approved in the HAL device registry. See [[18-Advanced Operations#USB Storage Driver]] for full details.
@@ -1601,8 +1601,8 @@ Check if the kernel health endpoint is responding. Designed for use by Docker HE
 **Example:**
 
 ```bash
-agentctl healthz
-agentctl healthz --port 9091
+agentos healthz
+agentos healthz --port 9091
 ```
 
 ---
@@ -1616,7 +1616,7 @@ Controls the kernel's runtime logging configuration, including log level and for
 **Example:**
 
 ```bash
-agentctl log
+agentos log
 ```
 
 ---
@@ -1637,8 +1637,8 @@ List notifications from the inbox.
 **Example:**
 
 ```bash
-agentctl notifications list
-agentctl notifications list --unread --limit 20
+agentos notifications list
+agentos notifications list --unread --limit 20
 ```
 
 ### `notifications read`
@@ -1652,7 +1652,7 @@ Show the full body of a notification and mark it as read. For `Question` message
 **Example:**
 
 ```bash
-agentctl notifications read a3b2c1d0-1234-5678-9abc-def012345678
+agentos notifications read a3b2c1d0-1234-5678-9abc-def012345678
 ```
 
 ### `notifications respond`
@@ -1667,7 +1667,7 @@ Submit a response to an interactive `Question` notification. If the question was
 **Example:**
 
 ```bash
-agentctl notifications respond a3b2c1d0-... --response "Yes, proceed"
+agentos notifications respond a3b2c1d0-... --response "Yes, proceed"
 ```
 
 ### `notifications watch`
@@ -1679,7 +1679,7 @@ Poll for new notifications every 5 seconds. Silently registers existing unread n
 **Example:**
 
 ```bash
-agentctl notifications watch
+agentos notifications watch
 ```
 
 ---
@@ -1705,12 +1705,12 @@ Register a new external delivery channel.
 
 ```bash
 # Telegram: first store token in vault, then connect
-agentctl secret set TELEGRAM_BOT_TOKEN
-agentctl channel connect --kind telegram --external-id "123456789" \
+agentos secret set TELEGRAM_BOT_TOKEN
+agentos channel connect --kind telegram --external-id "123456789" \
   --display-name "@myhandle" --credential-key TELEGRAM_BOT_TOKEN
 
 # ntfy
-agentctl channel connect --kind ntfy --external-id "agentos-alerts" \
+agentos channel connect --kind ntfy --external-id "agentos-alerts" \
   --display-name "ntfy/agentos-alerts"
 ```
 
@@ -1723,7 +1723,7 @@ List all registered channels with ID, kind, display name, external ID, and conne
 **Example:**
 
 ```bash
-agentctl channel list
+agentos channel list
 ```
 
 ### `channel test`
@@ -1737,7 +1737,7 @@ Send a test notification to a channel to verify delivery is working.
 **Example:**
 
 ```bash
-agentctl channel test a3b2c1d0-1234-5678-9abc-def012345678
+agentos channel test a3b2c1d0-1234-5678-9abc-def012345678
 ```
 
 ### `channel disconnect`
@@ -1751,7 +1751,7 @@ Remove a registered channel.
 **Example:**
 
 ```bash
-agentctl channel disconnect a3b2c1d0-1234-5678-9abc-def012345678
+agentos channel disconnect a3b2c1d0-1234-5678-9abc-def012345678
 ```
 
 ---
@@ -1768,10 +1768,10 @@ Expose all registered AgentOS tools as an MCP server over stdin/stdout. Intended
 
 ```bash
 # Used by MCP clients automatically (stdio transport)
-agentctl mcp serve
+agentos mcp serve
 
 # Test from the shell
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | agentctl mcp serve
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | agentos mcp serve
 ```
 
 No flags. The command reads tool manifests directly from disk — no running kernel required.
@@ -1781,8 +1781,8 @@ No flags. The command reads tool manifests directly from disk — no running ker
 List all MCP servers configured in the current config file. Shows config values only — does not check live connection state.
 
 ```bash
-agentctl mcp list
-agentctl --config /etc/agentos/prod.toml mcp list
+agentos mcp list
+agentos --config /etc/agentos/prod.toml mcp list
 ```
 
 ### `mcp status`
@@ -1790,7 +1790,7 @@ agentctl --config /etc/agentos/prod.toml mcp list
 Query the running kernel for live health of all configured MCP server connections. Requires a running kernel.
 
 ```bash
-agentctl mcp status
+agentos mcp status
 ```
 
 **Output:**
@@ -1825,13 +1825,13 @@ Start the AgentOS web UI. Boots the kernel internally and serves the dashboard a
 **Example:**
 
 ```bash
-agentctl web serve
-agentctl web serve --port 3000 --host 0.0.0.0
+agentos web serve
+agentos web serve --port 3000 --host 0.0.0.0
 ```
 
 The server prints `Web UI: http://<host>:<port>` on startup. Press Ctrl-C to shut down both the web server and the kernel gracefully. SIGTERM is also handled (for systemd).
 
-> **Note:** `web serve` boots its own embedded kernel. Do not run both `agentctl start` and `agentctl web serve` simultaneously — they would conflict on the bus socket and vault.
+> **Note:** `web serve` boots its own embedded kernel. Do not run both `agentos start` and `agentos web serve` simultaneously — they would conflict on the bus socket and vault.
 
 ---
 
@@ -1867,13 +1867,13 @@ Permissions follow the format `<resource>:<flags>` where flags are `r` (read), `
 
 ```bash
 # Read and write user data
-agentctl perm grant analyst fs.user_data:rw
+agentos perm grant analyst fs.user_data:rw
 
 # Execute outbound network calls
-agentctl perm grant worker network.outbound:x
+agentos perm grant worker network.outbound:x
 
 # Read-only access to GPU info
-agentctl perm grant monitor hardware.gpu:r
+agentos perm grant monitor hardware.gpu:r
 ```
 
 ---

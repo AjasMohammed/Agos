@@ -11,3 +11,6 @@ chrono = { workspace = true }
 cron = { workspace = true }
 thiserror = { workspace = true }
 hex = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }

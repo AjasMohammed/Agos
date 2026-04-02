@@ -42,13 +42,15 @@ pub async fn list(State(state): State<AppState>, jar: CookieJar) -> Response {
             .unwrap_or_default()
     };
 
-    let agents: Vec<_> = {
-        let registry = state.kernel.agent_registry.read().await;
-        registry
-            .list_online()
+    let agents: Vec<_> = match state.service.list_agents().await {
+        Ok(list) => list
             .iter()
             .map(|a| context! { name => a.name.clone(), model => a.model.clone() })
-            .collect()
+            .collect(),
+        Err(e) => {
+            tracing::error!("Failed to list agents for chat: {e}");
+            vec![]
+        }
     };
 
     let sessions_ctx: Vec<_> = sessions
@@ -107,9 +109,15 @@ pub async fn new_session(
 
     // Validate the agent exists and is online before touching the database.
     {
-        let registry = state.kernel.agent_registry.read().await;
-        match registry.get_by_name(&agent_name) {
-            Some(a) if a.status != agentos_types::AgentStatus::Offline => {}
+        let agents = match state.service.list_agents().await {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!("Failed to list agents for validation: {e}");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
+            }
+        };
+        match agents.iter().find(|a| a.name == agent_name) {
+            Some(a) if a.status != "offline" => {}
             Some(_) => {
                 return (StatusCode::BAD_REQUEST, "Agent is offline").into_response();
             }
@@ -146,6 +154,9 @@ pub async fn new_session(
     };
 
     // Run inference directly against the agent's LLM (no task created).
+    // TODO: Migrate to state.service.chat_send() once ChatRequest supports passing
+    // through tool call results and the service method exposes a non-streaming path
+    // that returns tool_calls alongside the assistant response.
     let result = match state
         .kernel
         .chat_infer_with_tools(&agent_name, &[], &message)
@@ -349,6 +360,9 @@ pub async fn message_stream(
     // (e.g. agent not found, no LLM adapter) that the kernel method doesn't cover.
     let tx_err = tx.clone();
 
+    // TODO: Migrate to state.service once KernelService grows a streaming chat method
+    // that accepts a sender channel (mpsc::Sender<ChatStreamEvent>) and returns a
+    // stream of chunks. Currently chat_send() on the trait is non-streaming only.
     let kernel = state.kernel.clone();
     let agent_name = session.agent_name.clone();
     let chat_store = Arc::clone(&state.chat_store);

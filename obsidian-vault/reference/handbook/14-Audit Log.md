@@ -31,7 +31,7 @@ Key properties:
 ## Querying Audit Logs
 
 ```
-agentctl audit logs [--last <N>]
+agentos audit logs [--last <N>]
 ```
 
 Retrieves the most recent `N` entries (default: 50).
@@ -46,7 +46,7 @@ TIMESTAMP                      EVENT TYPE                SEVERITY   DETAILS
 2026-03-17T10:23:02.001234Z    LLMInferenceCompleted     Info       {"model":"llama3.2","t...
 ```
 
-Details are truncated to 30 characters in the terminal. Use `agentctl audit export` for full JSON.
+Details are truncated to 30 characters in the terminal. Use `agentos audit export` for full JSON.
 
 ---
 
@@ -283,7 +283,7 @@ All 83 event types, grouped by category:
 ## Merkle Chain Verification
 
 ```
-agentctl audit verify [--from <seq>]
+agentos audit verify [--from <seq>]
 ```
 
 Verifies the SHA-256 hash chain from sequence number `seq` (default: the beginning). Each entry's `entry_hash` is computed over all fields including `prev_hash`. Verification walks the chain and recomputes every hash.
@@ -307,17 +307,17 @@ The first invalid sequence number is reported, indicating the earliest tampered 
 ## Exporting the Audit Chain
 
 ```
-agentctl audit export [--limit N] [--output <path>]
+agentos audit export [--limit N] [--output <path>]
 ```
 
 Exports the full audit log (or the most recent `N` entries) as newline-delimited JSON (JSONL). Each line is one `AuditEntry` serialized to JSON.
 
 ```bash
 # Export all entries to a file
-agentctl audit export --output /tmp/audit-backup.jsonl
+agentos audit export --output /tmp/audit-backup.jsonl
 
 # Export last 1000 entries to stdout
-agentctl audit export --limit 1000
+agentos audit export --limit 1000
 ```
 
 ---
@@ -325,7 +325,7 @@ agentctl audit export --limit 1000
 ## Context Snapshots
 
 ```
-agentctl audit snapshots --task <task-id>
+agentos audit snapshots --task <task-id>
 ```
 
 Lists all context snapshots saved for a specific task.
@@ -348,19 +348,19 @@ snap_0002       4128         1742205892
 ## Rolling Back
 
 ```
-agentctl audit rollback --task <task-id> [--snapshot <ref>]
+agentos audit rollback --task <task-id> [--snapshot <ref>]
 ```
 
 Restores a task's context window to the state saved in the specified snapshot. If `--snapshot` is omitted, the most recent snapshot is used.
 
-The same operation is also available via the dedicated `agentctl snapshot rollback` command.
+The same operation is also available via the dedicated `agentos snapshot rollback` command.
 
 ```bash
 # Roll back to the latest snapshot
-agentctl audit rollback --task abc123
+agentos audit rollback --task abc123
 
 # Roll back to a specific snapshot
-agentctl audit rollback --task abc123 --snapshot snap_0001
+agentos audit rollback --task abc123 --snapshot snap_0001
 ```
 
 After rollback, the task context is restored and can resume from that point.

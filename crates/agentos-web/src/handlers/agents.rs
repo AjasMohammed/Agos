@@ -16,22 +16,27 @@ pub async fn list(
     Query(query): Query<ListQuery>,
     jar: CookieJar,
 ) -> Response {
-    let registry = state.kernel.agent_registry.read().await;
-    let agents: Vec<_> = registry
-        .list_online()
+    let agent_list = match state.service.list_agents().await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!("Failed to list agents: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to list agents").into_response();
+        }
+    };
+    let agents: Vec<_> = agent_list
         .iter()
         .map(|a| {
             context! {
                 id => a.id.to_string(),
                 name => a.name.clone(),
-                provider => format!("{:?}", a.provider),
+                provider => a.provider.clone(),
                 model => a.model.clone(),
-                status => format!("{:?}", a.status),
-                description => a.description.clone(),
+                status => a.status.clone(),
+                description => Option::<String>::None,
                 roles => a.roles.clone(),
-                current_task => a.current_task.as_ref().map(|t| t.to_string()),
-                created_at => a.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                last_active => a.last_active.format("%Y-%m-%d %H:%M:%S").to_string(),
+                current_task => Option::<String>::None,
+                created_at => a.connected_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                last_active => a.connected_at.format("%Y-%m-%d %H:%M:%S").to_string(),
             }
         })
         .collect();
@@ -64,28 +69,18 @@ pub async fn connect(
     State(state): State<AppState>,
     axum::Form(form): axum::Form<ConnectForm>,
 ) -> Response {
-    use agentos_types::LLMProvider;
+    use agentos_api::types::ConnectAgentRequest;
 
-    let provider = match form.provider.to_lowercase().as_str() {
-        "ollama" => LLMProvider::Ollama,
-        "openai" => LLMProvider::OpenAI,
-        "anthropic" => LLMProvider::Anthropic,
-        "gemini" => LLMProvider::Gemini,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                "Unknown provider. Must be one of: ollama, openai, anthropic, gemini",
-            )
-                .into_response();
-        }
+    let req = ConnectAgentRequest {
+        name: form.name.clone(),
+        provider: form.provider.clone(),
+        model: form.model.clone(),
+        base_url: None,
+        roles: vec![],
     };
 
-    match state
-        .kernel
-        .api_connect_agent(form.name.clone(), provider, form.model, None, vec![])
-        .await
-    {
-        Ok(()) => {
+    match state.service.connect_agent(req).await {
+        Ok(_) => {
             let mut response = axum::response::Redirect::to("/agents").into_response();
             let trigger = serde_json::json!({
                 "showToast": {"message": format!("Agent '{}' connected", form.name), "type": "success"}
@@ -96,8 +91,8 @@ pub async fn connect(
             }
             response
         }
-        Err(msg) => {
-            tracing::error!(agent = %form.name, error = %msg, "Failed to connect agent");
+        Err(e) => {
+            tracing::error!(agent = %form.name, error = %e, "Failed to connect agent");
             let mut response = (StatusCode::BAD_REQUEST, "Failed to connect agent").into_response();
             response.headers_mut().insert(
                 "HX-Trigger",
@@ -111,13 +106,17 @@ pub async fn connect(
 }
 
 pub async fn disconnect(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    let agent_id = {
-        let registry = state.kernel.agent_registry.read().await;
-        registry.get_by_name(&name).map(|a| a.id)
+    // Look up agent ID via the service agent list.
+    let agent_id = match state.service.list_agents().await {
+        Ok(agents) => agents.into_iter().find(|a| a.name == name).map(|a| a.id),
+        Err(e) => {
+            tracing::error!(agent = %name, error = %e, "Failed to look up agent for disconnect");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
     };
 
     match agent_id {
-        Some(id) => match state.kernel.api_disconnect_agent(id).await {
+        Some(id) => match state.service.disconnect_agent(id).await {
             Ok(()) => {
                 let mut response = StatusCode::NO_CONTENT.into_response();
                 response.headers_mut().insert(
@@ -128,11 +127,9 @@ pub async fn disconnect(State(state): State<AppState>, Path(name): Path<String>)
                 );
                 response
             }
-            // Agent may have been disconnected by a concurrent request between the
-            // read-lock lookup above and the write-lock acquisition inside the kernel.
-            Err(msg) if msg.contains("not found") => StatusCode::NOT_FOUND.into_response(),
-            Err(msg) => {
-                tracing::error!(agent = %name, error = %msg, "Failed to disconnect agent");
+            Err(agentos_api::ApiError::NotFound(_)) => StatusCode::NOT_FOUND.into_response(),
+            Err(e) => {
+                tracing::error!(agent = %name, error = %e, "Failed to disconnect agent");
                 let mut response = StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 response.headers_mut().insert(
                     "HX-Trigger",

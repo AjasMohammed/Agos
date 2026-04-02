@@ -342,7 +342,7 @@ pub async fn handle(client: &mut BusClient, command: ToolCommands) -> anyhow::Re
 
 // ── Registry subcommand implementations ────────────────────────────────
 
-/// `agentctl tool search <query>` — search the registry.
+/// `agentos tool search <query>` — search the registry.
 async fn cmd_search(query: &str, limit: u32, registry: Option<&str>) -> anyhow::Result<()> {
     let base = resolve_registry_url(registry);
     let client = http_client()?;
@@ -387,7 +387,7 @@ async fn cmd_search(query: &str, limit: u32, registry: Option<&str>) -> anyhow::
     Ok(())
 }
 
-/// `agentctl tool add <name>` — fetch from registry, verify, write to tools/user/, hot-load.
+/// `agentos tool add <name>` — fetch from registry, verify, write to tools/user/, hot-load.
 async fn cmd_add(
     client: &mut BusClient,
     name: &str,
@@ -496,7 +496,7 @@ async fn cmd_add(
     Ok(())
 }
 
-/// `agentctl tool publish <manifest>` — publish a tool to the registry.
+/// `agentos tool publish <manifest>` — publish a tool to the registry.
 async fn cmd_publish(
     manifest_path: &std::path::Path,
     key_path: Option<&std::path::Path>,

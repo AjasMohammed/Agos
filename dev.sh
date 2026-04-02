@@ -46,4 +46,4 @@ echo ""
 
 # `web serve` boots the kernel internally and starts the web server in one process.
 # Ctrl+C triggers graceful shutdown of both.
-exec ./target/debug/agentctl --config "$CONFIG" web serve --host "$HOST" --port "$PORT"
+exec ./target/debug/agentos --config "$CONFIG" web serve --host "$HOST" --port "$PORT"

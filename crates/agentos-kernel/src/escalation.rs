@@ -56,7 +56,7 @@ fn default_metadata() -> serde_json::Value {
 /// Manages escalation requests from agents to human operators.
 ///
 /// Stores pending escalations in memory (optionally backed by SQLite persistence).
-/// Provides list/resolve operations for the CLI (`agentctl escalation list/resolve`).
+/// Provides list/resolve operations for the CLI (`agentos escalation list/resolve`).
 ///
 /// Escalations auto-deny after `DEFAULT_ESCALATION_TIMEOUT_SECS` (5 minutes)
 /// if not resolved by a human operator (Spec §12: "Auto-action on expiry: deny").

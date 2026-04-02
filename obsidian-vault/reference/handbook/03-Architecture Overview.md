@@ -17,7 +17,7 @@ status: complete
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                          agentctl (CLI)                             │
+│                          agentos (CLI)                             │
 │                     clap-based, 17+ commands                        │
 └──────────────────────────────┬──────────────────────────────────────┘
                                │ Unix Domain Socket (length-prefixed JSON)
@@ -25,6 +25,16 @@ status: complete
 ┌──────────────────────────────▼──────────────────────────────────────┐
 │                         agentos-bus                                  │
 │                    IPC Message Transport                             │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │
+┌─────────────────────────────────────────────────────────────────────┐
+│                       agentos-api (optional)                        │
+│                  REST API + WebSocket Server                         │
+│                                                                     │
+│  GET/POST /api/v1/*  │  GET /api/v1/ws?token=  │  API Key Auth      │
+│  30+ REST endpoints  │  Real-time events, chat  │  Bearer tokens     │
+│                      │  streaming, task control  │  HMAC-SHA256 keys  │
+│                 KernelService trait (abstraction layer)              │
 └──────────────────────────────┬──────────────────────────────────────┘
                                │
 ┌──────────────────────────────▼──────────────────────────────────────┐
@@ -63,7 +73,7 @@ status: complete
 
 ## Crate Dependency Graph
 
-The 17 crates form a layered dependency tree. Dependencies flow downward — no circular dependencies.
+The 18 crates form a layered dependency tree. Dependencies flow downward — no circular dependencies.
 
 ```
 agentos-cli
@@ -95,6 +105,10 @@ agentos-cli
 ├── agentos-bus
 └── agentos-types
 
+agentos-api                    (REST API + WebSocket server)
+├── agentos-kernel             (via KernelService trait impl)
+└── agentos-types
+
 agentos-sdk                    (tool development kit)
 ├── agentos-sdk-macros         (proc-macro for #[tool])
 └── agentos-types
@@ -108,7 +122,7 @@ agentos-web                    (web UI, under development)
 
 ## Kernel Boot Sequence
 
-When `agentctl start` is called, `Kernel::boot()` performs these steps in order:
+When `agentos start` is called, `Kernel::boot()` performs these steps in order:
 
 | Step | Subsystem | What Happens |
 |------|-----------|--------------|
@@ -128,7 +142,8 @@ When `agentctl start` is called, `Kernel::boot()` performs these steps in order:
 | 14 | Bus | Start bus server listening on Unix domain socket for CLI commands |
 | 15 | V3 Systems | Initialize cost tracker, escalation manager, injection scanner, risk classifier, snapshot manager, event bus |
 | 16 | IPC | Create bounded channels (capacity 1024) for internal subsystem communication |
-| 17 | Audit | Emit `KernelStarted` audit event — system is ready |
+| 17 | API | If `[api].enabled = true`, start `agentos-api` HTTP server alongside the kernel (REST + WebSocket) |
+| 18 | Audit | Emit `KernelStarted` audit event — system is ready |
 
 After boot, the kernel enters the main event loop (`run_loop.rs`) which spawns 9 concurrent subsystem tasks, each with fault-tolerant auto-restart (max 5 restarts per 60-second window).
 
@@ -141,7 +156,7 @@ When a user issues a CLI command that triggers LLM inference, the request flows 
 ```
  1. User types CLI command
     │
- 2. agentctl parses command, serializes to BusMessage
+ 2. agentos parses command, serializes to BusMessage
     │
  3. BusMessage sent over Unix domain socket to kernel
     │
@@ -166,7 +181,7 @@ When a user issues a CLI command that triggers LLM inference, the request flows 
 
 ### Step details
 
-1. **CLI parsing** — `agentctl` uses clap to parse arguments into a strongly-typed `Commands` enum
+1. **CLI parsing** — `agentos` uses clap to parse arguments into a strongly-typed `Commands` enum
 2. **Bus serialization** — the command is wrapped in a `BusMessage` with length-prefixed JSON encoding
 3. **Socket transport** — sent over the Unix domain socket at the configured `bus.socket_path`
 4. **Kernel dispatch** — `run_loop.rs` routes the message to the appropriate command handler in `commands/`
@@ -317,9 +332,52 @@ The `EventBus` is a **pure registry and filter evaluator** — it does not creat
 
 ---
 
+## REST API and WebSocket Layer
+
+The `agentos-api` crate provides an optional HTTP server that runs alongside the kernel when `[api].enabled = true` in the configuration. It exposes the kernel's full functionality to external consumers without requiring a Unix domain socket connection.
+
+### Architecture
+
+```
+External Consumers (scripts, UIs, CI, other services)
+      │
+      │  HTTP/WebSocket  (Bearer agos_<key>)
+      ▼
+┌─────────────────────────────────────────────────────┐
+│              agentos-api (Axum)                      │
+│                                                     │
+│  REST routes           WebSocket                    │
+│  /api/v1/*             /api/v1/ws?token=            │
+│                                                     │
+│  Auth middleware        WsBroadcaster               │
+│  (ApiKeyStore)          (event fan-out)             │
+│                                                     │
+│          KernelService trait                        │
+│    (abstraction — delegates to Kernel)              │
+└───────────────────────┬─────────────────────────────┘
+                        │
+                   Kernel (agentos-kernel)
+```
+
+### KernelService Trait
+
+The `KernelService` trait in `agentos-api/src/service.rs` defines the complete API surface — agents, tasks, tools, secrets, pipelines, audit, costs, notifications, system status. The `Kernel` struct implements this trait in `kernel_impl.rs`, which translates REST DTOs into `KernelCommand` variants and dispatches them through the same `api_*` wrapper methods used by the bus path.
+
+This design means:
+
+- REST and CLI bus paths share identical kernel logic (no code duplication)
+- The `KernelService` trait can be mocked for integration testing the API layer without a running kernel
+- Additional transports (gRPC, GraphQL) can be added by implementing `KernelService`
+
+### WebSocket Broadcaster
+
+The `WsBroadcaster` is a multi-producer, multi-consumer event fan-out component wired into the kernel's internal event bus. When the kernel emits events (task completed, agent connected, budget alert, etc.), the broadcaster routes them to all active WebSocket sessions that have subscribed to the corresponding channel.
+
+---
+
 ## Security Layers
 
-AgentOS implements defense-in-depth with 7 security layers:
+AgentOS implements defense-in-depth with 8 security layers:
 
 | Layer | Component | Mechanism |
 |-------|-----------|-----------|
@@ -330,6 +388,7 @@ AgentOS implements defense-in-depth with 7 security layers:
 | **5. WASM Isolation** | `agentos-wasm` | Wasmtime sandbox for untrusted tool execution with controlled host access |
 | **6. Tool Trust Tiers** | `agentos-tools` | Ed25519 signed manifests; 4 tiers: Core (trusted), Verified (signed), Community (signed), Blocked (rejected) |
 | **7. Injection Scanning** | `agentos-kernel` | Prompt injection detection with risk classification; system prompt includes standing safety instructions |
+| **8. API Authentication** | `agentos-api` | HMAC-SHA256 API keys with scope-based permissions, constant-time validation, optional expiry |
 
 ### Path traversal protection
 

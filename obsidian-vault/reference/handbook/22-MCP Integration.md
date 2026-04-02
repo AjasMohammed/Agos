@@ -24,7 +24,7 @@ AgentOS has bidirectional MCP (Model Context Protocol) support:
 | Direction | What it does |
 |-----------|--------------|
 | **Inbound** (kernel consumer) | Kernel spawns external MCP servers at boot, discovers their tools, and makes them available to agents with full capability-token enforcement |
-| **Outbound** (kernel as server) | `agentctl mcp serve` exposes all registered AgentOS tools as an MCP server over stdio — Claude Desktop, Cursor, and any MCP client can use AgentOS tools directly |
+| **Outbound** (kernel as server) | `agentos mcp serve` exposes all registered AgentOS tools as an MCP server over stdio — Claude Desktop, Cursor, and any MCP client can use AgentOS tools directly |
 
 MCP uses JSON-RPC 2.0 over stdio. Each server is a child process; communication is line-delimited JSON.
 
@@ -50,7 +50,7 @@ args = ["-m", "mcp_server_websearch"]
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | `String` | yes | Human-readable label — used in logs and `agentctl mcp status` |
+| `name` | `String` | yes | Human-readable label — used in logs and `agentos mcp status` |
 | `command` | `String` | yes | Executable to spawn (`npx`, `python3`, absolute path, etc.) |
 | `args` | `[String]` | no | Arguments passed to `command` |
 
@@ -84,22 +84,22 @@ If an MCP server process crashes or its stdio connection breaks, the kernel dete
 2. Retries the tool call once against the fresh process.
 3. If reconnect fails, returns a `ToolExecutionFailed` error to the agent.
 
-This is transparent to the calling agent. Use `agentctl mcp status` to see live connection state.
+This is transparent to the calling agent. Use `agentos mcp status` to see live connection state.
 
 ---
 
 ## Outbound: AgentOS as an MCP Server
 
-### `agentctl mcp serve`
+### `agentos mcp serve`
 
 Exposes all tools registered in the AgentOS tool registry as an MCP server over stdin/stdout. This is the bridge for Claude Desktop, Cursor, VS Code extensions, and any other MCP-compatible client to use AgentOS tools.
 
 ```bash
 # Pipe stdin/stdout — used by MCP clients automatically
-agentctl mcp serve
+agentos mcp serve
 
 # Test from the shell
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | agentctl mcp serve
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | agentos mcp serve
 ```
 
 **Offline command** — does not require a running kernel. The tool registry is loaded fresh from tool manifest files.
@@ -129,7 +129,7 @@ Add to Claude Desktop's `claude_desktop_config.json`:
 {
   "mcpServers": {
     "agentos": {
-      "command": "/path/to/agentctl",
+      "command": "/path/to/agentos",
       "args": ["--config", "/path/to/config/default.toml", "mcp", "serve"]
     }
   }
@@ -145,8 +145,8 @@ Add to Claude Desktop's `claude_desktop_config.json`:
 List all MCP servers configured in the current config file. **Offline** — shows config only, not live state.
 
 ```bash
-agentctl mcp list
-agentctl --config /etc/agentos/prod.toml mcp list
+agentos mcp list
+agentos --config /etc/agentos/prod.toml mcp list
 ```
 
 Output format: one row per configured server showing `name`, `command`, and `args`.
@@ -156,7 +156,7 @@ Output format: one row per configured server showing `name`, `command`, and `arg
 Start an MCP server on stdin/stdout exposing all AgentOS tools. **Offline.**
 
 ```bash
-agentctl mcp serve
+agentos mcp serve
 ```
 
 ### `mcp status`
@@ -164,7 +164,7 @@ agentctl mcp serve
 Query the running kernel for live health of all configured MCP server connections. **Requires a running kernel.**
 
 ```bash
-agentctl mcp status
+agentos mcp status
 ```
 
 Sample output:
@@ -194,16 +194,16 @@ web-search           disconnected 0        MCP server 'web-search' reconnect fai
 | `McpServerHandle` | `agentos-mcp` | Resilient connection wrapper with auto-reconnect and health state |
 | `McpClient` | `agentos-mcp` | Raw stdio connection holding a single `Mutex<McpConnection>` |
 | `McpToolAdapter` | `agentos-mcp` | `AgentTool` implementation wrapping a single MCP tool via `McpServerHandle` |
-| `McpServer` | `agentos-mcp` | Outbound server — serves `agentctl mcp serve` |
+| `McpServer` | `agentos-mcp` | Outbound server — serves `agentos mcp serve` |
 | `McpServerConfig` | `agentos-kernel` | Config struct for `[[mcp.servers]]` entries |
-| `KernelCommand::McpStatus` | `agentos-bus` | Bus command for `agentctl mcp status` |
+| `KernelCommand::McpStatus` | `agentos-bus` | Bus command for `agentos mcp status` |
 | `McpServerStatus` | `agentos-bus` | Per-server health data (name, connected, tool_count, last_error) |
 
 ### McpServerHandle concurrency model
 
 The handle uses two internal locks:
 - `Mutex<Option<Arc<McpClient>>>` — held briefly to get/swap the live client reference; **never held during I/O**
-- `Mutex<Option<String>>` — holds the last error string for `agentctl mcp status`
+- `Mutex<Option<String>>` — holds the last error string for `agentos mcp status`
 
 The `McpClient::conn` mutex serializes actual reads and writes, ensuring request/response pairs never interleave across concurrent calls.
 

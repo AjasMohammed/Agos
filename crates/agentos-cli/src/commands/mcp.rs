@@ -1,4 +1,4 @@
-/// `agentctl mcp` — MCP (Model Context Protocol) adapter commands.
+/// `agentos mcp` — MCP (Model Context Protocol) adapter commands.
 ///
 /// Subcommands:
 ///   `serve`  — Expose registered AgentOS tools as an MCP server on stdio.
@@ -22,7 +22,7 @@ pub enum McpCommands {
     /// use AgentOS tools directly.
     ///
     /// Example (test from shell):
-    ///   echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | agentctl mcp serve
+    ///   echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | agentos mcp serve
     Serve,
 
     /// List MCP server connections configured in the kernel config file.
@@ -121,12 +121,18 @@ fn cmd_list(config_path: &str) -> anyhow::Result<()> {
     println!("{:<20} COMMAND", "NAME");
     println!("{}", "-".repeat(60));
     for srv in &config.mcp.servers {
-        let cmd_display = if srv.args.is_empty() {
-            srv.command.clone()
+        let transport = if let Some(ref cmd) = srv.command {
+            if srv.args.is_empty() {
+                cmd.clone()
+            } else {
+                format!("{} {}", cmd, srv.args.join(" "))
+            }
+        } else if let Some(ref url) = srv.url {
+            url.clone()
         } else {
-            format!("{} {}", srv.command, srv.args.join(" "))
+            "(no transport configured)".to_string()
         };
-        println!("{:<20} {}", srv.name, cmd_display);
+        println!("{:<20} {}", srv.name, transport);
     }
     Ok(())
 }

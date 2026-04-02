@@ -5,6 +5,7 @@ pub mod chat;
 pub mod costs;
 pub mod dashboard;
 pub mod events;
+pub mod marketplace;
 pub mod notifications;
 pub mod pipeline_ui;
 pub mod pipelines;

@@ -16,7 +16,7 @@ pub async fn list(
     Query(query): Query<ListQuery>,
     jar: CookieJar,
 ) -> Response {
-    let secrets = match state.kernel.vault.list().await {
+    let secrets = match state.service.list_secrets().await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to list secrets");
@@ -115,10 +115,18 @@ pub async fn create(
     };
 
     // Route through kernel command dispatch for audit logging and scope resolution.
-    // secret_value dropped at end of scope -> memory zeroed by ZeroizingString.
+    // TODO: Migrate to state.service.set_secret() once SetSecretRequest supports
+    // Agent(<uuid>) and Tool(<uuid>) scope variants beyond "global" and "kernel".
+    //
+    // SECURITY NOTE: api_set_secret takes a plain String, so a copy of the secret
+    // value is allocated on the heap for the duration of the kernel call. The
+    // ZeroizingString (`secret_value`) zeroes its own allocation on drop, but cannot
+    // zero the copy passed here. This is a pre-existing limitation of the kernel API
+    // signature — tracked for fix when the above TODO is resolved.
+    let secret_str = secret_value.as_str().to_string();
     match state
         .kernel
-        .api_set_secret(form.name, secret_value.as_str().to_string(), scope)
+        .api_set_secret(form.name, secret_str, scope)
         .await
     {
         Ok(()) => {
@@ -150,7 +158,7 @@ pub async fn create(
 }
 
 pub async fn revoke(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    match state.kernel.api_revoke_secret(name.clone()).await {
+    match state.service.revoke_secret(&name).await {
         Ok(()) => {
             let mut response = StatusCode::NO_CONTENT.into_response();
             response.headers_mut().insert(
@@ -161,11 +169,9 @@ pub async fn revoke(State(state): State<AppState>, Path(name): Path<String>) -> 
             );
             response
         }
-        Err(msg) if msg.to_lowercase().contains("not found") => {
-            StatusCode::NOT_FOUND.into_response()
-        }
-        Err(msg) => {
-            tracing::warn!(secret = %name, error = %msg, "Failed to revoke secret");
+        Err(agentos_api::ApiError::NotFound(_)) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::warn!(secret = %name, error = %e, "Failed to revoke secret");
             let mut response = StatusCode::INTERNAL_SERVER_ERROR.into_response();
             response.headers_mut().insert(
                 "HX-Trigger",

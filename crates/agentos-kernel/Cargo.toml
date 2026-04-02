@@ -18,6 +18,8 @@ agentos-wasm = { path = "../agentos-wasm" }
 agentos-memory = { path = "../agentos-memory" }
 agentos-pipeline = { path = "../agentos-pipeline" }
 agentos-scratch = { path = "../agentos-scratch" }
+agentos-skills = { path = "../agentos-skills" }
+agentos-channels = { path = "../agentos-channels" }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -67,9 +69,22 @@ otel = [
 [dev-dependencies]
 tempfile = "3.10"
 serial_test = "3.4.0"
+criterion = { version = "0.5", features = ["html_reports"] }
 # agentos-audit is also a [dependencies] entry but integration tests in tests/
 # compile as separate crates and need it explicitly listed here.
 agentos-audit = { path = "../agentos-audit" }
 agentos-llm = { path = "../agentos-llm" }
 agentos-bus = { path = "../agentos-bus" }
 toml = { workspace = true }
+
+[[bench]]
+name = "bench_cold_start"
+harness = false
+
+[[bench]]
+name = "bench_routing"
+harness = false
+
+[[bench]]
+name = "bench_audit"
+harness = false

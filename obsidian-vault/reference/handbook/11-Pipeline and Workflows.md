@@ -30,7 +30,7 @@ The kernel's `PipelineEngine` (`crates/agentos-pipeline/src/engine.rs`) validate
 
 ## Pipeline YAML Format
 
-Pipelines are defined in YAML files and installed via `agentctl pipeline install`. Below is a fully annotated example:
+Pipelines are defined in YAML files and installed via `agentos pipeline install`. Below is a fully annotated example:
 
 ```yaml
 name: data-analysis
@@ -180,7 +180,7 @@ If `sentiment` fails, `{{sentiment_label}}` resolves to `"unknown"` and `report`
 ### Install a Pipeline
 
 ```bash
-agentctl pipeline install <path>
+agentos pipeline install <path>
 ```
 
 Reads the YAML file at `<path>`, sends it to the kernel, and registers the pipeline. Paths containing `..` are rejected to prevent path traversal.
@@ -192,7 +192,7 @@ Pipeline 'data-analysis' v1.0 installed (3 steps)
 ### List Installed Pipelines
 
 ```bash
-agentctl pipeline list
+agentos pipeline list
 ```
 
 ```
@@ -203,7 +203,7 @@ data-analysis             1.0        3        Fetch, parse, and summarize a data
 ### Run a Pipeline
 
 ```bash
-agentctl pipeline run <name> --input "<input>" [--agent <agent-name>] [--detach]
+agentos pipeline run <name> --input "<input>" [--agent <agent-name>] [--detach]
 ```
 
 - `--input` — string input passed as `{{input}}` to all steps.
@@ -226,7 +226,7 @@ The dataset shows a 15% increase in Q4...
 ### Check Run Status
 
 ```bash
-agentctl pipeline status <name> --run-id <id>
+agentos pipeline status <name> --run-id <id>
 ```
 
 ```
@@ -241,7 +241,7 @@ Status: COMPLETE
 ### View Step Logs
 
 ```bash
-agentctl pipeline logs <name> --run-id <id> --step <step-id>
+agentos pipeline logs <name> --run-id <id> --step <step-id>
 ```
 
 Shows per-attempt output and errors for a specific step:
@@ -257,7 +257,7 @@ Downloaded 2.4 MB from https://example.com/data.csv
 ### Remove a Pipeline
 
 ```bash
-agentctl pipeline remove <name>
+agentos pipeline remove <name>
 ```
 
 Unregisters the pipeline from the kernel's store. Does not affect runs already in progress or completed.

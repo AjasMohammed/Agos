@@ -1,0 +1,45 @@
+<article id="reviews">
+    <header><strong>Reviews</strong></header>
+
+    <form hx-post="/marketplace/{{ name }}/review"
+          hx-target="#reviews"
+          hx-swap="outerHTML"
+          hx-include="[name='_csrf']">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <fieldset>
+            <legend>Submit a Review</legend>
+            <label for="review-author">Your Public Key
+                <input type="text" id="review-author" name="author_key"
+                       placeholder="ed25519:..." required>
+            </label>
+            <label for="review-rating">Rating (1–5)
+                <input type="number" id="review-rating" name="rating"
+                       min="1" max="5" value="5" required>
+            </label>
+            <label for="review-body">Review
+                <textarea id="review-body" name="body" rows="3"
+                          placeholder="Share your experience with this tool..."></textarea>
+            </label>
+            <button type="submit">Submit Review</button>
+        </fieldset>
+    </form>
+
+    {% if reviews|length > 0 %}
+    {% for review in reviews %}
+    <article style="margin-top:1rem">
+        <header style="display:flex;justify-content:space-between">
+            <small>{{ review.author_key }}</small>
+            <small>
+                {% for i in range(1, 6) %}{% if i <= review.rating %}&#9733;{% else %}&#9734;{% endif %}{% endfor %}
+                &mdash; {{ review.created_at }}
+            </small>
+        </header>
+        {% if review.body %}
+        <p>{{ review.body }}</p>
+        {% endif %}
+    </article>
+    {% endfor %}
+    {% else %}
+    <p class="muted"><em>No reviews yet. Be the first to review this entry.</em></p>
+    {% endif %}
+</article>

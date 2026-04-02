@@ -5,14 +5,14 @@
 ///
 /// Usage:
 /// ```ignore
-/// agentctl mcp serve   # reads stdin, writes stdout
+/// agentos mcp serve   # reads stdin, writes stdout
 /// ```
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::io::{AsyncWriteExt, BufReader};
 
-use crate::client::{read_line_limited, MAX_MCP_RESPONSE_BYTES};
+use crate::transport::util::{read_line_limited, MAX_MCP_RESPONSE_BYTES};
 use crate::types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpToolDef};
 
 // ── Executor trait ────────────────────────────────────────────────────────────

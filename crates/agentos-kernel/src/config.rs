@@ -60,9 +60,15 @@ pub struct KernelConfig {
     /// Agent scratchpad configuration (graph-aware knowledge store).
     #[serde(default)]
     pub scratchpad: ScratchpadConfig,
+    /// Skills system configuration.
+    #[serde(default)]
+    pub skills: SkillsConfig,
     /// OpenTelemetry export configuration.
     #[serde(default)]
     pub otel: OtelConfig,
+    /// REST API server configuration.
+    #[serde(default)]
+    pub api: ApiSettings,
 }
 
 /// Configuration for the Unified Notification and Interaction System (UNIS).
@@ -866,16 +872,130 @@ pub struct McpConfig {
     pub servers: Vec<McpServerConfig>,
 }
 
-/// Configuration for a single external MCP server process.
+/// Configuration for a single external MCP server process or HTTP endpoint.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpServerConfig {
-    /// Human-readable name for this server (used in log messages).
+    // ── Identity ──────────────────────────────────────────────────────────
+    /// Human-readable name for this server (used in logs, CLI, status).
     pub name: String,
+
+    // ── Stdio Transport ───────────────────────────────────────────────────
     /// Path or name of the executable to spawn (e.g. `"npx"`, `"python3"`).
-    pub command: String,
-    /// Arguments passed to `command` (e.g. `["-y", "@modelcontextprotocol/server-filesystem"]`).
+    /// Set for stdio transport. Mutually exclusive with `url`.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Arguments passed to the executable.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Additional environment variables for the subprocess.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    /// Working directory for the subprocess.
+    #[serde(default)]
+    pub working_dir: Option<std::path::PathBuf>,
+
+    // ── HTTP Transport ────────────────────────────────────────────────────
+    /// MCP server endpoint URL (e.g. `"http://localhost:8080/mcp"`).
+    /// Set for HTTP transport. Mutually exclusive with `command`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Bearer token for HTTP authentication (plaintext).
+    #[serde(default)]
+    pub auth_token: Option<String>,
+
+    // ── Security ──────────────────────────────────────────────────────────
+    /// Trust tier: `"community"` (default) or `"verified"`.
+    #[serde(default = "default_mcp_trust_tier")]
+    pub trust_tier: String,
+    /// Max response size in bytes. Overrides global default (1MB).
+    #[serde(default)]
+    pub max_response_bytes: Option<usize>,
+    /// Rate limit: max calls per minute to this server.
+    #[serde(default)]
+    pub rate_limit_rpm: Option<u32>,
+    /// Tool whitelist (empty = allow all).
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    /// Tool blacklist (takes precedence over allow list).
+    #[serde(default)]
+    pub denied_tools: Vec<String>,
+    /// Per-request timeout in seconds. Overrides global default (30s).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────
+    /// Whether to automatically reconnect on connection failure. Default: true.
+    #[serde(default = "default_true")]
+    pub auto_reconnect: bool,
+    /// Health check interval in seconds. Default: 30.
+    #[serde(default = "default_mcp_health_check_interval")]
+    pub health_check_interval_secs: u64,
+}
+
+fn default_mcp_trust_tier() -> String {
+    "community".to_string()
+}
+
+fn default_mcp_health_check_interval() -> u64 {
+    30
+}
+
+impl McpServerConfig {
+    /// Validate the config.
+    pub fn validate(&self) -> Result<(), String> {
+        let has_command = self.command.is_some();
+        let has_url = self.url.is_some();
+
+        match (has_command, has_url) {
+            (true, true) => {
+                return Err(format!(
+                    "MCP server '{}': cannot set both 'command' and 'url'",
+                    self.name
+                ))
+            }
+            (false, false) => {
+                return Err(format!(
+                    "MCP server '{}': must set either 'command' (stdio) or 'url' (HTTP)",
+                    self.name
+                ))
+            }
+            _ => {}
+        }
+
+        if let Some(ref url) = self.url {
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(format!(
+                    "MCP server '{}': url must start with http:// or https://, got '{}'",
+                    self.name, url
+                ));
+            }
+        }
+
+        if self.trust_tier != "community" && self.trust_tier != "verified" {
+            return Err(format!(
+                "MCP server '{}': trust_tier must be 'community' or 'verified', got '{}'",
+                self.name, self.trust_tier
+            ));
+        }
+
+        if self.health_check_interval_secs == 0 {
+            return Err(format!(
+                "MCP server '{}': health_check_interval_secs must be > 0",
+                self.name
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Infer the transport type based on config.
+    pub fn transport_type(&self) -> Option<&'static str> {
+        match (&self.command, &self.url) {
+            (Some(_), None) => Some("stdio"),
+            (None, Some(_)) => Some("http"),
+            _ => None,
+        }
+    }
 }
 
 /// Agent scratchpad configuration for the graph-aware knowledge store.
@@ -1010,7 +1130,7 @@ fn default_summarization_max_input_chars() -> usize {
 
 /// Tool registry (marketplace) configuration.
 ///
-/// Controls where `agentctl tool search/add/publish` connect to fetch and
+/// Controls where `agentos tool search/add/publish` connect to fetch and
 /// publish community tools.  Defaults to the public AgentOS registry.
 /// Override with the `AGENTOS_REGISTRY` environment variable for local or
 /// self-hosted registries.
@@ -1031,6 +1151,70 @@ impl Default for RegistryConfig {
 
 fn default_registry_url() -> String {
     "https://registry.agentos.dev".to_string()
+}
+
+/// Skills system configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SkillsConfig {
+    /// Directory containing core (bundled) skills.
+    #[serde(default = "default_core_skills_dir")]
+    pub core_skills_dir: String,
+    /// Directory containing user-installed skills.
+    #[serde(default = "default_user_skills_dir")]
+    pub user_skills_dir: String,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            core_skills_dir: default_core_skills_dir(),
+            user_skills_dir: default_user_skills_dir(),
+        }
+    }
+}
+
+fn default_core_skills_dir() -> String {
+    "skills/core".to_string()
+}
+
+fn default_user_skills_dir() -> String {
+    "skills/user".to_string()
+}
+
+/// REST API server configuration.
+///
+/// When `enabled` is true, the kernel boots an HTTP API server alongside the
+/// Unix domain socket bus. The API server provides programmatic access to
+/// agents, tasks, tools, secrets, pipelines, audit, and notifications.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApiSettings {
+    /// Whether to start the API server on kernel boot.
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+    /// Host address to bind the API server to.
+    #[serde(default = "default_api_host")]
+    pub host: String,
+    /// TCP port for the API server.
+    #[serde(default = "default_api_port")]
+    pub port: u16,
+}
+
+impl Default for ApiSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: default_api_host(),
+            port: default_api_port(),
+        }
+    }
+}
+
+fn default_api_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_api_port() -> u16 {
+    8080
 }
 
 /// Load kernel configuration from a TOML file.
@@ -1055,18 +1239,18 @@ pub fn load_config(path: &std::path::Path) -> Result<KernelConfig, anyhow::Error
     Ok(config)
 }
 
-/// Validate that all MCP server entries have non-empty name and command fields.
+/// Validate that all MCP server entries have non-empty, unique names and valid config.
 fn validate_mcp_config(mcp: &McpConfig) -> Result<(), anyhow::Error> {
+    let mut seen_names = std::collections::HashSet::new();
     for (i, srv) in mcp.servers.iter().enumerate() {
         if srv.name.trim().is_empty() {
             anyhow::bail!("mcp.servers[{}]: 'name' must not be empty", i);
         }
-        if srv.command.trim().is_empty() {
-            anyhow::bail!(
-                "mcp.servers[{}] ({}): 'command' must not be empty",
-                i,
-                srv.name
-            );
+        if !seen_names.insert(srv.name.clone()) {
+            anyhow::bail!("mcp.servers[{}]: duplicate server name '{}'", i, srv.name);
+        }
+        if let Err(e) = srv.validate() {
+            anyhow::bail!("mcp.servers[{}] ({}): {}", i, srv.name, e);
         }
     }
     Ok(())

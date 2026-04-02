@@ -1,0 +1,23 @@
+[package]
+name = "agentos-channels"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agentos-types = { path = "../agentos-types" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+subtle = "2"
+zeroize = { workspace = true }
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }

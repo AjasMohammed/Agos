@@ -1,0 +1,27 @@
+[skill]
+name = "secops-monitor"
+version = "0.1.0"
+description = "Detects injection attacks, taint propagation anomalies, and permission escalation patterns in real-time"
+author = "agentos-core"
+trust_tier = "core"
+
+[triggers]
+schedule = "0 * * * *"
+events = ["task_completed", "permission_escalated", "injection_detected"]
+
+[agent]
+system_prompt_file = "prompt.md"
+roles = ["security-monitor"]
+default_provider = "anthropic"
+default_model = "claude-haiku-4-5"
+
+[tools]
+required = ["audit-query", "memory-search", "notify-user"]
+optional = ["memory-write"]
+
+[permissions]
+required = ["audit:read", "memory:read", "memory:write", "notification:write"]
+
+[budget]
+max_cost_per_run = 0.25
+max_tokens_per_run = 25000

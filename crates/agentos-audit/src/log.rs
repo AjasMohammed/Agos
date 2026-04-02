@@ -158,6 +158,12 @@ pub enum AuditEventType {
     // Agent context memory
     /// Emitted when an agent's context memory is created, updated, rolled back, or cleared.
     ContextMemoryUpdated,
+
+    // MCP (Model Context Protocol)
+    /// Emitted when an MCP tool call is executed (client mode).
+    McpToolCall,
+    /// Emitted when a potential injection attempt is detected in MCP output.
+    McpInjectionDetected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

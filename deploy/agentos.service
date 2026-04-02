@@ -15,7 +15,7 @@ StartLimitBurst=5
 # graceful shutdown.  Systemd therefore detects both crashes AND hangs.
 Type=notify
 
-ExecStart=/usr/local/bin/agentctl web serve --host 0.0.0.0 --port 8080
+ExecStart=/usr/local/bin/agentos web serve --host 0.0.0.0 --port 8080
 
 User=agentos
 Group=agentos

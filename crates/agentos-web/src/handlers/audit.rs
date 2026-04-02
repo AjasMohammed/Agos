@@ -3,6 +3,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum_extra::extract::CookieJar;
+use chrono::{DateTime, Utc};
 use minijinja::context;
 use serde::Deserialize;
 
@@ -11,6 +12,9 @@ pub struct ListQuery {
     pub partial: Option<String>,
     pub limit: Option<u32>,
     pub event_type: Option<String>,
+    pub severity: Option<String>,
+    pub from_ts: Option<DateTime<Utc>>,
+    pub to_ts: Option<DateTime<Utc>>,
 }
 
 pub async fn list(
@@ -18,6 +22,8 @@ pub async fn list(
     Query(query): Query<ListQuery>,
     jar: CookieJar,
 ) -> Response {
+    use agentos_api::types::AuditFilter;
+
     let requested = query.limit.unwrap_or(50);
     if requested > 1000 {
         tracing::warn!(
@@ -27,28 +33,33 @@ pub async fn list(
         );
     }
     let limit = requested.min(1000);
-    let audit = state.kernel.audit.clone();
-    let (entries, total_count) = match tokio::task::spawn_blocking(move || {
-        let entries = audit.query_recent(limit).unwrap_or_default();
-        let total_count = audit.count().unwrap_or(0);
-        (entries, total_count)
-    })
-    .await
-    {
-        Ok(result) => result,
+
+    let filter = AuditFilter {
+        limit: Some(limit),
+        severity: query.severity.clone().filter(|s| !s.is_empty()),
+        from: query.from_ts,
+        to: query.to_ts,
+    };
+    let entries = match state.service.query_audit(filter).await {
+        Ok(e) => e,
         Err(e) => {
-            tracing::error!("audit query panicked: {e}");
+            tracing::error!("audit query failed: {e}");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
         }
     };
+    // total_count not exposed by KernelService; use entries length as fallback
+    // TODO: expose total_count in KernelService::query_audit
+    let total_count = entries.len();
 
+    // NOTE: event_type filtering is applied client-side here because AuditFilter has no
+    // event_type field. This means the `limit` cap applies before the event_type filter,
+    // so a narrow event_type query against a busy log may return fewer rows than `limit`.
+    // TODO: Add event_type to AuditFilter and push this filter down to the service/DB layer.
     let rows: Vec<_> = entries
         .iter()
         .filter(|e| {
             if let Some(ref et) = query.event_type {
-                format!("{:?}", e.event_type)
-                    .to_lowercase()
-                    .contains(&et.to_lowercase())
+                e.event_type.to_lowercase().contains(&et.to_lowercase())
             } else {
                 true
             }
@@ -56,13 +67,13 @@ pub async fn list(
         .map(|e| {
             context! {
                 timestamp => e.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
-                event_type => format!("{:?}", e.event_type),
-                severity => format!("{:?}", e.severity),
-                agent_id => e.agent_id.as_ref().map(|id| id.to_string()),
-                task_id => e.task_id.as_ref().map(|id| id.to_string()),
-                tool_id => e.tool_id.as_ref().map(|id| id.to_string()),
-                details => e.details.to_string(),
-                trace_id => e.trace_id.to_string(),
+                event_type => e.event_type.trim_matches('"').to_string(),
+                severity => String::new(),
+                agent_id => e.agent_id.clone(),
+                task_id => Option::<String>::None,
+                tool_id => Option::<String>::None,
+                details => e.details.clone(),
+                trace_id => String::new(),
             }
         })
         .collect();
@@ -89,53 +100,41 @@ pub async fn detail(
     Path(trace_id_str): Path<String>,
     jar: CookieJar,
 ) -> Response {
-    let parsed_uuid = match uuid::Uuid::parse_str(&trace_id_str) {
-        Ok(u) => u,
-        Err(_) => {
-            return (StatusCode::BAD_REQUEST, "Invalid trace ID format").into_response();
-        }
-    };
-    let trace_id = agentos_types::TraceID::from_uuid(parsed_uuid);
-
-    let audit = state.kernel.audit.clone();
-    let entries = match tokio::task::spawn_blocking(move || audit.query_by_trace(&trace_id)).await {
-        Ok(Ok(entries)) => entries,
-        Ok(Err(e)) => {
-            tracing::error!("audit query_by_trace failed: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
-        }
-        Err(e) => {
-            tracing::error!("audit query_by_trace panicked: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
-        }
-    };
-
-    if entries.is_empty() {
-        return (StatusCode::NOT_FOUND, "Audit entry not found").into_response();
+    if uuid::Uuid::parse_str(&trace_id_str).is_err() {
+        return (StatusCode::BAD_REQUEST, "Invalid trace ID format").into_response();
     }
 
-    let first = &entries[0];
-    let event_type = format!("{:?}", first.event_type);
-    let severity = format!("{:?}", first.severity);
+    let entry = match state.service.get_audit_detail(&trace_id_str).await {
+        Ok(e) => e,
+        Err(agentos_api::ApiError::NotFound(_)) => {
+            return (StatusCode::NOT_FOUND, "Audit entry not found").into_response();
+        }
+        Err(e) => {
+            tracing::error!("audit detail query failed: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
+        }
+    };
 
-    let rows: Vec<_> = entries
-        .iter()
-        .map(|e| {
-            context! {
-                timestamp => e.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-                timestamp_iso => e.timestamp.to_rfc3339(),
-                event_type => format!("{:?}", e.event_type),
-                severity => format!("{:?}", e.severity),
-                agent_id => e.agent_id.as_ref().map(|id| id.to_string()),
-                task_id => e.task_id.as_ref().map(|id| id.to_string()),
-                tool_id => e.tool_id.as_ref().map(|id| id.to_string()),
-                details => serde_json::to_string_pretty(&e.details)
-                    .unwrap_or_else(|_| e.details.to_string()),
-                reversible => e.reversible,
-                rollback_ref => e.rollback_ref.clone(),
-            }
-        })
-        .collect();
+    let event_type = entry.event_type.trim_matches('"').to_string();
+    // TODO: severity and reversible are unimplemented — AuditEntryDetail does not expose
+    // these fields yet. Add them to AuditEntryDetail when the audit schema is extended.
+    let severity = String::new();
+
+    let details_pretty =
+        serde_json::to_string_pretty(&entry.metadata).unwrap_or_else(|_| entry.details.clone());
+
+    let rows: Vec<_> = vec![context! {
+        timestamp => entry.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        timestamp_iso => entry.timestamp.to_rfc3339(),
+        event_type => event_type.clone(),
+        severity => severity.clone(),
+        agent_id => entry.agent_id.clone(),
+        task_id => entry.task_id.clone(),
+        tool_id => Option::<String>::None,
+        details => details_pretty,
+        reversible => false,
+        rollback_ref => Option::<String>::None,
+    }];
 
     let short_id = &trace_id_str[..8.min(trace_id_str.len())];
     let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);

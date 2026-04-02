@@ -149,7 +149,7 @@ pub async fn handle(client: &mut BusClient, command: NotificationCommands) -> an
                             } else {
                                 println!();
                                 println!(
-                                "Use `agentctl notifications respond {id} --response <text>` to reply."
+                                "Use `agentos notifications respond {id} --response <text>` to reply."
                             );
                             }
                         }

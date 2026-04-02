@@ -54,6 +54,11 @@ async fn main() -> anyhow::Result<()> {
             "/v1/tools/{name}/{version}/dl",
             get(handlers::download_tool),
         )
+        .route(
+            "/v1/tools/{name}/reviews",
+            get(handlers::get_reviews).post(handlers::add_review),
+        )
+        .route("/v1/stats", get(handlers::get_stats))
         .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MiB
         .layer(CorsLayer::permissive())
         .with_state(db);

@@ -3,7 +3,7 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::models::{ToolEntry, ToolSearchResult};
+use crate::models::{RegistryStats, Review, ToolEntry, ToolSearchResult};
 
 /// Thread-safe handle to the registry SQLite database.
 #[derive(Clone)]
@@ -55,6 +55,7 @@ impl RegistryDb {
                 downloads     INTEGER NOT NULL DEFAULT 0,
                 created_at    TEXT NOT NULL,
                 updated_at    TEXT NOT NULL,
+                artifact_type TEXT NOT NULL DEFAULT 'tool',
                 PRIMARY KEY (name, version)
             );
 
@@ -79,7 +80,18 @@ impl RegistryDb {
                 VALUES ('delete', old.rowid, old.name, old.description, old.tags, old.author);
                 INSERT INTO tools_fts(rowid, name, description, tags, author)
                 VALUES (new.rowid, new.name, new.description, new.tags, new.author);
-            END;",
+            END;
+
+            CREATE TABLE IF NOT EXISTS reviews (
+                id         INTEGER PRIMARY KEY,
+                tool_name  TEXT NOT NULL,
+                author_key TEXT NOT NULL,
+                rating     INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
+                body       TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_reviews_tool ON reviews(tool_name);",
         )?;
         Ok(())
     }
@@ -88,8 +100,8 @@ impl RegistryDb {
     pub fn insert_tool(&self, entry: &ToolEntry) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO tools (name, version, description, author, author_pubkey, signature, tags, manifest_toml, downloads, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?9)",
+            "INSERT INTO tools (name, version, description, author, author_pubkey, signature, tags, manifest_toml, downloads, created_at, updated_at, artifact_type)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?9, ?10)",
             params![
                 entry.name,
                 entry.version,
@@ -100,6 +112,7 @@ impl RegistryDb {
                 serde_json::to_string(&entry.tags).unwrap_or_default(),
                 entry.manifest_toml,
                 entry.created_at,
+                entry.artifact_type,
             ],
         )
         .context("Failed to insert tool (name+version may already exist)")?;
@@ -122,7 +135,7 @@ impl RegistryDb {
 
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT t.name, t.version, t.description, t.author, t.downloads, t.tags
+            "SELECT t.name, t.version, t.description, t.author, t.downloads, t.tags, t.artifact_type
              FROM tools_fts f
              JOIN tools t ON f.rowid = t.rowid
              WHERE tools_fts MATCH ?1
@@ -138,6 +151,7 @@ impl RegistryDb {
                 author: row.get(3)?,
                 downloads: row.get(4)?,
                 tags: serde_json::from_str(&tags_str).unwrap_or_default(),
+                artifact_type: row.get(6)?,
             })
         })?;
 
@@ -153,7 +167,7 @@ impl RegistryDb {
     pub fn list_tools(&self, limit: u32, offset: u32) -> Result<Vec<ToolSearchResult>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT name, version, description, author, downloads, tags
+            "SELECT name, version, description, author, downloads, tags, artifact_type
              FROM tools
              WHERE rowid IN (SELECT MAX(rowid) FROM tools GROUP BY name)
              ORDER BY downloads DESC
@@ -168,6 +182,7 @@ impl RegistryDb {
                 author: row.get(3)?,
                 downloads: row.get(4)?,
                 tags: serde_json::from_str(&tags_str).unwrap_or_default(),
+                artifact_type: row.get(6)?,
             })
         })?;
 
@@ -182,7 +197,7 @@ impl RegistryDb {
     pub fn get_tool(&self, name: &str) -> Result<Option<ToolEntry>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT name, version, description, author, author_pubkey, signature, tags, manifest_toml, downloads, created_at, updated_at
+            "SELECT name, version, description, author, author_pubkey, signature, tags, manifest_toml, downloads, created_at, updated_at, artifact_type
              FROM tools
              WHERE name = ?1
              ORDER BY rowid DESC
@@ -202,6 +217,7 @@ impl RegistryDb {
                 downloads: row.get(8)?,
                 created_at: row.get(9)?,
                 updated_at: row.get(10)?,
+                artifact_type: row.get(11)?,
             })
         })?;
 
@@ -216,7 +232,7 @@ impl RegistryDb {
     pub fn get_tool_version(&self, name: &str, version: &str) -> Result<Option<ToolEntry>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT name, version, description, author, author_pubkey, signature, tags, manifest_toml, downloads, created_at, updated_at
+            "SELECT name, version, description, author, author_pubkey, signature, tags, manifest_toml, downloads, created_at, updated_at, artifact_type
              FROM tools
              WHERE name = ?1 AND version = ?2",
         )?;
@@ -234,6 +250,7 @@ impl RegistryDb {
                 downloads: row.get(8)?,
                 created_at: row.get(9)?,
                 updated_at: row.get(10)?,
+                artifact_type: row.get(11)?,
             })
         })?;
 
@@ -242,6 +259,71 @@ impl RegistryDb {
             Some(Err(e)) => Err(e.into()),
             None => Ok(None),
         }
+    }
+
+    /// Retrieve all reviews for a tool, ordered by most recent first.
+    pub fn get_reviews(&self, tool_name: &str) -> Result<Vec<Review>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, tool_name, author_key, rating, body, created_at
+             FROM reviews
+             WHERE tool_name = ?1
+             ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map(params![tool_name], |row| {
+            Ok(Review {
+                id: row.get(0)?,
+                tool_name: row.get(1)?,
+                author_key: row.get(2)?,
+                rating: row.get::<_, i64>(3)? as u8,
+                body: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        let mut reviews = Vec::new();
+        for row in rows {
+            reviews.push(row?);
+        }
+        Ok(reviews)
+    }
+
+    /// Add a review for a tool.
+    pub fn add_review(
+        &self,
+        tool_name: &str,
+        author_key: &str,
+        rating: u8,
+        body: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO reviews (tool_name, author_key, rating, body) VALUES (?1, ?2, ?3, ?4)",
+            params![tool_name, author_key, rating as i64, body],
+        )
+        .context("Failed to insert review")?;
+        Ok(())
+    }
+
+    /// Return aggregate statistics for the registry.
+    pub fn get_stats(&self) -> Result<RegistryStats> {
+        let conn = self.lock()?;
+        let total_tools: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT name) FROM tools WHERE artifact_type = 'tool'",
+            [],
+            |row| row.get(0),
+        )?;
+        let total_skills: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT name) FROM tools WHERE artifact_type = 'skill'",
+            [],
+            |row| row.get(0),
+        )?;
+        let total_reviews: i64 =
+            conn.query_row("SELECT COUNT(*) FROM reviews", [], |row| row.get(0))?;
+        Ok(RegistryStats {
+            total_tools,
+            total_skills,
+            total_reviews,
+        })
     }
 
     /// Increment the download counter for a tool version.
@@ -258,7 +340,7 @@ impl RegistryDb {
     pub fn list_versions(&self, name: &str) -> Result<Vec<ToolSearchResult>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT name, version, description, author, downloads, tags
+            "SELECT name, version, description, author, downloads, tags, artifact_type
              FROM tools
              WHERE name = ?1
              ORDER BY rowid DESC",
@@ -272,6 +354,7 @@ impl RegistryDb {
                 author: row.get(3)?,
                 downloads: row.get(4)?,
                 tags: serde_json::from_str(&tags_str).unwrap_or_default(),
+                artifact_type: row.get(6)?,
             })
         })?;
 
@@ -301,6 +384,7 @@ mod tests {
             downloads: 0,
             created_at: "2026-03-26T00:00:00Z".into(),
             updated_at: "2026-03-26T00:00:00Z".into(),
+            artifact_type: "tool".into(),
         }
     }
 

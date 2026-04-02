@@ -1,61 +1,45 @@
-/// `McpToolAdapter` wraps a single MCP tool as an AgentOS `AgentTool`.
+/// `McpToolAdapter` wraps a single MCP tool as an AgentOS `AgentTool`,
+/// delegating through the supervisor (transport) and security gate (validation).
 ///
-/// This is the boundary between the MCP protocol layer and the AgentOS security
-/// model. Capability token validation and `PermissionSet` enforcement are applied
-/// by the `ToolRunner` *before* `execute()` is called — MCP tools receive the same
-/// treatment as native tools.
-///
-/// The adapter holds an [`McpServerHandle`] rather than a raw `McpClient`.
-/// This means transparent reconnection happens at the protocol boundary: if the
-/// MCP server process crashes and restarts, agents calling this tool will get a
-/// seamless retry without kernel intervention.
+/// Flow: rate limit check -> supervisor.call_tool -> output validation -> audit log.
 use std::sync::Arc;
 
 use agentos_tools::traits::{AgentTool, ToolExecutionContext};
 use agentos_types::{AgentOSError, PermissionOp};
 use async_trait::async_trait;
-use serde_json::Value;
 
-use crate::handle::McpServerHandle;
+use crate::security::McpSecurityGate;
+use crate::supervisor::McpSupervisor;
 use crate::types::McpToolDef;
 
 pub struct McpToolAdapter {
-    handle: Arc<McpServerHandle>,
+    supervisor: Arc<McpSupervisor>,
+    security_gate: Arc<McpSecurityGate>,
+    server_name: String,
     tool_def: McpToolDef,
-    /// The `PermissionSet` resource key required to invoke this tool.
-    ///
-    /// Defaults to `"mcp.<sanitized_tool_name>"` where the tool name has all
-    /// non-alphanumeric/underscore characters replaced with `_`.
-    /// Operators may override this per-tool via [`McpToolAdapter::with_permission`].
     permission: String,
 }
 
 impl McpToolAdapter {
-    /// Wrap an MCP tool definition as an `AgentTool`.
-    ///
-    /// The default permission resource is `"mcp.<sanitized_tool_name>"`.
-    pub fn new(handle: Arc<McpServerHandle>, tool_def: McpToolDef) -> Self {
+    /// Create a new adapter.
+    pub fn new(
+        supervisor: Arc<McpSupervisor>,
+        security_gate: Arc<McpSecurityGate>,
+        server_name: String,
+        tool_def: McpToolDef,
+    ) -> Self {
         let permission = format!("mcp.{}", sanitize_tool_name(&tool_def.name));
         Self {
-            handle,
+            supervisor,
+            security_gate,
+            server_name,
             tool_def,
             permission,
         }
     }
-
-    /// Override the default permission resource key.
-    pub fn with_permission(mut self, permission: &str) -> Self {
-        self.permission = permission.to_string();
-        self
-    }
 }
 
 /// Sanitize an MCP tool name into a valid AgentOS permission resource component.
-///
-/// Replaces any character that is not alphanumeric or `_` with `_`.  This
-/// prevents tool names containing dots, colons, or spaces from colliding with
-/// other permission namespaces (e.g. a tool named `"fs:read"` produces
-/// `"mcp.fs_read"` rather than `"mcp.fs:read"`).
 fn sanitize_tool_name(name: &str) -> String {
     name.chars()
         .map(|c| {
@@ -80,16 +64,108 @@ impl AgentTool for McpToolAdapter {
 
     async fn execute(
         &self,
-        payload: Value,
-        _context: ToolExecutionContext,
-    ) -> Result<Value, AgentOSError> {
-        // Capability token and permissions were already validated by ToolRunner.
-        self.handle
-            .call_tool(&self.tool_def.name, payload)
+        payload: serde_json::Value,
+        context: ToolExecutionContext,
+    ) -> Result<serde_json::Value, AgentOSError> {
+        let start = tokio::time::Instant::now();
+        let input_size = serde_json::to_string(&payload)
+            .map(|s| s.len())
+            .unwrap_or(0);
+
+        // Step 1: Check rate limit and tool whitelist.
+        self.security_gate
+            .check_tool_allowed(&self.server_name, &self.tool_def.name)
             .await
             .map_err(|e| AgentOSError::ToolExecutionFailed {
                 tool_name: self.tool_def.name.clone(),
-                reason: e.to_string(),
-            })
+                reason: e,
+            })?;
+
+        // Step 2: Call the tool via supervisor.
+        let result = match self
+            .supervisor
+            .call_tool(&self.server_name, &self.tool_def.name, payload)
+            .await
+        {
+            Ok(val) => val,
+            Err(e) => {
+                let latency_ms = start.elapsed().as_millis() as u64;
+                self.security_gate.audit_tool_call(
+                    &self.server_name,
+                    &self.tool_def.name,
+                    input_size,
+                    0,
+                    latency_ms,
+                    false,
+                    context.trace_id,
+                    Some(context.task_id),
+                    Some(context.agent_id),
+                );
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name: self.tool_def.name.clone(),
+                    reason: e.to_string(),
+                });
+            }
+        };
+
+        // Step 3: Validate and wrap output.
+        let output_size_before = serde_json::to_string(&result).map(|s| s.len()).unwrap_or(0);
+        let wrapped = match self
+            .security_gate
+            .process_output(result, &self.server_name)
+            .await
+        {
+            Ok(val) => val,
+            Err(e) => {
+                let latency_ms = start.elapsed().as_millis() as u64;
+                self.security_gate.audit_tool_call(
+                    &self.server_name,
+                    &self.tool_def.name,
+                    input_size,
+                    output_size_before,
+                    latency_ms,
+                    false,
+                    context.trace_id,
+                    Some(context.task_id),
+                    Some(context.agent_id),
+                );
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name: self.tool_def.name.clone(),
+                    reason: e,
+                });
+            }
+        };
+
+        // Step 4: Audit the successful call.
+        let latency_ms = start.elapsed().as_millis() as u64;
+        let output_size = serde_json::to_string(&wrapped)
+            .map(|s| s.len())
+            .unwrap_or(output_size_before);
+        self.security_gate.audit_tool_call(
+            &self.server_name,
+            &self.tool_def.name,
+            input_size,
+            output_size,
+            latency_ms,
+            true,
+            context.trace_id,
+            Some(context.task_id),
+            Some(context.agent_id),
+        );
+
+        Ok(wrapped)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_tool_name_handles_special_chars() {
+        assert_eq!(sanitize_tool_name("read-file"), "read_file");
+        assert_eq!(sanitize_tool_name("read:file"), "read_file");
+        assert_eq!(sanitize_tool_name("read file"), "read_file");
+        assert_eq!(sanitize_tool_name("read_file"), "read_file");
     }
 }

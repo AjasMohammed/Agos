@@ -23,6 +23,8 @@ members = [
     "crates/agentos-scratch",
     "crates/agentos-web",
     "crates/agentos-api",
+    "crates/agentos-skills",
+    "crates/agentos-channels",
 ]
 
 [workspace.package]

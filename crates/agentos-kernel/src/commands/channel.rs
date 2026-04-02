@@ -299,6 +299,14 @@ impl Kernel {
                 let adapter = crate::adapters::email::EmailDeliveryAdapter;
                 Ok(Some(Box::new(adapter)))
             }
+            ChannelKind::Discord
+            | ChannelKind::Slack
+            | ChannelKind::WhatsApp
+            | ChannelKind::Webhook => {
+                // These channel kinds are handled by agentos-channels ChannelManager,
+                // not by the notification-router DeliveryAdapter path.
+                Ok(None)
+            }
             ChannelKind::Custom(_) => {
                 // Custom channel kinds have no built-in adapter.
                 Ok(None)

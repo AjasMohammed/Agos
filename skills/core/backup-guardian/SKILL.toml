@@ -1,0 +1,27 @@
+[skill]
+name = "backup-guardian"
+version = "0.1.0"
+description = "Verifies audit log freshness, snapshot recency, vault backup state, and SQLite database integrity"
+author = "agentos-core"
+trust_tier = "core"
+
+[triggers]
+schedule = "0 2 * * *"
+events = []
+
+[agent]
+system_prompt_file = "prompt.md"
+roles = ["backup-monitor"]
+default_provider = "anthropic"
+default_model = "claude-haiku-4-5"
+
+[tools]
+required = ["file-reader", "audit-query", "notify-user"]
+optional = ["shell-exec"]
+
+[permissions]
+required = ["file:read", "audit:read", "notification:write"]
+
+[budget]
+max_cost_per_run = 0.10
+max_tokens_per_run = 10000

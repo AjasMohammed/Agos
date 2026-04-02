@@ -26,11 +26,11 @@ AgentOS is designed for AI agents that operate autonomously — without per-acti
 - **Rogue tasks** — long-running tasks drift out of their original scope
 - **Supply chain attacks** — compromised tools attempt to exfiltrate data or expand access
 
-The answer is **defense in depth**: seven independent security layers stacked so that bypassing any single layer does not compromise the system.
+The answer is **defense in depth**: eight independent security layers stacked so that bypassing any single layer does not compromise the system.
 
 ---
 
-## Defense in Depth — 7 Layers
+## Defense in Depth — 8 Layers
 
 ### Layer 1: Capability-Based Access Control
 
@@ -125,6 +125,27 @@ Each agent has a **unique Ed25519 keypair** generated at connection time and sto
 
 Private keys persist across kernel restarts (stored in the vault). Identity can be revoked immediately via CLI, which simultaneously removes the signing key and all associated permissions.
 
+### Layer 8: API Authentication
+
+When the REST API is enabled (`[api].enabled = true`), all HTTP endpoints (except `GET /api/v1/health`) require a Bearer token:
+
+```
+Authorization: Bearer agos_<64-hex-chars>
+```
+
+Keys are validated by the `ApiKeyStore` on every request using **HMAC-SHA256** with constant-time comparison (`subtle::ConstantTimeEq`) to prevent timing side-channels. The raw key is never stored — only its HMAC digest.
+
+Each key carries a **scope list** (e.g. `["agents:r", "tasks:w"]`) that restricts which resources it can access. Empty scopes = full access (admin/bootstrap key only). The `require_permission()` check in each handler enforces scope before calling the kernel.
+
+For the WebSocket endpoint, the key is passed as a query parameter (`?token=agos_...`) because the browser WebSocket API does not support custom headers during the HTTP upgrade.
+
+Keys can be:
+- **Scoped** — issue minimum required scopes per consumer
+- **Expiring** — set `expires_at` for short-lived automation
+- **Revoked** — immediate effect on the next request
+
+See [[25-API Authentication and Keys]] for the full key management reference.
+
 ---
 
 ## Capability Tokens
@@ -196,24 +217,24 @@ Agents start with **no permissions**. Every permission must be explicitly grante
 
 **Grant a permission:**
 ```bash
-agentctl perm grant <agent> <permission> [--expires <seconds>]
+agentos perm grant <agent> <permission> [--expires <seconds>]
 
 # Examples
-agentctl perm grant worker fs:/tmp/:rw
-agentctl perm grant analyst network.outbound:rx --expires 3600
-agentctl perm grant writer fs:/home/user/reports/:rw
+agentos perm grant worker fs:/tmp/:rw
+agentos perm grant analyst network.outbound:rx --expires 3600
+agentos perm grant writer fs:/home/user/reports/:rw
 ```
 
 **Revoke a permission:**
 ```bash
-agentctl perm revoke <agent> <permission>
+agentos perm revoke <agent> <permission>
 
-agentctl perm revoke worker fs:/tmp/:rw
+agentos perm revoke worker fs:/tmp/:rw
 ```
 
 **Show an agent's permissions:**
 ```bash
-agentctl perm show <agent>
+agentos perm show <agent>
 
 # Output:
 # Permissions for agent 'worker':
@@ -229,14 +250,14 @@ Profiles are named, reusable permission sets:
 
 ```bash
 # Create a profile
-agentctl perm profile create analyst-profile "Read-only analyst" \
+agentos perm profile create analyst-profile "Read-only analyst" \
     fs:/data/:r network.outbound:rx memory.semantic:rw
 
 # Assign profile to an agent
-agentctl perm profile assign worker analyst-profile
+agentos perm profile assign worker analyst-profile
 
 # List profiles
-agentctl perm profile list
+agentos perm profile list
 ```
 
 Profiles compose with direct permission grants — the agent's effective permissions are the union of all grants and profile entries, subject to deny rules.
@@ -276,32 +297,32 @@ Roles are named collections of permissions that can be assigned to multiple agen
 
 ```bash
 # Create a role
-agentctl role create file-analyst --description "Read files and write memory"
+agentos role create file-analyst --description "Read files and write memory"
 
 # Grant a permission to a role
-agentctl role grant file-analyst fs:/data/:r
-agentctl role grant file-analyst memory.semantic:rw
+agentos role grant file-analyst fs:/data/:r
+agentos role grant file-analyst memory.semantic:rw
 
 # Assign a role to an agent
-agentctl role assign worker file-analyst
+agentos role assign worker file-analyst
 
 # View all roles
-agentctl role list
+agentos role list
 
 # Remove a role from an agent
-agentctl role remove worker file-analyst
+agentos role remove worker file-analyst
 
 # Delete a role
-agentctl role delete file-analyst
+agentos role delete file-analyst
 
 # Revoke a permission from a role
-agentctl role revoke file-analyst fs:/data/:r
+agentos role revoke file-analyst fs:/data/:r
 ```
 
 ### Role Composition
 
 An agent's effective permissions are the **union** of:
-1. All direct permission grants via `agentctl perm grant`
+1. All direct permission grants via `agentos perm grant`
 2. All permissions from all assigned roles
 
 Deny entries from any source take precedence over grants from all sources.
@@ -429,7 +450,7 @@ Escalations that are not resolved within **5 minutes** are automatically resolve
 
 **List pending escalations:**
 ```bash
-agentctl escalation list
+agentos escalation list
 
 # Output:
 # ID  TASK              AGENT    URGENCY   EXPIRES
@@ -439,7 +460,7 @@ agentctl escalation list
 
 **Inspect a specific escalation:**
 ```bash
-agentctl escalation get 1
+agentos escalation get 1
 
 # Output:
 # Escalation #1
@@ -456,7 +477,7 @@ agentctl escalation get 1
 
 **Resolve an escalation:**
 ```bash
-agentctl escalation resolve 1 --decision "Yes, send the email"
+agentos escalation resolve 1 --decision "Yes, send the email"
 
 # The task resumes with the operator's decision injected into its context.
 ```
@@ -490,7 +511,7 @@ The receiving agent (or kernel) verifies the signature against the sender's regi
 
 **View an agent's public key:**
 ```bash
-agentctl identity show --agent worker
+agentos identity show --agent worker
 
 # Output:
 # Agent: worker
@@ -500,7 +521,7 @@ agentctl identity show --agent worker
 
 **Revoke an agent's identity:**
 ```bash
-agentctl identity revoke --agent compromised-worker
+agentos identity revoke --agent compromised-worker
 
 # Effect: removes signing key from vault, revokes all permissions,
 # prevents the agent from establishing any new sessions.
@@ -508,6 +529,17 @@ agentctl identity revoke --agent compromised-worker
 
 > [!warning] Identity Revocation is Immediate
 > Revoking identity also revokes all associated permissions. The agent will be unable to execute any tools until disconnected and reconnected.
+
+---
+
+## Web UI Session Cookie
+
+The web server (`agentos web serve`) sets a session cookie for browser authentication. The `Secure` flag on this cookie is set automatically based on the bind address:
+
+- **Production** (non-loopback address, e.g. `0.0.0.0` or a specific external IP): `Secure` flag is set, restricting the cookie to HTTPS connections.
+- **Local development** (`127.0.0.1` or `localhost`): `Secure` flag is omitted, so the cookie works over plain HTTP.
+
+No manual configuration is required — the flag is derived from whether the server binds to a loopback address.
 
 ---
 

@@ -146,7 +146,7 @@ Blocking interactive question. The task enters `Waiting` state until the operato
 1. Creates a `Question` notification in the inbox
 2. Delivers it to all registered channels
 3. Suspends the task in `Waiting` state
-4. When the operator responds via `agentctl notifications respond <id> --response <text>` or the web UI, the response text is injected into the agent's context window and the task resumes
+4. When the operator responds via `agentos notifications respond <id> --response <text>` or the web UI, the response text is injected into the agent's context window and the task resumes
 
 **Timeout behaviour:** If `timeout_secs` elapses with no user response, the kernel automatically injects `auto_action` as the answer and resumes the task. The default `"auto_denied"` is a safe fallback for destructive operations.
 
@@ -160,13 +160,13 @@ From the CLI:
 
 ```bash
 # List all notifications (including unread questions)
-agentctl notifications list --unread
+agentos notifications list --unread
 
 # Show full question text and options
-agentctl notifications read <notification-id>
+agentos notifications read <notification-id>
 
 # Submit your response
-agentctl notifications respond <notification-id> --response "Yes, delete them"
+agentos notifications respond <notification-id> --response "Yes, delete them"
 ```
 
 From the web UI: navigate to the **Notifications** section in the sidebar and click **Reply** on any pending question.
@@ -186,8 +186,8 @@ List messages from the inbox. Defaults to the 50 most recent.
 
 **Example:**
 ```bash
-agentctl notifications list
-agentctl notifications list --unread --limit 20
+agentos notifications list
+agentos notifications list --unread --limit 20
 ```
 
 **Output columns:** `ID` (first 8 chars of UUID), `PRIORITY`, `READ`, `FROM`, `SUBJECT`
@@ -202,7 +202,7 @@ Show the full body of a notification and mark it as read.
 
 **Example:**
 ```bash
-agentctl notifications read a3b2c1d0
+agentos notifications read a3b2c1d0
 ```
 
 For `Question` messages, also shows the question text, options (if any), and the current response (if answered).
@@ -218,7 +218,7 @@ Submit a response to an interactive `Question` notification. Unblocks the waitin
 
 **Example:**
 ```bash
-agentctl notifications respond a3b2c1d0 --response "Yes, proceed"
+agentos notifications respond a3b2c1d0 --response "Yes, proceed"
 ```
 
 ### `notifications watch`
@@ -229,7 +229,7 @@ Poll for new notifications every 5 seconds. Press Ctrl-C to stop. Silently skips
 
 **Example:**
 ```bash
-agentctl notifications watch
+agentos notifications watch
 ```
 
 ---
@@ -240,7 +240,7 @@ Notifications are delivered in parallel to every registered channel. Built-in de
 
 | Channel ID | Description |
 |------------|-------------|
-| `cli` | Visible in `agentctl notifications list` and `watch` |
+| `cli` | Visible in `agentos notifications list` and `watch` |
 | `web` | Displayed in the web UI notification inbox |
 | `telegram` | Delivered via Telegram Bot API |
 | `ntfy` | Delivered via ntfy push notification |
@@ -283,12 +283,12 @@ Register a new external delivery channel.
 
 First store the bot token in the vault:
 ```bash
-agentctl secret set TELEGRAM_BOT_TOKEN
+agentos secret set TELEGRAM_BOT_TOKEN
 ```
 
 Then connect the channel (chat_id is your numeric Telegram chat ID):
 ```bash
-agentctl channel connect \
+agentos channel connect \
   --kind telegram \
   --external-id "123456789" \
   --display-name "@myhandle" \
@@ -298,7 +298,7 @@ agentctl channel connect \
 **ntfy example:**
 
 ```bash
-agentctl channel connect \
+agentos channel connect \
   --kind ntfy \
   --external-id "my-agentos-alerts" \
   --display-name "ntfy/my-agentos-alerts" \
@@ -309,8 +309,8 @@ agentctl channel connect \
 **Email example:**
 
 ```bash
-agentctl secret set EMAIL_PASSWORD
-agentctl channel connect \
+agentos secret set EMAIL_PASSWORD
+agentos channel connect \
   --kind email \
   --external-id "ops-team@example.com" \
   --display-name "ops-team@example.com" \
@@ -325,7 +325,7 @@ List all registered channels.
 
 **Example:**
 ```bash
-agentctl channel list
+agentos channel list
 ```
 
 **Output columns:** `CHANNEL ID` (full UUID), `KIND`, `DISPLAY NAME`, `EXTERNAL ID`, `CONNECTED`
@@ -340,7 +340,7 @@ Send a test notification to a registered channel to verify delivery.
 
 **Example:**
 ```bash
-agentctl channel test a3b2c1d0-1234-5678-9abc-def012345678
+agentos channel test a3b2c1d0-1234-5678-9abc-def012345678
 ```
 
 ### `channel disconnect`
@@ -353,7 +353,7 @@ Remove a registered channel.
 
 **Example:**
 ```bash
-agentctl channel disconnect a3b2c1d0-1234-5678-9abc-def012345678
+agentos channel disconnect a3b2c1d0-1234-5678-9abc-def012345678
 ```
 
 ---
@@ -364,20 +364,20 @@ A typical agent notification workflow:
 
 ```bash
 # 1. Store Telegram bot token in vault
-agentctl secret set TELEGRAM_BOT_TOKEN
+agentos secret set TELEGRAM_BOT_TOKEN
 
 # 2. Register the Telegram channel
-agentctl channel connect \
+agentos channel connect \
   --kind telegram \
   --external-id "123456789" \
   --display-name "@ops-handle" \
   --credential-key TELEGRAM_BOT_TOKEN
 
 # 3. Verify the channel is working
-agentctl channel test <channel-id>
+agentos channel test <channel-id>
 
 # 4. Connect an agent with notify permission
-agentctl agent connect \
+agentos agent connect \
   --provider anthropic \
   --model claude-sonnet-4-6 \
   --name worker \
@@ -385,13 +385,13 @@ agentctl agent connect \
   --grant user.interact:x
 
 # 5. Run a task — the agent sends notifications automatically
-agentctl task run --agent worker "Audit the user database and ask me before deleting anything"
+agentos task run --agent worker "Audit the user database and ask me before deleting anything"
 
 # 6. Watch for incoming questions in another terminal
-agentctl notifications watch
+agentos notifications watch
 
 # 7. When a question arrives, respond to it
-agentctl notifications respond <notification-id> --response "Yes, proceed"
+agentos notifications respond <notification-id> --response "Yes, proceed"
 ```
 
 ---
@@ -405,14 +405,14 @@ agentctl notifications respond <notification-id> --response "Yes, proceed"
 
 Grant at connect time:
 ```bash
-agentctl agent connect --provider ollama --model llama3.2 --name worker \
+agentos agent connect --provider ollama --model llama3.2 --name worker \
   --grant user.notify:w --grant user.interact:x
 ```
 
 Or after connection:
 ```bash
-agentctl perm grant worker user.notify:w
-agentctl perm grant worker user.interact:x
+agentos perm grant worker user.notify:w
+agentos perm grant worker user.interact:x
 ```
 
 ---

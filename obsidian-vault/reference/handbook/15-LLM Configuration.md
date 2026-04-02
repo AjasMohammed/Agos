@@ -46,7 +46,7 @@ Streaming: native NDJSON stream via `/api/chat`.
 
 ### OpenAI
 
-API key stored in the AgentOS vault under the key `openai_api_key` (or any name you specify at `agentctl agent connect` time).
+API key stored in the AgentOS vault under the key `openai_api_key` (or any name you specify at `agentos agent connect` time).
 
 | Config key | Default | Override |
 |---|---|---|
@@ -54,7 +54,7 @@ API key stored in the AgentOS vault under the key `openai_api_key` (or any name 
 
 Endpoint resolution precedence:
 1. `AGENTOS_OPENAI_BASE_URL` environment variable
-2. `--base-url` flag at `agentctl agent connect` time
+2. `--base-url` flag at `agentos agent connect` time
 3. `[llm] openai_base_url` in the active config file
 
 ### Anthropic
@@ -91,31 +91,31 @@ API key is optional. If not provided, requests are sent without authentication.
 
 ## Connecting Agents by Provider
 
-Use `agentctl agent connect` to register a new agent backed by a specific LLM.
+Use `agentos agent connect` to register a new agent backed by a specific LLM.
 
 ### Ollama (local)
 
 ```bash
-agentctl agent connect --provider ollama --model llama3.2 --name local
+agentos agent connect --provider ollama --model llama3.2 --name local
 ```
 
 ### OpenAI
 
 ```bash
-agentctl agent connect --provider openai --model gpt-4o --name researcher
+agentos agent connect --provider openai --model gpt-4o --name researcher
 ```
 
 API key must already be stored in the vault (value entered interactively):
 
 ```bash
-agentctl secret set openai_api_key
+agentos secret set openai_api_key
 # Enter value for 'openai_api_key' (input hidden): ▌
 ```
 
 ### Anthropic
 
 ```bash
-agentctl agent connect --provider anthropic --model claude-sonnet-4-6 --name coder
+agentos agent connect --provider anthropic --model claude-sonnet-4-6 --name coder
 ```
 
 Vault key: `anthropic_api_key`.
@@ -123,7 +123,7 @@ Vault key: `anthropic_api_key`.
 ### Gemini
 
 ```bash
-agentctl agent connect --provider gemini --model gemini-2.5-pro --name writer
+agentos agent connect --provider gemini --model gemini-2.5-pro --name writer
 ```
 
 Vault key: `gemini_api_key`.
@@ -131,7 +131,7 @@ Vault key: `gemini_api_key`.
 ### Custom OpenAI-compatible
 
 ```bash
-agentctl agent connect \
+agentos agent connect \
   --provider custom \
   --model my-model \
   --name local-gpu \
@@ -193,9 +193,9 @@ API keys are stored in the AgentOS vault (AES-256-GCM encrypted) and loaded at a
 Keys are never written to `config/default.toml` or `config/production.toml`. Always use the vault (values are entered interactively with hidden input — never as CLI arguments):
 
 ```bash
-agentctl secret set anthropic_api_key
-agentctl secret set openai_api_key
-agentctl secret set gemini_api_key
+agentos secret set anthropic_api_key
+agentos secret set openai_api_key
+agentos secret set gemini_api_key
 ```
 
 ---

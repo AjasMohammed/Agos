@@ -8,7 +8,7 @@
 //!   through standard AgentOS capability-token enforcement.
 //!
 //! - **Server mode**: Expose registered AgentOS tools to external MCP clients
-//!   (e.g. Claude Desktop, Cursor) via the `agentctl mcp serve` subcommand.
+//!   (e.g. Claude Desktop, Cursor) via the `agentos mcp serve` subcommand.
 //!
 //! # Security
 //!
@@ -19,11 +19,20 @@
 pub mod adapter;
 pub mod client;
 pub mod handle;
+pub mod security;
 pub mod server;
+pub mod supervisor;
+pub mod transport;
 pub mod types;
 
 pub use adapter::McpToolAdapter;
 pub use client::McpClient;
 pub use handle::McpServerHandle;
+pub use security::{McpSecurityGate, McpServerPolicy, SlidingWindowRateLimiter};
 pub use server::{McpServer, McpToolExecutor};
-pub use types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpToolDef};
+pub use supervisor::{McpServerResolvedConfig, McpSupervisor, SupervisedServer};
+pub use transport::{McpTransport, McpTransportError, McpTransportFactory};
+pub use types::{
+    JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpLifecycleEvent, McpToolDef, ServerState,
+    ServerStats,
+};

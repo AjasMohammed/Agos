@@ -66,7 +66,7 @@ pub async fn handle(client: &mut BusClient, command: BgCommands) -> anyhow::Resu
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 println!(
-                    "🚀 Background task '{}' started (task_id: {}). Use 'agentctl bg logs {}' to follow.",
+                    "🚀 Background task '{}' started (task_id: {}). Use 'agentos bg logs {}' to follow.",
                     name, task_id, name
                 );
             } else if let KernelResponse::Error { message } = response {

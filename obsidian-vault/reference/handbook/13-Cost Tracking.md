@@ -35,7 +35,7 @@ Every completed inference call is also logged to the audit trail as a `CostAttri
 ### All Agents
 
 ```bash
-agentctl cost show
+agentos cost show
 ```
 
 ```
@@ -64,7 +64,7 @@ Percentages show `0.0%` when the corresponding limit is set to zero (unlimited).
 ### Specific Agent
 
 ```bash
-agentctl cost show --agent <agent-name>
+agentos cost show --agent <agent-name>
 ```
 
 Same output, filtered to a single agent row.
@@ -174,7 +174,7 @@ Will automatically switch from `claude-sonnet-4-6` to `claude-haiku-4-5` at 90,0
 The kernel's memory context assembly system tracks whether it refreshed (re-fetched) or reused (cached) memory retrievals. This informs token efficiency — unnecessary refreshes waste input tokens.
 
 ```bash
-agentctl cost retrieval
+agentos cost retrieval
 ```
 
 ```

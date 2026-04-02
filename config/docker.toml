@@ -62,6 +62,15 @@ knowledge_pct = 0.30
 history_pct = 0.25
 task_pct = 0.12
 
+[logging]
+log_dir = "/var/log/agentos"
+
+[memory.context]
+db_path = "/var/lib/agentos/data/context_memory.db"
+
+[scratchpad]
+db_path = "/var/lib/agentos/data/scratchpad.db"
+
 [health_monitor]
 enabled = true
 check_interval_secs = 30

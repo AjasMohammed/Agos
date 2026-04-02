@@ -9,6 +9,10 @@ pub enum ChannelKind {
     Telegram,
     Ntfy,
     Email,
+    Discord,
+    Slack,
+    WhatsApp,
+    Webhook,
     Custom(String),
 }
 
@@ -18,6 +22,10 @@ impl std::fmt::Display for ChannelKind {
             ChannelKind::Telegram => write!(f, "telegram"),
             ChannelKind::Ntfy => write!(f, "ntfy"),
             ChannelKind::Email => write!(f, "email"),
+            ChannelKind::Discord => write!(f, "discord"),
+            ChannelKind::Slack => write!(f, "slack"),
+            ChannelKind::WhatsApp => write!(f, "whatsapp"),
+            ChannelKind::Webhook => write!(f, "webhook"),
             ChannelKind::Custom(s) => write!(f, "{s}"),
         }
     }
@@ -31,6 +39,10 @@ impl std::str::FromStr for ChannelKind {
             "telegram" => Ok(ChannelKind::Telegram),
             "ntfy" => Ok(ChannelKind::Ntfy),
             "email" => Ok(ChannelKind::Email),
+            "discord" => Ok(ChannelKind::Discord),
+            "slack" => Ok(ChannelKind::Slack),
+            "whatsapp" => Ok(ChannelKind::WhatsApp),
+            "webhook" => Ok(ChannelKind::Webhook),
             other => Ok(ChannelKind::Custom(other.to_string())),
         }
     }

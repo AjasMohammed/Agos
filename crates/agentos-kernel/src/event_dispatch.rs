@@ -42,7 +42,7 @@ pub(crate) fn emit_signed_event(
 
     let event = EventMessage {
         id: event_id,
-        event_type: event_type.clone(),
+        event_type,
         source,
         payload: payload.clone(),
         severity,
@@ -559,7 +559,7 @@ impl Kernel {
             max_iterations: None,
             trigger_source: Some(TriggerSource {
                 event_id: event.id,
-                event_type: event.event_type.clone(),
+                event_type: event.event_type,
                 subscription_id: sub.id,
                 chain_depth: event.chain_depth,
             }),

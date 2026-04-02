@@ -73,7 +73,7 @@ State transitions are enforced by `TaskState::can_transition_to()` — invalid t
 ## Creating Tasks
 
 ```bash
-agentctl task run [--agent <NAME>] [--autonomous] "<PROMPT>"
+agentos task run [--agent <NAME>] [--autonomous] "<PROMPT>"
 ```
 
 | Flag | Type | Required | Description |
@@ -86,13 +86,13 @@ agentctl task run [--agent <NAME>] [--autonomous] "<PROMPT>"
 
 ```bash
 # Route automatically to the best available agent
-agentctl task run "Summarize the contents of /data/report.csv"
+agentos task run "Summarize the contents of /data/report.csv"
 
 # Assign to a specific agent
-agentctl task run --agent "code-reviewer" "Review the authentication module for security issues"
+agentos task run --agent "code-reviewer" "Review the authentication module for security issues"
 
 # Run an autonomous long-running task with no iteration/timeout ceiling
-agentctl task run --autonomous "Refactor the entire auth module, write tests, and ensure all tests pass"
+agentos task run --autonomous "Refactor the entire auth module, write tests, and ensure all tests pass"
 ```
 
 When a task is created:
@@ -208,19 +208,19 @@ When a tool call is classified as `HardApproval` (Level 3):
 1. The kernel creates a `PendingEscalation` with details of the action
 2. The task transitions from `Running` to `Waiting`
 3. The escalation has a 5-minute expiration window
-4. A human operator must resolve via `agentctl escalation resolve`
+4. A human operator must resolve via `agentos escalation resolve`
 5. On approval: task resumes from `Waiting` to `Running`
 6. On denial or expiration: task transitions to `Failed`
 
 ```bash
 # List pending escalations
-agentctl escalation list
+agentos escalation list
 
 # Approve an escalation
-agentctl escalation resolve <ESCALATION_ID> --decision "Approved"
+agentos escalation resolve <ESCALATION_ID> --decision "Approved"
 
 # Deny an escalation
-agentctl escalation resolve <ESCALATION_ID> --decision "Denied"
+agentos escalation resolve <ESCALATION_ID> --decision "Denied"
 ```
 
 ---
@@ -228,7 +228,7 @@ agentctl escalation resolve <ESCALATION_ID> --decision "Denied"
 ## Listing Tasks
 
 ```bash
-agentctl task list
+agentos task list
 ```
 
 Displays all tasks in a table:
@@ -246,7 +246,7 @@ The `TaskSummary` includes: `id`, `state`, `agent_id`, `prompt_preview` (first 1
 ## Task Logs
 
 ```bash
-agentctl task logs <TASK_ID>
+agentos task logs <TASK_ID>
 ```
 
 Shows the execution log for a specific task, including tool calls, LLM responses, and state transitions.
@@ -254,7 +254,7 @@ Shows the execution log for a specific task, including tool calls, LLM responses
 **Example:**
 
 ```bash
-agentctl task logs a1b2c3d4-e5f6-7890-abcd-ef1234567890
+agentos task logs a1b2c3d4-e5f6-7890-abcd-ef1234567890
 ```
 
 ---
@@ -262,7 +262,7 @@ agentctl task logs a1b2c3d4-e5f6-7890-abcd-ef1234567890
 ## Cancelling Tasks
 
 ```bash
-agentctl task cancel <TASK_ID>
+agentos task cancel <TASK_ID>
 ```
 
 Transitions the task to `Cancelled` state. Only tasks in `Queued`, `Running`, or `Waiting` states can be cancelled.
@@ -270,7 +270,7 @@ Transitions the task to `Cancelled` state. Only tasks in `Queued`, `Running`, or
 **Example:**
 
 ```bash
-agentctl task cancel a1b2c3d4-e5f6-7890-abcd-ef1234567890
+agentos task cancel a1b2c3d4-e5f6-7890-abcd-ef1234567890
 ```
 
 ---
@@ -282,7 +282,7 @@ Background tasks run detached from the CLI session. Use the `bg` command group t
 ### Running a Background Task
 
 ```bash
-agentctl bg run --name <NAME> --agent <AGENT> --task "<PROMPT>" [--detach]
+agentos bg run --name <NAME> --agent <AGENT> --task "<PROMPT>" [--detach]
 ```
 
 | Flag | Type | Default | Description |
@@ -296,16 +296,16 @@ agentctl bg run --name <NAME> --agent <AGENT> --task "<PROMPT>" [--detach]
 
 ```bash
 # Run a background task and detach
-agentctl bg run --name "nightly-audit" --agent "ops" --task "Run full security audit" --detach
+agentos bg run --name "nightly-audit" --agent "ops" --task "Run full security audit" --detach
 
 # Run and stay attached (see output)
-agentctl bg run --name "data-export" --agent "local-dev" --task "Export user data to CSV"
+agentos bg run --name "data-export" --agent "local-dev" --task "Export user data to CSV"
 ```
 
 ### Listing Background Tasks
 
 ```bash
-agentctl bg list
+agentos bg list
 ```
 
 Shows all background tasks with their name, agent, state, start time, and completion time.
@@ -313,7 +313,7 @@ Shows all background tasks with their name, agent, state, start time, and comple
 ### Viewing Background Task Logs
 
 ```bash
-agentctl bg logs <NAME> [--follow]
+agentos bg logs <NAME> [--follow]
 ```
 
 | Flag | Type | Default | Description |
@@ -324,13 +324,13 @@ agentctl bg logs <NAME> [--follow]
 **Example:**
 
 ```bash
-agentctl bg logs "nightly-audit" --follow
+agentos bg logs "nightly-audit" --follow
 ```
 
 ### Killing a Background Task
 
 ```bash
-agentctl bg kill <NAME>
+agentos bg kill <NAME>
 ```
 
 Terminates a running background task by name.
@@ -344,7 +344,7 @@ Scheduled tasks run on a cron schedule. The kernel evaluates cron expressions an
 ### Creating a Scheduled Task
 
 ```bash
-agentctl schedule create --name <NAME> --cron "<EXPRESSION>" --agent <AGENT> \
+agentos schedule create --name <NAME> --cron "<EXPRESSION>" --agent <AGENT> \
   --task "<PROMPT>" --permissions "<PERM1,PERM2,...>"
 ```
 
@@ -372,17 +372,17 @@ agentctl schedule create --name <NAME> --cron "<EXPRESSION>" --agent <AGENT> \
 
 ```bash
 # Run every day at 2 AM
-agentctl schedule create --name "daily-report" --cron "0 2 * * *" \
+agentos schedule create --name "daily-report" --cron "0 2 * * *" \
   --agent "ops" --task "Generate daily system health report" \
   --permissions "fs.read,audit.read"
 
 # Run every Monday at 9 AM
-agentctl schedule create --name "weekly-review" --cron "0 9 * * 1" \
+agentos schedule create --name "weekly-review" --cron "0 9 * * 1" \
   --agent "code-reviewer" --task "Review code changes from last week" \
   --permissions "fs.read"
 
 # Run every 15 minutes
-agentctl schedule create --name "health-check" --cron "*/15 * * * *" \
+agentos schedule create --name "health-check" --cron "*/15 * * * *" \
   --agent "ops" --task "Check system health" \
   --permissions "fs.read,shell.exec"
 ```
@@ -390,7 +390,7 @@ agentctl schedule create --name "health-check" --cron "*/15 * * * *" \
 ### Listing Scheduled Tasks
 
 ```bash
-agentctl schedule list
+agentos schedule list
 ```
 
 Shows all schedules with name, cron expression, agent, state, next run time, and run count.
@@ -398,7 +398,7 @@ Shows all schedules with name, cron expression, agent, state, next run time, and
 ### Pausing a Schedule
 
 ```bash
-agentctl schedule pause <NAME>
+agentos schedule pause <NAME>
 ```
 
 Suspends a scheduled task. It will not run until resumed.
@@ -406,7 +406,7 @@ Suspends a scheduled task. It will not run until resumed.
 ### Resuming a Schedule
 
 ```bash
-agentctl schedule resume <NAME>
+agentos schedule resume <NAME>
 ```
 
 Re-activates a paused schedule.
@@ -414,7 +414,7 @@ Re-activates a paused schedule.
 ### Deleting a Schedule
 
 ```bash
-agentctl schedule delete <NAME>
+agentos schedule delete <NAME>
 ```
 
 Permanently removes a scheduled task.
@@ -428,7 +428,7 @@ Tasks that must run to natural completion — deep refactors, multi-file analysi
 ### Enabling Autonomous Mode
 
 ```bash
-agentctl task run --autonomous "<PROMPT>"
+agentos task run --autonomous "<PROMPT>"
 ```
 
 When `autonomous=true`, the kernel replaces all complexity-based limits with the `[kernel.autonomous_mode]` ceiling:
@@ -535,17 +535,17 @@ Tasks can form dependency chains through delegation. The kernel maintains a `Tas
 
 | Operation | Command | Key Behavior |
 |-----------|---------|-------------|
-| Run task | `agentctl task run [--agent name] "prompt"` | Auto-routes if no agent specified |
-| Run autonomous task | `agentctl task run --autonomous "prompt"` | No iteration/timeout limits; child tasks inherit |
-| List tasks | `agentctl task list` | Shows ID, state, agent, prompt preview |
-| View logs | `agentctl task logs <id>` | Execution history and tool calls |
-| Cancel task | `agentctl task cancel <id>` | Transitions to Cancelled state |
-| Background run | `agentctl bg run --name ... --agent ... --task ...` | Detached execution |
-| Background list | `agentctl bg list` | Shows all background tasks |
-| Background logs | `agentctl bg logs <name> [--follow]` | Stream execution output |
-| Background kill | `agentctl bg kill <name>` | Terminate background task |
-| Schedule create | `agentctl schedule create --name ... --cron ... --agent ... --task ...` | Cron-based scheduling |
-| Schedule list | `agentctl schedule list` | Shows schedules with next run time |
-| Schedule pause | `agentctl schedule pause <name>` | Suspend schedule |
-| Schedule resume | `agentctl schedule resume <name>` | Re-activate schedule |
-| Schedule delete | `agentctl schedule delete <name>` | Remove schedule |
+| Run task | `agentos task run [--agent name] "prompt"` | Auto-routes if no agent specified |
+| Run autonomous task | `agentos task run --autonomous "prompt"` | No iteration/timeout limits; child tasks inherit |
+| List tasks | `agentos task list` | Shows ID, state, agent, prompt preview |
+| View logs | `agentos task logs <id>` | Execution history and tool calls |
+| Cancel task | `agentos task cancel <id>` | Transitions to Cancelled state |
+| Background run | `agentos bg run --name ... --agent ... --task ...` | Detached execution |
+| Background list | `agentos bg list` | Shows all background tasks |
+| Background logs | `agentos bg logs <name> [--follow]` | Stream execution output |
+| Background kill | `agentos bg kill <name>` | Terminate background task |
+| Schedule create | `agentos schedule create --name ... --cron ... --agent ... --task ...` | Cron-based scheduling |
+| Schedule list | `agentos schedule list` | Shows schedules with next run time |
+| Schedule pause | `agentos schedule pause <name>` | Suspend schedule |
+| Schedule resume | `agentos schedule resume <name>` | Re-activate schedule |
+| Schedule delete | `agentos schedule delete <name>` | Remove schedule |

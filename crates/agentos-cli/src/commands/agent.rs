@@ -170,7 +170,7 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                             );
                         }
                         println!("  Task ID : {}", tid);
-                        println!("  Monitor : agentctl task logs {}", tid);
+                        println!("  Monitor : agentos task logs {}", tid);
                     }
                 }
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
@@ -469,6 +469,9 @@ fn parse_provider(s: &str) -> anyhow::Result<LLMProvider> {
             Ok(LLMProvider::Custom(parts[1].to_string()))
         }
         "custom" => Ok(LLMProvider::Custom("custom".to_string())),
-        _ => anyhow::bail!("Unknown provider '{}'", s),
+        // Any unrecognized name is treated as a catalog provider.
+        // The kernel will look it up in the provider catalog; if not found there,
+        // it falls back to the generic custom provider logic.
+        other => Ok(LLMProvider::Custom(other.to_string())),
     }
 }

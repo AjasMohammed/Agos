@@ -80,7 +80,7 @@ pub enum KernelCommand {
         manifest_path: String,
     },
     /// Hot-reload a tool from an already-written manifest on disk.
-    /// Used by `agentctl tool add` (registry install) and the web UI marketplace
+    /// Used by `agentos tool add` (registry install) and the web UI marketplace
     /// after writing the manifest to `tools/user/<name>.toml`.
     /// Returns the assigned ToolID on success.
     ToolLoad {
@@ -471,6 +471,31 @@ pub enum KernelCommand {
         content: String,
     },
 
+    // Skills management
+    /// Install a skill from a directory containing SKILL.toml + prompt.
+    SkillInstall {
+        path: String,
+    },
+    /// Remove an installed skill by name.
+    SkillRemove {
+        name: String,
+    },
+    /// List all installed skills.
+    SkillList,
+    /// Run a skill by name with optional input text.
+    SkillRun {
+        name: String,
+        input: Option<String>,
+    },
+    /// Get the status/details of an installed skill.
+    SkillStatus {
+        name: String,
+    },
+
+    // Provider catalog
+    /// List all available LLM providers (built-in + catalog).
+    ListProviders,
+
     // Scratchpad management
     /// List all scratchpad pages for an agent.
     ScratchListPages {
@@ -593,6 +618,16 @@ pub enum KernelResponse {
 
     // MCP server health
     McpServerStatusList(Vec<McpServerStatus>),
+
+    // Provider catalog
+    ProviderList(Vec<serde_json::Value>),
+
+    // Skills
+    SkillList(Vec<serde_json::Value>),
+    SkillRunResult {
+        task_id: String,
+    },
+    SkillStatusInfo(serde_json::Value),
 
     // Task trace / debugger
     TaskTrace(Box<agentos_types::TaskTrace>),

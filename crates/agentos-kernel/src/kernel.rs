@@ -403,6 +403,14 @@ pub struct Kernel {
     pub mcp_supervisor: Arc<agentos_mcp::McpSupervisor>,
     /// MCP security gate for output validation, rate limiting, and audit logging.
     pub mcp_security_gate: Arc<agentos_mcp::McpSecurityGate>,
+    /// Provider catalog for auto-configuring OpenAI-compatible LLM providers.
+    pub provider_catalog: Arc<agentos_llm::ProviderCatalog>,
+    /// Manages bidirectional channel adapters (Discord, Slack, Telegram, etc.).
+    pub channel_manager: Arc<agentos_channels::manager::ChannelManager>,
+    /// Receiver for inbound messages from ChannelManager adapters.
+    pub(crate) channel_manager_rx: Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::Receiver<agentos_channels::types::InboundMessage>>,
+    >,
     /// Token used to signal graceful shutdown to all kernel loops.
     pub cancellation_token: CancellationToken,
     /// Set to `true` once the first `KernelShutdown` audit entry has been written.
@@ -1388,6 +1396,28 @@ impl Kernel {
             "Kernel configuration loaded"
         );
 
+        // 1.2 Load provider catalog (optional — missing file is not an error)
+        let catalog_path = config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("providers.toml");
+        let provider_catalog = match agentos_llm::ProviderCatalog::from_file(&catalog_path) {
+            Ok(catalog) => {
+                if !catalog.is_empty() {
+                    tracing::info!(
+                        path = %catalog_path.display(),
+                        providers = catalog.len(),
+                        "Loaded provider catalog"
+                    );
+                }
+                Arc::new(catalog)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to load provider catalog, continuing without it");
+                Arc::new(agentos_llm::ProviderCatalog::empty())
+            }
+        };
+
         // 1.5 Run pre-flight system health checks before any subsystem init
         preflight_checks(&config)?;
 
@@ -2186,6 +2216,14 @@ impl Kernel {
             Arc::new(RwLock::new(sr))
         };
 
+        // Initialize ChannelManager for bidirectional adapter management.
+        let (channel_manager_inbound_tx, channel_manager_inbound_rx) =
+            tokio::sync::mpsc::channel::<agentos_channels::types::InboundMessage>(256);
+        let channel_manager_arc = Arc::new(agentos_channels::manager::ChannelManager::new(
+            channel_manager_inbound_tx,
+            kernel_cancellation_token.clone(),
+        ));
+
         let kernel = Kernel {
             config,
             audit,
@@ -2257,11 +2295,14 @@ impl Kernel {
             )),
             mcp_supervisor,
             mcp_security_gate,
+            provider_catalog,
             data_dir,
             workspace_paths,
             started_at: chrono::Utc::now(),
             cancellation_token: kernel_cancellation_token,
             shutdown_audited: std::sync::atomic::AtomicBool::new(false),
+            channel_manager: channel_manager_arc,
+            channel_manager_rx: Arc::new(tokio::sync::Mutex::new(channel_manager_inbound_rx)),
         };
 
         // Restore bidirectional channels persisted from the previous run.
@@ -2425,6 +2466,8 @@ impl Kernel {
         }
     }
 
+    /// Public API: Revoke a permission from an agent through the kernel command dispatch path.
+    /// Permission format: `resource:rwx` (e.g. `fs.user_data:rw`, `network.outbound:x`).
     pub async fn api_revoke_permission(
         &self,
         agent_name: String,

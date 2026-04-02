@@ -253,7 +253,7 @@ async fn test_sandbox_exec_datetime_smoke() {
 
     let executor = SandboxExecutor::with_executable(
         sandbox_home,
-        std::path::PathBuf::from(env!("CARGO_BIN_EXE_agentctl")),
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_agentos")),
         4,
     );
     let request = SandboxExecRequest {

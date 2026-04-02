@@ -7,6 +7,10 @@ use minijinja::context;
 use serde::Deserialize;
 
 /// GET /agents/{name}/detail — agent detail page with permissions, tasks, and cost.
+///
+/// TODO: Migrate to state.service.get_agent_detail() once ApiAgentDetail exposes
+/// per-entry permission details (read/write/execute/query/observe flags), deny_entries,
+/// task tool_calls/tokens_used fields, and full cost snapshot with budget percentages.
 pub async fn detail(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -112,11 +116,14 @@ pub async fn grant_permission(
     Path(name): Path<String>,
     axum::Form(form): axum::Form<GrantPermissionForm>,
 ) -> Response {
-    match state
-        .kernel
-        .api_grant_permission(name.clone(), form.permission.clone())
-        .await
-    {
+    use agentos_api::types::PermissionRequest;
+
+    let req = PermissionRequest {
+        agent_name: name.clone(),
+        permission: form.permission.clone(),
+    };
+
+    match state.service.grant_permission(req).await {
         Ok(()) => {
             let redirect_url = format!("/agents/{}/detail", name);
             let mut response = axum::response::Redirect::to(&redirect_url).into_response();
@@ -129,8 +136,8 @@ pub async fn grant_permission(
             }
             response
         }
-        Err(msg) => {
-            tracing::error!(agent = %name, error = %msg, "Failed to grant permission");
+        Err(e) => {
+            tracing::error!(agent = %name, error = %e, "Failed to grant permission");
             let mut response =
                 (StatusCode::BAD_REQUEST, "Failed to grant permission").into_response();
             response.headers_mut().insert(
@@ -155,11 +162,14 @@ pub async fn revoke_permission(
     Path(name): Path<String>,
     axum::Form(form): axum::Form<RevokePermissionForm>,
 ) -> Response {
-    match state
-        .kernel
-        .api_revoke_permission(name.clone(), form.permission.clone())
-        .await
-    {
+    use agentos_api::types::PermissionRequest;
+
+    let req = PermissionRequest {
+        agent_name: name.clone(),
+        permission: form.permission.clone(),
+    };
+
+    match state.service.revoke_permission(req).await {
         Ok(()) => {
             let redirect_url = format!("/agents/{}/detail", name);
             let mut response = axum::response::Redirect::to(&redirect_url).into_response();
@@ -172,8 +182,8 @@ pub async fn revoke_permission(
             }
             response
         }
-        Err(msg) => {
-            tracing::error!(agent = %name, error = %msg, "Failed to revoke permission");
+        Err(e) => {
+            tracing::error!(agent = %name, error = %e, "Failed to revoke permission");
             let mut response =
                 (StatusCode::BAD_REQUEST, "Failed to revoke permission").into_response();
             response.headers_mut().insert(

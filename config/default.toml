@@ -122,6 +122,7 @@ enabled = true
 min_pattern_occurrences = 3
 task_completions_trigger = 100
 time_trigger_hours = 24
+max_episodes_per_cycle = 500
 
 [memory.context]
 # Per-agent self-curated context memory — injected into context window at every task start.
@@ -129,7 +130,6 @@ enabled = true
 max_tokens = 4096
 max_versions = 50
 db_path = "context_memory.db"
-max_episodes_per_cycle = 500
 
 [context_budget]
 total_tokens = 128000
@@ -160,7 +160,7 @@ summarization_max_input_chars = 8000
 # Set to "" to disable file logging (stderr only).
 log_dir = "/tmp/agentos/logs"
 # Minimum log level: trace | debug | info | warn | error
-# Can be overridden at runtime with the RUST_LOG environment variable or `agentctl log set-level`.
+# Can be overridden at runtime with the RUST_LOG environment variable or `agentos log set-level`.
 log_level = "info"
 # Output format: "text" (human-readable, default) or "json" (structured, for log aggregators like
 # Loki, Datadog, or Elasticsearch). In production, set to "json".
@@ -239,10 +239,24 @@ auto_write_min_steps = 3
 # Maximum bytes for an auto-generated note.
 auto_write_max_summary = 2048
 
+[skills]
+# Skill system directories. Skills are autonomous capability packages
+# containing a SKILL.toml manifest + system prompt file.
+core_skills_dir = "skills/core"
+user_skills_dir = "skills/user"
+
 [registry]
-# Tool registry (marketplace) URL for `agentctl tool search/add/publish`.
+# Tool registry (marketplace) URL for `agentos tool search/add/publish`.
 # Override with AGENTOS_REGISTRY environment variable for self-hosted registries.
 url = "https://registry.agentos.dev"
+
+[api]
+# REST API server. When enabled, the kernel starts an HTTP API alongside the
+# Unix domain socket bus. Provides programmatic access to agents, tasks, tools,
+# secrets, pipelines, audit, and notifications.
+enabled = false
+host = "127.0.0.1"
+port = 8080
 
 [mcp]
 # List of MCP servers to connect at kernel boot.

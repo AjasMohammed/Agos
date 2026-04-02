@@ -168,7 +168,7 @@ The `EventType` enum (`agentos-types/src/event.rs`) defines **72 event types** a
 ## Subscribing to Events
 
 ```bash
-agentctl event subscribe \
+agentos event subscribe \
   --agent <agent-name> \
   --event <filter> \
   [--filter "<payload-expr>"] \
@@ -244,10 +244,10 @@ Controls the task priority assigned when the subscription triggers an agent.
 
 ```bash
 # All subscriptions
-agentctl event subscriptions list
+agentos event subscriptions list
 
 # Subscriptions for a specific agent
-agentctl event subscriptions list --agent <agent-name>
+agentos event subscriptions list --agent <agent-name>
 ```
 
 Output columns: `ID`, `AGENT_ID`, `EVENT`, `PAYLOAD`, `PRIORITY`, `ENABLED`.
@@ -255,7 +255,7 @@ Output columns: `ID`, `AGENT_ID`, `EVENT`, `PAYLOAD`, `PRIORITY`, `ENABLED`.
 ### Show Subscription Details
 
 ```bash
-agentctl event subscriptions show --id <subscription-id>
+agentos event subscriptions show --id <subscription-id>
 ```
 
 Shows all fields: agent ID, event filter, payload filter, priority, throttle policy, enabled state, and creation time.
@@ -263,8 +263,8 @@ Shows all fields: agent ID, event filter, payload filter, priority, throttle pol
 ### Enable / Disable a Subscription
 
 ```bash
-agentctl event subscriptions enable --id <subscription-id>
-agentctl event subscriptions disable --id <subscription-id>
+agentos event subscriptions enable --id <subscription-id>
+agentos event subscriptions disable --id <subscription-id>
 ```
 
 Disabled subscriptions remain stored but do not trigger tasks. Re-enable at any time without losing the subscription configuration.
@@ -272,7 +272,7 @@ Disabled subscriptions remain stored but do not trigger tasks. Re-enable at any 
 ### Remove a Subscription
 
 ```bash
-agentctl event unsubscribe <subscription-id>
+agentos event unsubscribe <subscription-id>
 ```
 
 Permanently removes the subscription. The removal is logged to the audit trail as `EventSubscriptionRemoved`.
@@ -282,7 +282,7 @@ Permanently removes the subscription. The removal is logged to the audit trail a
 ## Event History
 
 ```bash
-agentctl event history --last <N>
+agentos event history --last <N>
 ```
 
 Queries the audit log for the `N` most recent `EventEmitted` entries. Default: 20.

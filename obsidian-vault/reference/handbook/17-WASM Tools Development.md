@@ -173,8 +173,8 @@ version     = "0.1.0"
 description = "Returns a greeting match based on the input query"
 author      = "alice@example.com"
 trust_tier  = "community"
-author_pubkey = "<64 hex chars>"    # set by `agentctl tool sign`
-signature     = "<128 hex chars>"  # set by `agentctl tool sign`
+author_pubkey = "<64 hex chars>"    # set by `agentos tool sign`
+signature     = "<128 hex chars>"  # set by `agentos tool sign`
 
 [capabilities_required]
 permissions = []                    # no special permissions needed for this example
@@ -198,7 +198,7 @@ type      = "wasm"
 wasm_path = "hello-tool.wasm"   # relative to this manifest's directory
 ```
 
-The `.wasm` binary and the manifest must be in the same directory (or adjust `wasm_path` to a relative path within the directory). When `agentctl tool install` is called, the kernel resolves `wasm_path` relative to the manifest's location, pre-compiles the module with Wasmtime, and registers it.
+The `.wasm` binary and the manifest must be in the same directory (or adjust `wasm_path` to a relative path within the directory). When `agentos tool install` is called, the kernel resolves `wasm_path` relative to the manifest's location, pre-compiles the module with Wasmtime, and registers it.
 
 ---
 
@@ -348,17 +348,17 @@ cat /tmp/output.json
 
 ```bash
 # 1. Start the kernel
-agentctl serve
+agentos serve
 
 # 2. Sign and install your tool
-agentctl tool sign --manifest my-tool.toml --key my-keypair.json
-agentctl tool install my-tool.toml
+agentos tool sign --manifest my-tool.toml --key my-keypair.json
+agentos tool install my-tool.toml
 
 # 3. Confirm it appears
-agentctl tool list
+agentos tool list
 
 # 4. Run an agent that exercises the tool
-agentctl task run --agent my-agent --goal "Use hello-tool to check 'hello world'"
+agentos task run --agent my-agent --goal "Use hello-tool to check 'hello world'"
 ```
 
 ### Unit testing the protocol (native binary)
@@ -382,7 +382,7 @@ cat /tmp/out.json
 
 ```bash
 # 1. Generate a keypair (one-time)
-agentctl tool keygen --output my-keypair.json
+agentos tool keygen --output my-keypair.json
 # Store my-keypair.json securely — never commit to version control.
 
 # 2. Build the WASM binary
@@ -393,15 +393,15 @@ cp target/wasm32-wasip1/release/hello-tool.wasm ./hello-tool.wasm
 # ... edit hello-tool.toml ...
 
 # 4. Sign the manifest
-agentctl tool sign --manifest hello-tool.toml --key my-keypair.json
+agentos tool sign --manifest hello-tool.toml --key my-keypair.json
 
 # 5. Verify the signature
-agentctl tool verify hello-tool.toml
+agentos tool verify hello-tool.toml
 # OK  hello-tool (trust_tier=community)
 
 # 6. Distribute: share hello-tool.toml and hello-tool.wasm together
 # Users install with:
-agentctl tool install hello-tool.toml
+agentos tool install hello-tool.toml
 
 # 7. If you need to revoke a release:
 #    Ask the AgentOS project to add your pubkey to the CRL.

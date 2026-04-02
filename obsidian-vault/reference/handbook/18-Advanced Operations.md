@@ -44,23 +44,23 @@ Devices are identified by strings like `gpu:0`, `usb:1`, `cam:0`, `mic:0`. The i
 
 ### HAL CLI
 
-The HAL CLI is available via `agentctl hal`:
+The HAL CLI is available via `agentos hal`:
 
 ```bash
 # List all registered devices
-agentctl hal list
+agentos hal list
 
 # Show devices currently in quarantine
-agentctl hal quarantine
+agentos hal quarantine
 
 # Approve a device for a specific agent
-agentctl hal approve --device gpu:0 --agent coder
+agentos hal approve --device gpu:0 --agent coder
 
 # Deny a device for all agents
-agentctl hal deny --device usb:1
+agentos hal deny --device usb:1
 
 # Revoke an agent's access to a device
-agentctl hal revoke --device cam:0 --agent researcher
+agentos hal revoke --device cam:0 --agent researcher
 ```
 
 ### Audit Events
@@ -103,20 +103,20 @@ When the feature is disabled, the driver module is excluded entirely — no `zbu
 | `unmount` | Unmount a USB filesystem | `device` |
 | `eject` | Power off the parent USB drive | `device` |
 
-#### Usage via `agentctl`
+#### Usage via `agentos`
 
 ```bash
 # List all USB filesystems
-agentctl hal query usb-storage '{"action": "list"}'
+agentos hal query usb-storage '{"action": "list"}'
 
 # Mount a USB drive partition
-agentctl hal query usb-storage '{"action": "mount", "device": "sdb1"}'
+agentos hal query usb-storage '{"action": "mount", "device": "sdb1"}'
 
 # Unmount
-agentctl hal query usb-storage '{"action": "unmount", "device": "sdb1"}'
+agentos hal query usb-storage '{"action": "unmount", "device": "sdb1"}'
 
 # Eject (power off the drive)
-agentctl hal query usb-storage '{"action": "eject", "device": "sdb1"}'
+agentos hal query usb-storage '{"action": "eject", "device": "sdb1"}'
 ```
 
 #### Security
@@ -188,19 +188,19 @@ Locks can have a TTL in seconds. A background sweep (`sweep_expired()`) runs eve
 
 ```bash
 # List all currently held resource locks
-agentctl resource list
+agentos resource list
 
 # Show resource contention (waiters, blocked agents)
-agentctl resource contention
+agentos resource contention
 
 # Forcibly release a specific lock
-agentctl resource release --resource fs:/var/data/report.md --agent researcher
+agentos resource release --resource fs:/var/data/report.md --agent researcher
 
 # Release all locks held by an agent
-agentctl resource release-all --agent researcher
+agentos resource release-all --agent researcher
 ```
 
-Output of `agentctl resource list`:
+Output of `agentos resource list`:
 
 ```
 Resource                       Mode       Held By              TTL(s)
@@ -231,7 +231,7 @@ A background sweep runs every 10 minutes and deletes snapshots older than 72 hou
 ### Listing Snapshots
 
 ```bash
-agentctl snapshot list --task <task-id>
+agentos snapshot list --task <task-id>
 ```
 
 Output:
@@ -247,23 +247,23 @@ Total: 2 snapshot(s)
 The same data is accessible via:
 
 ```bash
-agentctl audit snapshots --task <task-id>
+agentos audit snapshots --task <task-id>
 ```
 
 ### Rolling Back
 
 ```bash
 # Roll back to the most recent snapshot
-agentctl snapshot rollback --task <task-id>
+agentos snapshot rollback --task <task-id>
 
 # Roll back to a specific snapshot
-agentctl snapshot rollback --task <task-id> --snapshot snap_0001
+agentos snapshot rollback --task <task-id> --snapshot snap_0001
 ```
 
 Also accessible via:
 
 ```bash
-agentctl audit rollback --task <task-id> [--snapshot <ref>]
+agentos audit rollback --task <task-id> [--snapshot <ref>]
 ```
 
 After rollback, the task context is restored to the snapshot state. The task can then resume or be resubmitted.
@@ -289,21 +289,21 @@ Escalations that are not resolved within **5 minutes** are automatically denied.
 
 ```bash
 # List pending escalations
-agentctl escalation list
+agentos escalation list
 
 # List all escalations including resolved ones
-agentctl escalation list --all
+agentos escalation list --all
 
 # Show details of a specific escalation
-agentctl escalation get <id>
+agentos escalation get <id>
 
 # Resolve an escalation with a decision
-agentctl escalation resolve <id> --decision "Approved"
-agentctl escalation resolve <id> --decision "Denied"
-agentctl escalation resolve <id> --decision "Acknowledged"
+agentos escalation resolve <id> --decision "Approved"
+agentos escalation resolve <id> --decision "Denied"
+agentos escalation resolve <id> --decision "Acknowledged"
 ```
 
-Output of `agentctl escalation list`:
+Output of `agentos escalation list`:
 
 ```
 ID     TASK         URGENCY    BLOCKING   STATUS   SUMMARY
@@ -312,7 +312,7 @@ ID     TASK         URGENCY    BLOCKING   STATUS   SUMMARY
 43     def67890     medium     no         pending  Agent wants to call external payment API...
 ```
 
-Output of `agentctl escalation get 42`:
+Output of `agentos escalation get 42`:
 
 ```
 Escalation #42
@@ -354,7 +354,7 @@ Each agent has an Ed25519 keypair used for cryptographic identity. The keypair i
 ### Viewing an Agent's Identity
 
 ```bash
-agentctl identity show --agent <name>
+agentos identity show --agent <name>
 ```
 
 Output:
@@ -371,7 +371,7 @@ The public key is safe to share. The signing key (private key) is held only in k
 ### Revoking an Identity
 
 ```bash
-agentctl identity revoke --agent <name>
+agentos identity revoke --agent <name>
 ```
 
 This permanently revokes the agent's cryptographic identity and all associated permissions. The agent will need to be reconnected to generate a new keypair and receive new permissions.

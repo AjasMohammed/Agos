@@ -1,0 +1,27 @@
+[skill]
+name = "cost-optimizer"
+version = "0.1.0"
+description = "Analyzes LLM spend by agent and model, recommends cheaper alternatives, tracks cost trends"
+author = "agentos-core"
+trust_tier = "core"
+
+[triggers]
+schedule = "0 8 * * *"
+events = ["budget_soft_limit_reached"]
+
+[agent]
+system_prompt_file = "prompt.md"
+roles = ["cost-monitor"]
+default_provider = "anthropic"
+default_model = "claude-haiku-4-5"
+
+[tools]
+required = ["audit-query", "memory-write", "notify-user"]
+optional = ["memory-search"]
+
+[permissions]
+required = ["audit:read", "memory:read", "memory:write", "notification:write"]
+
+[budget]
+max_cost_per_run = 0.10
+max_tokens_per_run = 10000

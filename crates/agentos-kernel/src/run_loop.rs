@@ -18,6 +18,7 @@ enum TaskKind {
     ArbiterNotificationListener,
     HealthMonitor,
     Consolidation,
+    ChannelInboundListener,
 }
 
 impl std::fmt::Display for TaskKind {
@@ -34,6 +35,7 @@ impl std::fmt::Display for TaskKind {
             TaskKind::ArbiterNotificationListener => write!(f, "ArbiterNotificationListener"),
             TaskKind::HealthMonitor => write!(f, "HealthMonitor"),
             TaskKind::Consolidation => write!(f, "Consolidation"),
+            TaskKind::ChannelInboundListener => write!(f, "ChannelInboundListener"),
         }
     }
 }
@@ -688,6 +690,35 @@ impl Kernel {
                     TaskKind::Consolidation
                 })
             }
+            TaskKind::ChannelInboundListener => {
+                let token = kernel.cancellation_token.clone();
+                join_set.spawn(async move {
+                    let mut rx = kernel.channel_manager_rx.lock().await;
+                    loop {
+                        tokio::select! {
+                            _ = token.cancelled() => break,
+                            msg = rx.recv() => {
+                                match msg {
+                                    Some(inbound) => {
+                                        tracing::debug!(
+                                            channel_type = %inbound.channel_type,
+                                            instance_id = %inbound.channel_instance_id,
+                                            "Inbound channel message received"
+                                        );
+                                        // TODO: Route to bound agent based on
+                                        // channel_instance_id -> agent mapping.
+                                    }
+                                    None => {
+                                        tracing::warn!("Channel inbound channel closed");
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    TaskKind::ChannelInboundListener
+                })
+            }
         }
     }
 
@@ -723,7 +754,7 @@ impl Kernel {
         // Pending delayed restarts: (fire_at, TaskKind) — avoids blocking the supervisor loop.
         let mut pending_restarts: Vec<(tokio::time::Instant, TaskKind)> = Vec::new();
 
-        // Spawn all 11 core tasks
+        // Spawn all 12 core tasks
         let all_kinds = [
             TaskKind::Acceptor,
             TaskKind::Executor,
@@ -736,6 +767,7 @@ impl Kernel {
             TaskKind::ArbiterNotificationListener,
             TaskKind::HealthMonitor,
             TaskKind::Consolidation,
+            TaskKind::ChannelInboundListener,
         ];
 
         for kind in &all_kinds {
@@ -750,6 +782,7 @@ impl Kernel {
         }
 
         tracing::info!("Kernel supervisor started with {} tasks", all_kinds.len());
+        // Note: the docstring above still says "11 core tasks" — updated to 12 with ChannelInboundListener.
 
         // Signal systemd that the kernel is ready to accept connections.
         // No-op when NOTIFY_SOCKET is not set (Docker, direct invocation, tests).
@@ -1214,6 +1247,9 @@ impl Kernel {
                 test_mode,
                 extra_permissions,
             } => {
+                // Intentionally calls cmd_connect_agent directly (not api_connect_agent):
+                // the bus command carries test_mode and extra_permissions which are
+                // bus/CLI-only features not exposed by api_connect_agent.
                 self.cmd_connect_agent(
                     name,
                     provider,
@@ -1227,7 +1263,12 @@ impl Kernel {
             }
             KernelCommand::ListAgents => self.cmd_list_agents().await,
             KernelCommand::DisconnectAgent { agent_id } => {
-                self.cmd_disconnect_agent(agent_id).await
+                // Route through api_* so any future shared logic (validation, audit hooks)
+                // applies to both CLI and REST paths.
+                match self.api_disconnect_agent(agent_id).await {
+                    Ok(()) => agentos_bus::KernelResponse::Success { data: None },
+                    Err(msg) => agentos_bus::KernelResponse::Error { message: msg },
+                }
             }
             KernelCommand::RunTask {
                 agent_name,
@@ -1240,12 +1281,20 @@ impl Kernel {
                 value,
                 scope,
                 scope_raw,
-            } => self.cmd_set_secret(name, value, scope, scope_raw).await,
+            } => {
+                // Intentionally calls cmd_set_secret directly (not api_set_secret):
+                // the bus command carries scope_raw (raw CLI string scope) which
+                // api_set_secret hard-codes to None.
+                self.cmd_set_secret(name, value, scope, scope_raw).await
+            }
             KernelCommand::ListSecrets => self.cmd_list_secrets().await,
             KernelCommand::RotateSecret { name, new_value } => {
                 self.cmd_rotate_secret(name, new_value).await
             }
-            KernelCommand::RevokeSecret { name } => self.cmd_revoke_secret(name).await,
+            KernelCommand::RevokeSecret { name } => match self.api_revoke_secret(name).await {
+                Ok(()) => agentos_bus::KernelResponse::Success { data: None },
+                Err(msg) => agentos_bus::KernelResponse::Error { message: msg },
+            },
             KernelCommand::GetTaskLogs { task_id } => self.cmd_get_task_logs(task_id).await,
             KernelCommand::CancelTask { task_id } => self.cmd_cancel_task(task_id).await,
             KernelCommand::TaskGetTrace { task_id } => self.cmd_get_task_trace(task_id).await,
@@ -1254,18 +1303,32 @@ impl Kernel {
             }
             KernelCommand::ListTools => self.cmd_list_tools().await,
             KernelCommand::InstallTool { manifest_path } => {
-                self.cmd_install_tool(manifest_path).await
+                match self.api_install_tool(manifest_path).await {
+                    Ok(()) => agentos_bus::KernelResponse::Success { data: None },
+                    Err(msg) => agentos_bus::KernelResponse::Error { message: msg },
+                }
             }
             KernelCommand::ToolLoad { manifest_path } => self.cmd_tool_load(manifest_path).await,
-            KernelCommand::RemoveTool { tool_name } => self.cmd_remove_tool(tool_name).await,
+            KernelCommand::RemoveTool { tool_name } => {
+                match self.api_remove_tool(tool_name).await {
+                    Ok(()) => agentos_bus::KernelResponse::Success { data: None },
+                    Err(msg) => agentos_bus::KernelResponse::Error { message: msg },
+                }
+            }
             KernelCommand::GrantPermission {
                 agent_name,
                 permission,
-            } => self.cmd_grant_permission(agent_name, permission).await,
+            } => match self.api_grant_permission(agent_name, permission).await {
+                Ok(()) => agentos_bus::KernelResponse::Success { data: None },
+                Err(msg) => agentos_bus::KernelResponse::Error { message: msg },
+            },
             KernelCommand::RevokePermission {
                 agent_name,
                 permission,
-            } => self.cmd_revoke_permission(agent_name, permission).await,
+            } => match self.api_revoke_permission(agent_name, permission).await {
+                Ok(()) => agentos_bus::KernelResponse::Success { data: None },
+                Err(msg) => agentos_bus::KernelResponse::Error { message: msg },
+            },
             KernelCommand::ShowPermissions { agent_name } => {
                 self.cmd_show_permissions(agent_name).await
             }
@@ -1345,6 +1408,8 @@ impl Kernel {
                 permission,
                 expires_secs,
             } => {
+                // TODO: Add api_grant_permission_timed wrapper and route through it,
+                // mirroring the Phase 7 migration done for GrantPermission.
                 self.cmd_grant_permission_timed(agent_name, permission, expires_secs)
                     .await
             }
@@ -1633,6 +1698,9 @@ impl Kernel {
             KernelCommand::SkillList => self.cmd_skill_list().await,
             KernelCommand::SkillRun { name, input } => self.cmd_skill_run(name, input).await,
             KernelCommand::SkillStatus { name } => self.cmd_skill_status(name).await,
+
+            // Provider catalog
+            KernelCommand::ListProviders => self.cmd_list_providers().await,
         }
     }
 

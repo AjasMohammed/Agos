@@ -1,6 +1,6 @@
 use crate::handlers::render;
 use crate::state::AppState;
-use agentos_types::{DeliveryChannel, NotificationID};
+use agentos_types::NotificationID;
 use axum::extract::{Form, Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -15,13 +15,13 @@ use tokio_stream::StreamExt;
 
 /// GET /notifications — full inbox page.
 pub async fn inbox(State(state): State<AppState>, jar: CookieJar) -> Response {
-    let notifications = match state
-        .kernel
-        .notification_router
-        .inbox()
-        .list(false, 50)
-        .await
-    {
+    use agentos_api::types::NotificationFilter;
+
+    let filter = NotificationFilter {
+        unread_only: Some(false),
+        limit: Some(50),
+    };
+    let notifications = match state.service.list_notifications(filter).await {
         Ok(msgs) => msgs,
         Err(e) => {
             tracing::error!(error = %e, "Failed to load notification inbox");
@@ -34,7 +34,10 @@ pub async fn inbox(State(state): State<AppState>, jar: CookieJar) -> Response {
     };
 
     let unread_count = notifications.iter().filter(|m| !m.read).count();
-    let notifs_ctx: Vec<_> = notifications.iter().map(notification_to_ctx).collect();
+    let notifs_ctx: Vec<_> = notifications
+        .iter()
+        .map(notification_summary_to_ctx)
+        .collect();
     let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);
 
     let ctx = context! {
@@ -49,12 +52,13 @@ pub async fn inbox(State(state): State<AppState>, jar: CookieJar) -> Response {
 
 /// GET /notifications/unread-count — lightweight JSON endpoint for the bell counter.
 pub async fn unread_count(State(state): State<AppState>) -> axum::response::Json<UnreadCount> {
-    let count = state
-        .kernel
-        .notification_router
-        .inbox()
-        .count_unread()
-        .await;
+    let count = match state.service.get_unread_count().await {
+        Ok(n) => n as usize,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to get unread notification count, defaulting to 0");
+            0
+        }
+    };
     axum::response::Json(UnreadCount { count })
 }
 
@@ -74,29 +78,16 @@ pub async fn get_notification(
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid notification ID").into_response(),
     };
 
-    let msg = match state
-        .kernel
-        .notification_router
-        .inbox()
-        .get(&notification_id)
-        .await
-    {
-        Ok(Some(m)) => m,
-        Ok(None) => return (StatusCode::NOT_FOUND, "Notification not found").into_response(),
+    let msg = match state.service.get_notification(notification_id).await {
+        Ok(m) => m,
+        Err(agentos_api::ApiError::NotFound(_)) => {
+            return (StatusCode::NOT_FOUND, "Notification not found").into_response()
+        }
         Err(e) => {
             tracing::error!(error = %e, "Failed to fetch notification");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
         }
     };
-
-    // Mark as read (best-effort — don't fail the render if this fails).
-    state
-        .kernel
-        .notification_router
-        .inbox()
-        .mark_read(&notification_id)
-        .await
-        .ok();
 
     let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);
     let ctx = context! {
@@ -134,16 +125,9 @@ pub async fn respond_to_notification(
             .into_response();
     }
 
-    let response = agentos_types::UserResponse {
-        text: response_text.clone(),
-        responded_at: chrono::Utc::now(),
-        channel: DeliveryChannel::web(),
-    };
-
     match state
-        .kernel
-        .notification_router
-        .route_response(notification_id, response)
+        .service
+        .respond_to_notification(notification_id, response_text.clone())
         .await
     {
         Ok(()) => {
@@ -262,6 +246,30 @@ fn notification_to_ctx(msg: &agentos_types::UserMessage) -> minijinja::Value {
         created_at => msg.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
         expires_at,
         requires_response => msg.interaction.is_some() && msg.response.is_none(),
+    }
+}
+
+/// Convert a `NotificationSummary` (from `KernelService::list_notifications`) into a
+/// MiniJinja context value. This has fewer fields than `notification_to_ctx` since the
+/// list API only returns summary data.
+fn notification_summary_to_ctx(msg: &agentos_api::types::NotificationSummary) -> minijinja::Value {
+    context! {
+        id => msg.id.to_string(),
+        from => String::new(),
+        priority => msg.priority.clone(),
+        subject => msg.subject.clone(),
+        body => String::new(),
+        kind_tag => "notification",
+        question => Option::<String>::None,
+        options => Option::<Vec<String>>::None,
+        response_text => Option::<String>::None,
+        read => msg.read,
+        created_at => msg.timestamp.clone(),
+        expires_at => Option::<String>::None,
+        // TODO: requires_response and from are hardcoded — NotificationSummary does not
+        // include message kind or sender. The inbox list will not distinguish Question-type
+        // messages from informational ones until NotificationSummary grows these fields.
+        requires_response => false,
     }
 }
 

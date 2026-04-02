@@ -22,18 +22,25 @@ pub async fn list(
     Query(query): Query<ListQuery>,
     jar: CookieJar,
 ) -> Response {
-    let tasks = state.kernel.scheduler.list_tasks().await;
-    let task_rows: Vec<_> = tasks
+    use agentos_api::types::TaskFilter;
+
+    let filter = TaskFilter {
+        status: query.status.clone().filter(|s| !s.is_empty()),
+        agent_name: None,
+        offset: None,
+        limit: Some(500),
+    };
+    let (tasks_api, _total) = match state.service.list_tasks(filter).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to list tasks: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to list tasks").into_response();
+        }
+    };
+
+    let task_rows: Vec<_> = tasks_api
         .iter()
         .filter(|t| {
-            if let Some(ref status) = query.status {
-                if !status.is_empty() {
-                    let state_str = format!("{:?}", t.state).to_lowercase();
-                    if !state_str.contains(&status.to_lowercase()) {
-                        return false;
-                    }
-                }
-            }
             if let Some(ref search) = query.search {
                 if !search.is_empty()
                     && !t
@@ -49,13 +56,13 @@ pub async fn list(
         .map(|t| {
             context! {
                 id => t.id.to_string(),
-                state => format!("{:?}", t.state),
-                agent_id => t.agent_id.to_string(),
+                state => t.status.clone(),
+                agent_id => t.agent_name.clone().unwrap_or_default(),
                 prompt_preview => t.prompt_preview.clone(),
                 created_at => t.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                tool_calls => t.tool_calls,
-                tokens_used => t.tokens_used,
-                priority => t.priority,
+                tool_calls => 0u32,
+                tokens_used => 0u64,
+                priority => 0u32,
             }
         })
         .collect();
@@ -84,24 +91,20 @@ pub async fn cancel(State(state): State<AppState>, Path(id): Path<String>) -> Re
         }
     };
 
-    match state
-        .kernel
-        .scheduler
-        .update_state(&task_id, agentos_types::TaskState::Cancelled)
-        .await
-    {
+    match state.service.cancel_task(task_id).await {
         Ok(()) => {
-            if let Some(task) = state.kernel.scheduler.get_task(&task_id).await {
+            // Re-fetch the task via service to render the updated row.
+            if let Ok(task) = state.service.get_task(task_id).await {
                 let ctx = context! {
                     tasks => vec![context! {
                         id => task.id.to_string(),
-                        state => format!("{:?}", task.state),
-                        agent_id => task.agent_id.to_string(),
-                        prompt_preview => task.original_prompt.chars().take(100).collect::<String>(),
+                        state => task.status.clone(),
+                        agent_id => task.agent_name.clone().unwrap_or_default(),
+                        prompt_preview => task.prompt.chars().take(100).collect::<String>(),
                         created_at => task.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
                         tool_calls => 0u32,
                         tokens_used => 0u64,
-                        priority => task.priority,
+                        priority => 0u32,
                     }],
                 };
                 let mut response = super::render(&state.templates, "partials/task_row.html", ctx);
@@ -122,8 +125,8 @@ pub async fn cancel(State(state): State<AppState>, Path(id): Path<String>) -> Re
             );
             response
         }
-        Err(msg) => {
-            tracing::error!(task = %id, error = %msg, "Failed to cancel task");
+        Err(e) => {
+            tracing::error!(task = %id, error = %e, "Failed to cancel task");
             let mut response = (StatusCode::BAD_REQUEST, "Failed to cancel task").into_response();
             response.headers_mut().insert(
                 "HX-Trigger",
@@ -136,6 +139,13 @@ pub async fn cancel(State(state): State<AppState>, Path(id): Path<String>) -> Re
     }
 }
 
+/// GET /tasks/{id} — task detail page.
+///
+/// TODO: Migrate to state.service.get_task() once ApiTaskDetail exposes:
+/// - task.history (Vec<IntentMessage> — full turn history for the detail template)
+/// - task.original_prompt (untruncated prompt, distinct from prompt_preview)
+/// - task.priority (scheduling priority field)
+/// - task.agent_id (typed AgentID, not just agent_name)
 pub async fn detail(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -186,6 +196,10 @@ pub async fn detail(
 }
 
 /// Render the execution trace timeline for a completed task.
+///
+/// TODO: Migrate to state.service.get_task_trace() once ApiTaskTrace exposes the full
+/// IterationRecord fields (tool_calls with permission_check, injection_score, snapshot_ref,
+/// input_json) that the trace timeline template requires.
 pub async fn trace_page(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let task_id: agentos_types::TaskID = match id.parse() {
         Ok(id) => id,
@@ -283,6 +297,8 @@ pub async fn trace_page(State(state): State<AppState>, Path(id): Path<String>) -
 }
 
 /// JSON API — returns the raw trace for a task.
+///
+/// TODO: Migrate to state.service.get_task_trace() — same blocker as trace_page above.
 pub async fn trace_json(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let task_id: agentos_types::TaskID = match id.parse() {
         Ok(id) => id,
@@ -303,6 +319,12 @@ pub async fn trace_json(State(state): State<AppState>, Path(id): Path<String>) -
 
 /// SSE endpoint for live task log streaming.
 /// Streams audit events related to the given task using monotonic ID-based tracking.
+///
+/// TODO: This handler intentionally uses state.kernel.audit and state.kernel.scheduler
+/// directly because it must clone both into a `'static` move closure for stream::unfold.
+/// KernelService methods are async trait methods and cannot be easily moved into the
+/// stream::unfold closure without holding an Arc ref across the future boundary.
+/// Migrate once KernelService grows a dedicated log_stream method returning a Stream.
 pub async fn log_stream(
     State(state): State<AppState>,
     Path(id): Path<String>,

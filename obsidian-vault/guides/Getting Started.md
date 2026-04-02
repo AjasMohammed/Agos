@@ -131,3 +131,4 @@ agentctl status
 - [[Configuration Guide]] - Customize your setup
 - [[Tool System]] - Learn about built-in and custom tools
 - [[Security Model]] - Understand the security layers
+- [[Pipeline Tutorial]] - Build multi-step agent workflows
