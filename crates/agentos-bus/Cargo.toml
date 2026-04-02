@@ -15,11 +15,11 @@ thiserror = { workspace = true }
 
 # Optional TLS support for TCP transport
 tokio-rustls = { workspace = true, optional = true }
-rustls-pemfile = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true, features = ["std"] }
 
 [features]
 default = []
-tls = ["tokio-rustls", "rustls-pemfile"]
+tls = ["tokio-rustls", "rustls-pki-types"]
 
 [dev-dependencies]
 tempfile = "3.10"

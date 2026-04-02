@@ -6,12 +6,12 @@
 use crate::message::BusMessage;
 use crate::transport::{read_message, write_message};
 use agentos_types::AgentOSError;
-use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls_pki_types::pem::PemObject;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
@@ -143,19 +143,13 @@ impl TlsBusClient {
 }
 
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, AgentOSError> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| AgentOSError::BusError(format!("Cannot open cert file {:?}: {}", path, e)))?;
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::certs(&mut reader)
+    CertificateDer::pem_file_iter(path)
+        .map_err(|e| AgentOSError::BusError(format!("Cannot open cert file {:?}: {}", path, e)))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| AgentOSError::BusError(format!("Failed to parse certs: {}", e)))
 }
 
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, AgentOSError> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| AgentOSError::BusError(format!("Cannot open key file {:?}: {}", path, e)))?;
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::private_key(&mut reader)
-        .map_err(|e| AgentOSError::BusError(format!("Failed to parse private key: {}", e)))?
-        .ok_or_else(|| AgentOSError::BusError("No private key found in file".to_string()))
+    PrivateKeyDer::from_pem_file(path)
+        .map_err(|e| AgentOSError::BusError(format!("Failed to parse private key: {}", e)))
 }
