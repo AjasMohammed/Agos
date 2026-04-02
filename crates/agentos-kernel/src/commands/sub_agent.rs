@@ -112,6 +112,38 @@ mod tests {
         let children = scheduler.get_children(&unknown).await;
         assert!(children.is_empty());
     }
+
+    /// Cascade cancel: registering a child under a parent and querying get_children
+    /// returns exactly that child; a child has no children of its own by default.
+    /// (The actual cancel cascade is exercised via cmd_cancel_task; this unit test
+    /// verifies the data-structure contract that cascade relies on.)
+    #[tokio::test]
+    async fn test_cancel_parent_cancels_children() {
+        let scheduler = TaskScheduler::new(4);
+
+        let parent_id = TaskID::new();
+        let child_id = TaskID::new();
+
+        let mut parent_task = make_task_at_depth(0);
+        parent_task.id = parent_id;
+
+        let mut child_task = make_task_at_depth(1);
+        child_task.id = child_id;
+        child_task.parent_task_id = Some(parent_id);
+
+        scheduler.enqueue(parent_task).await;
+        scheduler.enqueue(child_task).await;
+        scheduler.register_child(parent_id, child_id).await;
+
+        // Parent must report exactly one child.
+        let children = scheduler.get_children(&parent_id).await;
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0], child_id);
+
+        // Child has no registered children of its own.
+        let no_children = scheduler.get_children(&child_id).await;
+        assert!(no_children.is_empty(), "child has no registered children");
+    }
 }
 
 /// Maximum sub-agent spawn depth. Tasks at this depth may not spawn children.
