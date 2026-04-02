@@ -98,8 +98,8 @@ rpassword = "7"
 libc = "0.2"
 
 # WASM runtime
-wasmtime = { version = "38", features = ["async", "cranelift"] }
-wasmtime-wasi = "38"
+wasmtime = { version = "41", features = ["async", "cranelift"] }
+wasmtime-wasi = "41"
 
 # JSON Schema validation
 jsonschema = "0.28"
