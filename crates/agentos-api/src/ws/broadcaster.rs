@@ -4,21 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
-use agentos_types::TaskState;
-
 use super::protocol::ServerFrame;
-
-fn task_state_str(s: &TaskState) -> &str {
-    match s {
-        TaskState::Queued => "queued",
-        TaskState::Running => "running",
-        TaskState::Waiting => "waiting",
-        TaskState::Suspended => "suspended",
-        TaskState::Complete => "complete",
-        TaskState::Failed => "failed",
-        TaskState::Cancelled => "cancelled",
-    }
-}
+use crate::util::task_state_str;
 
 /// Entry tracking a single subscription.
 struct BroadcastEntry {

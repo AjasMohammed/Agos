@@ -7,6 +7,7 @@
 use crate::error::ApiError;
 use crate::service::KernelService;
 use crate::types::*;
+use crate::util::task_state_str;
 use agentos_kernel::Kernel;
 use agentos_types::{
     DeliveryChannel, LLMProvider, NotificationID, SecretMetadata, SecretScope, TaskID, TaskState,
@@ -32,18 +33,6 @@ fn status_str(s: &agentos_types::AgentStatus) -> &str {
         agentos_types::AgentStatus::Idle => "idle",
         agentos_types::AgentStatus::Busy => "busy",
         agentos_types::AgentStatus::Offline => "offline",
-    }
-}
-
-fn task_state_str(s: &TaskState) -> &str {
-    match s {
-        TaskState::Queued => "queued",
-        TaskState::Running => "running",
-        TaskState::Waiting => "waiting",
-        TaskState::Suspended => "suspended",
-        TaskState::Complete => "complete",
-        TaskState::Failed => "failed",
-        TaskState::Cancelled => "cancelled",
     }
 }
 

@@ -38,6 +38,11 @@ GET /api/v1/ws?token=agos_<64-hex-chars>
 
 The API key is passed as a query parameter because the WebSocket HTTP upgrade does not support custom headers in all clients. The key must be a valid, non-revoked, non-expired `agos_*` key.
 
+> **Security note — log redaction required before public exposure.**
+> URL query parameters (including `?token=…`) are recorded verbatim by HTTP server access logs, reverse proxies, CDNs, and browser history. Before exposing this endpoint on a public or shared network, configure your reverse proxy (nginx, Caddy, etc.) to redact or strip the `token` query parameter from access logs. Failure to do so means long-lived API keys will appear in plaintext in multiple external systems.
+>
+> If your deployment cannot guarantee log redaction, consider issuing a short-lived, single-use ticket via `POST /api/v1/auth/ws-ticket` (planned) so the long-lived key never appears in the URL.
+
 **Example (JavaScript):**
 
 ```javascript

@@ -7,6 +7,7 @@ pub mod router;
 pub mod server;
 pub mod service;
 pub mod types;
+pub(crate) mod util;
 pub mod ws;
 
 pub use api_key::ApiKeyStore;
