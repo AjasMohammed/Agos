@@ -64,6 +64,26 @@ pub enum KernelCommand {
     CancelTask {
         task_id: TaskID,
     },
+    /// Spawn a child task from within a running parent task.
+    /// The child inherits a scoped subset of the parent's capabilities.
+    SpawnSubAgent {
+        /// The parent task that is spawning this child.
+        parent_task_id: TaskID,
+        /// Name of the registered agent to run the child task.
+        agent_name: String,
+        /// The prompt / goal for the child task.
+        prompt: String,
+        /// Permissions requested for the child (intersected with parent's at spawn time).
+        #[serde(default)]
+        requested_permissions: Vec<String>,
+    },
+    /// Wait for a set of child tasks to complete and retrieve their results.
+    AwaitSubAgents {
+        /// The parent task that is waiting.
+        parent_task_id: TaskID,
+        /// IDs of child tasks to wait for.
+        child_task_ids: Vec<TaskID>,
+    },
     /// Retrieve the execution trace for a completed task.
     TaskGetTrace {
         task_id: TaskID,
@@ -632,6 +652,17 @@ pub enum KernelResponse {
     // Task trace / debugger
     TaskTrace(Box<agentos_types::TaskTrace>),
     TaskTraces(Vec<agentos_types::TaskTraceSummary>),
+
+    // Sub-agent coordination
+    /// A sub-agent task was successfully spawned.
+    SubAgentSpawned {
+        child_task_id: TaskID,
+    },
+    /// Results from awaited sub-agent tasks.
+    SubAgentResults {
+        /// (child_task_id, result_summary) pairs.
+        results: Vec<(TaskID, String)>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
