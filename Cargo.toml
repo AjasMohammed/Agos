@@ -106,7 +106,7 @@ jsonschema = "0.28"
 
 # TLS
 tokio-rustls = "0.26"
-rustls-pemfile = "2"
+rustls-pki-types = { version = "1", features = ["std"] }
 
 # System info
 sysinfo = "0.33"

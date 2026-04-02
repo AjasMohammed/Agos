@@ -287,6 +287,7 @@ async fn post_review(_state: &AppState, name: &str, form: &ReviewForm) {
         ureq::post(&url)
             .set("content-type", "application/json")
             .send_string(&body_str)
+            .map_err(Box::new)
     })
     .await;
 
