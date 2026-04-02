@@ -294,7 +294,7 @@ impl HardwareAbstractionLayer {
         //   3. The driver returns a device_key for this call (physical-device drivers only).
         //
         // On first contact the device is auto-quarantined. Access is denied until an
-        // operator approves it via `agentctl hal approve`. If already approved for this
+        // operator approves it via `agentos hal approve`. If already approved for this
         // agent, the call proceeds to `driver.query()`.
         if let Some(device_key) = driver.device_key(&params) {
             let device_type = format!("{}-device", driver_name);

@@ -15,18 +15,20 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 
 mod commands;
+mod embedded;
 use commands::{
     agent::AgentCommands, audit::AuditCommands, bg::BgCommands, channel::ChannelCommands,
     cost::CostCommands, escalation::EscalationCommands, event::EventCommands, hal::HalCommands,
     identity::IdentityCommands, log::LogCommands, mcp::McpCommands,
     notifications::NotificationCommands, perm::PermCommands, pipeline::PipelineCommands,
-    resource::ResourceCommands, role::RoleCommands, schedule::ScheduleCommands,
-    scratchpad::ScratchpadCommands, secret::SecretCommands, snapshot::SnapshotCommands,
-    task::TaskCommands, tool::ToolCommands, web::WebCommands,
+    provider::ProviderCommands, resource::ResourceCommands, role::RoleCommands,
+    schedule::ScheduleCommands, scratchpad::ScratchpadCommands, secret::SecretCommands,
+    skill::SkillCommands, snapshot::SnapshotCommands, task::TaskCommands, tool::ToolCommands,
+    web::WebCommands,
 };
 
 #[derive(Parser)]
-#[command(name = "agentctl")]
+#[command(name = "agentos")]
 #[command(about = "AgentOS — Control CLI for the LLM-native operating system")]
 #[command(version)]
 pub struct Cli {
@@ -188,10 +190,22 @@ pub enum Commands {
         command: ChannelCommands,
     },
 
+    /// Manage autonomous skill packages (system prompt + tools + triggers + budget)
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommands,
+    },
+
     /// MCP (Model Context Protocol) adapter — import/export tools via the standard protocol
     Mcp {
         #[command(subcommand)]
         command: McpCommands,
+    },
+
+    /// List and inspect available LLM providers (built-in + catalog)
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommands,
     },
 }
 
@@ -247,6 +261,14 @@ async fn tokio_main() -> anyhow::Result<()> {
     };
 
     init_logging(&logging_cfg);
+
+    // Extract embedded assets to working directory if not present
+    let data_dir = std::env::var("AGENTOS_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if let Err(e) = embedded::extract_assets_if_needed(&data_dir) {
+        eprintln!("Warning: failed to extract embedded assets: {e}");
+    }
 
     match cli.command {
         Commands::Start => {
@@ -333,7 +355,7 @@ fn init_logging(cfg: &agentos_kernel::config::LoggingSettings) {
         tracing_subscriber::EnvFilter::new(format!("agentos={}", cfg.log_level))
     });
 
-    // Wrap the filter in a reload layer so `agentctl log set-level` can update it at runtime.
+    // Wrap the filter in a reload layer so `agentos log set-level` can update it at runtime.
     let (filter_reload_layer, reload_handle) = tracing_subscriber::reload::Layer::new(env_filter);
 
     // Register the reload setter in the kernel so the SetLogLevel command can call it.
@@ -593,8 +615,58 @@ async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
         "   Tools: {} loaded",
         kernel.tool_registry.read().await.list_all().len()
     );
+
+    // ── API server ─────────────────────────────────────────────────────
+    if kernel.config.api.enabled {
+        let api_host = kernel.config.api.host.clone();
+        let api_port = kernel.config.api.port;
+        let api_addr: std::net::SocketAddr = format!("{api_host}:{api_port}")
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid API bind address: {e}"))?;
+
+        // Derive api_keys.db path from the same directory as the kernel state DB.
+        let api_keys_db = {
+            let state_path = std::path::Path::new(&kernel.config.kernel.state_db_path);
+            let dir = state_path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("."));
+            dir.join("api_keys.db")
+        };
+        let key_store = agentos_api::ApiKeyStore::open(&api_keys_db)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to open API key store: {e}"))?;
+        // Revoke any stale bootstrap keys from previous runs before issuing a
+        // fresh one — prevents unbounded accumulation of full-admin keys in the DB.
+        key_store.revoke_by_name("bootstrap").await;
+        let bootstrap_key = key_store
+            .create_key("bootstrap".into(), vec!["*".into()], None)
+            .await;
+
+        println!("   API: http://{api_addr}");
+        println!();
+        println!("╔══════════════════════════════════════════════════════════════════════╗");
+        println!("║  Bootstrap API key (full admin access — store securely):             ║");
+        println!("║  {bootstrap_key}  ║");
+        println!("╚══════════════════════════════════════════════════════════════════════╝");
+        println!();
+        println!(
+            "  Example: curl -H \"Authorization: Bearer {bootstrap_key}\" http://{api_addr}/v1/status"
+        );
+
+        let service: Arc<dyn agentos_api::KernelService> = kernel.clone();
+        let broadcaster = agentos_api::ws::broadcaster::WsBroadcaster::new();
+        tokio::spawn(async move {
+            if let Err(e) =
+                agentos_api::run_api_server(service, key_store, broadcaster, api_addr).await
+            {
+                tracing::error!("API server exited with error: {e}");
+            }
+        });
+    }
+
     println!();
-    println!("AgentOS is running. Use another terminal to run agentctl commands.");
+    println!("AgentOS is running. Use another terminal to run agentos commands.");
     println!("Press Ctrl+C to shutdown.");
 
     kernel.run().await?;
@@ -623,14 +695,14 @@ mod tests {
 
     #[test]
     fn test_cli_parses_start_command() {
-        let cli = Cli::try_parse_from(["agentctl", "start"]).unwrap();
+        let cli = Cli::try_parse_from(["agentos", "start"]).unwrap();
         assert!(matches!(cli.command, Commands::Start));
     }
 
     #[test]
     fn test_cli_parses_agent_connect() {
         let cli = Cli::try_parse_from([
-            "agentctl",
+            "agentos",
             "agent",
             "connect",
             "--provider",
@@ -666,7 +738,7 @@ mod tests {
     #[test]
     fn test_cli_parses_task_run() {
         let cli = Cli::try_parse_from([
-            "agentctl",
+            "agentos",
             "task",
             "run",
             "--agent",
@@ -694,7 +766,7 @@ mod tests {
     #[test]
     fn test_cli_parses_secret_set_with_scope() {
         let cli = Cli::try_parse_from([
-            "agentctl",
+            "agentos",
             "secret",
             "set",
             "SLACK_TOKEN",
@@ -716,7 +788,7 @@ mod tests {
 
     #[test]
     fn test_cli_parses_perm_grant() {
-        let cli = Cli::try_parse_from(["agentctl", "perm", "grant", "analyst", "fs.user_data:rw"])
+        let cli = Cli::try_parse_from(["agentos", "perm", "grant", "analyst", "fs.user_data:rw"])
             .unwrap();
 
         match cli.command {
@@ -738,7 +810,7 @@ mod tests {
     #[test]
     fn test_cli_parses_schedule_create() {
         let cli = Cli::try_parse_from([
-            "agentctl",
+            "agentos",
             "schedule",
             "create",
             "--name",
@@ -777,7 +849,7 @@ mod tests {
     #[test]
     fn test_cli_parses_bg_run() {
         let cli = Cli::try_parse_from([
-            "agentctl",
+            "agentos",
             "bg",
             "run",
             "--name",
@@ -811,7 +883,7 @@ mod tests {
     #[test]
     fn test_cli_parses_event_subscribe() {
         let cli = Cli::try_parse_from([
-            "agentctl",
+            "agentos",
             "event",
             "subscribe",
             "--agent",
@@ -849,7 +921,7 @@ mod tests {
     #[test]
     fn test_cli_parses_event_subscribe_with_payload_filter() {
         let cli = Cli::try_parse_from([
-            "agentctl",
+            "agentos",
             "event",
             "subscribe",
             "--agent",
@@ -887,7 +959,7 @@ mod tests {
 
     #[test]
     fn test_cli_parses_event_subscriptions_list() {
-        let cli = Cli::try_parse_from(["agentctl", "event", "subscriptions", "list"]).unwrap();
+        let cli = Cli::try_parse_from(["agentos", "event", "subscriptions", "list"]).unwrap();
 
         match cli.command {
             Commands::Event {
@@ -899,7 +971,7 @@ mod tests {
 
     #[test]
     fn test_cli_parses_event_history() {
-        let cli = Cli::try_parse_from(["agentctl", "event", "history", "--last", "50"]).unwrap();
+        let cli = Cli::try_parse_from(["agentos", "event", "history", "--last", "50"]).unwrap();
 
         match cli.command {
             Commands::Event {
@@ -914,7 +986,7 @@ mod tests {
     #[test]
     fn test_cli_parses_hal_register() {
         let cli = Cli::try_parse_from([
-            "agentctl",
+            "agentos",
             "hal",
             "register",
             "--id",
@@ -937,7 +1009,7 @@ mod tests {
 
     #[test]
     fn test_cli_parses_hal_approve() {
-        let cli = Cli::try_parse_from(["agentctl", "hal", "approve", "gpu:0", "--agent", "worker"])
+        let cli = Cli::try_parse_from(["agentos", "hal", "approve", "gpu:0", "--agent", "worker"])
             .unwrap();
 
         match cli.command {
@@ -954,7 +1026,7 @@ mod tests {
     #[test]
     fn test_cli_parses_web_serve() {
         let cli = Cli::try_parse_from([
-            "agentctl", "web", "serve", "--port", "9090", "--host", "0.0.0.0",
+            "agentos", "web", "serve", "--port", "9090", "--host", "0.0.0.0",
         ])
         .unwrap();
 
@@ -971,7 +1043,7 @@ mod tests {
 
     #[test]
     fn test_cli_parses_web_serve_defaults() {
-        let cli = Cli::try_parse_from(["agentctl", "web", "serve"]).unwrap();
+        let cli = Cli::try_parse_from(["agentos", "web", "serve"]).unwrap();
 
         match cli.command {
             Commands::Web {
@@ -986,7 +1058,7 @@ mod tests {
 
     #[test]
     fn test_cli_parses_log_set_level() {
-        let cli = Cli::try_parse_from(["agentctl", "log", "set-level", "debug"]).unwrap();
+        let cli = Cli::try_parse_from(["agentos", "log", "set-level", "debug"]).unwrap();
         match cli.command {
             Commands::Log {
                 command: LogCommands::SetLevel { level },
@@ -1000,7 +1072,7 @@ mod tests {
     #[test]
     fn test_cli_parses_log_set_level_compound_directive() {
         let cli = Cli::try_parse_from([
-            "agentctl",
+            "agentos",
             "log",
             "set-level",
             "agentos=debug,agentos_kernel=trace",

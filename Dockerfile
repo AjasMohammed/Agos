@@ -20,7 +20,7 @@ COPY crates/ crates/
 COPY tools/ tools/
 
 # Build release binary
-RUN cargo build --release --bin agentctl
+RUN cargo build --release --bin agentos
 
 # Create empty dirs for the runtime stage (distroless has no mkdir)
 RUN mkdir -p runtime-dirs/data runtime-dirs/models runtime-dirs/user-tools runtime-dirs/log
@@ -33,7 +33,7 @@ FROM gcr.io/distroless/cc-debian12
 # All runtime libs (OpenSSL eliminated via rustls-tls) are self-contained.
 
 # Copy binary from builder
-COPY --from=builder /usr/src/agentos/target/release/agentctl /usr/local/bin/agentctl
+COPY --from=builder /usr/src/agentos/target/release/agentos /usr/local/bin/agentos
 
 # Create writable data directories (distroless has no mkdir/shell).
 # Docker initialises new volumes with the image directory's ownership,
@@ -54,7 +54,7 @@ COPY --chown=nonroot:nonroot tools/core/ /var/lib/agentos/tools/core/
 # Copy web UI static assets
 COPY --from=builder /usr/src/agentos/crates/agentos-web/static/ /var/lib/agentos/static/
 
-# Set default config path so every agentctl command finds it automatically
+# Set default config path so every agentos command finds it automatically
 ENV AGENTOS_CONFIG=/etc/agentos/config.toml
 # Point the web server at the static assets directory inside the container
 ENV AGENTOS_STATIC_DIR=/var/lib/agentos/static
@@ -66,7 +66,7 @@ WORKDIR /var/lib/agentos
 EXPOSE 8080 9091
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["/usr/local/bin/agentctl", "healthz"]
+    CMD ["/usr/local/bin/agentos", "healthz"]
 
-ENTRYPOINT ["agentctl"]
+ENTRYPOINT ["agentos"]
 CMD ["web", "serve", "--host", "0.0.0.0", "--port", "8080"]

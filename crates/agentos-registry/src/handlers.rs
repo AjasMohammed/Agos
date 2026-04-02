@@ -5,7 +5,7 @@ use axum::Json;
 use serde::Deserialize;
 
 use crate::db::RegistryDb;
-use crate::models::{ErrorResponse, PublishRequest, PublishResponse};
+use crate::models::{ErrorResponse, PublishRequest, PublishResponse, ReviewRequest};
 
 /// GET /v1/tools?q=<query>&limit=<n>&offset=<n>
 #[derive(Deserialize)]
@@ -201,6 +201,7 @@ pub async fn publish_tool(
         downloads: 0,
         created_at: now.clone(),
         updated_at: now,
+        artifact_type: "tool".to_string(),
     };
 
     match db.insert_tool(&entry) {
@@ -223,6 +224,64 @@ pub async fn publish_tool(
             StatusCode::CONFLICT,
             Json(ErrorResponse {
                 error: format!("Failed to publish: {}", e),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /v1/tools/:name/reviews
+pub async fn get_reviews(
+    State(db): State<RegistryDb>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match db.get_reviews(&name) {
+        Ok(reviews) => Json(reviews).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /v1/tools/:name/reviews
+pub async fn add_review(
+    State(db): State<RegistryDb>,
+    Path(name): Path<String>,
+    Json(req): Json<ReviewRequest>,
+) -> impl IntoResponse {
+    if req.rating < 1 || req.rating > 5 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Rating must be between 1 and 5".into(),
+            }),
+        )
+            .into_response();
+    }
+    match db.add_review(&name, &req.author_key, req.rating, req.body.as_deref()) {
+        Ok(()) => StatusCode::CREATED.into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /v1/stats
+pub async fn get_stats(State(db): State<RegistryDb>) -> impl IntoResponse {
+    match db.get_stats() {
+        Ok(stats) => Json(stats).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
             }),
         )
             .into_response(),

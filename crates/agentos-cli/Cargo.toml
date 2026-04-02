@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "agentctl"
+name = "agentos"
 path = "src/main.rs"
 
 [dependencies]
@@ -16,6 +16,7 @@ agentos-hal = { path = "../agentos-hal" }
 agentos-vault = { path = "../agentos-vault" }
 agentos-tools = { path = "../agentos-tools" }
 agentos-mcp = { path = "../agentos-mcp" }
+agentos-api = { path = "../agentos-api" }
 agentos-web = { path = "../agentos-web" }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
@@ -28,6 +29,7 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+rust-embed = { version = "8", features = ["compression"] }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 anyhow = { workspace = true }

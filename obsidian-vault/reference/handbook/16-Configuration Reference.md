@@ -152,6 +152,17 @@ Tool loading paths and data directory.
 
 ---
 
+## `[skills]`
+
+Skill discovery paths. Skills are SKILL.toml-defined bundles of prompts, tools, and context that extend agent behaviour.
+
+| Key | Type | Dev Default | Prod Default | Description |
+|---|---|---|---|---|
+| `core_skills_dir` | string | `skills/core` | `skills/core` | Directory containing distribution-provided core skill manifests |
+| `user_skills_dir` | string | `skills/user` | `skills/user` | Directory for user-installed skill manifests |
+
+---
+
 ## `[tools.workspace]`
 
 Additional directories agents can access beyond `data_dir`. Validated at startup.
@@ -296,7 +307,7 @@ Rolling file and stderr log configuration. Logs rotate daily with up to 7 days r
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `log_dir` | string | `"/tmp/agentos/logs"` | Directory where rolling log files are written. Set to `""` to disable file logging (stderr only). |
-| `log_level` | string | `"info"` | Minimum log level: `trace`, `debug`, `info`, `warn`, `error`. Can be overridden at runtime with `RUST_LOG` or `agentctl log set-level`. |
+| `log_level` | string | `"info"` | Minimum log level: `trace`, `debug`, `info`, `warn`, `error`. Can be overridden at runtime with `RUST_LOG` or `agentos log set-level`. |
 | `log_format` | string | `"text"` | Output format: `"text"` (human-readable) or `"json"` (structured, for log aggregators like Loki, Datadog, or Elasticsearch). Use `"json"` in production. |
 
 ---
@@ -399,9 +410,36 @@ Agent scratchpad — a graph-aware knowledge store for agent working memory. Sup
 
 ---
 
+## `[api]`
+
+REST API and WebSocket server. When enabled, the kernel starts an HTTP API server alongside the Unix domain socket bus.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Start the API server at kernel boot. Disabled by default — must be explicitly enabled. |
+| `host` | string | `"127.0.0.1"` | IP address to bind the API server. Use `"0.0.0.0"` to expose on all interfaces (use a reverse proxy in production). |
+| `port` | integer | `8080` | TCP port for the API server. The WebSocket endpoint (`/api/v1/ws`) is served on the same port. |
+
+**Example:**
+
+```toml
+[api]
+enabled = true
+host = "127.0.0.1"
+port = 8080
+```
+
+**CORS:** The server automatically allows CORS from the configured `host:port`. Requests from other origins are rejected.
+
+**Rate limiting:** 120-request burst, 2 requests/second per IP.
+
+**TLS:** The API server does not terminate TLS. In production, place a TLS-terminating reverse proxy (nginx, Caddy) in front.
+
+---
+
 ## `[registry]`
 
-Tool registry marketplace configuration for `agentctl tool search/add/publish`.
+Tool registry marketplace configuration for `agentos tool search/add/publish`.
 
 | Key | Type | Default | Description |
 |---|---|---|---|

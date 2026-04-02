@@ -15,7 +15,7 @@ status: complete
 
 ## What is AgentOS?
 
-AgentOS is a **purpose-built operating environment** where **LLMs are the primary users**, not humans. Unlike traditional AI agent frameworks that wrap LLMs around existing operating systems, AgentOS is built from scratch around a radical idea: treat LLMs as first-class compute units with their own kernel, scheduling, memory management, and security model. It runs as a process on your local machine, exposes a CLI (`agentctl`) for management, and allows multiple LLMs to be connected and routed simultaneously.
+AgentOS is a **purpose-built operating environment** where **LLMs are the primary users**, not humans. Unlike traditional AI agent frameworks that wrap LLMs around existing operating systems, AgentOS is built from scratch around a radical idea: treat LLMs as first-class compute units with their own kernel, scheduling, memory management, and security model. It runs as a process on your local machine, exposes a CLI (`agentos`) for management, and allows multiple LLMs to be connected and routed simultaneously.
 
 ---
 
@@ -42,7 +42,7 @@ If you are familiar with Linux, the following mapping will help you understand e
 | Process | Agent Task | A unit of work dispatched to an LLM agent |
 | System Call | Semantic Intent | Structured declaration instead of integer-keyed kernel call |
 | Program / ELF Binary | Agent Tool | Manifest + executable (native or WASM), versioned and sandboxed |
-| Shell (bash/zsh) | Intent Shell (`agentctl`) | CLI entry point for humans to manage the system |
+| Shell (bash/zsh) | Intent Shell (`agentos`) | CLI entry point for humans to manage the system |
 | IPC (pipes/sockets) | Intent Channels + Agent Message Bus | Typed, async communication between agents |
 | Filesystem | Semantic Store | Multi-tier memory with embeddings (working, episodic, semantic) |
 | User / Group Permissions | Permission Matrix | rwx-style permissions per resource, capability tokens |
@@ -75,14 +75,15 @@ The key philosophical shift: **an LLM does not "execute" tools the way a human r
 
 ## Crate Overview
 
-AgentOS is organized as a Rust workspace with 17 crates. Each crate has a single responsibility; the dependency graph flows downward with no circular dependencies.
+AgentOS is organized as a Rust workspace with 18 crates. Each crate has a single responsibility; the dependency graph flows downward with no circular dependencies.
 
 | Crate | Description |
 |-------|-------------|
 | `agentos-types` | Shared type definitions — IDs, IntentMessage, AgentTask, error types |
 | `agentos-kernel` | Central orchestrator — scheduler, router, context manager, agent registry |
-| `agentos-cli` | CLI binary `agentctl` (clap-based, 17+ command groups) |
+| `agentos-cli` | CLI binary `agentos` (clap-based, 17+ command groups) |
 | `agentos-bus` | Unix domain socket IPC between CLI and kernel |
+| `agentos-api` | REST API + WebSocket server — `KernelService` trait, auth, 30+ endpoints |
 | `agentos-llm` | LLM adapter trait + Ollama, OpenAI, Anthropic, Gemini, Mock implementations |
 | `agentos-tools` | Built-in tools (file I/O, memory, shell, data parser, signing, etc.) |
 | `agentos-capability` | HMAC-SHA256 signed capability tokens and permission system |
@@ -114,7 +115,7 @@ AgentOS is on **V3** — the third major development phase.
 - Inference kernel (task scheduler, context manager)
 - Ollama LLM adapter
 - 5 core tools (file-reader, file-writer, memory-search, memory-write, data-parser)
-- CLI (`agentctl`) with all command groups
+- CLI (`agentos`) with all command groups
 
 ### V2 — Production Features (Complete)
 
@@ -139,6 +140,7 @@ AgentOS is on **V3** — the third major development phase.
 - Hardware Abstraction Layer (6 driver types)
 - Pipeline orchestration engine
 - WASM tool execution runtime
+- REST API + WebSocket server (`agentos-api` — 30+ endpoints, API key auth, real-time streaming)
 
 ---
 
@@ -152,7 +154,7 @@ This handbook is organized so that each chapter builds on the previous ones. We 
 
 After the foundation, chapters can be read in any order based on your needs:
 
-- **CLI Reference** — Complete `agentctl` command reference
+- **CLI Reference** — Complete `agentos` command reference
 - **Tools Guide** — Understanding, using, and building agent tools
 - **Security Model** — Secrets vault, capability tokens, sandboxing, trust tiers
 - **Configuration** — All kernel and subsystem configuration options

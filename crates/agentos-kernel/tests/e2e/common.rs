@@ -100,7 +100,9 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         mcp: Default::default(),
         registry: Default::default(),
         scratchpad: Default::default(),
+        skills: Default::default(),
         otel: OtelConfig::default(),
+        api: Default::default(),
     }
 }
 

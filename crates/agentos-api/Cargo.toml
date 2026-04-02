@@ -29,6 +29,8 @@ sha2 = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
 subtle = "2"
+zeroize = { workspace = true }
+rusqlite = { workspace = true }
 futures = "0.3"
 bytes = { workspace = true }
 

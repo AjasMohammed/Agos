@@ -775,7 +775,7 @@ pub enum TrustTier {
 - Author-signed only — the kernel verifies the author's own signature
 - Requires `author_pubkey` and `signature` fields in the manifest
 - Same Ed25519 signature verification algorithm as Verified
-- Operators opt in by running `agentctl tool install`; trust is the operator's responsibility
+- Operators opt in by running `agentos tool install`; trust is the operator's responsibility
 
 ### Blocked
 
@@ -802,7 +802,7 @@ Three offline CLI commands handle the complete signing workflow. None of them re
 ### Generate a keypair
 
 ```bash
-agentctl tool keygen --output tool-keypair.json
+agentos tool keygen --output tool-keypair.json
 # Keypair written to tool-keypair.json
 # Public key: a1b2c3d4...
 # Keep tool-keypair.json secret — it contains your signing seed.
@@ -823,12 +823,12 @@ The output file contains:
 ### Sign a manifest
 
 ```bash
-agentctl tool sign --manifest my-tool.toml --key tool-keypair.json
+agentos tool sign --manifest my-tool.toml --key tool-keypair.json
 # Signed manifest written to my-tool.toml
 # Signature: 3f8a...
 
 # Write to a separate file:
-agentctl tool sign --manifest my-tool.toml --key tool-keypair.json --output my-tool-signed.toml
+agentos tool sign --manifest my-tool.toml --key tool-keypair.json --output my-tool-signed.toml
 ```
 
 This command:
@@ -842,7 +842,7 @@ This command:
 ### Verify a manifest
 
 ```bash
-agentctl tool verify my-tool.toml
+agentos tool verify my-tool.toml
 # OK  my-tool (trust_tier=community)
 
 # Exits with code 1 on failure:
@@ -853,19 +853,19 @@ agentctl tool verify my-tool.toml
 
 ```bash
 # 1. Generate keypair (one-time setup)
-agentctl tool keygen --output my-keypair.json
+agentos tool keygen --output my-keypair.json
 
 # 2. Create or edit the manifest (set trust_tier = "community")
 # ... edit my-tool.toml ...
 
 # 3. Sign it
-agentctl tool sign --manifest my-tool.toml --key my-keypair.json
+agentos tool sign --manifest my-tool.toml --key my-keypair.json
 
 # 4. Verify (sanity check)
-agentctl tool verify my-tool.toml
+agentos tool verify my-tool.toml
 
 # 5. Install
-agentctl tool install my-tool.toml
+agentos tool install my-tool.toml
 ```
 
 ---
@@ -876,16 +876,16 @@ These commands require the kernel to be running.
 
 ```bash
 # List installed tools
-agentctl tool list
+agentos tool list
 
 # Install from a manifest file (kernel verifies trust tier and signature)
-agentctl tool install /path/to/my-tool.toml
+agentos tool install /path/to/my-tool.toml
 
 # Remove a tool
-agentctl tool remove my-tool
+agentos tool remove my-tool
 ```
 
-Example `agentctl tool list` output:
+Example `agentos tool list` output:
 ```
 NAME                 VERSION      TRUST        DESCRIPTION
 ----------------------------------------------------------------------

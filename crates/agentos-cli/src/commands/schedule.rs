@@ -78,7 +78,7 @@ pub async fn handle(client: &mut BusClient, command: ScheduleCommands) -> anyhow
             let response = client.send_command(cmd).await?;
             if let KernelResponse::ScheduleId(id) = response {
                 println!(
-                    "✅ Schedule '{}' created (id: {}). Use 'agentctl schedule list' to view.",
+                    "✅ Schedule '{}' created (id: {}). Use 'agentos schedule list' to view.",
                     name, id
                 );
             } else if let KernelResponse::Error { message } = response {

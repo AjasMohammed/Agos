@@ -713,7 +713,7 @@ impl AgentManualTool {
                 },
                 {
                     "title": "Autonomous Mode",
-                    "content": "Tasks can run without iteration or timeout limits by setting autonomous=true. In autonomous mode: iteration cap becomes 10,000 (vs 1,000 for high-complexity normal tasks), task timeout extends to 24 hours (vs 1 hour), per-tool timeout extends to 10 minutes (vs 5 minutes), and max parallel tool calls per turn increases to 10. Child tasks delegated by an autonomous task automatically inherit autonomous=true so sub-agents are not artificially capped. Use autonomous mode for long-running workflows: deep codebase refactors, multi-file analysis, extended research, or any task that must run to natural completion. From the CLI: agentctl task run --autonomous \"<prompt>\". Limits are configurable via [kernel.autonomous_mode] in config."
+                    "content": "Tasks can run without iteration or timeout limits by setting autonomous=true. In autonomous mode: iteration cap becomes 10,000 (vs 1,000 for high-complexity normal tasks), task timeout extends to 24 hours (vs 1 hour), per-tool timeout extends to 10 minutes (vs 5 minutes), and max parallel tool calls per turn increases to 10. Child tasks delegated by an autonomous task automatically inherit autonomous=true so sub-agents are not artificially capped. Use autonomous mode for long-running workflows: deep codebase refactors, multi-file analysis, extended research, or any task that must run to natural completion. From the CLI: agentos task run --autonomous \"<prompt>\". Limits are configurable via [kernel.autonomous_mode] in config."
                 },
                 {
                     "title": "Inspect a Task",

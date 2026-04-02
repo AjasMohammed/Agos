@@ -38,12 +38,16 @@ pub struct JsonRpcError {
 // ── MCP-specific types ───────────────────────────────────────────────────────
 
 /// An MCP tool definition as returned by `tools/list`.
+///
+/// Both `description` and `inputSchema` are optional per the MCP spec.
+/// Missing values default to empty string / null respectively.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolDef {
     pub name: String,
+    #[serde(default)]
     pub description: String,
     /// JSON Schema object describing the tool's input parameters.
-    #[serde(rename = "inputSchema")]
+    #[serde(default, rename = "inputSchema")]
     pub input_schema: serde_json::Value,
 }
 
@@ -87,6 +91,102 @@ impl JsonRpcRequest {
         }
     }
 }
+
+// ── Supervisor types ─────────────────────────────────────────────────────────
+
+/// Lifecycle events emitted by the MCP supervisor for audit logging.
+#[derive(Debug, Clone)]
+pub enum McpLifecycleEvent {
+    /// Server successfully connected and tools were discovered.
+    ServerConnected { name: String, tool_count: usize },
+    /// Server connection lost.
+    ServerDisconnected { name: String, error: String },
+    /// Attempting to reconnect to a server.
+    ServerReconnecting { name: String, attempt: u32 },
+    /// Server explicitly stopped (removed or shutdown).
+    ServerStopped { name: String },
+    /// A tool call completed (success or failure).
+    ToolCallCompleted {
+        server: String,
+        tool: String,
+        latency_ms: u64,
+        success: bool,
+    },
+}
+
+/// Connection state of a supervised MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerState {
+    /// Transport is being established / initialize handshake in progress.
+    Connecting,
+    /// Server is alive and tools are registered.
+    Connected,
+    /// Connection failed; waiting for backoff timer before retrying.
+    Backoff,
+    /// Server was explicitly removed or shutdown. Terminal state.
+    Stopped,
+}
+
+impl std::fmt::Display for ServerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connecting => write!(f, "connecting"),
+            Self::Connected => write!(f, "connected"),
+            Self::Backoff => write!(f, "backoff"),
+            Self::Stopped => write!(f, "stopped"),
+        }
+    }
+}
+
+/// Runtime statistics for a supervised MCP server.
+#[derive(Debug, Clone)]
+pub struct ServerStats {
+    /// When the server was first connected (or last reconnected).
+    pub connected_since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Total number of tool calls made to this server.
+    pub total_calls: u64,
+    /// Number of consecutive connection failures.
+    pub failure_count: u32,
+    /// Running average latency of tool calls in milliseconds.
+    pub avg_latency_ms: f64,
+}
+
+impl Default for ServerStats {
+    fn default() -> Self {
+        Self {
+            connected_since: None,
+            total_calls: 0,
+            failure_count: 0,
+            avg_latency_ms: 0.0,
+        }
+    }
+}
+
+impl ServerStats {
+    /// Record a successful call with the given latency.
+    pub fn record_call(&mut self, latency_ms: u64) {
+        self.total_calls += 1;
+        // Exponential moving average with alpha = 0.1
+        if self.total_calls == 1 {
+            self.avg_latency_ms = latency_ms as f64;
+        } else {
+            self.avg_latency_ms = self.avg_latency_ms * 0.9 + latency_ms as f64 * 0.1;
+        }
+    }
+
+    /// Record a connection failure.
+    pub fn record_failure(&mut self) {
+        self.failure_count += 1;
+    }
+
+    /// Reset failure count on successful reconnect.
+    pub fn reset_failures(&mut self) {
+        self.failure_count = 0;
+        self.connected_since = Some(chrono::Utc::now());
+    }
+}
+
+// ── Constructors ─────────────────────────────────────────────────────────────
 
 impl JsonRpcResponse {
     /// Convenience: build a successful response.

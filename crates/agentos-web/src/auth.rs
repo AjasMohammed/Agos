@@ -121,10 +121,11 @@ pub struct LoginForm {
 
 /// POST /login — validates the token and sets an HttpOnly session cookie.
 ///
-/// Note: the `Secure` flag is intentionally omitted for local development
-/// (the server binds to plain HTTP). TODO: pass a `tls: bool` flag and set
-/// `.secure(true)` when running behind TLS in production.
+/// The `Secure` flag is set when the server is bound to a non-loopback address
+/// (i.e. production behind a TLS proxy). For local development on 127.0.0.1 it
+/// is omitted so plain-HTTP dev workflows keep working.
 pub async fn login_submit(
+    State(state): State<AppState>,
     Extension(auth_token): Extension<AuthToken>,
     axum::Form(mut form): axum::Form<LoginForm>,
 ) -> Response {
@@ -134,6 +135,7 @@ pub async fn login_submit(
         let cookie = Cookie::build(("agentos_session", auth_token.0.as_str().to_string()))
             .path("/")
             .http_only(true)
+            .secure(state.secure_cookies)
             .same_site(SameSite::Strict)
             .max_age(time::Duration::hours(8))
             .build();

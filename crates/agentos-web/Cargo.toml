@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+agentos-api = { path = "../agentos-api" }
 agentos-kernel = { path = "../agentos-kernel" }
 agentos-types = { path = "../agentos-types" }
 agentos-audit = { path = "../agentos-audit" }
@@ -36,6 +37,7 @@ rusqlite = { workspace = true }
 time = "0.3"
 subtle = "2"
 zeroize = { workspace = true }
+ureq = "2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

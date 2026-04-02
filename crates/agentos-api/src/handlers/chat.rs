@@ -104,7 +104,23 @@ fn parse_model(model: &str) -> String {
 }
 
 /// Convert OpenAI messages to history pairs suitable for `ChatRequest`.
-fn messages_to_history(messages: &[OpenAIMessage]) -> (Vec<(String, String)>, String) {
+///
+/// Returns `Err` if two consecutive messages share the same role, which is
+/// not a valid conversation structure and typically indicates a client bug.
+fn messages_to_history(
+    messages: &[OpenAIMessage],
+) -> Result<(Vec<(String, String)>, String), String> {
+    // Reject consecutive same-role messages — they are structurally invalid and
+    // would silently drop content if we tried to pair them up.
+    for window in messages.windows(2) {
+        if window[0].role == window[1].role {
+            return Err(format!(
+                "consecutive '{}' messages are not valid; messages must alternate roles",
+                window[0].role
+            ));
+        }
+    }
+
     let mut history = Vec::new();
     let mut last_user_msg = String::new();
 
@@ -126,7 +142,7 @@ fn messages_to_history(messages: &[OpenAIMessage]) -> (Vec<(String, String)>, St
         i += 1;
     }
 
-    (history, last_user_msg)
+    Ok((history, last_user_msg))
 }
 
 fn generate_id() -> String {
@@ -150,7 +166,8 @@ pub async fn completions(
 ) -> Result<axum::response::Response, ApiError> {
     require_permission(&key, "chat:w")?;
     let agent_name = parse_model(&req.model);
-    let (history, user_message) = messages_to_history(&req.messages);
+    let (history, user_message) =
+        messages_to_history(&req.messages).map_err(ApiError::BadRequest)?;
 
     if user_message.is_empty() {
         return Err(ApiError::BadRequest(
@@ -232,7 +249,8 @@ pub async fn completions(
             .chain(std::iter::once(done_chunk));
 
         let event_stream = stream::iter(chunks).map(|chunk| {
-            let data = serde_json::to_string(&chunk).unwrap_or_default();
+            let data =
+                serde_json::to_string(&chunk).expect("OpenAIChunk serialization is infallible");
             Ok::<_, std::convert::Infallible>(Event::default().data(data))
         });
 

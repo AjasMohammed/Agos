@@ -16,11 +16,13 @@ pub mod mcp;
 pub mod notifications;
 pub mod perm;
 pub mod pipeline;
+pub mod provider;
 pub mod resource;
 pub mod role;
 pub mod schedule;
 pub mod scratchpad;
 pub mod secret;
+pub mod skill;
 pub mod snapshot;
 pub mod status;
 pub mod task;
@@ -51,6 +53,8 @@ pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow
         Commands::Notifications { command } => notifications::handle(client, command).await,
         Commands::Channel { command } => channel::handle(client, command).await,
         Commands::Scratchpad { command } => scratchpad::handle(client, command).await,
+        Commands::Skill { command } => skill::handle(client, command).await,
+        Commands::Provider { command } => provider::handle(client, command).await,
         _ => unreachable!(),
     }
 }

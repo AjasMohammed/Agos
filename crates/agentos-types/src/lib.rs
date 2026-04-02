@@ -16,6 +16,7 @@ pub mod task;
 pub mod tool;
 pub use schedule::*;
 pub mod agent_message;
+pub mod skill;
 
 // Re-export commonly used types at crate root
 pub use agent::{AgentProfile, AgentStatus, LLMProvider};
@@ -51,6 +52,7 @@ pub use registry_query::{
 };
 pub use role::Role;
 pub use secret::{SecretEntry, SecretMetadata, SecretOwner, SecretScope};
+pub use skill::SkillManifest;
 pub use task::TriggerSource;
 pub use task::{
     AgentBudget, AgentTask, BudgetAction, ComplexityLevel, CostSnapshot, ModelDowngradeTier,

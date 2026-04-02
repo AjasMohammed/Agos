@@ -79,7 +79,7 @@ The database file must be protected by OS-level filesystem permissions — the v
 
 | Guarantee | How it is enforced |
 |-----------|--------------------|
-| Never in CLI arguments | `agentctl secret set` uses `rpassword::read_password()` — terminal echo is suppressed, value is never in the shell command string |
+| Never in CLI arguments | `agentos secret set` uses `rpassword::read_password()` — terminal echo is suppressed, value is never in the shell command string |
 | Never in environment variables | Secrets are retrieved by the kernel on startup, not via `$ENV` injection |
 | Never in config files | `config/default.toml` contains no secret values; vault path and params only |
 | Zeroed from memory | `ZeroizeOnDrop` on `MasterKey` and `ZeroizingString` |
@@ -90,17 +90,17 @@ The database file must be protected by OS-level filesystem permissions — the v
 ## Setting Secrets
 
 ```bash
-agentctl secret set NAME [--scope SCOPE]
+agentos secret set NAME [--scope SCOPE]
 ```
 
 The command prompts for the value with hidden input — the value is never visible in the shell history or process table:
 
 ```bash
-agentctl secret set OPENAI_API_KEY
+agentos secret set OPENAI_API_KEY
 # Enter value for 'OPENAI_API_KEY' (input hidden): ▌
 # ✅ Secret 'OPENAI_API_KEY' stored securely
 
-agentctl secret set DB_PASSWORD --scope agent:worker
+agentos secret set DB_PASSWORD --scope agent:worker
 # Enter value for 'DB_PASSWORD' (input hidden): ▌
 # ✅ Secret 'DB_PASSWORD' stored securely
 ```
@@ -125,13 +125,13 @@ Scopes control which agents and tools can access a secret. The kernel enforces s
 
 ```bash
 # Global — any agent can use this
-agentctl secret set ANTHROPIC_API_KEY --scope global
+agentos secret set ANTHROPIC_API_KEY --scope global
 
 # Scoped to the 'finance-agent' only
-agentctl secret set PAYROLL_DB_PASSWORD --scope agent:finance-agent
+agentos secret set PAYROLL_DB_PASSWORD --scope agent:finance-agent
 
 # Scoped to the 'stripe-payment' tool only
-agentctl secret set STRIPE_SECRET_KEY --scope tool:stripe-payment
+agentos secret set STRIPE_SECRET_KEY --scope tool:stripe-payment
 ```
 
 > [!tip] Prefer Narrow Scopes
@@ -142,7 +142,7 @@ agentctl secret set STRIPE_SECRET_KEY --scope tool:stripe-payment
 ## Listing Secrets
 
 ```bash
-agentctl secret list
+agentos secret list
 ```
 
 Lists all stored secrets — **metadata only**. Secret values are never shown:
@@ -164,11 +164,11 @@ The `last_used_at` timestamp updates each time the kernel retrieves a secret val
 Use `rotate` when a credential has been compromised or needs periodic renewal. The old value is replaced atomically — the secret is unavailable for the minimum possible time:
 
 ```bash
-agentctl secret rotate NAME
+agentos secret rotate NAME
 ```
 
 ```bash
-agentctl secret rotate OPENAI_API_KEY
+agentos secret rotate OPENAI_API_KEY
 # Enter new value for 'OPENAI_API_KEY' (input hidden): ▌
 # ✅ Secret 'OPENAI_API_KEY' rotated
 ```
@@ -182,11 +182,11 @@ The rotation is logged to the audit trail with a `SecretRotated` event. The scop
 `revoke` permanently deletes a secret from the vault:
 
 ```bash
-agentctl secret revoke NAME
+agentos secret revoke NAME
 ```
 
 ```bash
-agentctl secret revoke OLD_API_KEY
+agentos secret revoke OLD_API_KEY
 # ✅ Secret 'OLD_API_KEY' revoked
 ```
 
@@ -199,7 +199,7 @@ After revocation, any agent or tool that attempts to access the secret will rece
 `lockdown` is a break-glass command for security incidents. It revokes **all active proxy tokens** and **blocks new issuance** until the kernel is restarted:
 
 ```bash
-agentctl secret lockdown
+agentos secret lockdown
 ```
 
 **What it does:**
@@ -260,11 +260,11 @@ All vault operations are logged to the audit trail:
 
 | Event | Trigger |
 |-------|---------|
-| `SecretCreated` | `agentctl secret set` |
+| `SecretCreated` | `agentos secret set` |
 | `SecretAccessed` | Kernel decrypts a value for agent use |
-| `SecretRotated` | `agentctl secret rotate` |
-| `SecretRevoked` | `agentctl secret revoke` |
-| `SecretRevoked` (with lockdown payload) | `agentctl secret lockdown` — lockdown uses the `SecretRevoked` audit event type with lockdown details in the payload; `VaultLockdown` is not a distinct event type |
+| `SecretRotated` | `agentos secret rotate` |
+| `SecretRevoked` | `agentos secret revoke` |
+| `SecretRevoked` (with lockdown payload) | `agentos secret lockdown` — lockdown uses the `SecretRevoked` audit event type with lockdown details in the payload; `VaultLockdown` is not a distinct event type |
 
 Audit entries include the secret name, scope, requesting agent/tool, and timestamp. Secret values are never written to the audit log.
 

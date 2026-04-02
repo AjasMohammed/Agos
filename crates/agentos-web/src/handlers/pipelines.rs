@@ -16,15 +16,10 @@ pub async fn list(
     Query(query): Query<ListQuery>,
     jar: CookieJar,
 ) -> Response {
-    let store = state.kernel.pipeline_engine.store_arc();
-    let pipelines = match tokio::task::spawn_blocking(move || store.list_pipelines()).await {
-        Ok(Ok(p)) => p,
-        Ok(Err(e)) => {
-            tracing::warn!(error = %e, "Failed to list pipelines");
-            vec![]
-        }
+    let pipelines = match state.service.list_pipelines().await {
+        Ok(p) => p,
         Err(e) => {
-            tracing::warn!(error = %e, "Pipeline list task panicked");
+            tracing::warn!(error = %e, "Failed to list pipelines");
             vec![]
         }
     };
@@ -34,10 +29,10 @@ pub async fn list(
         .map(|p| {
             context! {
                 name => p.name.clone(),
-                version => p.version.clone(),
-                description => p.description.clone(),
+                version => String::new(),
+                description => p.description.clone().unwrap_or_default(),
                 step_count => p.step_count,
-                installed_at => p.installed_at.clone(),
+                installed_at => String::new(),
             }
         })
         .collect();
@@ -85,16 +80,14 @@ pub async fn run(State(state): State<AppState>, axum::Form(form): axum::Form<Run
         return (StatusCode::BAD_REQUEST, "Pipeline input too long").into_response();
     }
 
-    match state
-        .kernel
-        .run_pipeline(
-            form.pipeline_name.clone(),
-            form.input.clone(),
-            true,
-            form.agent_name.clone(),
-        )
-        .await
-    {
+    use agentos_api::types::RunPipelineRequest;
+    let req = RunPipelineRequest {
+        name: form.pipeline_name.clone(),
+        input: form.input.clone(),
+        detach: true,
+        agent_name: form.agent_name.clone(),
+    };
+    match state.service.run_pipeline(req).await {
         Ok(data) => {
             if let Some(run_id) = data.get("id").and_then(|v| v.as_str()) {
                 tracing::info!(run_id = %run_id, pipeline = %form.pipeline_name, "Pipeline started from web UI");

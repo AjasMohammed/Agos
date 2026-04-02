@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod catalog;
 pub mod custom;
 pub mod fallback;
 pub mod gemini;
@@ -11,6 +12,7 @@ pub mod traits;
 pub mod types;
 
 pub use anthropic::AnthropicCore;
+pub use catalog::{CatalogEntry, ProviderCatalog};
 pub use custom::CustomCore;
 pub use fallback::FallbackAdapter;
 pub use gemini::GeminiCore;

@@ -48,6 +48,7 @@ impl Kernel {
              - Use `agent-list` to discover available peer agents and their capabilities.\n\
              - Delegated tasks inherit your permission intersection with the target agent.\n\n\
              ## Memory\n\
+             - **Context memory** is your personal notebook — a markdown document injected into your context at every task start. Use `context-memory-read` to review it and `context-memory-update` to save patterns, preferences, and knowledge for your future self. Updates take effect on your next task, not the current one. Be concise (4096 token budget).\n\
              - Semantic memory persists across tasks. Use `memory-write` and `memory-read` (scope=semantic) for long-term knowledge.\n\
              - Episodic memory is task-scoped. It records what happened during each task.\n\
              - Use `memory-read` with scope=episodic and an ID to retrieve specific episodic entries.\n\n\

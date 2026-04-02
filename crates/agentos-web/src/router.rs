@@ -13,8 +13,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::AuthToken;
 use crate::handlers::{
-    agent_detail, agents, audit, chat, costs, dashboard, events, notifications, pipeline_ui,
-    pipelines, secrets, tasks, tools,
+    agent_detail, agents, audit, chat, costs, dashboard, events, marketplace, notifications,
+    pipeline_ui, pipelines, secrets, tasks, tools,
 };
 use crate::state::AppState;
 
@@ -25,6 +25,10 @@ async fn add_security_headers(request: Request<axum::body::Body>, next: Next) ->
     headers.insert(
         axum::http::HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static(
+            // TODO: remove 'unsafe-inline' once all inline <script> blocks in templates
+            // (Alpine.js components, log terminal, cost chart) are moved to /static/js/ files.
+            // style-src 'unsafe-inline' is also required while Alpine.js and Pico CSS
+            // inject inline style attributes at runtime.
             "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; \
              img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
         ),
@@ -126,6 +130,16 @@ pub fn build_router(
             axum::routing::get(tools::list).post(tools::install),
         )
         .route("/tools/{name}", axum::routing::delete(tools::remove))
+        // Marketplace
+        .route("/marketplace", axum::routing::get(marketplace::list))
+        .route(
+            "/marketplace/{name}",
+            axum::routing::get(marketplace::detail),
+        )
+        .route(
+            "/marketplace/{name}/review",
+            axum::routing::post(marketplace::submit_review),
+        )
         // Secrets
         .route(
             "/secrets",

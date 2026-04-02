@@ -1,0 +1,26 @@
+[skill]
+name = "browser-automator"
+version = "0.1.0"
+description = "Headless browser automation for web navigation, form filling, data extraction, and screenshot capture"
+author = "agentos-core"
+trust_tier = "core"
+
+[triggers]
+events = ["automation_requested"]
+
+[agent]
+system_prompt_file = "prompt.md"
+roles = ["browser-automator"]
+default_provider = "anthropic"
+default_model = "claude-sonnet-4-6"
+
+[tools]
+required = ["shell-exec", "file-writer"]
+optional = ["data-parser", "memory-write"]
+
+[permissions]
+required = ["shell:exec", "file:write", "network:read"]
+
+[budget]
+max_cost_per_run = 1.00
+max_tokens_per_run = 50000

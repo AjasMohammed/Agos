@@ -11,6 +11,9 @@ pub struct CostQuery {
 }
 
 /// GET /costs — cost dashboard page.
+///
+/// TODO: Migrate to `state.service.get_cost_summary()` once `CostSummaryEntry`
+/// exposes `cost_pct`, `tokens_pct`, `budget`, and related percentage fields.
 pub async fn dashboard(
     State(state): State<AppState>,
     Query(query): Query<CostQuery>,

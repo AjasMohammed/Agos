@@ -6,7 +6,7 @@
 ///   (server crash, broken pipe, timeout), the handle transparently re-spawns
 ///   the server process and retries the call **once**.
 /// * **Health state** — `is_connected()` and `last_error()` expose the current
-///   liveness of the server, suitable for `agentctl mcp status`.
+///   liveness of the server, suitable for `agentos mcp status`.
 /// * **Tool count** — tracks how many tools were registered from this server at
 ///   boot so the count remains available for health display after reconnects.
 use std::sync::{

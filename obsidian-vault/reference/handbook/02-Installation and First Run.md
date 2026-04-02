@@ -45,7 +45,7 @@ cargo test --workspace
 cargo build --workspace --release
 ```
 
-The CLI binary is at `target/debug/agentctl` (or `target/release/agentctl` for release builds).
+The CLI binary is at `target/debug/agentos` (or `target/release/agentos` for release builds).
 
 > [!tip] Lint and Format
 > CI enforces these checks. Run them locally before committing:
@@ -182,23 +182,23 @@ Production also adds:
 
 ## Starting the Kernel
 
-The kernel is started via the `agentctl start` command:
+The kernel is started via the `agentos start` command:
 
 ```bash
 # Using default config (config/default.toml)
-agentctl start
+agentos start
 
 # Using a specific config file
-agentctl --config config/production.toml start
+agentos --config config/production.toml start
 
 # Providing vault passphrase via environment variable
 export AGENTOS_VAULT_PASSPHRASE="my-secret-passphrase"
-agentctl start
+agentos start
 ```
 
 ### What happens during boot
 
-When you run `agentctl start`, the kernel performs the following initialization sequence:
+When you run `agentos start`, the kernel performs the following initialization sequence:
 
 1. **Load configuration** from the specified TOML file
 2. **Create directories** for audit, vault, tools, and bus socket
@@ -217,10 +217,11 @@ When you run `agentctl start`, the kernel performs the following initialization 
 15. **Initialize V3 subsystems** — cost tracker, escalation manager, injection scanner, risk classifier, snapshot manager, event bus
 16. **Create IPC channels** — bounded channels (capacity 1024) for internal communication
 17. **Emit `KernelStarted` audit event** — the system is now ready
+18. **Start API server** (if `api.enabled = true`) — opens `data/api_keys.db`, revokes any stale bootstrap key from a previous run, issues a fresh bootstrap key printed to the console, and begins serving on `host:port`
 
 After boot, the kernel enters its main event loop, running these subsystems as concurrent tasks:
 
-- **Acceptor** — accepts new bus connections from `agentctl`
+- **Acceptor** — accepts new bus connections from `agentos`
 - **Executor** — processes pending agent tasks
 - **TimeoutChecker** — sweeps expired tasks, escalations, snapshots, and resource locks
 - **Scheduler** — triggers cron-scheduled jobs
@@ -258,43 +259,43 @@ ollama serve
 ollama pull llama3.2
 
 # Connect an Ollama agent
-agentctl agent connect --name "local-agent" --provider ollama --model llama3.2
+agentos agent connect --name "local-agent" --provider ollama --model llama3.2
 ```
 
 ### OpenAI
 
 ```bash
 # Store your API key in the vault
-agentctl secret set openai-api-key
+agentos secret set openai-api-key
 
 # Connect an OpenAI agent
-agentctl agent connect --name "gpt-agent" --provider openai --model gpt-4
+agentos agent connect --name "gpt-agent" --provider openai --model gpt-4
 ```
 
 ### Anthropic
 
 ```bash
 # Store your API key in the vault
-agentctl secret set anthropic-api-key
+agentos secret set anthropic-api-key
 
 # Connect an Anthropic agent
-agentctl agent connect --name "claude-agent" --provider anthropic --model claude-sonnet-4-20250514
+agentos agent connect --name "claude-agent" --provider anthropic --model claude-sonnet-4-20250514
 ```
 
 ### Google Gemini
 
 ```bash
 # Store your API key in the vault
-agentctl secret set gemini-api-key
+agentos secret set gemini-api-key
 
 # Connect a Gemini agent
-agentctl agent connect --name "gemini-agent" --provider gemini --model gemini-pro
+agentos agent connect --name "gemini-agent" --provider gemini --model gemini-pro
 ```
 
 After connecting, verify your agents are listed:
 
 ```bash
-agentctl agent list
+agentos agent list
 ```
 
 ---
@@ -305,13 +306,13 @@ With an agent connected, you can run a task:
 
 ```bash
 # Run a simple task
-agentctl task run --agent local-agent "List the files in the current directory"
+agentos task run --agent local-agent "List the files in the current directory"
 
 # Check task status
-agentctl task list
+agentos task list
 
 # View task logs
-agentctl task logs <task-id>
+agentos task logs <task-id>
 ```
 
 ---
@@ -335,7 +336,7 @@ $ ollama serve
 $ ollama pull llama3.2
 
 # 3. Start the kernel
-$ ./target/debug/agentctl start
+$ ./target/debug/agentos start
 Enter vault passphrase: ********
 [INFO] Audit log initialized at /tmp/agentos/audit.db
 [INFO] Secrets vault opened
@@ -344,23 +345,23 @@ Enter vault passphrase: ********
 [INFO] Kernel started successfully
 
 # 4. Connect an agent (separate terminal)
-$ ./target/debug/agentctl agent connect --name "my-agent" --provider ollama --model llama3.2
+$ ./target/debug/agentos agent connect --name "my-agent" --provider ollama --model llama3.2
 Agent connected: my-agent (id: a1b2c3d4-...)
 
 # 5. Run a task
-$ ./target/debug/agentctl task run --agent my-agent "What is 2 + 2?"
+$ ./target/debug/agentos task run --agent my-agent "What is 2 + 2?"
 Task created: t5e6f7g8-...
 Result: 2 + 2 = 4
 
 # 6. Check system status
-$ ./target/debug/agentctl status
+$ ./target/debug/agentos status
 Kernel: running
 Agents: 1 online
 Tasks: 1 completed, 0 pending
 Uptime: 45s
 
 # 7. View audit log
-$ ./target/debug/agentctl audit logs --last 5
+$ ./target/debug/agentos audit logs --last 5
 [2026-03-16T10:00:01Z] KernelStarted
 [2026-03-16T10:00:15Z] AgentConnected agent=my-agent
 [2026-03-16T10:00:20Z] TaskCreated task=t5e6f7g8
@@ -392,7 +393,7 @@ sudo cp -r tools/core/* /var/lib/agentos/tools/core/
 
 ```bash
 # Use production config
-agentctl --config config/production.toml start
+agentos --config config/production.toml start
 ```
 
 ### 4. Production checklist
@@ -420,7 +421,7 @@ After=network.target
 Type=simple
 User=agentos
 Group=agentos
-ExecStart=/usr/local/bin/agentctl --config /etc/agentos/production.toml start
+ExecStart=/usr/local/bin/agentos --config /etc/agentos/production.toml start
 Environment=AGENTOS_VAULT_PASSPHRASE_FILE=/run/secrets/agentos-vault
 Restart=on-failure
 RestartSec=5

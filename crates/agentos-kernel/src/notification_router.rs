@@ -387,7 +387,7 @@ impl NotificationRouter {
 /// The CLI delivery adapter.
 ///
 /// Phase 1 model: all messages are already in the `UserInbox` SQLite DB.
-/// The CLI reads from it via `agentctl notifications list`.  This adapter is
+/// The CLI reads from it via `agentos notifications list`.  This adapter is
 /// therefore a lightweight no-op for Phase 1 — it represents the CLI channel
 /// in the delivery status map so future phases can badge an active TTY session.
 pub struct CliDeliveryAdapter;
@@ -789,7 +789,7 @@ impl DeliveryAdapter for SlackDeliveryAdapter {
                 "type": "context",
                 "elements": [{
                     "type": "mrkdwn",
-                    "text": "_Reply via `agentctl notifications respond` or the web UI._"
+                    "text": "_Reply via `agentos notifications respond` or the web UI._"
                 }]
             }));
         }

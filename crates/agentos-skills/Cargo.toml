@@ -1,0 +1,15 @@
+[package]
+name = "agentos-skills"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agentos-types = { path = "../agentos-types" }
+toml = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

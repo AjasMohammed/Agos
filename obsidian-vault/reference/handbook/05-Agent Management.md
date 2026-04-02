@@ -59,7 +59,7 @@ graph LR
 ## Connecting Agents
 
 ```bash
-agentctl agent connect --provider <PROVIDER> --model <MODEL> --name <NAME> [--role <ROLE>...]
+agentos agent connect --provider <PROVIDER> --model <MODEL> --name <NAME> [--role <ROLE>...]
 ```
 
 | Flag | Type | Required | Description |
@@ -84,23 +84,23 @@ agentctl agent connect --provider <PROVIDER> --model <MODEL> --name <NAME> [--ro
 
 ```bash
 # Connect a local Ollama agent
-agentctl agent connect --provider ollama --model llama3.2 --name "local-dev"
+agentos agent connect --provider ollama --model llama3.2 --name "local-dev"
 
 # Connect an OpenAI agent with the orchestrator role
-agentctl agent connect --provider openai --model gpt-4o --name "planner" --role orchestrator
+agentos agent connect --provider openai --model gpt-4o --name "planner" --role orchestrator
 
 # Connect an Anthropic agent
-agentctl agent connect --provider anthropic --model claude-sonnet-4-20250514 --name "code-reviewer"
+agentos agent connect --provider anthropic --model claude-sonnet-4-20250514 --name "code-reviewer"
 
 # Connect a Gemini agent
-agentctl agent connect --provider gemini --model gemini-pro --name "researcher"
+agentos agent connect --provider gemini --model gemini-pro --name "researcher"
 
 # Connect a custom provider
-agentctl agent connect --provider custom:local-llm --model my-model --name "custom-agent" \
+agentos agent connect --provider custom:local-llm --model my-model --name "custom-agent" \
   --base_url "http://localhost:8080/v1"
 
 # Connect with multiple roles
-agentctl agent connect --provider ollama --model llama3.2 --name "ops" \
+agentos agent connect --provider ollama --model llama3.2 --name "ops" \
   --role sysops --role security-monitor
 ```
 
@@ -127,7 +127,7 @@ On connect, the kernel automatically:
 ## Listing Agents
 
 ```bash
-agentctl agent list
+agentos agent list
 ```
 
 Displays all connected agents in a table:
@@ -144,7 +144,7 @@ code-reviewer   Anthropic   claude-sonnet-4-20250514   i9j0k1l2-...
 ## Disconnecting Agents
 
 ```bash
-agentctl agent disconnect <NAME>
+agentos agent disconnect <NAME>
 ```
 
 Removes the agent from the kernel registry. The agent's inbox is closed and any queued messages are lost.
@@ -152,7 +152,7 @@ Removes the agent from the kernel registry. The agent's inbox is closed and any 
 **Example:**
 
 ```bash
-agentctl agent disconnect "local-dev"
+agentos agent disconnect "local-dev"
 ```
 
 ---
@@ -173,7 +173,7 @@ Agents can communicate with each other through the kernel's message bus (`AgentM
 ### Sending a Direct Message
 
 ```bash
-agentctl agent message --from <SENDER> <RECIPIENT> "<CONTENT>"
+agentos agent message --from <SENDER> <RECIPIENT> "<CONTENT>"
 ```
 
 | Flag / Argument | Type | Required | Description |
@@ -185,7 +185,7 @@ agentctl agent message --from <SENDER> <RECIPIENT> "<CONTENT>"
 **Example:**
 
 ```bash
-agentctl agent message --from "planner" "code-reviewer" "Please review the auth module changes"
+agentos agent message --from "planner" "code-reviewer" "Please review the auth module changes"
 ```
 
 ### Message Security
@@ -202,7 +202,7 @@ Failed deliveries emit a `MessageDeliveryFailed` notification for audit logging.
 ## Viewing Messages
 
 ```bash
-agentctl agent messages <AGENT> [--last N]
+agentos agent messages <AGENT> [--last N]
 ```
 
 | Flag | Type | Default | Description |
@@ -222,7 +222,7 @@ Shows messages sent to and from the specified agent, with content type indicated
 
 ```bash
 # Show last 5 messages for the planner agent
-agentctl agent messages planner --last 5
+agentos agent messages planner --last 5
 ```
 
 ---
@@ -234,7 +234,7 @@ Groups allow broadcasting messages to multiple agents at once. Members are speci
 ### Creating a Group
 
 ```bash
-agentctl agent group create <NAME> --members "<AGENT1,AGENT2,...>"
+agentos agent group create <NAME> --members "<AGENT1,AGENT2,...>"
 ```
 
 | Flag | Type | Required | Description |
@@ -245,13 +245,13 @@ agentctl agent group create <NAME> --members "<AGENT1,AGENT2,...>"
 **Example:**
 
 ```bash
-agentctl agent group create "dev-team" --members "planner,code-reviewer,local-dev"
+agentos agent group create "dev-team" --members "planner,code-reviewer,local-dev"
 ```
 
 ### Broadcasting to a Group
 
 ```bash
-agentctl agent broadcast --from <SENDER> <GROUP> "<CONTENT>"
+agentos agent broadcast --from <SENDER> <GROUP> "<CONTENT>"
 ```
 
 | Flag | Type | Required | Description |
@@ -265,7 +265,7 @@ The broadcast is delivered to all group members except the sender. The response 
 **Example:**
 
 ```bash
-agentctl agent broadcast --from "planner" "dev-team" "Sprint review in 10 minutes"
+agentos agent broadcast --from "planner" "dev-team" "Sprint review in 10 minutes"
 # Output: Broadcast sent to 2 agents in group 'dev-team'
 ```
 
@@ -281,7 +281,7 @@ Every agent receives an Ed25519 cryptographic identity on connection. The privat
 ### Viewing an Agent's Identity
 
 ```bash
-agentctl identity show --agent <NAME>
+agentos identity show --agent <NAME>
 ```
 
 Displays the agent's identity information:
@@ -296,13 +296,13 @@ Has Signing Key: true
 ### Revoking an Agent's Identity
 
 ```bash
-agentctl identity revoke --agent <NAME>
+agentos identity revoke --agent <NAME>
 ```
 
 Removes the agent's signing key from the vault and revokes associated permissions. After revocation, the agent can no longer sign messages.
 
 ```bash
-agentctl identity revoke --agent "code-reviewer"
+agentos identity revoke --agent "code-reviewer"
 # Output: Identity and permissions revoked for agent 'code-reviewer'.
 ```
 
@@ -315,7 +315,7 @@ agentctl identity revoke --agent "code-reviewer"
 
 Every agent has two sources of permissions:
 
-1. **Direct permissions** — granted explicitly to the agent via `agentctl perm grant`
+1. **Direct permissions** — granted explicitly to the agent via `agentos perm grant`
 2. **Role permissions** — inherited from assigned roles
 
 The kernel computes **effective permissions** by merging both sources. The `base` role is mandatory and grants `fs.user_data` read/write access to all agents.
@@ -326,13 +326,13 @@ For the full permission model — including capability tokens, deny entries, pat
 
 ```bash
 # Grant an agent file-read permission
-agentctl perm grant local-dev fs.user_data:r
+agentos perm grant local-dev fs.user_data:r
 
 # Grant shell execution
-agentctl perm grant ops shell.exec:x
+agentos perm grant ops shell.exec:x
 
 # View an agent's effective permissions
-agentctl perm show local-dev
+agentos perm show local-dev
 ```
 
 ---
@@ -354,12 +354,12 @@ These files are updated on every agent registration, status change, role assignm
 
 | Operation | Command | Key Behavior |
 |-----------|---------|-------------|
-| Connect | `agentctl agent connect --provider ... --model ... --name ...` | Creates profile, generates identity, assigns roles |
-| List | `agentctl agent list` | Shows NAME, PROVIDER, MODEL, ID columns |
-| Disconnect | `agentctl agent disconnect <name>` | Removes from registry, closes inbox |
-| Message | `agentctl agent message --from ... <to> "..."` | Ed25519-signed, 60s TTL, audit logged |
-| View Messages | `agentctl agent messages <agent> --last N` | Shows message history with types |
-| Create Group | `agentctl agent group create <name> --members "a,b,c"` | Named group for broadcast |
-| Broadcast | `agentctl agent broadcast --from ... <group> "..."` | Delivers to all group members except sender |
-| Show Identity | `agentctl identity show --agent <name>` | Displays public key and signing status |
-| Revoke Identity | `agentctl identity revoke --agent <name>` | Permanently removes signing key |
+| Connect | `agentos agent connect --provider ... --model ... --name ...` | Creates profile, generates identity, assigns roles |
+| List | `agentos agent list` | Shows NAME, PROVIDER, MODEL, ID columns |
+| Disconnect | `agentos agent disconnect <name>` | Removes from registry, closes inbox |
+| Message | `agentos agent message --from ... <to> "..."` | Ed25519-signed, 60s TTL, audit logged |
+| View Messages | `agentos agent messages <agent> --last N` | Shows message history with types |
+| Create Group | `agentos agent group create <name> --members "a,b,c"` | Named group for broadcast |
+| Broadcast | `agentos agent broadcast --from ... <group> "..."` | Delivers to all group members except sender |
+| Show Identity | `agentos identity show --agent <name>` | Displays public key and signing status |
+| Revoke Identity | `agentos identity revoke --agent <name>` | Permanently removes signing key |

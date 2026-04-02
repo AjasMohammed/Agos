@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use agentos_api::types::AuditFilter;
 use agentos_types::TaskState;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -8,18 +9,23 @@ use minijinja::context;
 
 pub async fn index(State(state): State<AppState>, jar: CookieJar) -> Response {
     let (agents, agent_count) = build_agent_list(&state).await;
-    let tool_count = state.kernel.tool_registry.read().await.list_all().len();
+    let tool_count = match state.service.list_tools().await {
+        Ok(tools) => tools.len(),
+        Err(e) => {
+            tracing::error!("Failed to list tools for dashboard: {e}");
+            0
+        }
+    };
     let (tasks, task_summary) = build_task_summary(&state).await;
-    let uptime_secs = chrono::Utc::now()
-        .signed_duration_since(state.kernel.started_at)
-        .num_seconds();
+    // TODO(streaming): background_pool and started_at are kernel-internal; not in KernelService
+    let uptime_secs = state.service.get_uptime().await.as_secs() as i64;
     let uptime_display = format_uptime(uptime_secs);
     let bg_running = state.kernel.background_pool.list_running().await.len();
     let recent_audit = fetch_recent_audit(&state, 10).await;
     let recent_audit = match recent_audit {
         Ok(v) => v,
         Err(e) => {
-            tracing::error!("dashboard audit query panicked: {e}");
+            tracing::error!("dashboard audit query failed: {e}");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
         }
     };
@@ -51,13 +57,24 @@ pub async fn index(State(state): State<AppState>, jar: CookieJar) -> Response {
 }
 
 pub async fn stats_partial(State(state): State<AppState>) -> Response {
-    let agent_count = state.kernel.agent_registry.read().await.list_online().len();
-    let tool_count = state.kernel.tool_registry.read().await.list_all().len();
+    let agent_count = match state.service.list_agents().await {
+        Ok(agents) => agents.len(),
+        Err(e) => {
+            tracing::error!("Failed to list agents for stats partial: {e}");
+            0
+        }
+    };
+    let tool_count = match state.service.list_tools().await {
+        Ok(tools) => tools.len(),
+        Err(e) => {
+            tracing::error!("Failed to list tools for stats partial: {e}");
+            0
+        }
+    };
     let (total_task_count, task_summary) = build_task_summary(&state).await;
-    let uptime_secs = chrono::Utc::now()
-        .signed_duration_since(state.kernel.started_at)
-        .num_seconds();
+    let uptime_secs = state.service.get_uptime().await.as_secs() as i64;
     let uptime_display = format_uptime(uptime_secs);
+    // TODO(streaming): background_pool not exposed in KernelService
     let bg_running = state.kernel.background_pool.list_running().await.len();
 
     let ctx = context! {
@@ -94,7 +111,7 @@ pub async fn recent_audit_partial(State(state): State<AppState>) -> Response {
     let recent_audit = match fetch_recent_audit(&state, 10).await {
         Ok(v) => v,
         Err(e) => {
-            tracing::error!("dashboard audit partial query panicked: {e}");
+            tracing::error!("dashboard audit partial query failed: {e}");
             return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
         }
     };
@@ -112,17 +129,22 @@ struct TaskSummary {
 }
 
 async fn build_agent_list(state: &AppState) -> (Vec<minijinja::Value>, usize) {
-    let registry = state.kernel.agent_registry.read().await;
-    let agents: Vec<_> = registry
-        .list_online()
-        .into_iter()
+    let agents_api = match state.service.list_agents().await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!("Failed to list agents: {e}");
+            vec![]
+        }
+    };
+    let agents: Vec<_> = agents_api
+        .iter()
         .map(|a| {
             context! {
                 name => a.name.clone(),
-                provider => format!("{:?}", a.provider),
+                provider => a.provider.clone(),
                 model => a.model.clone(),
-                status => format!("{:?}", a.status),
-                current_task => a.current_task.as_ref().map(|t| t.to_string()),
+                status => a.status.clone(),
+                current_task => Option::<String>::None,
             }
         })
         .collect();
@@ -131,6 +153,11 @@ async fn build_agent_list(state: &AppState) -> (Vec<minijinja::Value>, usize) {
 }
 
 async fn build_task_summary(state: &AppState) -> (usize, TaskSummary) {
+    // TODO: Replace with state.service.get_dashboard_summary().task_counts once
+    // DashboardSummary.TaskCounts exposes queued and suspended state breakdowns.
+    // Currently TaskCounts only tracks running/completed/failed/total (kernel_impl.rs
+    // lines 592-604), so we fall back to kernel.scheduler to get the queued/suspended
+    // distinction that the dashboard template renders.
     let tasks = state.kernel.scheduler.list_tasks().await;
     let mut summary = TaskSummary {
         queued: 0,
@@ -152,18 +179,20 @@ async fn build_task_summary(state: &AppState) -> (usize, TaskSummary) {
 async fn fetch_recent_audit(
     state: &AppState,
     limit: u32,
-) -> Result<Vec<minijinja::Value>, tokio::task::JoinError> {
-    let audit = state.kernel.audit.clone();
-    let entries =
-        tokio::task::spawn_blocking(move || audit.query_recent(limit).unwrap_or_default()).await?;
+) -> Result<Vec<minijinja::Value>, agentos_api::ApiError> {
+    let filter = AuditFilter {
+        limit: Some(limit),
+        ..Default::default()
+    };
+    let entries = state.service.query_audit(filter).await?;
     Ok(entries
         .iter()
         .map(|e| {
             context! {
                 timestamp => e.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
-                event_type => format!("{:?}", e.event_type),
-                severity => format!("{:?}", e.severity),
-                agent_id => e.agent_id.as_ref().map(|id| id.to_string()),
+                event_type => e.event_type.trim_matches('"').to_string(),
+                severity => String::new(),
+                agent_id => e.agent_id.clone(),
             }
         })
         .collect())

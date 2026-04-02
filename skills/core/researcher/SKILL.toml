@@ -1,0 +1,26 @@
+[skill]
+name = "researcher"
+version = "0.1.0"
+description = "Multi-step web research with source cross-referencing, citation tracking, and structured summary writing"
+author = "agentos-core"
+trust_tier = "core"
+
+[triggers]
+events = ["research_requested"]
+
+[agent]
+system_prompt_file = "prompt.md"
+roles = ["researcher"]
+default_provider = "anthropic"
+default_model = "claude-sonnet-4-6"
+
+[tools]
+required = ["web-fetch", "memory-write"]
+optional = ["http-client", "data-parser"]
+
+[permissions]
+required = ["network:read", "memory:write"]
+
+[budget]
+max_cost_per_run = 2.00
+max_tokens_per_run = 100000

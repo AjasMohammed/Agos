@@ -33,7 +33,7 @@ AgentOS is a purpose-built operating environment where **LLMs are the primary us
 │                        AgentOS                            │
 │                                                          │
 │  ┌──────────────┐                                        │
-│  │  agentctl    │  CLI (clap)                            │
+│  │  agentos     │  CLI (clap)                            │
 │  └──────┬───────┘                                        │
 │         │  Unix Domain Socket                            │
 │  ┌──────▼──────────────────────────────────────────────┐ │
@@ -145,7 +145,7 @@ agos/
 │   ├── agentos-wasm/        # WASM tool executor (Wasmtime runtime)
 │   ├── agentos-sandbox/     # Seccomp-BPF sandboxed process execution
 │   ├── agentos-kernel/      # Central orchestrator (scheduler, router, registry)
-│   └── agentos-cli/         # agentctl CLI
+│   └── agentos-cli/         # agentos CLI
 ├── config/
 │   ├── default.toml         # Development defaults (uses /tmp paths; kernel warns at startup)
 │   ├── production.toml      # Production baseline (persistent /var/lib paths, internal endpoints)
@@ -183,7 +183,7 @@ agos/
 | **RBAC**                | Role-based access control with persistent roles                                                |
 | **Background Tasks**    | agentd supervisor, cron/schedule management                                                    |
 | **Seccomp Sandbox**     | BPF syscall filtering for tool execution                                                       |
-| **Full CLI**            | agentctl with 12 command groups                                                                |
+| **Full CLI**            | agentos with 12 command groups                                                                 |
 | **Docker Deployment**   | Multi-stage image, docker-compose with Ollama, read-only rootfs, persistent volumes           |
 | **Production Config**   | `config/production.toml` with persistent paths; kernel warns at startup on `/tmp` paths       |
 
@@ -202,18 +202,18 @@ agos/
 ## CLI Commands
 
 ```bash
-agentctl start                    # Boot the kernel
-agentctl status                   # System status
+agentos start                    # Boot the kernel
+agentos status                   # System status
 
-agentctl agent connect/list/disconnect   # Manage LLM agents
-agentctl task run/list/logs/cancel       # Run and manage tasks
-agentctl tool list/install/remove        # Manage agent tools
-agentctl secret set/list/rotate/revoke   # Manage encrypted secrets
-agentctl perm grant/revoke/show          # Manage agent permissions
-agentctl role create/assign/list/delete  # Manage RBAC roles
-agentctl schedule create/list/pause/resume/delete  # Cron jobs
-agentctl bg run/list/logs/kill           # Background tasks
-agentctl audit logs                      # View audit trail
+agentos agent connect/list/disconnect   # Manage LLM agents
+agentos task run/list/logs/cancel       # Run and manage tasks
+agentos tool list/install/remove        # Manage agent tools
+agentos secret set/list/rotate/revoke   # Manage encrypted secrets
+agentos perm grant/revoke/show          # Manage agent permissions
+agentos role create/assign/list/delete  # Manage RBAC roles
+agentos schedule create/list/pause/resume/delete  # Cron jobs
+agentos bg run/list/logs/kill           # Background tasks
+agentos audit logs                      # View audit trail
 ```
 
 See the [CLI Reference](docs/guide/04-cli-reference.md) for full details.

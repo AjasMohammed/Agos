@@ -27,12 +27,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "plans/real-world-adoption-roadmap/10-visual-pipeline-builder.md",
+                "file": "plans/competitive-gap-closure/01-rest-api-layer.md",
                 "mode": "preview",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "10-visual-pipeline-builder"
+              "title": "01-rest-api-layer"
             }
           },
           {
@@ -137,7 +137,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "plans/real-world-adoption-roadmap/10-visual-pipeline-builder.md",
+                "file": "plans/competitive-gap-closure/01-rest-api-layer.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -147,7 +147,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for 10-visual-pipeline-builder"
+              "title": "Backlinks for 01-rest-api-layer"
             }
           },
           {
@@ -226,43 +226,43 @@
       "bases:Create new base": false
     }
   },
-  "active": "a9bdbdc87d6f2fda",
+  "active": "bf87c24d930745ee",
   "lastOpenFiles": [
-    "reference/handbook/14-Audit Log.md.tmp.2024226.1774808590559",
-    "reference/handbook/14-Audit Log.md.tmp.2024226.1774808571189",
-    "reference/handbook/14-Audit Log.md.tmp.2024226.1774808565282",
-    "reference/handbook/14-Audit Log.md.tmp.2024226.1774808559721",
-    "reference/handbook/AgentOS Handbook Index.md.tmp.2024226.1774808556193",
-    "reference/handbook/10-Memory System.md.tmp.2024226.1774808551151",
-    "reference/handbook/04-CLI Reference Complete.md.tmp.2024226.1774808547977",
-    "reference/handbook/09-Secrets and Vault.md.tmp.2024226.1774808540213",
-    "reference/handbook/09-Secrets and Vault.md.tmp.2024226.1774808534867",
-    "reference/handbook/07-Tool System.md.tmp.2024226.1774808534857",
-    "reference/handbook/09-Secrets and Vault.md.tmp.2024226.1774808528737",
-    "plans/handbook-audit-report.md",
-    "plans/real-world-adoption-roadmap/09-hal-approval-workflow.md",
-    "plans/real-world-adoption-roadmap/Real World Adoption Roadmap Plan.md",
-    "plans/real-world-adoption-roadmap/08-deployment-packaging.md",
-    "plans/peripheral-device-ecosystem/01-usb-storage-driver.md",
-    "plans/agent-scratchpad/06-episodic-auto-write.md",
-    "plans/agent-scratchpad/05-cross-agent-knowledge.md",
-    "plans/agent-scratchpad/Agent Scratchpad Plan.md",
-    "reference/handbook/18-Advanced Operations.md",
-    "reference/handbook/AgentOS Handbook Index.md",
-    "reference/handbook/02-Installation and First Run.md",
-    "plans/peripheral-device-ecosystem/Peripheral Device Ecosystem Plan.md",
-    "plans/v3-completion/02-mcp-adapter.md",
-    "plans/peripheral-device-ecosystem/Peripheral Device Ecosystem Research.md",
+    "plans/mcp-client-hardening/02-supervisor-layer.md",
+    "plans/mcp-client-hardening/01-transport-layer.md",
+    "plans/mcp-client-hardening/MCP Client Hardening Plan.md",
+    "plans/mcp-client-hardening",
+    "plans/competitive-gap-closure/Competitive Gap Closure Plan.md",
+    "plans/api-layer/01-kernel-service-trait.md",
+    "plans/competitive-gap-closure/09-community-infrastructure.md",
+    "plans/competitive-gap-closure/09-community-infrastructure.md.tmp.2347716.1774891119233",
+    "plans/competitive-gap-closure/08-benchmarks-performance.md",
+    "plans/competitive-gap-closure/08-benchmarks-performance.md.tmp.2347716.1774891097021",
+    "plans/competitive-gap-closure/07-single-binary-distribution.md",
+    "plans/competitive-gap-closure/07-single-binary-distribution.md.tmp.2347716.1774891076084",
+    "plans/competitive-gap-closure/06-llm-provider-expansion.md",
+    "plans/competitive-gap-closure/06-llm-provider-expansion.md.tmp.2347716.1774891025454",
+    "plans/competitive-gap-closure/05-prebuilt-agents.md",
+    "plans/competitive-gap-closure/05-prebuilt-agents.md.tmp.2347716.1774890987506",
+    "plans/competitive-gap-closure/03-marketplace-ui.md",
+    "plans/competitive-gap-closure/03-marketplace-ui.md.tmp.2347716.1774890944728",
+    "plans/competitive-gap-closure/04-skills-abstraction.md",
+    "plans/competitive-gap-closure/04-skills-abstraction.md.tmp.2347716.1774890910729",
+    "plans/competitive-gap-closure/02-channel-adapter-system.md",
+    "plans/competitive-gap-closure/01-rest-api-layer.md",
+    "plans/competitive-gap-closure/01-rest-api-layer.md.tmp.2347716.1774890759037",
+    "plans/competitive-gap-closure/Competitive Gap Closure Plan.md.tmp.2347716.1774890614257",
+    "plans/api-layer/API Layer Plan.md",
+    "plans/api-layer/API Layer Data Flow.md",
+    "plans/api-layer/07-bus-dispatch-migration.md",
+    "plans/api-layer/06-web-handler-migration.md",
+    "plans/api-layer/05-websocket-layer.md",
+    "plans/api-layer/04-full-rest-endpoints.md",
+    "plans/api-layer/API Layer Research.md",
     "plans/real-world-adoption-roadmap/10-visual-pipeline-builder.md",
-    "plans/peripheral-device-ecosystem/08-peripheral-tools.md",
-    "plans/peripheral-device-ecosystem/07-raw-usb-driver.md",
-    "plans/peripheral-device-ecosystem/06-display-driver.md",
-    "plans/peripheral-device-ecosystem/05-bluetooth-driver.md",
-    "plans/peripheral-device-ecosystem/04-audio-driver.md",
-    "plans/peripheral-device-ecosystem/03-webcam-driver.md",
-    "plans/peripheral-device-ecosystem/02-printer-driver.md",
-    "plans/peripheral-device-ecosystem/Peripheral Device Data Flow.md",
-    "plans/real-world-adoption-roadmap/07-agent-rpc.md",
-    "plans/real-world-adoption-roadmap/06-opentelemetry-export.md"
+    "plans/api-layer/03-core-rest-endpoints.md",
+    "plans/api-layer/02-auth-system.md",
+    "plans/handbook-audit-report.md",
+    "plans/real-world-adoption-roadmap/09-hal-approval-workflow.md"
   ]
 }

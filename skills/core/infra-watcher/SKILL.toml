@@ -1,0 +1,27 @@
+[skill]
+name = "infra-watcher"
+version = "0.1.0"
+description = "Monitors CPU, memory, disk, and thermal metrics; detects hardware anomalies and new device connections"
+author = "agentos-core"
+trust_tier = "core"
+
+[triggers]
+schedule = "*/15 * * * *"
+events = ["device_mounted", "device_quarantined"]
+
+[agent]
+system_prompt_file = "prompt.md"
+roles = ["infra-monitor"]
+default_provider = "anthropic"
+default_model = "claude-haiku-4-5"
+
+[tools]
+required = ["hardware-info", "notify-user", "memory-write"]
+optional = ["network-monitor", "process-manager"]
+
+[permissions]
+required = ["hardware:read", "notification:write", "memory:write"]
+
+[budget]
+max_cost_per_run = 0.10
+max_tokens_per_run = 10000

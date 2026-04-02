@@ -21,47 +21,47 @@ status: complete
 | # | Problem | Likely Cause | Solution |
 |---|---------|-------------|----------|
 | 1 | `Config file not found: config/default.toml` | Running binary from wrong directory | Run from project root, or pass `--config /path/to/default.toml` |
-| 2 | `Connection refused` / `BusError: …` | Kernel not running | Start the kernel first: `agentctl start` in a separate terminal |
+| 2 | `Connection refused` / `BusError: …` | Kernel not running | Start the kernel first: `agentos start` in a separate terminal |
 | 3 | `Socket path already in use` | Previous kernel instance still alive | Kill the old process (`pkill agentos`) or change `[bus].socket_path` in `config/default.toml` |
-| 4 | `KernelShutdown` returned on any command | Kernel is mid-shutdown or crashed | Restart: `agentctl start` |
+| 4 | `KernelShutdown` returned on any command | Kernel is mid-shutdown or crashed | Restart: `agentos start` |
 
 ### Agents
 
 | # | Problem | Likely Cause | Solution |
 |---|---------|-------------|----------|
-| 5 | `AgentNotFound: <name>` | Agent never registered or was evicted | Verify with `agentctl agent list`; re-register if missing |
-| 6 | Agent unresponsive to messages | LLM not connected or overloaded | Check `agentctl status`; verify LLM adapter health with `agentctl llm status` |
+| 5 | `AgentNotFound: <name>` | Agent never registered or was evicted | Verify with `agentos agent list`; re-register if missing |
+| 6 | Agent unresponsive to messages | LLM not connected or overloaded | Check `agentos status`; verify LLM adapter health with `agentos llm status` |
 | 7 | `NoLLMConnected` | No adapter configured or all health checks failed | Add a provider in `[llm]` section or start Ollama (`ollama serve`) |
 
 ### Tasks
 
 | # | Problem | Likely Cause | Solution |
 |---|---------|-------------|----------|
-| 8 | Task stuck in `Running` state | Pending escalation or LLM hang | Check `agentctl escalation list`; approve, deny, or cancel the task |
+| 8 | Task stuck in `Running` state | Pending escalation or LLM hang | Check `agentos escalation list`; approve, deny, or cancel the task |
 | 9 | `TaskTimeout: <id>` | Task exceeded configured timeout | Increase `[kernel].task_timeout_secs` or break work into smaller tasks |
-| 10 | `BudgetExceeded` — task stopped | Per-agent cost limit reached | Review with `agentctl cost show`; increase budget or switch to a cheaper model |
-| 11 | Task immediately fails with `PermissionDenied` | Agent lacks required capability | Grant the permission: `agentctl perm grant <agent> <resource> <op>` |
+| 10 | `BudgetExceeded` — task stopped | Per-agent cost limit reached | Review with `agentos cost show`; increase budget or switch to a cheaper model |
+| 11 | Task immediately fails with `PermissionDenied` | Agent lacks required capability | Grant the permission: `agentos perm grant <agent> <resource> <op>` |
 
 ### Tools
 
 | # | Problem | Likely Cause | Solution |
 |---|---------|-------------|----------|
 | 12 | `ToolBlocked: <name>` on install | Manifest sets `trust_tier = "blocked"` | Change the tier in the manifest or use a different tool |
-| 13 | `ToolSignatureInvalid: <name>` on install | Signature does not match `author_pubkey` | Re-sign: `agentctl tool sign --key author.key manifest.toml`; verify: `agentctl tool verify manifest.toml` |
+| 13 | `ToolSignatureInvalid: <name>` on install | Signature does not match `author_pubkey` | Re-sign: `agentos tool sign --key author.key manifest.toml`; verify: `agentos tool verify manifest.toml` |
 | 14 | `ToolNotFound: <name>` | Tool directory not on scan path | Add directory to `[tools].tool_dirs` in config; reload tools |
 | 15 | `ToolExecutionFailed` | Runtime error inside the tool | Check tool logs; run with `RUST_LOG=agentos=debug` to see detail |
 | 16 | WASM tool timeout (`SandboxTimeout`) | Tool CPU limit exceeded | Increase `max_cpu_ms` in the WASM tool manifest |
 | 17 | `SandboxSpawnFailed` on non-Linux | Seccomp is Linux-only | Disable the sandbox in config (`[kernel].enable_sandbox = false`) when running on macOS or Windows |
 | 18 | `SandboxFilterError` | Seccomp policy rejected a syscall | Review seccomp allow-list in `agentos-sandbox`; file a bug if a legitimate syscall is blocked |
-| 19 | `FileLocked` — file held by another task | Concurrent tasks hold a file lock | Wait for the other task to finish, or cancel it: `agentctl task cancel <id>` |
+| 19 | `FileLocked` — file held by another task | Concurrent tasks hold a file lock | Wait for the other task to finish, or cancel it: `agentos task cancel <id>` |
 
 ### Secrets and Vault
 
 | # | Problem | Likely Cause | Solution |
 |---|---------|-------------|----------|
-| 20 | `SecretNotFound: <key>` | Secret not set for this scope | Add it: `agentctl secret set <key> --scope <scope>` |
+| 20 | `SecretNotFound: <key>` | Secret not set for this scope | Add it: `agentos secret set <key> --scope <scope>` |
 | 21 | `VaultError: wrong passphrase` | Wrong master passphrase | No recovery path — if passphrase is lost, delete the vault DB and recreate all secrets |
-| 22 | OpenAI / Anthropic / Gemini API errors | Key not in vault or endpoint unreachable | Check `agentctl secret list`; set key if missing; verify network access to the API endpoint |
+| 22 | OpenAI / Anthropic / Gemini API errors | Key not in vault or endpoint unreachable | Check `agentos secret list`; set key if missing; verify network access to the API endpoint |
 | 23 | Ollama `LLMError: connection refused` | Ollama server not running | Run `ollama serve` and ensure the model is pulled: `ollama pull <model>` |
 
 ### Memory
@@ -75,18 +75,18 @@ status: complete
 
 | # | Problem | Likely Cause | Solution |
 |---|---------|-------------|----------|
-| 26 | Event subscription not firing | Subscription disabled or throttled | List subscriptions: `agentctl event subscriptions list`; check `enabled` flag and throttle policy |
+| 26 | Event subscription not firing | Subscription disabled or throttled | List subscriptions: `agentos event subscriptions list`; check `enabled` flag and throttle policy |
 | 27 | `EventLoopDetected` error | Triggered task emits the same event that triggered it | Add a depth guard or break the feedback loop in the subscription filter |
-| 28 | Pipeline step shows `skipped` status | `depends_on` prerequisite failed | Inspect step results with `agentctl pipeline status <id>`; fix the failing predecessor step |
-| 29 | Pipeline hangs at a step | Step agent is awaiting escalation | Check `agentctl escalation list` and respond |
+| 28 | Pipeline step shows `skipped` status | `depends_on` prerequisite failed | Inspect step results with `agentos pipeline status <id>`; fix the failing predecessor step |
+| 29 | Pipeline hangs at a step | Step agent is awaiting escalation | Check `agentos escalation list` and respond |
 
 ### Resources and Audit
 
 | # | Problem | Likely Cause | Solution |
 |---|---------|-------------|----------|
-| 30 | Resource deadlock detected | Two tasks holding locks in opposite order | Inspect contention: `agentctl resource contention`; force-release: `agentctl resource release <resource>` |
+| 30 | Resource deadlock detected | Two tasks holding locks in opposite order | Inspect contention: `agentos resource contention`; force-release: `agentos resource release <resource>` |
 | 31 | Escalation auto-expired | No response within 5 minutes | Escalations expire after `[kernel].escalation_timeout_secs` (default 300 s); respond faster or increase the timeout |
-| 32 | Audit chain verification fails | Possible log corruption or tampering | Export the chain for forensics: `agentctl audit export --output audit.json`; then review the broken link |
+| 32 | Audit chain verification fails | Possible log corruption or tampering | Export the chain for forensics: `agentos audit export --output audit.json`; then review the broken link |
 | 33 | `SchemaValidation` error on intent | Intent payload does not match declared schema | Validate the JSON against the tool manifest schema before submission |
 
 ---
@@ -110,23 +110,23 @@ RUST_LOG=agentos_kernel=trace,agentos_llm=debug cargo run --bin agentos-cli -- s
 Every kernel log line at `debug` level includes a `trace_id`. Use it to find the corresponding audit entry:
 
 ```bash
-agentctl audit logs --last 100 | grep <trace_id>
+agentos audit logs --last 100 | grep <trace_id>
 ```
 
 ### Useful investigation commands
 
 ```bash
 # Recent audit entries
-agentctl audit logs --last 50
+agentos audit logs --last 50
 
 # Tail live audit log
-agentctl audit logs --follow
+agentos audit logs --follow
 
 # Verify audit chain integrity
-agentctl audit verify
+agentos audit verify
 
 # Export full chain for offline analysis
-agentctl audit export --output audit.json
+agentos audit export --output audit.json
 ```
 
 ---
@@ -137,22 +137,22 @@ Run this sequence when something seems wrong:
 
 ```bash
 # 1. Overall kernel status
-agentctl status
+agentos status
 
 # 2. Registered agents
-agentctl agent list
+agentos agent list
 
 # 3. Loaded tools
-agentctl tool list
+agentos tool list
 
 # 4. Active tasks
-agentctl task list
+agentos task list
 
 # 5. Pending escalations
-agentctl escalation list
+agentos escalation list
 
 # 6. Audit chain integrity
-agentctl audit verify
+agentos audit verify
 ```
 
 All commands should return without error. Any `ERROR` or `WARN` lines indicate the component that needs attention.
@@ -165,7 +165,7 @@ All commands should return without error. Any `ERROR` or `WARN` lines indicate t
 
 ```bash
 # Stop the kernel
-agentctl stop
+agentos stop
 
 # Remove runtime state (sockets, task state, agent registrations)
 rm -rf /tmp/agentos/
@@ -174,7 +174,7 @@ rm -rf /tmp/agentos/
 rm -f data/audit.db data/memory.db
 
 # Restart
-agentctl start
+agentos start
 ```
 
 ### Preserve secrets while resetting other state
@@ -182,7 +182,7 @@ agentctl start
 The vault database is separate from runtime state. To keep secrets intact while resetting everything else:
 
 ```bash
-agentctl stop
+agentos stop
 
 # Back up vault
 cp data/vault.db vault.db.bak
@@ -191,7 +191,7 @@ cp data/vault.db vault.db.bak
 rm -rf /tmp/agentos/ data/audit.db data/memory.db
 
 # Restart — vault.db is still in place, secrets are preserved
-agentctl start
+agentos start
 ```
 
 ---
@@ -260,10 +260,10 @@ Key `AgentOSError` variants and what they mean:
 ### Filing issues
 
 Report bugs and feature requests at the project issue tracker. Include:
-1. AgentOS version (`agentctl --version`)
+1. AgentOS version (`agentos --version`)
 2. Operating system and kernel version
 3. Relevant log output (`RUST_LOG=agentos=debug`)
-4. Audit export if the issue involves task execution (`agentctl audit export`)
+4. Audit export if the issue involves task execution (`agentos audit export`)
 
 ### Reading audit logs for diagnostics
 
@@ -271,13 +271,13 @@ The audit log is the ground truth for what AgentOS did and why. For any unexpect
 
 ```bash
 # Last 100 events with full JSON
-agentctl audit logs --last 100 --format json
+agentos audit logs --last 100 --format json
 
 # Filter to a specific agent
-agentctl audit logs --agent <agent-id> --last 50
+agentos audit logs --agent <agent-id> --last 50
 
 # Filter to a specific task
-agentctl audit logs --task <task-id>
+agentos audit logs --task <task-id>
 ```
 
 Look for `SecurityViolation`, `EscalationRequired`, `BudgetExceeded`, and `ToolExecutionFailed` event types — these are the most common root causes of unexpected stops.

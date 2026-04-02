@@ -5,7 +5,7 @@ use async_trait::async_trait;
 /// Ask the user a blocking question and wait for a response.
 ///
 /// The task pauses in `Waiting` state until the user submits a response via the
-/// CLI (`agentctl notifications respond`) or the web UI.  An optional timeout
+/// CLI (`agentos notifications respond`) or the web UI.  An optional timeout
 /// controls how long the kernel waits before auto-responding with the
 /// `auto_action` text (default: "auto_denied").
 ///

@@ -1,0 +1,27 @@
+[skill]
+name = "compliance-auditor"
+version = "0.1.0"
+description = "Monitors audit trail for policy violations, verifies Merkle chain integrity, generates compliance reports"
+author = "agentos-core"
+trust_tier = "core"
+
+[triggers]
+schedule = "0 */6 * * *"
+events = ["permission_changed", "secret_accessed"]
+
+[agent]
+system_prompt_file = "prompt.md"
+roles = ["security-monitor"]
+default_provider = "anthropic"
+default_model = "claude-sonnet-4-6"
+
+[tools]
+required = ["audit-query", "audit-verify", "notify-user", "memory-write"]
+optional = ["http-client"]
+
+[permissions]
+required = ["audit:read", "notification:write", "memory:write"]
+
+[budget]
+max_cost_per_run = 0.50
+max_tokens_per_run = 50000

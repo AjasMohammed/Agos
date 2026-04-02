@@ -17,29 +17,33 @@ pub async fn list(
     Query(query): Query<ListQuery>,
     jar: CookieJar,
 ) -> Response {
-    let registry = state.kernel.tool_registry.read().await;
-    let all_tools = registry.list_all();
+    let all_tools = match state.service.list_tools().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("Failed to list tools: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to list tools").into_response();
+        }
+    };
 
     let tools: Vec<_> = all_tools
         .iter()
-        .filter(|t| {
-            if let Some(ref ft) = query.filter_type {
-                let exec_type = format!("{:?}", t.manifest.executor.executor_type);
-                exec_type.to_lowercase().contains(&ft.to_lowercase())
-            } else {
-                true
-            }
+        .filter(|_t| {
+            // TODO: filter_type not applicable to ApiToolSummary (no executor_type field)
+            true
         })
         .map(|t| {
             context! {
                 id => t.id.to_string(),
-                name => t.manifest.manifest.name.clone(),
-                description => t.manifest.manifest.description.clone(),
-                version => t.manifest.manifest.version.clone(),
-                executor_type => format!("{:?}", t.manifest.executor.executor_type),
-                status => format!("{:?}", t.status),
-                network => t.manifest.sandbox.network,
-                fs_write => t.manifest.sandbox.fs_write,
+                name => t.name.clone(),
+                description => t.description.clone(),
+                version => t.version.clone(),
+                executor_type => String::new(),
+                status => t.status.clone(),
+                // TODO: network and fs_write are hardcoded false — ApiToolSummary does not
+                // expose permission flags. Add these fields to ApiToolSummary once
+                // ToolManifest permission flags are surfaced through KernelService.
+                network => false,
+                fs_write => false,
             }
         })
         .collect();
@@ -155,13 +159,13 @@ pub async fn install(
             .into_response();
     }
 
-    // Step 4: Route through kernel command dispatch for trust tier validation and audit.
-    match state
-        .kernel
-        .api_install_tool(canonical_path.to_string_lossy().to_string())
-        .await
-    {
-        Ok(()) => {
+    // Step 4: Route through service for trust tier validation and audit.
+    use agentos_api::types::InstallToolRequest;
+    let req = InstallToolRequest {
+        manifest_path: canonical_path.to_string_lossy().to_string(),
+    };
+    match state.service.install_tool(req).await {
+        Ok(_) => {
             let mut response = axum::response::Redirect::to("/tools").into_response();
             response.headers_mut().insert(
                 "HX-Trigger",
@@ -171,11 +175,11 @@ pub async fn install(
             );
             response
         }
-        Err(msg) => {
-            tracing::error!(path = %canonical_path.display(), error = %msg, "Failed to install tool");
+        Err(e) => {
+            tracing::error!(path = %canonical_path.display(), error = %e, "Failed to install tool");
             let mut response = (
                 StatusCode::BAD_REQUEST,
-                format!("Failed to install tool: {}", msg),
+                format!("Failed to install tool: {}", e),
             )
                 .into_response();
             response.headers_mut().insert(
@@ -190,7 +194,7 @@ pub async fn install(
 }
 
 pub async fn remove(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    match state.kernel.api_remove_tool(name.clone()).await {
+    match state.service.remove_tool(&name).await {
         Ok(()) => {
             let mut response = StatusCode::NO_CONTENT.into_response();
             response.headers_mut().insert(
@@ -201,11 +205,9 @@ pub async fn remove(State(state): State<AppState>, Path(name): Path<String>) -> 
             );
             response
         }
-        Err(msg) if msg.to_lowercase().contains("not found") => {
-            StatusCode::NOT_FOUND.into_response()
-        }
-        Err(msg) => {
-            tracing::error!(tool = %name, error = %msg, "Failed to remove tool");
+        Err(agentos_api::ApiError::NotFound(_)) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!(tool = %name, error = %e, "Failed to remove tool");
             let mut response = StatusCode::INTERNAL_SERVER_ERROR.into_response();
             response.headers_mut().insert(
                 "HX-Trigger",

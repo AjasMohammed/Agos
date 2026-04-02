@@ -34,6 +34,14 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
     )?;
     env.add_template("audit.html", include_str!("templates/audit.html"))?;
     env.add_template(
+        "marketplace.html",
+        include_str!("templates/marketplace.html"),
+    )?;
+    env.add_template(
+        "marketplace_detail.html",
+        include_str!("templates/marketplace_detail.html"),
+    )?;
+    env.add_template(
         "audit_detail.html",
         include_str!("templates/audit_detail.html"),
     )?;
@@ -117,6 +125,10 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
     env.add_template(
         "partials/empty_state.html",
         include_str!("templates/partials/empty_state.html"),
+    )?;
+    env.add_template(
+        "partials/marketplace_reviews.html",
+        include_str!("templates/partials/marketplace_reviews.html"),
     )?;
     env.add_template(
         "partials/toast_container.html",

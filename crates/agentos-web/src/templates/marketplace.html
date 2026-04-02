@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block content %}
+<div>
+    <div class="page-header">
+        <div>
+            <h1>Marketplace</h1>
+            <p class="page-meta">Discover tools and skills for your AgentOS instance</p>
+        </div>
+    </div>
+
+    <article>
+        <form hx-get="/marketplace" hx-target="#marketplace-results" hx-push-url="true" hx-swap="innerHTML">
+            <div style="display:flex;gap:0.5rem;align-items:flex-end">
+                <label for="mp-search" style="flex:1;margin-bottom:0">
+                    Search
+                    <input type="search" id="mp-search" name="q" placeholder="Search tools and skills..."
+                           value="{{ search_query }}" autocomplete="off">
+                </label>
+                <label for="mp-type" style="margin-bottom:0">
+                    Type
+                    <select id="mp-type" name="artifact_type">
+                        <option value="">All</option>
+                        <option value="tool" {% if artifact_type == "tool" %}selected{% endif %}>Tools</option>
+                        <option value="skill" {% if artifact_type == "skill" %}selected{% endif %}>Skills</option>
+                    </select>
+                </label>
+                <button type="submit" style="margin-bottom:0">Search</button>
+            </div>
+        </form>
+    </article>
+
+    <div id="marketplace-results">
+        {% if tools|length > 0 %}
+        <div class="grid">
+            {% for tool in tools %}
+            <article>
+                <header>
+                    <strong>{{ tool.name }}</strong>
+                    <small style="float:right;opacity:0.7">{{ tool.artifact_type }}</small>
+                </header>
+                <p>{{ tool.description }}</p>
+                <footer style="display:flex;justify-content:space-between;align-items:center">
+                    <small class="muted">v{{ tool.version }} &mdash; by {{ tool.author }}</small>
+                    <a href="/marketplace/{{ tool.name }}" role="button" class="outline" style="padding:0.25rem 0.75rem;font-size:0.85rem">Details</a>
+                </footer>
+            </article>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div style="text-align:center;padding:3rem 1rem;opacity:0.7">
+            <p style="font-size:2rem">&#128269;</p>
+            <p>No entries found{% if search_query %} for <em>{{ search_query }}</em>{% endif %}.</p>
+            <p><small>The marketplace is populated from the registry server. Make sure it is running and reachable.</small></p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

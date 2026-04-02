@@ -1,9 +1,7 @@
 /// Kernel handler for `KernelCommand::McpStatus`.
 ///
-/// Iterates the live `mcp_handles` stored at boot and collects health
-/// information from each `McpServerHandle` without blocking I/O — all
-/// fields are either atomic reads or held behind short-duration mutex
-/// lock calls.
+/// Queries the MCP supervisor for live server state and converts to
+/// the bus-compatible `McpServerStatus` format.
 use agentos_bus::{KernelResponse, McpServerStatus};
 
 use crate::kernel::Kernel;
@@ -11,16 +9,21 @@ use crate::kernel::Kernel;
 impl Kernel {
     /// Return the live health status of all configured MCP server connections.
     pub async fn cmd_mcp_status(&self) -> KernelResponse {
-        let handles = self.mcp_handles.read().await;
-        let mut statuses = Vec::with_capacity(handles.len());
-        for handle in handles.iter() {
-            statuses.push(McpServerStatus {
-                name: handle.server_name().to_string(),
-                connected: handle.is_connected().await,
-                tool_count: handle.tool_count(),
-                last_error: handle.last_error().await,
-            });
-        }
+        let statuses: Vec<McpServerStatus> = self
+            .mcp_supervisor
+            .server_statuses()
+            .await
+            .into_iter()
+            .map(
+                |(name, state, tool_count, _stats, backoff_msg)| McpServerStatus {
+                    name,
+                    connected: state == agentos_mcp::ServerState::Connected,
+                    tool_count,
+                    last_error: backoff_msg,
+                },
+            )
+            .collect();
+
         KernelResponse::McpServerStatusList(statuses)
     }
 }

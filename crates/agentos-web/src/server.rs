@@ -38,13 +38,17 @@ impl WebServer {
             .register_adapter(Arc::new(sse_adapter))
             .await;
 
+        let service: Arc<dyn agentos_api::KernelService> =
+            Arc::clone(&kernel) as Arc<dyn agentos_api::KernelService>;
         let state = AppState {
             kernel,
+            service,
             templates,
             csrf_tokens: Arc::new(dashmap::DashMap::<String, (String, std::time::Instant)>::new()),
             allowed_tool_dirs,
             chat_store,
             notification_tx,
+            secure_cookies: !bind_addr.ip().is_loopback(),
         };
         Ok(Self { bind_addr, state })
     }

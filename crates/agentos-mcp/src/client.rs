@@ -5,10 +5,11 @@ use std::sync::{
     Arc,
 };
 
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
 
+use crate::transport::util::{read_line_limited, MAX_MCP_RESPONSE_BYTES};
 use crate::types::{JsonRpcRequest, JsonRpcResponse, McpToolDef};
 
 // ── Limits ────────────────────────────────────────────────────────────────────
@@ -16,45 +17,6 @@ use crate::types::{JsonRpcRequest, JsonRpcResponse, McpToolDef};
 /// Maximum time to wait for a single MCP request/response round-trip.
 /// A server that does not respond within this window is considered hung.
 const MCP_REQUEST_TIMEOUT_SECS: u64 = 30;
-
-/// Maximum number of bytes accepted from a single MCP server response line.
-/// Prevents memory exhaustion from a malicious or malfunctioning server.
-pub(crate) const MAX_MCP_RESPONSE_BYTES: usize = 10 * 1024 * 1024; // 10 MB
-
-/// Read a single newline-terminated line from `reader`, enforcing a byte limit
-/// *during* the read rather than after. This prevents a malicious server from
-/// exhausting memory by sending a very large payload without a newline.
-///
-/// Returns the number of bytes read (0 means EOF).
-pub(crate) async fn read_line_limited(
-    reader: &mut (impl AsyncBufRead + Unpin),
-    buf: &mut String,
-    max_bytes: usize,
-) -> Result<usize, anyhow::Error> {
-    let mut total = 0usize;
-    loop {
-        let available = reader.fill_buf().await?;
-        if available.is_empty() {
-            break; // EOF
-        }
-        let newline_pos = available.iter().position(|&b| b == b'\n');
-        let chunk_end = newline_pos.map_or(available.len(), |p| p + 1);
-        total += chunk_end;
-        if total > max_bytes {
-            anyhow::bail!("MCP server response exceeds {} byte limit", max_bytes);
-        }
-        let chunk = &available[..chunk_end];
-        buf.push_str(
-            std::str::from_utf8(chunk)
-                .map_err(|e| anyhow::anyhow!("Invalid UTF-8 from MCP server: {e}"))?,
-        );
-        reader.consume(chunk_end);
-        if newline_pos.is_some() {
-            break; // found the line terminator
-        }
-    }
-    Ok(total)
-}
 
 // ── Connection guard ──────────────────────────────────────────────────────────
 

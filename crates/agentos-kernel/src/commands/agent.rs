@@ -123,30 +123,61 @@ impl Kernel {
                     }
                 }
             }
-            LLMProvider::Custom(_) => {
-                let sec = match self.vault.get(&format!("{}_custom_api_key", name)).await {
-                    Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
-                    Err(_) => match self.vault.get("custom_api_key").await {
+            LLMProvider::Custom(ref custom_name) => {
+                // Check the provider catalog first for known providers.
+                if let Some(catalog_entry) = self.provider_catalog.lookup(custom_name) {
+                    // Catalog-based provider: use catalog's base_url and API key env var.
+                    let sec = if !catalog_entry.api_key_env.is_empty() {
+                        // Try vault first, then env var
+                        match self
+                            .vault
+                            .get(&format!("{}_{}_api_key", name, custom_name))
+                            .await
+                        {
+                            Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
+                            Err(_) => std::env::var(&catalog_entry.api_key_env)
+                                .ok()
+                                .filter(|s| !s.trim().is_empty())
+                                .map(SecretString::new),
+                        }
+                    } else {
+                        None
+                    };
+                    // Allow --base-url to override catalog URL
+                    let url = base_url.unwrap_or_else(|| catalog_entry.base_url.clone());
+                    // Use catalog default model if the user specified the provider's default
+                    let effective_model = if model == "default" || model.is_empty() {
+                        catalog_entry.default_model.clone()
+                    } else {
+                        model.clone()
+                    };
+                    Ok(Arc::new(CustomCore::new(sec, effective_model, url)))
+                } else {
+                    // Fallback: original custom provider logic
+                    let sec = match self.vault.get(&format!("{}_custom_api_key", name)).await {
                         Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
-                        _ => None,
-                    },
-                };
-                let url = match base_url
-                    .or_else(|| {
-                        std::env::var("AGENTOS_LLM_URL")
-                            .ok()
-                            .filter(|s| !s.trim().is_empty())
-                    })
-                    .or_else(|| self.config.llm.custom_base_url.clone())
-                {
-                    Some(url) => url,
-                    None => {
-                        return KernelResponse::Error {
-                            message: "Missing custom LLM endpoint. Provide --base-url, set AGENTOS_LLM_URL, or configure llm.custom_base_url in config.".to_string(),
-                        };
-                    }
-                };
-                Ok(Arc::new(CustomCore::new(sec, model.clone(), url)))
+                        Err(_) => match self.vault.get("custom_api_key").await {
+                            Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
+                            _ => None,
+                        },
+                    };
+                    let url = match base_url
+                        .or_else(|| {
+                            std::env::var("AGENTOS_LLM_URL")
+                                .ok()
+                                .filter(|s| !s.trim().is_empty())
+                        })
+                        .or_else(|| self.config.llm.custom_base_url.clone())
+                    {
+                        Some(url) => url,
+                        None => {
+                            return KernelResponse::Error {
+                                message: "Missing custom LLM endpoint. Provide --base-url, set AGENTOS_LLM_URL, or configure llm.custom_base_url in config.".to_string(),
+                            };
+                        }
+                    };
+                    Ok(Arc::new(CustomCore::new(sec, model.clone(), url)))
+                }
             }
         };
 
@@ -884,7 +915,7 @@ fn default_permissions_for_agent(name: &str) -> PermissionSet {
     perms.grant("process.list".to_string(), true, false, false, None);
     // Note: process.exec (shell-exec) is NOT granted by default — it is
     // added dynamically for autonomous/background tasks, or can be granted
-    // explicitly via `agentctl perm grant <agent> process.exec:x`.
+    // explicitly via `agentos perm grant <agent> process.exec:x`.
 
     // Task query — read-only (task-list, task-status)
     perms.grant("task.query".to_string(), true, false, false, None);
@@ -894,6 +925,9 @@ fn default_permissions_for_agent(name: &str) -> PermissionSet {
 
     // Event stream — observe (subscribe/unsubscribe to kernel events)
     perms.grant_op("events.stream".to_string(), PermissionOp::Observe, None);
+
+    // Scratchpad — read+write (scratch-read, scratch-write, scratch-list)
+    perms.grant("scratchpad".to_string(), true, true, false, None);
 
     perms
 }
