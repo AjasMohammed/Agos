@@ -601,6 +601,8 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         max_iterations: None,
                         trigger_source: None,
                         autonomous: false,
+                        parent_task_id: None,
+                        spawn_depth: 0,
                     };
                     self.scheduler.enqueue(onboarding_task).await;
                     onboarding_task_id_opt = Some(onboarding_task_id);

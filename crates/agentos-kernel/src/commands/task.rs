@@ -108,6 +108,8 @@ impl Kernel {
             max_iterations: None,
             trigger_source: None,
             autonomous,
+            parent_task_id: None,
+            spawn_depth: 0,
         };
 
         self.scheduler.register_external(task.clone()).await;
@@ -366,6 +368,8 @@ impl Kernel {
             // Child tasks inherit the parent's autonomous mode so long-running
             // orchestrators don't have their sub-agents capped arbitrarily.
             autonomous: parent_task.autonomous,
+            parent_task_id: None,
+            spawn_depth: 0,
         };
 
         // Check for circular dependencies before enqueuing

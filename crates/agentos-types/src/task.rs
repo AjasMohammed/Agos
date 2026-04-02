@@ -37,6 +37,63 @@ pub struct AgentTask {
     /// completion. Limits are sourced from `[kernel.autonomous_mode]` config.
     #[serde(default)]
     pub autonomous: bool,
+    /// `Some(id)` when this task was spawned by another task.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<TaskID>,
+    /// How many spawn hops from a root task (root = 0, child = 1, grandchild = 2, …).
+    #[serde(default)]
+    pub spawn_depth: u8,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_task_parent_fields_default() {
+        let task = AgentTask {
+            parent_task_id: None,
+            spawn_depth: 0,
+            ..Default::default()
+        };
+        assert!(task.parent_task_id.is_none());
+        assert_eq!(task.spawn_depth, 0);
+    }
+}
+
+impl Default for AgentTask {
+    fn default() -> Self {
+        use crate::capability::CapabilityToken;
+        Self {
+            id: TaskID::new(),
+            state: TaskState::Queued,
+            agent_id: AgentID::new(),
+            capability_token: CapabilityToken {
+                task_id: TaskID::new(),
+                agent_id: AgentID::new(),
+                allowed_tools: Default::default(),
+                allowed_intents: Default::default(),
+                permissions: Default::default(),
+                issued_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now(),
+                signature: Vec::new(),
+            },
+            assigned_llm: None,
+            priority: 0,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            timeout: Duration::ZERO,
+            original_prompt: String::new(),
+            history: Vec::new(),
+            parent_task: None,
+            reasoning_hints: None,
+            max_iterations: None,
+            trigger_source: None,
+            autonomous: false,
+            parent_task_id: None,
+            spawn_depth: 0,
+        }
+    }
 }
 
 /// Provenance data for a task that was triggered by an OS event.

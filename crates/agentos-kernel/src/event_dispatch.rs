@@ -564,6 +564,8 @@ impl Kernel {
                 chain_depth: event.chain_depth,
             }),
             autonomous: false,
+            parent_task_id: None,
+            spawn_depth: 0,
         };
 
         self.scheduler.enqueue(task).await;

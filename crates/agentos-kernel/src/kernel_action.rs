@@ -1245,6 +1245,8 @@ impl Kernel {
             max_iterations: None,
             trigger_source: None,
             autonomous: task.autonomous,
+            parent_task_id: None,
+            spawn_depth: 0,
         };
 
         self.scheduler.register_external(child_task.clone()).await;
