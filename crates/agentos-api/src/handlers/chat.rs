@@ -1,18 +1,19 @@
 //! OpenAI-compatible chat completion endpoint.
 //!
 //! `POST /api/v1/chat/completions` accepts the standard OpenAI request format
-//! and returns either a full response or SSE stream in OpenAI chunk format.
+//! and returns a full (non-streaming) response in OpenAI format.
+//!
+//! Streaming (`stream: true`) is not yet implemented and returns `501 Not
+//! Implemented`. Until `KernelService` exposes an `infer_stream` path, callers
+//! must use `stream: false`.
 
 use axum::extract::State;
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Extension;
 use axum::Json;
 use chrono::Utc;
-use futures::stream;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio_stream::StreamExt;
 
 use super::require_permission;
 use crate::auth::AuthenticatedKey;
@@ -64,38 +65,12 @@ pub struct OpenAIUsage {
     pub total_tokens: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct OpenAIChunk {
-    pub id: String,
-    pub object: String,
-    pub created: i64,
-    pub model: String,
-    pub choices: Vec<OpenAIChunkChoice>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct OpenAIChunkChoice {
-    pub index: u32,
-    pub delta: OpenAIChunkDelta,
-    pub finish_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct OpenAIChunkDelta {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-}
-
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Parse `model` field into (agent_name, optional_model). Supports:
+/// Parse `model` field into agent name. Supports:
 /// - `"agent-name"` — uses the agent's default model
-/// - `"provider/model"` — uses the first part as agent hint
+/// - `"provider/model"` — uses the provider portion as agent name hint
 fn parse_model(model: &str) -> String {
-    // If model contains "/" it's a "provider/model" string; use provider
-    // portion as agent name hint. Otherwise use it directly.
     if let Some((agent, _model)) = model.split_once('/') {
         agent.to_string()
     } else {
@@ -105,11 +80,25 @@ fn parse_model(model: &str) -> String {
 
 /// Convert OpenAI messages to history pairs suitable for `ChatRequest`.
 ///
-/// Returns `Err` if two consecutive messages share the same role, which is
-/// not a valid conversation structure and typically indicates a client bug.
+/// Returns `Err` if any message has an unrecognised role (only `user` and
+/// `assistant` are accepted — `system` and `tool` are not yet supported and
+/// must be rejected rather than silently dropped), or if two consecutive
+/// messages share the same role.
 fn messages_to_history(
     messages: &[OpenAIMessage],
 ) -> Result<(Vec<(String, String)>, String), String> {
+    // Reject unrecognised roles. System prompts and tool messages are not yet
+    // supported by the underlying ChatRequest; return an error rather than
+    // silently dropping them.
+    for msg in messages {
+        if msg.role != "user" && msg.role != "assistant" {
+            return Err(format!(
+                "role '{}' is not supported; only 'user' and 'assistant' are accepted",
+                msg.role
+            ));
+        }
+    }
+
     // Reject consecutive same-role messages — they are structurally invalid and
     // would silently drop content if we tried to pair them up.
     for window in messages.windows(2) {
@@ -129,7 +118,6 @@ fn messages_to_history(
     while i < messages.len() {
         let msg = &messages[i];
         if msg.role == "user" {
-            // Check if next message is assistant
             if i + 1 < messages.len() && messages[i + 1].role == "assistant" {
                 history.push((msg.content.clone(), messages[i + 1].content.clone()));
                 i += 2;
@@ -156,15 +144,24 @@ fn generate_id() -> String {
 
 /// `POST /api/v1/chat/completions` — OpenAI-compatible chat completion.
 ///
-/// NOTE: This endpoint intentionally follows the OpenAI response format for
-/// client library compatibility, so it does NOT use the standard `{ "data": ... }`
-/// envelope that other endpoints use.
+/// NOTE: This endpoint follows the OpenAI response format for client library
+/// compatibility and does NOT use the standard `{ "data": ... }` envelope.
+///
+/// `stream: true` returns `501 Not Implemented` — real token streaming requires
+/// wiring `KernelService::infer_stream` which is not yet available.
 pub async fn completions(
     State(svc): State<Arc<dyn KernelService>>,
     Extension(key): Extension<AuthenticatedKey>,
     Json(req): Json<OpenAIChatRequest>,
 ) -> Result<axum::response::Response, ApiError> {
     require_permission(&key, "chat:w")?;
+
+    if req.stream {
+        return Err(ApiError::NotImplemented(
+            "streaming is not yet supported; use stream: false".into(),
+        ));
+    }
+
     let agent_name = parse_model(&req.model);
     let (history, user_message) =
         messages_to_history(&req.messages).map_err(ApiError::BadRequest)?;
@@ -182,117 +179,34 @@ pub async fn completions(
         history,
     };
 
-    if req.stream {
-        // Streaming response via SSE.
-        let response = svc.chat_send(chat_req).await?;
-        let id = generate_id();
-        let created = Utc::now().timestamp();
-        let model = req.model.clone();
+    let response = svc.chat_send(chat_req).await?;
 
-        // Simulate streaming by chunking the response into words.
-        let words: Vec<String> = response
-            .message
-            .split_inclusive(' ')
-            .map(|s| s.to_string())
-            .collect();
+    let prompt_tokens = req
+        .messages
+        .iter()
+        .map(|m| m.content.len() / 4) // rough estimate
+        .sum::<usize>() as u32;
+    let completion_tokens = (response.message.len() / 4) as u32;
 
-        let initial_chunk = OpenAIChunk {
-            id: id.clone(),
-            object: "chat.completion.chunk".to_string(),
-            created,
-            model: model.clone(),
-            choices: vec![OpenAIChunkChoice {
-                index: 0,
-                delta: OpenAIChunkDelta {
-                    role: Some("assistant".to_string()),
-                    content: None,
-                },
-                finish_reason: None,
-            }],
-        };
-
-        let id_clone = id.clone();
-        let model_clone = model.clone();
-
-        let word_chunks = words.into_iter().map(move |word| OpenAIChunk {
-            id: id_clone.clone(),
-            object: "chat.completion.chunk".to_string(),
-            created,
-            model: model_clone.clone(),
-            choices: vec![OpenAIChunkChoice {
-                index: 0,
-                delta: OpenAIChunkDelta {
-                    role: None,
-                    content: Some(word),
-                },
-                finish_reason: None,
-            }],
-        });
-
-        let done_chunk = OpenAIChunk {
-            id,
-            object: "chat.completion.chunk".to_string(),
-            created,
-            model,
-            choices: vec![OpenAIChunkChoice {
-                index: 0,
-                delta: OpenAIChunkDelta {
-                    role: None,
-                    content: None,
-                },
-                finish_reason: Some("stop".to_string()),
-            }],
-        };
-
-        let chunks = std::iter::once(initial_chunk)
-            .chain(word_chunks)
-            .chain(std::iter::once(done_chunk));
-
-        let event_stream = stream::iter(chunks).map(|chunk| {
-            let data =
-                serde_json::to_string(&chunk).expect("OpenAIChunk serialization is infallible");
-            Ok::<_, std::convert::Infallible>(Event::default().data(data))
-        });
-
-        // Append a final `[DONE]` event.
-        let done_stream = stream::once(async { Ok(Event::default().data("[DONE]")) });
-
-        let combined = event_stream.chain(done_stream);
-
-        Ok(Sse::new(combined)
-            .keep_alive(KeepAlive::default())
-            .into_response())
-    } else {
-        // Non-streaming response.
-        let response = svc.chat_send(chat_req).await?;
-
-        let prompt_tokens = req
-            .messages
-            .iter()
-            .map(|m| m.content.len() / 4) // rough estimate
-            .sum::<usize>() as u32;
-        let completion_tokens = (response.message.len() / 4) as u32;
-
-        let reply = OpenAIChatResponse {
-            id: generate_id(),
-            object: "chat.completion".to_string(),
-            created: Utc::now().timestamp(),
-            model: req.model,
-            choices: vec![OpenAIChoice {
-                index: 0,
-                message: OpenAIMessage {
-                    role: "assistant".to_string(),
-                    content: response.message,
-                },
-                finish_reason: "stop".to_string(),
-            }],
-            usage: OpenAIUsage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
+    let reply = OpenAIChatResponse {
+        id: generate_id(),
+        object: "chat.completion".to_string(),
+        created: Utc::now().timestamp(),
+        model: req.model,
+        choices: vec![OpenAIChoice {
+            index: 0,
+            message: OpenAIMessage {
+                role: "assistant".to_string(),
+                content: response.message,
             },
-        };
+            finish_reason: "stop".to_string(),
+        }],
+        usage: OpenAIUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+        },
+    };
 
-        Ok(Json(reply).into_response())
-    }
+    Ok(Json(reply).into_response())
 }
