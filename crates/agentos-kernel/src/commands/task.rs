@@ -273,6 +273,12 @@ impl Kernel {
                 self.trace_collector
                     .finish_task(&task_id, "Cancelled", chrono::Utc::now())
                     .await;
+                // Cascade cancel to all registered sub-agent children.
+                let children = self.scheduler.get_children(&task_id).await;
+                for child_id in children {
+                    // Use Box::pin to handle the recursive async call.
+                    Box::pin(self.cmd_cancel_task(child_id)).await;
+                }
                 KernelResponse::Success { data: None }
             }
             Err(e) => KernelResponse::Error {
