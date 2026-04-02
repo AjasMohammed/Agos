@@ -20,6 +20,7 @@ pub mod schedule;
 pub mod scratch;
 pub mod secret;
 pub mod skill;
+pub mod sub_agent;
 pub mod system;
 pub mod task;
 pub mod tool;

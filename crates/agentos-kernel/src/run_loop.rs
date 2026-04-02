@@ -1702,13 +1702,28 @@ impl Kernel {
             // Provider catalog
             KernelCommand::ListProviders => self.cmd_list_providers().await,
 
-            // Sub-agent coordination (TODO: implemented in Task 4)
-            KernelCommand::SpawnSubAgent { .. } => agentos_bus::KernelResponse::Error {
-                message: "SpawnSubAgent not yet implemented".to_string(),
-            },
-            KernelCommand::AwaitSubAgents { .. } => agentos_bus::KernelResponse::Error {
-                message: "AwaitSubAgents not yet implemented".to_string(),
-            },
+            // Sub-agent coordination
+            KernelCommand::SpawnSubAgent {
+                parent_task_id,
+                agent_name,
+                prompt,
+                requested_permissions,
+            } => {
+                self.cmd_spawn_sub_agent(
+                    parent_task_id,
+                    &agent_name,
+                    &prompt,
+                    &requested_permissions,
+                )
+                .await
+            }
+            KernelCommand::AwaitSubAgents {
+                parent_task_id,
+                child_task_ids,
+            } => {
+                self.cmd_await_sub_agents(parent_task_id, &child_task_ids)
+                    .await
+            }
         }
     }
 
