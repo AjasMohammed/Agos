@@ -1708,12 +1708,14 @@ impl Kernel {
                 agent_name,
                 prompt,
                 requested_permissions,
+                context_slice,
             } => {
                 self.cmd_spawn_sub_agent(
                     parent_task_id,
                     &agent_name,
                     &prompt,
                     &requested_permissions,
+                    context_slice,
                 )
                 .await
             }

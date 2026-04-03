@@ -802,6 +802,41 @@ impl ContextWindow {
     }
 }
 
+/// A portable slice of a parent context window that can be passed to a child sub-agent.
+/// Contains the last N active entries plus a label describing what the slice represents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextSlice {
+    pub messages: Vec<ContextEntry>,
+    pub label: String,
+}
+
+impl ContextSlice {
+    /// Build a slice from the last `n` active (non-scratchpad) entries of a context window.
+    pub fn last_n(context: &ContextWindow, n: usize, label: impl Into<String>) -> Self {
+        let active: Vec<&ContextEntry> = context
+            .entries
+            .iter()
+            .filter(|e| e.partition == ContextPartition::Active)
+            .collect();
+        let start = active.len().saturating_sub(n);
+        let messages: Vec<ContextEntry> = active[start..].iter().map(|e| (*e).clone()).collect();
+        Self {
+            messages,
+            label: label.into(),
+        }
+    }
+}
+
+/// The result of a completed sub-agent task, ready to be injected into the parent's context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubAgentResult {
+    pub child_task_id: crate::ids::TaskID,
+    pub agent_name: String,
+    /// Final output text, truncated to 8 KiB.
+    pub output: String,
+    pub success: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

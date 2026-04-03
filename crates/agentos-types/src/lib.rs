@@ -27,8 +27,8 @@ pub use capability::{
 };
 pub use channel::{ChannelKind, RegisteredChannel};
 pub use context::{
-    ContextCategory, ContextEntry, ContextMetadata, ContextPartition, ContextRole, ContextWindow,
-    OverflowStrategy, TokenBudget,
+    ContextCategory, ContextEntry, ContextMetadata, ContextPartition, ContextRole, ContextSlice,
+    ContextWindow, OverflowStrategy, SubAgentResult, TokenBudget,
 };
 pub use error::AgentOSError;
 pub use event::{

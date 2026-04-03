@@ -218,6 +218,37 @@ impl Kernel {
             self.auto_write_scratchpad_note(task, "Success").await;
         }
 
+        // If this is a sub-agent task, inject its result into the parent context.
+        if completed {
+            if let Some(parent_task_id) = task.parent_task_id {
+                let agent_name = {
+                    let registry = self.agent_registry.read().await;
+                    registry
+                        .get_by_id(&task.agent_id)
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| task.agent_id.to_string())
+                };
+                let sub_result = agentos_types::SubAgentResult {
+                    child_task_id: task.id,
+                    agent_name,
+                    output: result.answer.chars().take(8192).collect(),
+                    success: true,
+                };
+                if let Err(e) = self
+                    .context_manager
+                    .inject_sub_agent_result(parent_task_id, &sub_result)
+                    .await
+                {
+                    tracing::warn!(
+                        parent_task_id = %parent_task_id,
+                        child_task_id = %task.id,
+                        error = %e,
+                        "Failed to inject sub-agent result into parent context"
+                    );
+                }
+            }
+        }
+
         self.cleanup_task_subscriptions(&task.id).await;
     }
 

@@ -76,6 +76,9 @@ pub enum KernelCommand {
         /// Permissions requested for the child (intersected with parent's at spawn time).
         #[serde(default)]
         requested_permissions: Vec<String>,
+        /// Optional slice of parent context to seed the child's context window.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_slice: Option<agentos_types::ContextSlice>,
     },
     /// Wait for a set of child tasks to complete and retrieve their results.
     AwaitSubAgents {
