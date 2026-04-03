@@ -152,6 +152,14 @@ impl Kernel {
             include_str!("../../../tools/core/shell-exec.toml"),
         ),
         (
+            "spawn-agent.toml",
+            include_str!("../../../tools/core/spawn-agent.toml"),
+        ),
+        (
+            "await-agents.toml",
+            include_str!("../../../tools/core/await-agents.toml"),
+        ),
+        (
             "task-delegate.toml",
             include_str!("../../../tools/core/task-delegate.toml"),
         ),

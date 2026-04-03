@@ -1,0 +1,33 @@
+[manifest]
+name        = "await-agents"
+version     = "1.0.0"
+description = "Wait for spawned sub-agents to complete and retrieve their current status. Results are also automatically injected into your context window when each child completes."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["agent.spawn:x"]
+
+[capabilities_provided]
+outputs = ["results"]
+
+[intent_schema]
+input  = "AwaitAgentsIntent"
+output = "AwaitAgentsResult"
+
+[input_schema]
+type = "object"
+required = ["task_ids"]
+
+[input_schema.properties.task_ids]
+type = "array"
+items = { type = "string" }
+description = "Task IDs returned by spawn-agent calls to check."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

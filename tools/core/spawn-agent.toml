@@ -1,0 +1,48 @@
+[manifest]
+name        = "spawn-agent"
+version     = "1.0.0"
+description = "Spawn a sub-agent to handle a specific subtask. The child runs independently and its result is injected back into your context when complete. Returns the task_id to use with await-agents."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["agent.spawn:x"]
+
+[capabilities_provided]
+outputs = ["task_id"]
+
+[intent_schema]
+input  = "SpawnAgentIntent"
+output = "SpawnAgentResult"
+
+[input_schema]
+type = "object"
+required = ["agent", "prompt"]
+
+[input_schema.properties.agent]
+type = "string"
+description = "Name of the registered agent to run."
+
+[input_schema.properties.prompt]
+type = "string"
+description = "Goal or prompt for the sub-agent."
+
+[input_schema.properties.permissions]
+type = "array"
+items = { type = "string" }
+description = "Permissions to request for the child (subset of your own). Defaults to inheriting parent permissions."
+
+[input_schema.properties.context_messages]
+type = "integer"
+default = 10
+minimum = 0
+maximum = 100
+description = "Number of recent parent context messages to pass to the child. Default: 10."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

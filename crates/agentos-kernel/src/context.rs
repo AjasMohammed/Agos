@@ -157,6 +157,20 @@ impl ContextManager {
         Ok(())
     }
 
+    /// Build a `ContextSlice` from the last `n` active entries of a task's context window.
+    /// Returns `None` if no window exists for this task.
+    pub async fn get_slice(
+        &self,
+        task_id: &TaskID,
+        n: usize,
+        label: impl Into<String>,
+    ) -> Option<agentos_types::ContextSlice> {
+        let tasks = self.tasks.read().await;
+        tasks.get(task_id).map(|tc| {
+            agentos_types::ContextSlice::last_n(&tc.window, n, label)
+        })
+    }
+
     /// Concat fallback: format entries as truncated snippets (matches legacy compress_oldest format).
     fn summarize_entries_concat(entries: &[ContextEntry]) -> String {
         let parts: Vec<String> = entries
