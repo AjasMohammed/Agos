@@ -98,6 +98,65 @@ impl ContextManager {
         context_id
     }
 
+    /// Seed a task's context window from a `ContextSlice` passed by a parent agent.
+    /// If no context window exists yet for this task, one is created (with no agent_id).
+    /// Call *after* `create_context` when an `agent_id` is available.
+    pub async fn seed_from_slice(
+        &self,
+        task_id: TaskID,
+        agent_id: AgentID,
+        slice: &agentos_types::ContextSlice,
+    ) -> Result<(), AgentOSError> {
+        let mut tasks = self.tasks.write().await;
+        let tc = tasks.entry(task_id).or_insert_with(|| TaskContext {
+            window: ContextWindow::with_strategy(self.max_entries, OverflowStrategy::SemanticEviction),
+            agent_id,
+        });
+        for entry in &slice.messages {
+            tc.window.push(entry.clone());
+        }
+        Ok(())
+    }
+
+    /// Inject a completed sub-agent's result into the parent task's context window
+    /// as a synthetic tool-result entry, so the parent LLM sees the output naturally.
+    pub async fn inject_sub_agent_result(
+        &self,
+        parent_task_id: TaskID,
+        result: &agentos_types::SubAgentResult,
+    ) -> Result<(), AgentOSError> {
+        let content = format!(
+            "[sub-agent '{}' ({}) {}]\n{}",
+            result.agent_name,
+            result.child_task_id,
+            if result.success { "succeeded" } else { "failed" },
+            result.output,
+        );
+        let entry = ContextEntry {
+            role: ContextRole::ToolResult,
+            content,
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.8,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
+            is_summary: false,
+        };
+        let mut tasks = self.tasks.write().await;
+        if let Some(tc) = tasks.get_mut(&parent_task_id) {
+            tc.window.push(entry);
+        } else {
+            tracing::warn!(
+                parent_task_id = %parent_task_id,
+                child_task_id = %result.child_task_id,
+                "inject_sub_agent_result: no context window for parent task"
+            );
+        }
+        Ok(())
+    }
+
     /// Concat fallback: format entries as truncated snippets (matches legacy compress_oldest format).
     fn summarize_entries_concat(entries: &[ContextEntry]) -> String {
         let parts: Vec<String> = entries

@@ -165,6 +165,7 @@ impl Kernel {
         agent_name: &str,
         prompt: &str,
         requested_permissions: &[String],
+        context_slice: Option<agentos_types::ContextSlice>,
     ) -> KernelResponse {
         // 1. Look up parent task.
         let parent_task = match self.scheduler.get_task(&parent_task_id).await {
@@ -257,6 +258,21 @@ impl Kernel {
         self.scheduler
             .register_child(parent_task_id, child_task_id)
             .await;
+
+        // If the parent passed a context slice, seed the child context window.
+        if let Some(slice) = context_slice {
+            if let Err(e) = self
+                .context_manager
+                .seed_from_slice(child_task_id, agent.id, &slice)
+                .await
+            {
+                tracing::warn!(
+                    child_task_id = %child_task_id,
+                    error = %e,
+                    "Failed to seed child context from slice"
+                );
+            }
+        }
 
         // 6. Write audit entry.
         let _ = self.audit.append(AuditEntry {
