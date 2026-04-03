@@ -26,6 +26,7 @@ pub mod skill;
 pub mod snapshot;
 pub mod status;
 pub mod task;
+pub mod team;
 pub mod tool;
 pub mod web;
 
@@ -55,6 +56,7 @@ pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow
         Commands::Scratchpad { command } => scratchpad::handle(client, command).await,
         Commands::Skill { command } => skill::handle(client, command).await,
         Commands::Provider { command } => provider::handle(client, command).await,
+        Commands::Team { command } => team::handle(client, command).await,
         _ => unreachable!(),
     }
 }

@@ -87,6 +87,16 @@ pub enum KernelCommand {
         /// IDs of child tasks to wait for.
         child_task_ids: Vec<TaskID>,
     },
+    /// Execute a named agent team against a goal.
+    /// The coordinator agent is spawned automatically; it uses spawn_agent to delegate to workers.
+    RunTeam {
+        /// JSON-encoded `TeamConfig`.
+        config: String,
+    },
+    /// Get the current status of a running team (by coordinator task ID).
+    TeamStatus {
+        team_task_id: TaskID,
+    },
     /// Retrieve the execution trace for a completed task.
     TaskGetTrace {
         task_id: TaskID,
@@ -665,6 +675,15 @@ pub enum KernelResponse {
     SubAgentResults {
         /// (child_task_id, result_summary) pairs.
         results: Vec<(TaskID, String)>,
+    },
+
+    // Agent teams
+    /// A team run was successfully started.
+    TeamStarted {
+        /// Task ID of the coordinator agent.
+        coordinator_task_id: TaskID,
+        /// Task IDs of pre-spawned workers (empty if workers are spawned dynamically).
+        worker_task_ids: Vec<TaskID>,
     },
 }
 

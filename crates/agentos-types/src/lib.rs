@@ -65,3 +65,5 @@ pub mod task_trace;
 pub use task_trace::{
     IterationTrace, PermissionCheckTrace, TaskTrace, TaskTraceSummary, ToolCallTrace,
 };
+pub mod team;
+pub use team::{TeamConfig, TeamMember, TeamRole};
