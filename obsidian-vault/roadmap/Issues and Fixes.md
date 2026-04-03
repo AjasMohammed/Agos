@@ -19,6 +19,28 @@ Post-implementation audit of the [[Feedback Implementation Plan]]. All issues di
 
 ---
 
+## Multi-Agent Coordination Last-Mile (2026-04-03)
+
+Four issues discovered during review of the multi-agent coordination feature (Phases 1--4). These are bugs and gaps in already-implemented code on `feat/multi-agent-coordination`.
+
+| # | Issue | Severity | Status | Fix Location |
+|---|-------|----------|--------|--------------|
+| 13 | `inject_sub_agent_result()` exists in `context.rs` but is never called from `cmd_await_sub_agents` -- child results are never injected into parent context | Critical | Planned | `crates/agentos-kernel/src/commands/sub_agent.rs` ~line 302 + `crates/agentos-kernel/src/context.rs` |
+| 14 | `delegate_task` registered in `crates/agentos-tools/src/lib.rs` line 200 but the `DelegateTaskTool` struct/impl does not exist in `coordination.rs` -- tool exists separately as `TaskDelegate` in `task_delegate.rs` with name `task-delegate` | High | Planned | `crates/agentos-tools/src/coordination.rs` |
+| 15 | `TeamConfig.max_rounds` field exists but `cmd_run_team` never reads or enforces it -- coordinator can loop forever | High | Planned | `crates/agentos-kernel/src/commands/team.rs` |
+| 16 | `TeamMember.role_description` is parsed from TOML but never injected into coordinator system prompt -- role specialization is inert | Medium | Planned | `crates/agentos-kernel/src/commands/team.rs` |
+
+> [!note] Issue 16 Nuance
+> The worker roster _does_ include `role_description` in the coordinator prompt (line 88-93 of `team.rs`), but the coordinator's _own_ `role_description` is only used when non-empty. The actual gap is that worker role descriptions are formatted but not used as system-level instructions that guide the coordinator's delegation strategy. The coordinator sees them as labels, not behavioral directives.
+
+### See Also
+
+- [[Event-Driven Completion Plan]]
+- [[Task Checkpointing Plan]]
+- [[Observability Uplift Plan]]
+
+---
+
 ## Production Stability Issues (discovered 2026-03-17)
 
 Three critical issues found through audit log analysis (96 entries, 50 minutes of runtime). Full fix plan: [[Production Stability Fixes Plan]]
@@ -194,6 +216,10 @@ graph LR
     E[Production - 3] --> E1[MemorySearchFailed Spam]
     E --> E2[DiskSpaceLow Flood]
     E --> E3[Restart Instability]
+    F[Multi-Agent - 4] --> F1[inject_sub_agent_result dead code]
+    F --> F2[DelegateTaskTool missing]
+    F --> F3[max_rounds unenforced]
+    F --> F4[role_description inert]
 ```
 
 | Priority | Count | Issues | Status |
@@ -202,6 +228,7 @@ graph LR
 | Medium | 5 | #2, #3, #4, #7, #9 | All Resolved |
 | Low | 3 | #5, #6, #8 | All Resolved |
 | Production | 3 | #10, #11, #12 | Planned -- [[Production Stability Fixes Plan]] |
+| Multi-Agent | 4 | #13, #14, #15, #16 | Planned -- [[Event-Driven Completion Plan]] |
 
 > [!success] All 9 original issues resolved
-> All issues from the original audit have been addressed. 3 new production stability issues discovered via runtime audit log analysis are tracked in [[Production Stability Fixes Plan]].
+> All issues from the original audit have been addressed. 3 new production stability issues discovered via runtime audit log analysis are tracked in [[Production Stability Fixes Plan]]. 4 multi-agent coordination last-mile issues are tracked above and relate to [[Event-Driven Completion Plan]], [[Task Checkpointing Plan]], and [[Observability Uplift Plan]].

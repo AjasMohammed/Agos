@@ -109,7 +109,10 @@ impl ContextManager {
     ) -> Result<(), AgentOSError> {
         let mut tasks = self.tasks.write().await;
         let tc = tasks.entry(task_id).or_insert_with(|| TaskContext {
-            window: ContextWindow::with_strategy(self.max_entries, OverflowStrategy::SemanticEviction),
+            window: ContextWindow::with_strategy(
+                self.max_entries,
+                OverflowStrategy::SemanticEviction,
+            ),
             agent_id,
         });
         for entry in &slice.messages {
@@ -129,7 +132,11 @@ impl ContextManager {
             "[sub-agent '{}' ({}) {}]\n{}",
             result.agent_name,
             result.child_task_id,
-            if result.success { "succeeded" } else { "failed" },
+            if result.success {
+                "succeeded"
+            } else {
+                "failed"
+            },
             result.output,
         );
         let entry = ContextEntry {
@@ -166,9 +173,9 @@ impl ContextManager {
         label: impl Into<String>,
     ) -> Option<agentos_types::ContextSlice> {
         let tasks = self.tasks.read().await;
-        tasks.get(task_id).map(|tc| {
-            agentos_types::ContextSlice::last_n(&tc.window, n, label)
-        })
+        tasks
+            .get(task_id)
+            .map(|tc| agentos_types::ContextSlice::last_n(&tc.window, n, label))
     }
 
     /// Concat fallback: format entries as truncated snippets (matches legacy compress_oldest format).

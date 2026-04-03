@@ -1726,6 +1726,11 @@ impl Kernel {
                 self.cmd_await_sub_agents(parent_task_id, &child_task_ids)
                     .await
             }
+            KernelCommand::RunTeam { config } => self.cmd_run_team(&config).await,
+            KernelCommand::TeamStatus { team_task_id } => {
+                // Return the task summary for the coordinator task.
+                self.cmd_get_task_logs(team_task_id).await
+            }
         }
     }
 

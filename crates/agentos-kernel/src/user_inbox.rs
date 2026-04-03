@@ -107,16 +107,31 @@ impl UserInbox {
                 serde_json::to_string(&msg.kind).map_err(|e| AgentOSError::KernelError {
                     reason: format!("UserInbox: failed to serialize kind: {e}"),
                 })?;
+            let priority_json =
+                serde_json::to_string(&msg.priority).map_err(|e| AgentOSError::KernelError {
+                    reason: format!("UserInbox: failed to serialize priority: {e}"),
+                })?;
             let interaction_json = msg
                 .interaction
                 .as_ref()
-                .and_then(|i| serde_json::to_string(i).ok());
-            let delivery_json =
-                serde_json::to_string(&msg.delivery_status).unwrap_or_else(|_| "{}".into());
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| AgentOSError::KernelError {
+                    reason: format!("UserInbox: failed to serialize interaction: {e}"),
+                })?;
+            let delivery_json = serde_json::to_string(&msg.delivery_status).map_err(|e| {
+                AgentOSError::KernelError {
+                    reason: format!("UserInbox: failed to serialize delivery_status: {e}"),
+                }
+            })?;
             let response_json = msg
                 .response
                 .as_ref()
-                .and_then(|r| serde_json::to_string(r).ok());
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| AgentOSError::KernelError {
+                    reason: format!("UserInbox: failed to serialize response: {e}"),
+                })?;
             let expires_str = msg.expires_at.map(|d| d.to_rfc3339());
 
             conn.execute(
@@ -131,7 +146,7 @@ impl UserInbox {
                     msg.task_id.map(|t| t.to_string()),
                     msg.trace_id.to_string(),
                     kind_json,
-                    msg.priority.to_string(),
+                    priority_json,
                     msg.subject,
                     msg.body,
                     interaction_json,
@@ -380,7 +395,21 @@ impl UserInbox {
                  ORDER BY created_at ASC",
             )?;
             let rows = stmt.query_map([], row_to_user_message)?;
-            Ok(rows.flatten().flatten().collect())
+            let mut msgs = Vec::new();
+            for row in rows {
+                match row {
+                    Ok(Ok(msg)) => msgs.push(msg),
+                    Ok(Err(e)) => tracing::warn!(
+                        "UserInbox: skipping malformed row in list_pending_questions: {}",
+                        e
+                    ),
+                    Err(e) => tracing::warn!(
+                        "UserInbox: row fetch error in list_pending_questions: {}",
+                        e
+                    ),
+                }
+            }
+            Ok(msgs)
         })
         .await
         {
@@ -412,7 +441,21 @@ impl UserInbox {
                    AND response IS NULL",
             )?;
             let rows = stmt.query_map(params![now_str], row_to_user_message)?;
-            Ok(rows.flatten().flatten().collect())
+            let mut msgs = Vec::new();
+            for row in rows {
+                match row {
+                    Ok(Ok(msg)) => msgs.push(msg),
+                    Ok(Err(e)) => tracing::warn!(
+                        "UserInbox: skipping malformed row in list_expired_questions: {}",
+                        e
+                    ),
+                    Err(e) => tracing::warn!(
+                        "UserInbox: row fetch error in list_expired_questions: {}",
+                        e
+                    ),
+                }
+            }
+            Ok(msgs)
         })
         .await
         {
@@ -461,7 +504,11 @@ fn row_to_user_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<UserM
         Ok(v) => v,
         Err(e) => return Ok(Err(format!("bad id: {e}"))),
     };
-    let task_id = task_id_str.and_then(|s| s.parse().ok());
+    let task_id = task_id_str.and_then(|s| {
+        s.parse()
+            .map_err(|e| tracing::warn!("UserInbox: failed to parse task_id '{}': {}", s, e))
+            .ok()
+    });
     let trace_id = match trace_id_str.parse() {
         Ok(v) => v,
         Err(e) => return Ok(Err(format!("bad trace_id: {e}"))),
@@ -478,13 +525,17 @@ fn row_to_user_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<UserM
     let priority: NotificationPriority = deser!(priority_str, NotificationPriority);
     let from = deser!(from_json, agentos_types::NotificationSource);
     let kind = deser!(kind_json, agentos_types::UserMessageKind);
-    let interaction = interaction_json
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok());
+    let interaction = interaction_json.as_deref().and_then(|s| {
+        serde_json::from_str(s)
+            .map_err(|e| tracing::warn!("UserInbox: failed to deserialize interaction: {e}"))
+            .ok()
+    });
     let delivery_status = serde_json::from_str(&delivery_json).unwrap_or_default();
-    let response = response_json
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok());
+    let response = response_json.as_deref().and_then(|s| {
+        serde_json::from_str(s)
+            .map_err(|e| tracing::warn!("UserInbox: failed to deserialize response: {e}"))
+            .ok()
+    });
 
     Ok(Ok(UserMessage {
         id,

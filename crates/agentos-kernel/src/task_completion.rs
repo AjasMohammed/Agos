@@ -406,6 +406,53 @@ impl Kernel {
 
         self.push_status_update(task.id, TaskState::Failed, error_message.clone());
 
+        // Inject the failure result into the parent context so the parent LLM
+        // learns about the child failure through its context window, not just
+        // via a subsequent await_agents poll.
+        if let Some(parent_task_id) = task.parent_task_id {
+            let agent_name = {
+                self.agent_registry
+                    .read()
+                    .await
+                    .get_by_id(&task.agent_id)
+                    .map(|a| a.name.clone())
+                    .unwrap_or_else(|| task.agent_id.to_string())
+            };
+            let failure_output = format!(
+                "Sub-agent failed: {}\nError: {}",
+                task.original_prompt.chars().take(200).collect::<String>(),
+                error_message
+            );
+            let sub_result = agentos_types::SubAgentResult {
+                child_task_id: task.id,
+                agent_name: agent_name.clone(),
+                output: failure_output.chars().take(8192).collect(),
+                success: false,
+            };
+            match self
+                .context_manager
+                .inject_sub_agent_result(parent_task_id, &sub_result)
+                .await
+            {
+                Ok(()) => {
+                    tracing::debug!(
+                        parent_task_id = %parent_task_id,
+                        child_task_id = %task.id,
+                        agent_name = %agent_name,
+                        "Injected sub-agent failure into parent context"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        parent_task_id = %parent_task_id,
+                        child_task_id = %task.id,
+                        error = %e,
+                        "Failed to inject sub-agent failure into parent context"
+                    );
+                }
+            }
+        }
+
         // Write a direct TaskFailed audit entry with task_id, agent_id, and full
         // error details. This is separate from the EventEmitted path below so the
         // failure is always queryable by task_id regardless of event-system state.
@@ -672,8 +719,12 @@ impl Kernel {
     // ── Task-completion notification helpers ─────────────────────────────────
 
     /// Returns `true` only for root tasks (no parent) that the user sees directly.
+    ///
+    /// Checks both the legacy `parent_task` field (used by delegation) and the
+    /// newer `parent_task_id` field (used by sub-agent spawning) so that neither
+    /// delegation children nor sub-agent children receive user-visible notifications.
     fn is_root_task(task: &AgentTask) -> bool {
-        task.parent_task.is_none()
+        task.parent_task.is_none() && task.parent_task_id.is_none()
     }
 
     /// Build the short subject line (≤80 chars) for a task-completion notification.

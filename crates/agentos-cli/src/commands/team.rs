@@ -46,19 +46,26 @@ pub async fn handle(client: &mut BusClient, cmd: TeamCommands) -> anyhow::Result
         }
         TeamCommands::List => match client.send_command(KernelCommand::ListTasks).await? {
             KernelResponse::TaskList(tasks) => {
-                let team_tasks: Vec<_> = tasks
-                    .iter()
-                    .filter(|t| {
-                        t.prompt_preview
-                            .starts_with("You are the coordinator for team")
-                    })
-                    .collect();
+                // Filter reliably on the `is_team_coordinator` flag — not fragile
+                // prompt-prefix matching.
+                let team_tasks: Vec<_> = tasks.iter().filter(|t| t.is_team_coordinator).collect();
                 if team_tasks.is_empty() {
                     println!("No active team runs.");
                 } else {
+                    println!(
+                        "{:<38} {:<12} {:<6} GOAL PREVIEW",
+                        "COORDINATOR TASK ID", "STATE", "DEPTH"
+                    );
+                    println!("{}", "-".repeat(90));
                     for t in team_tasks {
-                        let preview = &t.prompt_preview[..80.min(t.prompt_preview.len())];
-                        println!("[{}] {:?} — {}", t.id, t.state, preview);
+                        let preview = &t.prompt_preview[..60.min(t.prompt_preview.len())];
+                        println!(
+                            "{:<38} {:<12} {:<6} {}",
+                            t.id,
+                            format!("{:?}", t.state),
+                            t.spawn_depth,
+                            preview
+                        );
                     }
                 }
             }

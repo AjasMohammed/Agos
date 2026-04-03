@@ -53,10 +53,20 @@ impl AgentTool for SpawnAgentTool {
             .cloned()
             .unwrap_or_default();
 
+        // Clamp context_messages to the schema maximum (100) to prevent
+        // excessive context cloning even if schema validation is bypassed.
         let context_messages = payload
             .get("context_messages")
             .and_then(|v| v.as_u64())
-            .unwrap_or(10);
+            .unwrap_or(10)
+            .min(100);
+
+        tracing::debug!(
+            agent = %agent,
+            permissions_count = permissions.len(),
+            context_messages = context_messages,
+            "spawn_agent tool: forwarding to kernel"
+        );
 
         Ok(serde_json::json!({
             "_kernel_action": "spawn_agent",
@@ -112,6 +122,11 @@ impl AgentTool for AwaitAgentsTool {
                 "await-agents: task_ids must not be empty".into(),
             ));
         }
+
+        tracing::debug!(
+            task_count = task_ids.len(),
+            "await_agents tool: forwarding to kernel"
+        );
 
         Ok(serde_json::json!({
             "_kernel_action": "await_agents",

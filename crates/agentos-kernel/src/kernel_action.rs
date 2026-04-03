@@ -1385,6 +1385,7 @@ impl Kernel {
             autonomous: task.autonomous,
             parent_task_id: None,
             spawn_depth: 0,
+            is_team_coordinator: false,
         };
 
         self.scheduler.register_external(child_task.clone()).await;
