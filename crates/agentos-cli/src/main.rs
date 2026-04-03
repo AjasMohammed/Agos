@@ -23,8 +23,8 @@ use commands::{
     notifications::NotificationCommands, perm::PermCommands, pipeline::PipelineCommands,
     provider::ProviderCommands, resource::ResourceCommands, role::RoleCommands,
     schedule::ScheduleCommands, scratchpad::ScratchpadCommands, secret::SecretCommands,
-    skill::SkillCommands, snapshot::SnapshotCommands, task::TaskCommands, tool::ToolCommands,
-    web::WebCommands,
+    skill::SkillCommands, snapshot::SnapshotCommands, task::TaskCommands, team::TeamCommands,
+    tool::ToolCommands, web::WebCommands,
 };
 
 #[derive(Parser)]
@@ -109,6 +109,12 @@ pub enum Commands {
     Pipeline {
         #[command(subcommand)]
         command: PipelineCommands,
+    },
+
+    /// Run and manage agent teams (coordinator + workers)
+    Team {
+        #[command(subcommand)]
+        command: TeamCommands,
     },
 
     /// View agent cost and budget reports
