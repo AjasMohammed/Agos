@@ -1,4 +1,5 @@
 use crate::agent_call::AgentCallTool;
+use crate::coordination::{AwaitAgentsTool, SpawnAgentTool};
 use crate::agent_list::AgentListTool;
 use crate::agent_message::AgentMessageTool;
 use crate::archival_insert::ArchivalInsert;
@@ -184,6 +185,8 @@ impl ToolRunner {
         self.register(Box::new(TaskStatusTool::new()));
         self.register(Box::new(TaskListTool::new()));
         self.register(Box::new(AgentCallTool::new()));
+        self.register(Box::new(SpawnAgentTool::new()));
+        self.register(Box::new(AwaitAgentsTool::new()));
     }
 
     pub fn register(&mut self, tool: Box<dyn AgentTool>) {

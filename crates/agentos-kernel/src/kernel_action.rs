@@ -76,6 +76,17 @@ pub(crate) enum KernelAction {
     ContextMemoryRead {
         agent_id: String,
     },
+    /// Spawn a sub-agent task scoped to the current task's capabilities.
+    SpawnAgent {
+        agent: String,
+        prompt: String,
+        permissions: Vec<String>,
+        context_messages: u64,
+    },
+    /// Wait for spawned sub-agent tasks and collect their results.
+    AwaitAgents {
+        task_ids: Vec<String>,
+    },
 }
 
 /// Why an agent is requesting human escalation.
@@ -265,6 +276,41 @@ impl KernelAction {
                 let agent_id = value.get("agent_id")?.as_str()?.to_string();
                 Some(Self::ContextMemoryRead { agent_id })
             }
+            "spawn_agent" => {
+                let agent = value.get("agent")?.as_str()?.to_string();
+                let prompt = value.get("prompt")?.as_str()?.to_string();
+                let permissions = value
+                    .get("permissions")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let context_messages = value
+                    .get("context_messages")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(10);
+                Some(Self::SpawnAgent {
+                    agent,
+                    prompt,
+                    permissions,
+                    context_messages,
+                })
+            }
+            "await_agents" => {
+                let task_ids = value
+                    .get("task_ids")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(Self::AwaitAgents { task_ids })
+            }
             other => {
                 tracing::warn!(action = %other, "Unknown _kernel_action, ignoring");
                 None
@@ -299,6 +345,8 @@ impl Kernel {
             KernelAction::AgentRpcCall { .. } => "agent_rpc_call",
             KernelAction::ContextMemoryUpdate { .. } => "context_memory_update",
             KernelAction::ContextMemoryRead { .. } => "context_memory_read",
+            KernelAction::SpawnAgent { .. } => "spawn_agent",
+            KernelAction::AwaitAgents { .. } => "await_agents",
         };
 
         self.audit_log(agentos_audit::AuditEntry {
@@ -497,6 +545,96 @@ impl Kernel {
                         result: serde_json::json!({
                             "error": e.to_string(),
                         }),
+                    },
+                }
+            }
+            KernelAction::SpawnAgent {
+                agent,
+                prompt,
+                permissions,
+                context_messages,
+            } => {
+                // Build a context slice from the parent task's current context window.
+                let slice = self
+                    .context_manager
+                    .get_slice(
+                        &task.id,
+                        context_messages as usize,
+                        format!("from-parent-{}", task.id),
+                    )
+                    .await;
+
+                let response = self
+                    .cmd_spawn_sub_agent(task.id, &agent, &prompt, &permissions, slice)
+                    .await;
+
+                match response {
+                    agentos_bus::KernelResponse::SubAgentSpawned { child_task_id } => {
+                        KernelActionResult {
+                            success: true,
+                            result: serde_json::json!({
+                                "task_id": child_task_id.to_string(),
+                                "agent": agent,
+                                "status": "spawned",
+                                "message": format!(
+                                    "Sub-agent '{}' spawned as task {}. Use await-agents to wait for the result.",
+                                    agent, child_task_id
+                                ),
+                            }),
+                        }
+                    }
+                    agentos_bus::KernelResponse::Error { message } => KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({ "error": message }),
+                    },
+                    _ => KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({ "error": "unexpected response from spawn" }),
+                    },
+                }
+            }
+            KernelAction::AwaitAgents { task_ids } => {
+                // Parse task IDs and query their current state.
+                let mut parsed_ids = Vec::with_capacity(task_ids.len());
+                for id_str in &task_ids {
+                    match id_str.parse::<agentos_types::TaskID>() {
+                        Ok(id) => parsed_ids.push(id),
+                        Err(_) => {
+                            return KernelActionResult {
+                                success: false,
+                                result: serde_json::json!({
+                                    "error": format!("invalid task_id: {}", id_str)
+                                }),
+                            };
+                        }
+                    }
+                }
+
+                let response = self.cmd_await_sub_agents(task.id, &parsed_ids).await;
+
+                match response {
+                    agentos_bus::KernelResponse::SubAgentResults { results } => {
+                        let results_json: Vec<serde_json::Value> = results
+                            .iter()
+                            .map(|(id, summary)| {
+                                serde_json::json!({
+                                    "task_id": id.to_string(),
+                                    "summary": summary,
+                                })
+                            })
+                            .collect();
+                        KernelActionResult {
+                            success: true,
+                            result: serde_json::json!({ "results": results_json }),
+                        }
+                    }
+                    agentos_bus::KernelResponse::Error { message } => KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({ "error": message }),
+                    },
+                    _ => KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({ "error": "unexpected response from await" }),
                     },
                 }
             }

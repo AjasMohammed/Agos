@@ -70,6 +70,8 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "escalation-status",
     "notify-user",
     "ask-user",
+    "spawn-agent",
+    "await-agents",
 ];
 
 const SPECIAL_CONTEXT_TOOL_NAMES: &[&str] = &["agent-manual", "agent-self"];

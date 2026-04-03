@@ -1,5 +1,6 @@
 pub mod agent_call;
 pub mod agent_list;
+pub mod coordination;
 pub mod agent_manual;
 pub mod agent_message;
 pub mod agent_self;
@@ -64,6 +65,7 @@ pub mod web_fetch;
 pub mod workspace;
 
 pub use agent_call::AgentCallTool;
+pub use coordination::{AwaitAgentsTool, SpawnAgentTool};
 pub use agent_list::AgentListTool;
 pub use agent_manual::AgentManualTool;
 pub use agent_message::AgentMessageTool;
