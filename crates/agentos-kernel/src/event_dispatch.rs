@@ -566,6 +566,7 @@ impl Kernel {
             autonomous: false,
             parent_task_id: None,
             spawn_depth: 0,
+            is_team_coordinator: false,
         };
 
         self.scheduler.enqueue(task).await;

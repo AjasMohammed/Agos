@@ -43,6 +43,10 @@ pub struct AgentTask {
     /// How many spawn hops from a root task (root = 0, child = 1, grandchild = 2, …).
     #[serde(default)]
     pub spawn_depth: u8,
+    /// True when this task is the coordinator of an agent team (`agentos team run`).
+    /// Used to identify team runs in task listings without fragile prompt matching.
+    #[serde(default)]
+    pub is_team_coordinator: bool,
 }
 
 #[cfg(test)]
@@ -92,6 +96,7 @@ impl Default for AgentTask {
             autonomous: false,
             parent_task_id: None,
             spawn_depth: 0,
+            is_team_coordinator: false,
         }
     }
 }
@@ -172,6 +177,15 @@ pub struct TaskSummary {
     pub tool_calls: u32,
     pub tokens_used: u64,
     pub priority: u8,
+    /// True when this task is the coordinator of an agent team.
+    #[serde(default)]
+    pub is_team_coordinator: bool,
+    /// Parent task ID if this is a sub-agent task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<TaskID>,
+    /// Spawn depth (0 = root, 1 = child, 2 = grandchild, …).
+    #[serde(default)]
+    pub spawn_depth: u8,
 }
 
 /// Hints for the scheduler and executor about how to handle task reasoning.

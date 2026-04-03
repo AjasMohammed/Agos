@@ -350,6 +350,7 @@ mod tests {
             autonomous: false,
             parent_task_id: None,
             spawn_depth: 0,
+            is_team_coordinator: false,
         }
     }
 

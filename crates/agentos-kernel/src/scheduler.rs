@@ -349,6 +349,9 @@ impl TaskScheduler {
                 tool_calls: 0,
                 tokens_used: 0,
                 priority: t.priority,
+                is_team_coordinator: t.is_team_coordinator,
+                parent_task_id: t.parent_task_id,
+                spawn_depth: t.spawn_depth,
             })
             .collect()
     }
@@ -446,6 +449,17 @@ impl TaskScheduler {
             .unwrap_or_default()
     }
 
+    /// Return a brief text summary of a completed task's original prompt (first 200 chars).
+    /// Used by `cmd_await_sub_agents` to surface meaningful result context.
+    /// Returns `None` if the task is not found (e.g. already evicted from memory).
+    pub async fn get_task_result_summary(&self, task_id: TaskID) -> Option<String> {
+        self.tasks
+            .read()
+            .await
+            .get(&task_id)
+            .map(|t| t.original_prompt.chars().take(200).collect())
+    }
+
     // --- Dependency Graph Methods ---
 
     /// Check if adding a dependency (parent waits on child) would create a cycle.
@@ -521,6 +535,7 @@ mod tests {
             autonomous: false,
             parent_task_id: None,
             spawn_depth: 0,
+            is_team_coordinator: false,
         }
     }
 

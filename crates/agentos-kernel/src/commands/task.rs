@@ -110,6 +110,7 @@ impl Kernel {
             autonomous,
             parent_task_id: None,
             spawn_depth: 0,
+            is_team_coordinator: false,
         };
 
         self.scheduler.register_external(task.clone()).await;
@@ -376,6 +377,7 @@ impl Kernel {
             autonomous: parent_task.autonomous,
             parent_task_id: None,
             spawn_depth: 0,
+            is_team_coordinator: false,
         };
 
         // Check for circular dependencies before enqueuing

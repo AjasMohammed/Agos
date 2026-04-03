@@ -273,41 +273,76 @@ impl CapabilityEngine {
     }
 
     /// Issue a capability token for a child agent scoped to the intersection of
-    /// `parent_token`'s permissions and `requested`. Returns `Err` if the parent
-    /// token is invalid, expired, or the intersection is empty.
+    /// `parent_token`'s permissions and `requested`.
+    ///
+    /// # Security invariant
+    /// The child token is issued for `child_task_id` and `child_agent_id` — never
+    /// re-using the parent's task or agent IDs — preventing scheduler state corruption
+    /// and ensuring audit attribution is always correct.
+    ///
+    /// Returns `Err` if the parent token is invalid, expired, or the intersection is empty.
     pub fn scope_for_child(
         &self,
         parent_token: &CapabilityToken,
+        child_task_id: TaskID,
+        child_agent_id: AgentID,
         requested: &PermissionSet,
         ttl: Duration,
     ) -> Result<CapabilityToken, AgentOSError> {
-        // 1. Verify parent token signature
+        // 1. Verify parent token signature — reject tampered tokens immediately.
         if !self.verify_signature(parent_token) {
+            tracing::warn!(
+                parent_task_id = %parent_token.task_id,
+                parent_agent_id = %parent_token.agent_id,
+                "scope_for_child: parent token has invalid HMAC signature"
+            );
             return Err(AgentOSError::InvalidToken {
                 reason: "Parent token has invalid HMAC signature".into(),
             });
         }
 
-        // 2. Check parent token expiry
-        if chrono::Utc::now() > parent_token.expires_at {
+        // 2. Check parent token expiry.
+        let now = chrono::Utc::now();
+        if now > parent_token.expires_at {
+            tracing::warn!(
+                parent_task_id = %parent_token.task_id,
+                expired_at = %parent_token.expires_at,
+                "scope_for_child: parent token has expired"
+            );
             return Err(AgentOSError::TokenExpired);
         }
 
-        // 3. Intersect parent permissions with what the child requested
+        // 3. Intersect parent permissions with what the child requested.
+        //    This is the core security invariant: child ⊆ parent, always.
         let intersection = parent_token.permissions.intersect(requested);
 
-        // 4. Reject empty intersection — child asked for nothing the parent has
+        // 4. Reject empty intersection — child asked for nothing the parent holds.
         if intersection.is_empty() {
+            tracing::warn!(
+                parent_task_id = %parent_token.task_id,
+                child_task_id = %child_task_id,
+                child_agent_id = %child_agent_id,
+                "scope_for_child: requested permissions have empty intersection with parent"
+            );
             return Err(AgentOSError::PermissionDenied {
                 resource: "child_permissions".into(),
                 operation: "child requested permissions not held by parent".into(),
             });
         }
 
-        // 5. Issue a fresh token for the same agent/task scoped to the intersection
+        tracing::debug!(
+            parent_task_id = %parent_token.task_id,
+            child_task_id = %child_task_id,
+            child_agent_id = %child_agent_id,
+            granted_resources = intersection.entries.len(),
+            "scope_for_child: issuing scoped child token"
+        );
+
+        // 5. Issue a fresh token scoped to the child's own task/agent IDs.
+        //    Using child_task_id (not parent) prevents scheduler entry collision.
         self.issue_token(
-            parent_token.task_id,
-            parent_token.agent_id,
+            child_task_id,
+            child_agent_id,
             parent_token.allowed_tools.clone(),
             parent_token.allowed_intents.clone(),
             intersection,
@@ -596,9 +631,26 @@ mod tests {
         child_requested.grant("shell.exec".into(), false, false, true, None); // execute
         child_requested.grant("network.outbound".into(), false, false, true, None); // NOT in parent
 
+        let child_task_id = TaskID::new();
+        let child_agent_id = AgentID::new();
         let child_token = engine
-            .scope_for_child(&parent_token, &child_requested, Duration::from_secs(300))
+            .scope_for_child(
+                &parent_token,
+                child_task_id,
+                child_agent_id,
+                &child_requested,
+                Duration::from_secs(300),
+            )
             .unwrap();
+        // Verify child token is bound to child's IDs, not the parent's.
+        assert_eq!(
+            child_token.task_id, child_task_id,
+            "child token must use child task ID"
+        );
+        assert_eq!(
+            child_token.agent_id, child_agent_id,
+            "child token must use child agent ID"
+        );
 
         // Verify child token is properly signed
         assert!(engine.verify_signature(&child_token));
@@ -652,8 +704,13 @@ mod tests {
         child_requested.grant("network.outbound".into(), false, false, true, None);
         child_requested.grant("shell.exec".into(), false, false, true, None);
 
-        let result =
-            engine.scope_for_child(&parent_token, &child_requested, Duration::from_secs(300));
+        let result = engine.scope_for_child(
+            &parent_token,
+            TaskID::new(),
+            AgentID::new(),
+            &child_requested,
+            Duration::from_secs(300),
+        );
         assert!(result.is_err(), "empty intersection should return error");
         assert!(
             matches!(result, Err(AgentOSError::PermissionDenied { .. })),
