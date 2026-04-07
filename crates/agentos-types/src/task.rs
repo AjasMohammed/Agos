@@ -47,6 +47,10 @@ pub struct AgentTask {
     /// Used to identify team runs in task listings without fragile prompt matching.
     #[serde(default)]
     pub is_team_coordinator: bool,
+    /// When true, the task executor skips checkpoint writes for this task.
+    /// Set by `--no-checkpoint` CLI flag for ephemeral one-shot tasks.
+    #[serde(default)]
+    pub skip_checkpoint: bool,
 }
 
 #[cfg(test)]
@@ -97,6 +101,7 @@ impl Default for AgentTask {
             parent_task_id: None,
             spawn_depth: 0,
             is_team_coordinator: false,
+            skip_checkpoint: false,
         }
     }
 }
@@ -288,6 +293,18 @@ pub struct ModelDowngradeTier {
     pub provider: String,
 }
 
+/// Record of a single tool call during task execution, for checkpoint replay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallRecord {
+    pub tool_name: String,
+    pub tool_call_id: Option<String>,
+    pub input_json: String,
+    pub output_json: String,
+    pub called_at: chrono::DateTime<chrono::Utc>,
+    pub duration_ms: u64,
+    pub success: bool,
+}
+
 /// Snapshot of an agent's current cost accumulation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostSnapshot {
@@ -301,4 +318,9 @@ pub struct CostSnapshot {
     pub tokens_pct: f64,
     pub cost_pct: f64,
     pub tool_calls_pct: f64,
+    /// Linear forecast: estimated hours until the budget is exhausted based on
+    /// the current burn rate since `period_start`. `None` when the budget is
+    /// unlimited (limit == 0) or no time has elapsed yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forecast_exhaustion_hours: Option<f64>,
 }

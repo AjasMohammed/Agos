@@ -255,10 +255,10 @@ fn notification_to_ctx(msg: &agentos_types::UserMessage) -> minijinja::Value {
 fn notification_summary_to_ctx(msg: &agentos_api::types::NotificationSummary) -> minijinja::Value {
     context! {
         id => msg.id.to_string(),
-        from => String::new(),
+        from => msg.from.clone(),
         priority => msg.priority.clone(),
         subject => msg.subject.clone(),
-        body => String::new(),
+        body => msg.body.clone(),
         kind_tag => "notification",
         question => Option::<String>::None,
         options => Option::<Vec<String>>::None,
@@ -266,9 +266,6 @@ fn notification_summary_to_ctx(msg: &agentos_api::types::NotificationSummary) ->
         read => msg.read,
         created_at => msg.timestamp.clone(),
         expires_at => Option::<String>::None,
-        // TODO: requires_response and from are hardcoded — NotificationSummary does not
-        // include message kind or sender. The inbox list will not distinguish Question-type
-        // messages from informational ones until NotificationSummary grows these fields.
         requires_response => false,
     }
 }

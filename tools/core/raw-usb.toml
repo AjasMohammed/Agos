@@ -1,0 +1,157 @@
+[manifest]
+name        = "raw-usb"
+version     = "1.0.0"
+description = "Enumerate whitelisted USB devices and perform stateless bulk, interrupt, and control transfers."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = [
+  "hardware.raw-usb.list:r",
+  "hardware.raw-usb.session:x",
+  "hardware.raw-usb.transfer:r",
+  "hardware.raw-usb.transfer:w",
+  "hardware.raw-usb.control:r",
+  "hardware.raw-usb.control:w",
+]
+
+[capabilities_provided]
+outputs = ["hardware.raw-usb"]
+
+[intent_schema]
+input  = "RawUsbIntent"
+output = "RawUsbResult"
+
+[input_schema]
+type = "object"
+description = "Raw USB operation"
+
+[input_schema.properties.action]
+type = "string"
+enum = ["list", "open", "read", "write", "control", "close"]
+default = "list"
+description = "Operation to perform."
+
+[input_schema.properties.vendor_id]
+description = "USB vendor ID as an integer or hex string like '0x2341'. Required for open/read/write/control/close."
+oneOf = [{ type = "integer", minimum = 0, maximum = 65535 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]{1,4}$" }]
+
+[input_schema.properties.product_id]
+description = "USB product ID as an integer or hex string like '0x0043'. Required for open/read/write/control/close."
+oneOf = [{ type = "integer", minimum = 0, maximum = 65535 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]{1,4}$" }]
+
+[input_schema.properties.interface]
+description = "Interface number to claim. Defaults to 0."
+oneOf = [{ type = "integer", minimum = 0, maximum = 255 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]{1,2}$" }]
+
+[input_schema.properties.endpoint]
+description = "Endpoint address for read/write, as an integer or hex string like '0x81'."
+oneOf = [{ type = "integer", minimum = 0, maximum = 255 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]{1,2}$" }]
+
+[input_schema.properties.transfer_kind]
+type = "string"
+enum = ["bulk", "interrupt"]
+default = "bulk"
+description = "Transfer type for read/write."
+
+[input_schema.properties.length]
+description = "Requested byte count for read or control IN."
+oneOf = [{ type = "integer", minimum = 1, maximum = 1048576 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]+$" }]
+
+[input_schema.properties.data]
+type = "array"
+description = "Byte-array payload for write or control OUT."
+items = { type = "integer", minimum = 0, maximum = 255 }
+
+[input_schema.properties.data_base64]
+type = "string"
+description = "Base64 payload alternative for write or control OUT."
+
+[input_schema.properties.timeout_ms]
+type = "integer"
+minimum = 1
+maximum = 120000
+description = "Transfer timeout in milliseconds."
+
+[input_schema.properties.request_type]
+type = "string"
+enum = ["standard", "class", "vendor"]
+description = "Control request type for control transfers."
+
+[input_schema.properties.recipient]
+type = "string"
+enum = ["device", "interface", "endpoint", "other"]
+description = "Control transfer recipient."
+
+[input_schema.properties.direction]
+type = "string"
+enum = ["in", "out"]
+description = "Control transfer direction."
+
+[input_schema.properties.request]
+description = "Control request byte."
+oneOf = [{ type = "integer", minimum = 0, maximum = 255 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]{1,2}$" }]
+
+[input_schema.properties.value]
+description = "Control transfer wValue field."
+oneOf = [{ type = "integer", minimum = 0, maximum = 65535 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]{1,4}$" }]
+
+[input_schema.properties.index]
+description = "Control transfer wIndex field. Defaults to the interface number for interface recipients."
+oneOf = [{ type = "integer", minimum = 0, maximum = 65535 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]{1,4}$" }]
+
+[input_schema.properties.detach_kernel_driver]
+type = "boolean"
+description = "Request kernel-driver detach before claiming the interface. Blocked unless the driver was configured to allow it."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 128
+max_cpu_ms    = 10000
+syscalls      = []
+
+[examples]
+"List accessible USB devices" = """
+{
+  "action": "list"
+}
+"""
+
+"Open a whitelisted device" = """
+{
+  "action": "open",
+  "vendor_id": "0x2341",
+  "product_id": "0x0043",
+  "interface": 0
+}
+"""
+
+"Bulk read from endpoint 0x81" = """
+{
+  "action": "read",
+  "vendor_id": "0x2341",
+  "product_id": "0x0043",
+  "interface": 0,
+  "endpoint": "0x81",
+  "transfer_kind": "bulk",
+  "length": 64
+}
+"""
+
+"Vendor control OUT transfer" = """
+{
+  "action": "control",
+  "vendor_id": "0x2341",
+  "product_id": "0x0043",
+  "interface": 0,
+  "direction": "out",
+  "request_type": "vendor",
+  "recipient": "interface",
+  "request": 1,
+  "value": 0,
+  "index": 0,
+  "data": [1, 2, 3, 4]
+}
+"""

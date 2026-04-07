@@ -62,10 +62,11 @@ status: complete
 │ LLM  │ │Tools │ │ Security │ │Memory │ │ Audit  │ │  HAL   │
 │      │ │      │ │          │ │       │ │        │ │        │
 │Ollama│ │file  │ │Capability│ │Episod.│ │SQLite  │ │System  │
-│OpenAI│ │shell │ │  Vault   │ │Semant.│ │83+ evt │ │Process │
+│OpenAI│ │shell │ │  Vault   │ │Semant.│ │85+ evt │ │Process │
 │Anthro│ │memory│ │ Sandbox  │ │Proced.│ │  types │ │Network │
 │Gemini│ │data  │ │  WASM    │ │Embedd.│ │        │ │GPU     │
-│Mock  │ │sign  │ │          │ │       │ │        │ │Storage │
+│Mock  │ │coord │ │          │ │       │ │        │ │Storage │
+│      │ │      │ │          │ │       │ │        │ │Audio*  │
 └──────┘ └──────┘ └──────────┘ └───────┘ └────────┘ └────────┘
 ```
 
@@ -132,7 +133,7 @@ When `agentos start` is called, `Kernel::boot()` performs these steps in order:
 | 4 | Audit | Open SQLite audit log database, create tables if needed |
 | 5 | Vault | Open encrypted secrets vault, derive key with Argon2id from passphrase |
 | 6 | Capability | Initialize the capability engine and load permission matrix |
-| 7 | HAL | Initialize Hardware Abstraction Layer with 6 drivers: System, Process, Network, Sensor, GPU, Storage |
+| 7 | HAL | Initialize Hardware Abstraction Layer with core drivers (System, Process, Network, Sensor, GPU, Storage, Log Reader) plus feature-gated peripheral drivers (Audio, Bluetooth, Display, Printer, Raw USB, USB Storage, Webcam) |
 | 8 | Tools | Load tool manifests, validate trust tiers (Core/Verified/Community/Blocked), check Ed25519 signatures |
 | 9 | Schema | Build JSON schema registry from tool manifests for intent validation |
 | 10 | Memory | Initialize embedder and 3 memory stores: episodic, semantic, procedural |
@@ -281,6 +282,51 @@ Messages flow through the kernel's `CommNotificationListener` subsystem, which v
 
 ---
 
+## Multi-Agent Coordination
+
+AgentOS supports hierarchical multi-agent workflows through sub-agent spawning, context handoff, and agent teams.
+
+### Architecture
+
+```
+Parent Agent Task
+  │
+  ├── spawn-agent → Child Task 1 (spawn_depth=1)
+  │                   ├── ContextSlice (last N messages from parent)
+  │                   └── Scoped CapabilityToken (intersection of parent perms)
+  │
+  ├── spawn-agent → Child Task 2 (spawn_depth=1)
+  │
+  └── await-agents [child1, child2]
+        ├── SubAgentResult injected into parent context
+        └── Parent resumes with children's outputs
+```
+
+### Key Components
+
+| Component | Location | Role |
+|-----------|----------|------|
+| `ContextSlice` | `agentos-types/src/context.rs` | Portable slice of parent context for child handoff |
+| `SubAgentResult` | `agentos-types/src/context.rs` | Completed child result, ready for parent injection |
+| `ContextManager.seed_from_slice()` | `agentos-kernel/src/context.rs` | Seeds child context from parent slice |
+| `ContextManager.inject_sub_agent_result()` | `agentos-kernel/src/context.rs` | Injects child result into parent context |
+| `SpawnAgentTool` | `agentos-tools/src/coordination.rs` | Tool that emits `_kernel_action: "spawn_agent"` |
+| `AwaitAgentsTool` | `agentos-tools/src/coordination.rs` | Tool that emits `_kernel_action: "await_agents"` |
+| `VerifyOutputTool` | `agentos-tools/src/coordination.rs` | Spawns a critic agent for output verification |
+| `TeamConfig` | `agentos-types/src/team.rs` | TOML-loadable team configuration |
+
+### Safety Mechanisms
+
+- **Spawn depth limit** — prevents unbounded recursive spawning (default max: 4)
+- **Capability scoping** — child tokens are an intersection of parent permissions via `scope_for_child()`
+- **Cascading cancellation** — parent cancellation propagates to all children
+- **Idempotent injection** — `injected_sub_agents` set prevents duplicate result injection
+- **Context message cap** — `context_messages` is clamped to 100 even if schema validation is bypassed
+
+See [[05-Agent Management]] for the full user-facing reference.
+
+---
+
 ## Event System Architecture
 
 The event system enables reactive workflows where events trigger automated actions.
@@ -396,7 +442,7 @@ All file tools reject any path containing `..` — this is a hard-coded security
 
 ### Audit trail
 
-Every security-relevant operation is logged to the append-only SQLite audit log (`agentos-audit`), which supports 83+ event types. The log cannot be modified or deleted through normal operation.
+Every security-relevant operation is logged to the append-only SQLite audit log (`agentos-audit`), which supports 85+ event types. The log cannot be modified or deleted through normal operation.
 
 ---
 

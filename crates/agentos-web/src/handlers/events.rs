@@ -191,6 +191,56 @@ pub async fn tasks_stream(
     Sse::new(stream.boxed()).keep_alive(KeepAlive::default())
 }
 
+/// SSE endpoint for the costs page.
+/// Sends a `cost-update` event every 5 s with JSON cost snapshot data including
+/// the new `forecast_exhaustion_hours` field.
+pub async fn costs_stream(
+    State(state): State<AppState>,
+) -> Sse<KeepAliveStream<futures::stream::BoxStream<'static, Result<Event, Infallible>>>> {
+    let kernel = state.kernel.clone();
+
+    let stream = stream::unfold((), move |()| {
+        let kernel = kernel.clone();
+        async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+
+            let snapshots = kernel.cost_tracker.get_all_snapshots().await;
+            let total_cost_usd: f64 = snapshots.iter().map(|s| s.cost_usd).sum();
+            let total_tokens: u64 = snapshots.iter().map(|s| s.tokens_used).sum();
+            let agent_count = snapshots.len();
+
+            let by_agent: Vec<serde_json::Value> = snapshots
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "agent_name": s.agent_name,
+                        "cost_usd": s.cost_usd,
+                        "tokens_used": s.tokens_used,
+                        "cost_pct": s.cost_pct,
+                        "tokens_pct": s.tokens_pct,
+                        "forecast_exhaustion_hours": s.forecast_exhaustion_hours,
+                    })
+                })
+                .collect();
+
+            let payload = serde_json::json!({
+                "total_cost_usd": total_cost_usd,
+                "total_tokens": total_tokens,
+                "agent_count": agent_count,
+                "by_agent": by_agent,
+            });
+
+            let event = Event::default()
+                .event("cost-update")
+                .data(payload.to_string());
+
+            Some((Ok(event), ()))
+        }
+    });
+
+    Sse::new(stream.boxed()).keep_alive(KeepAlive::default())
+}
+
 fn render_partial(
     templates: &minijinja::Environment<'static>,
     name: &str,

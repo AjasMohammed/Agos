@@ -245,6 +245,7 @@ pub fn build_router(
         )
         .route("/events/agents", axum::routing::get(events::agents_stream))
         .route("/events/tasks", axum::routing::get(events::tasks_stream))
+        .route("/events/costs", axum::routing::get(events::costs_stream))
         // Static files (served without auth — bypassed inside require_auth)
         .nest_service(
             "/static",

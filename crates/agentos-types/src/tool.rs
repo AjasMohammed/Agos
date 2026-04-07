@@ -1,5 +1,6 @@
 use crate::ids::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Trust tier assigned to a tool manifest.
@@ -66,6 +67,31 @@ pub struct ToolManifest {
     /// Which execution backend should run this tool. Defaults to Inline.
     #[serde(default)]
     pub executor: ToolExecutor,
+    /// Fallback chains: tried in order when the tool fails with a matching error category.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallbacks: Vec<FallbackRule>,
+}
+
+/// A single fallback rule in a tool manifest's degradation chain.
+///
+/// When the tool fails with an error whose `error_category()` matches `on_error`,
+/// the kernel retries with `try_tool` after applying `transform` to the payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FallbackRule {
+    /// Error category to match (e.g., "StorageError", "PermissionDenied").
+    pub on_error: String,
+    /// Tool to try as fallback.
+    pub try_tool: String,
+    /// Payload key transformations (key → "op:value", e.g., "prepend:/tmp/").
+    #[serde(default)]
+    pub transform: HashMap<String, String>,
+    /// Max retries for this specific fallback (default 1, kernel ceiling 3).
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u8,
+}
+
+fn default_max_retries() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +117,10 @@ pub struct ToolInfo {
     /// Searchable tags for marketplace discovery (e.g. ["github", "code-review"]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    /// Semantic capability tags for agent discoverability.
+    /// Embedded alongside the description for intent-based tool search.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

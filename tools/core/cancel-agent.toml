@@ -1,0 +1,37 @@
+[manifest]
+name        = "cancel-agent"
+version     = "1.0.0"
+description = "Cancel a spawned sub-agent that is going off-track or no longer needed. Transitions the child to Cancelled state and cascades to any grandchildren."
+author      = "agentos-core"
+trust_tier  = "core"
+capability_tags = ["multi-agent", "coordination", "cancellation", "intervention"]
+
+[capabilities_required]
+permissions = ["agent.spawn:x"]
+
+[capabilities_provided]
+outputs = ["cancellation_result"]
+
+[intent_schema]
+input  = "CancelAgentIntent"
+output = "CancelAgentResult"
+
+[input_schema]
+type = "object"
+required = ["task_id"]
+
+[input_schema.properties.task_id]
+type = "string"
+description = "Task ID of the spawned sub-agent to cancel."
+
+[input_schema.properties.reason]
+type = "string"
+description = "Reason for cancellation (logged in audit). Default: 'Cancelled by parent agent'."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

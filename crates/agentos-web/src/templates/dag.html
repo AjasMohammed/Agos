@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Task DAG</h1>
+        <p class="muted">Live parent-child execution topology for long-running multi-agent work.</p>
+    </div>
+    <div class="header-actions">
+        <a href="/tasks" role="button" class="outline secondary">Back to Tasks</a>
+        <a href="/api/tasks/dag/mermaid" role="button" class="outline secondary">Export Mermaid</a>
+    </div>
+</div>
+
+<section class="dag-shell">
+    <div class="dag-toolbar">
+        <span class="muted">Queued tasks appear in grey, running in blue, complete in green, failures in red, and cancellations in amber.</span>
+    </div>
+
+    <div id="dag-shell"
+         hx-ext="sse"
+         sse-connect="/api/tasks/stream">
+        <div id="dag-tree"
+             hx-get="/tasks/dag?partial=true"
+             hx-trigger="sse:task-state-changed, sse:task-sub-agent-spawned, sse:task-completed, sse:task-failed, sse:task-cancelled"
+             hx-swap="outerHTML">
+            {% include "partials/dag_tree.html" %}
+        </div>
+    </div>
+</section>
+{% endblock %}

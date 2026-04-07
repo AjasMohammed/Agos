@@ -85,6 +85,7 @@ mod tests {
             agent_name: Some("test".into()),
             prompt: large_data.clone(),
             autonomous: false,
+            no_checkpoint: false,
         };
         client
             .send_message(&BusMessage::Command(cmd))

@@ -21,3 +21,4 @@ subtle = "2"
 zeroize = { workspace = true }
 futures-util = "0.3"
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+lettre = { workspace = true }

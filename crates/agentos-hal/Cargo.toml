@@ -16,8 +16,26 @@ tracing.workspace = true
 sysinfo.workspace = true
 regex.workspace = true
 chrono.workspace = true
+uuid.workspace = true
+futures.workspace = true
 zbus = { workspace = true, optional = true }
+ipp = { version = "6", optional = true }
+base64.workspace = true
+bluer = { version = "0.17", optional = true, features = ["full"] }
+wayland-client = { version = "0.31", optional = true }
+wayland-protocols-wlr = { version = "0.3", optional = true }
+nusb = { version = "0.2", optional = true, features = ["tokio"] }
+v4l = { version = "0.14", optional = true }
 
 [features]
 default = []
+audio = []
 usb-storage = ["dep:zbus"]
+printer = ["dep:ipp"]
+bluetooth = ["dep:bluer"]
+display = ["dep:zbus", "dep:wayland-client", "dep:wayland-protocols-wlr"]
+raw-usb = ["dep:nusb"]
+webcam = ["dep:v4l"]
+
+[dev-dependencies]
+tempfile.workspace = true

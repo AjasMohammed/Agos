@@ -104,6 +104,9 @@ wasmtime-wasi = "41"
 # JSON Schema validation
 jsonschema = "0.28"
 
+# Email (SMTP)
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport", "hostname"] }
+
 # TLS
 tokio-rustls = "0.26"
 rustls-pki-types = { version = "1", features = ["std"] }
@@ -114,3 +117,4 @@ sysinfo = "0.33"
 # Unicode normalization (for injection scanner homoglyph bypass prevention)
 unicode-normalization = "0.1"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+base64 = "0.22"

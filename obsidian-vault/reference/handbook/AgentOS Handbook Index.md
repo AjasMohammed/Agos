@@ -21,20 +21,20 @@ status: complete
 | 02 | [[02-Installation and First Run]] | Prerequisites, building from source, configuration, first kernel boot |
 | 03 | [[03-Architecture Overview]] | System architecture, crate dependency graph, the intent flow from CLI to tool execution |
 | 04 | [[04-CLI Reference Complete]] | All 27 `agentos` command groups with flags, arguments, and examples — includes `stop`, `scratchpad`, `healthz`, `log`, `notifications`, `channel`, `mcp`, and `web` |
-| 05 | [[05-Agent Management]] | Agent lifecycle, messaging, groups, identity keys, and agent registry |
-| 06 | [[06-Task System]] | Task routing, lifecycle states, background tasks, and scheduled tasks |
-| 07 | [[07-Tool System]] | Built-in tools, manifests, trust tiers (Core/Verified/Community/Blocked), signing |
+| 05 | [[05-Agent Management]] | Agent lifecycle, messaging, groups, identity keys, agent registry, multi-agent coordination (sub-agents, teams) |
+| 06 | [[06-Task System]] | Task routing, lifecycle states, background tasks, scheduled tasks, sub-agent tasks (parent_task_id, spawn_depth, team coordinator) |
+| 07 | [[07-Tool System]] | Built-in tools (including coordination tools: spawn-agent, await-agents, verify-output), manifests, trust tiers, signing |
 | 08 | [[08-Security Model]] | 7 defense layers, capability tokens, permission enforcement, injection scanner, risk levels |
 | 09 | [[09-Secrets and Vault]] | AES-256-GCM encrypted vault, secret scopes, rotation, lockdown mode |
 | 10 | [[10-Memory System]] | 4 memory tiers, automatic extraction, consolidation, context budget management |
-| 11 | [[11-Pipeline and Workflows]] | Multi-step YAML pipelines, step dependencies, failure handling, pipeline CLI |
+| 11 | [[11-Pipeline and Workflows]] | Multi-step YAML pipelines, wave-based parallel execution, step dependencies, failure handling, budget enforcement, variable sanitization |
 | 12 | [[12-Event System]] | Event types, subscriptions, filter predicates, event-triggered tasks, throttle policy |
 | 13 | [[13-Cost Tracking]] | Per-agent token costs, budget enforcement, model pricing table, cost CLI |
 | 14 | [[14-Audit Log]] | 83+ event types, append-only SQLite chain, Merkle verification, export, snapshots |
 | 15 | [[15-LLM Configuration]] | 5 provider adapters (Ollama, OpenAI, Anthropic, Gemini, Mock), endpoint resolution, env vars |
 | 16 | [[16-Configuration Reference]] | Every config key in `config/default.toml` with type, default value, and description |
 | 17 | [[17-WASM Tools Development]] | WASM execution protocol, Rust and Python examples, `#[tool]` SDK macro |
-| 18 | [[18-Advanced Operations]] | HAL, resource locks, snapshots, escalation workflows, agent identity |
+| 18 | [[18-Advanced Operations]] | HAL (14 drivers incl. audio, bluetooth, webcam, printer, display, raw USB), consent store, resource locks, snapshots, escalation, identity |
 | 19 | [[19-Troubleshooting and FAQ]] | 33+ common errors with solutions, debug logging, health checks, platform notes |
 | 20 | [[20-LLM Agent Testing]] | `agent-tester` binary — LLM-driven scenario testing, feedback protocol, report format, CI integration |
 | 21 | [[21-User Notifications and Channels]] | Agent-to-operator messaging — `notify-user`, `ask-user`, delivery channels (Telegram, ntfy, email), notification inbox CLI |
@@ -42,7 +42,7 @@ status: complete
 | 23 | [[23-REST API Reference]] | All 30+ REST endpoints under `/api/v1/*` — auth, permissions, request/response shapes, rate limiting, error codes |
 | 24 | [[24-WebSocket Guide]] | Real-time event subscriptions, chat streaming, task control — frame protocol, available channels, reconnection patterns |
 | 25 | [[25-API Authentication and Keys]] | API key lifecycle (create, scope, expire, revoke), HMAC validation internals, WebSocket auth, security best practices |
-| 26 | [[26-Channel Adapters]] | Bidirectional messaging adapters — Discord (WebSocket Gateway), Telegram (long-poll), Slack (REST polling), WhatsApp (Cloud API), Webhook (HMAC-signed), Email (stub) — setup, credentials, health states |
+| 26 | [[26-Channel Adapters]] | Bidirectional messaging adapters — Discord (WebSocket Gateway), Telegram (long-poll), Slack (REST polling), WhatsApp (Cloud API), Webhook (HMAC-signed), Email (SMTP via lettre) — setup, credentials, health states, retry mechanism |
 
 ---
 
@@ -54,7 +54,7 @@ status: complete
 
 **Operator running a deployment?** See [[04-CLI Reference Complete]], [[16-Configuration Reference]], and [[19-Troubleshooting and FAQ]].
 
-**Developer building agents?** See [[05-Agent Management]], [[06-Task System]], [[07-Tool System]], [[17-WASM Tools Development]], [[21-User Notifications and Channels]], [[22-MCP Integration]], and [[26-Channel Adapters]].
+**Developer building agents?** See [[05-Agent Management]] (including multi-agent coordination and teams), [[06-Task System]], [[07-Tool System]], [[17-WASM Tools Development]], [[21-User Notifications and Channels]], [[22-MCP Integration]], and [[26-Channel Adapters]].
 
 **Testing and evaluating AgentOS?** See [[20-LLM Agent Testing]].
 
@@ -72,9 +72,9 @@ status: complete
 |-----------|----------------|-----------------|
 | Kernel | [[03-Architecture Overview]] | [[06-Task System]], [[18-Advanced Operations]] |
 | CLI (`agentos`) | [[04-CLI Reference Complete]] | All chapters |
-| Agents | [[05-Agent Management]] | [[06-Task System]], [[08-Security Model]] |
+| Agents | [[05-Agent Management]] | [[06-Task System]], [[07-Tool System]], [[08-Security Model]] |
 | Tasks | [[06-Task System]] | [[11-Pipeline and Workflows]], [[12-Event System]] |
-| Tools | [[07-Tool System]] | [[17-WASM Tools Development]], [[08-Security Model]] |
+| Tools | [[07-Tool System]] | [[05-Agent Management]], [[17-WASM Tools Development]], [[08-Security Model]] |
 | Security | [[08-Security Model]] | [[09-Secrets and Vault]], [[14-Audit Log]] |
 | Vault | [[09-Secrets and Vault]] | [[08-Security Model]] |
 | Memory | [[10-Memory System]] | [[06-Task System]], [[03-Architecture Overview]] |

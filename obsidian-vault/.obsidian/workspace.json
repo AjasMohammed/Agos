@@ -27,12 +27,26 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "plans/event-driven-completion/Event-Driven Completion Plan.md",
+                "file": "plans/peripheral-device-ecosystem/06-display-driver.md",
                 "mode": "preview",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Event-Driven Completion Plan"
+              "title": "06-display-driver"
+            }
+          },
+          {
+            "id": "134a15ee3e7e7b5a",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "reference/handbook/26-Channel Adapters.md",
+                "mode": "preview",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "26-Channel Adapters"
             }
           },
           {
@@ -50,7 +64,7 @@
             }
           }
         ],
-        "currentTab": 1
+        "currentTab": 2
       }
     ],
     "direction": "vertical"
@@ -212,43 +226,43 @@
       "bases:Create new base": false
     }
   },
-  "active": "34c752490c5b05c4",
+  "active": "134a15ee3e7e7b5a",
   "lastOpenFiles": [
-    "plans/observability-uplift/01-task-dag-view.md",
-    "plans/observability-uplift/01-task-dag-view.md.tmp.416826.1775208781629",
-    "plans/task-checkpointing/04-checkpoint-lifecycle.md",
-    "plans/task-checkpointing/04-checkpoint-lifecycle.md.tmp.416826.1775208733237",
-    "plans/task-checkpointing/03-crash-recovery.md",
-    "plans/task-checkpointing/03-crash-recovery.md.tmp.416826.1775208694914",
-    "plans/task-checkpointing/02-state-serialization.md",
-    "plans/task-checkpointing/02-state-serialization.md.tmp.416826.1775208646422",
-    "plans/event-driven-completion/02-completion-event-emission.md",
-    "plans/v3-completion/02-mcp-adapter.md",
-    "plans/task-checkpointing/01-checkpoint-schema-and-storage.md",
-    "plans/task-checkpointing/01-checkpoint-schema-and-storage.md.tmp.416826.1775208583076",
-    "plans/event-driven-completion/03-event-driven-await-and-injection.md",
-    "plans/event-driven-completion/03-event-driven-await-and-injection.md.tmp.416826.1775208538254",
-    "plans/event-driven-completion/02-completion-event-emission.md.tmp.416826.1775208450336",
-    "plans/event-driven-completion/01-async-task-execution.md",
-    "plans/observability-uplift/Observability Uplift Plan.md",
-    "plans/task-checkpointing/Task Checkpointing Plan.md",
-    "plans/task-checkpointing/Task Checkpointing Plan.md.tmp.416826.1775208340267",
-    "plans/event-driven-completion/Event-Driven Completion Plan.md",
-    "plans/event-driven-completion/Event-Driven Completion Plan.md.tmp.416826.1775208310455",
-    "roadmap/Issues and Fixes.md.tmp.416826.1775208269186",
+    "plans/capability-discoverability/Capability Discoverability Plan.md.tmp.80762.1775566925003",
+    "plans/graceful-degradation-chains/Graceful Degradation Chains Plan.md.tmp.80762.1775566913187",
+    "plans/capability-discoverability/01-semantic-tool-search.md.tmp.80762.1775566893108",
+    "plans/capability-discoverability/Capability Discoverability Plan.md.tmp.80762.1775566886467",
+    "plans/graceful-degradation-chains/02-kernel-fallback-resolver.md.tmp.80762.1775566880823",
+    "plans/graceful-degradation-chains/01-fallback-schema-and-error-categories.md.tmp.80762.1775566870748",
+    "plans/graceful-degradation-chains/Graceful Degradation Chains Plan.md.tmp.80762.1775566864555",
+    "plans/multi-agent-coordination/Multi-Agent Coordination Plan.md.tmp.80762.1775566857049",
+    "plans/task-checkpointing/04-checkpoint-lifecycle.md.tmp.16113.1775566137263",
+    "plans/task-checkpointing/03-crash-recovery.md.tmp.16113.1775566136223",
+    "plans/task-checkpointing/02-state-serialization.md.tmp.16113.1775566135204",
+    "plans/graceful-degradation-chains/01-fallback-schema-and-error-categories.md",
+    "plans/graceful-degradation-chains/Graceful Degradation Chains Plan.md",
     "plans/multi-agent-coordination/Multi-Agent Coordination Plan.md",
-    "plans/multi-agent-coordination/04-agent-teams.md",
-    "plans/multi-agent-coordination/03-coordination-tools.md",
-    "plans/multi-agent-coordination/02-context-handoff.md",
     "plans/multi-agent-coordination/01-sub-agent-spawning.md",
-    "plans/logging-observability/Logging Observability Data Flow.md",
-    "plans/logging-observability/04-production-structured-logging.md",
-    "plans/logging-observability/03-silent-failure-elimination.md",
-    "plans/logging-observability/02-tools-logging.md",
-    "plans/logging-observability/01-span-instrumentation.md",
-    "plans/logging-observability/05-security-gap-coverage.md",
-    "plans/logging-observability/03-memory-crate-instrumentation.md",
-    "plans/logging-observability/02-llm-adapter-instrumentation.md",
-    "reference/handbook/02-Installation and First Run.md"
+    "plans/multi-agent-coordination/04-agent-teams.md",
+    "plans/multi-agent-coordination/05-streaming-agent-communication.md",
+    "plans/peripheral-device-ecosystem/Peripheral Device Ecosystem Plan.md",
+    "plans/capability-discoverability/03-proactive-capability-hints.md",
+    "plans/capability-discoverability/02-capability-tags-and-grouping.md",
+    "plans/capability-discoverability/01-semantic-tool-search.md",
+    "plans/graceful-degradation-chains/03-core-tool-fallback-declarations.md",
+    "plans/graceful-degradation-chains/02-kernel-fallback-resolver.md",
+    "plans/capability-discoverability/Capability Discoverability Plan.md",
+    "plans/peripheral-device-ecosystem/08-peripheral-tools.md",
+    "plans/peripheral-device-ecosystem/07-raw-usb-driver.md",
+    "plans/peripheral-device-ecosystem/Peripheral Device Ecosystem Research.md",
+    "plans/peripheral-device-ecosystem/06-display-driver.md",
+    "plans/peripheral-device-ecosystem/05-bluetooth-driver.md",
+    "plans/peripheral-device-ecosystem/04-audio-driver.md",
+    "plans/gap-closure-research/Gap Closure Research Plan.md",
+    "plans/peripheral-device-ecosystem/02-printer-driver.md",
+    "plans/observability-uplift/Observability Uplift Plan.md",
+    "plans/event-driven-completion/Event-Driven Completion Plan.md",
+    "plans/event-driven-completion/01-async-task-execution.md",
+    "plans/observability-uplift/03-audit-log-viewer.md"
   ]
 }

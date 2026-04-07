@@ -53,7 +53,7 @@ Discord/Telegram/Slack/WhatsApp
 | **Slack** | REST polling (5s) | `chat.postMessage` | 40,000 chars | ✓ | Stable |
 | **WhatsApp** | Webhook (inbound via REST API) | Cloud API v18 | 4,096 chars | ✗ | Stable |
 | **Webhook** | Webhook (inbound via REST API) | HTTP POST | 100,000 chars | ✗ | Stable |
-| **Email** | Stub (IMAP planned) | Stub (SMTP planned) | Unlimited | ✓ | Stub |
+| **Email** | Stub (IMAP planned) | SMTP via `lettre` | Unlimited | ✓ | Partial |
 
 ---
 
@@ -333,11 +333,92 @@ Health is checked via `HEAD <target_url>`. Both `2xx` and `405 Method Not Allowe
 
 ---
 
-## Email (Stub)
+## Email
 
-The email adapter is a **stub implementation**. It accepts registrations and returns stub receipts, but does not actually send email. SMTP delivery via the `lettre` crate and IMAP IDLE listening are planned future work.
+The email adapter sends outbound messages via SMTP using the `lettre` crate (`AsyncSmtpTransport<Tokio1Executor>`). Inbound message reception via IMAP IDLE is planned but not yet implemented.
 
-The health check performs a TCP connect to the configured SMTP host and port to verify reachability.
+### What you need
+
+- An SMTP server with credentials (host, port, username, password)
+- A sender email address (the `From:` header)
+- A recipient email address
+
+### Store SMTP credentials
+
+```bash
+agentos secret set SMTP_PASSWORD
+# Paste your SMTP password when prompted
+```
+
+### Register the adapter (programmatic)
+
+```rust
+use agentos_channels::email::EmailAdapter;
+use std::sync::Arc;
+
+let adapter = EmailAdapter::new(
+    "smtp.example.com".to_string(),     // SMTP host
+    587,                                  // SMTP port (STARTTLS)
+    "bot@example.com".to_string(),       // sender address
+    "operator@example.com".to_string(),  // recipient address
+    "bot@example.com".to_string(),       // username
+    std::env::var("SMTP_PASSWORD").unwrap(), // password
+    "email-ops".to_string(),             // instance ID
+);
+channel_manager.register("email-ops", Arc::new(adapter)).await?;
+```
+
+### Health states
+
+| State | Meaning |
+|-------|---------|
+| `Connected` | TCP connect to SMTP host:port succeeded |
+| `Disconnected(reason)` | TCP connect failed — host unreachable, DNS failure |
+
+### Notes and limitations
+
+- Outbound only — IMAP IDLE inbound listening is not yet implemented
+- Messages are sent as plain text (`text/plain`)
+- The SMTP connection is established per-send (no persistent connection pool)
+- STARTTLS is used when the port supports it (typically port 587)
+
+---
+
+## Retry Mechanism
+
+All channel adapters benefit from a shared retry mechanism (`crates/agentos-channels/src/retry.rs`) that provides exponential backoff for transient failures.
+
+### RetryPolicy
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_attempts` | u32 | 3 | Maximum attempts including the initial attempt |
+| `base_delay` | Duration | 500ms | Base delay between retries (doubled each attempt) |
+| `max_delay` | Duration | 30s | Maximum delay cap |
+
+### Retryable Errors
+
+Only transient errors trigger retries. The retry logic inspects error messages for:
+
+- Network errors: `timeout`, `connection`, `reset by peer`, `broken pipe`, `timed out`
+- Rate limits: `429`
+- Server errors: `500`, `502`, `503`, `504`
+
+Non-transient errors (authentication failures, bad requests) are returned immediately without retry.
+
+### Usage
+
+The `with_retry()` function wraps any async operation:
+
+```rust
+use agentos_channels::retry::{with_retry, RetryPolicy};
+
+let result = with_retry(&RetryPolicy::default(), "discord", || async {
+    // ... send message ...
+}).await?;
+```
+
+Each retry logs a warning with the channel name, attempt number, delay, and error message.
 
 ---
 

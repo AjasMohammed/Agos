@@ -43,43 +43,50 @@ impl ChannelAdapter for SlackAdapter {
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
         let text = msg.content.as_text();
-        let resp = self
-            .client
-            .post("https://slack.com/api/chat.postMessage")
-            .bearer_auth(self.bot_token.as_str())
-            .json(&serde_json::json!({
-                "channel": self.channel_id,
-                "text": text
-            }))
-            .send()
-            .await
-            .map_err(|e| AgentOSError::ToolExecutionFailed {
-                tool_name: "slack".to_string(),
-                reason: e.to_string(),
-            })?;
+        let client = &self.client;
+        let token = self.bot_token.as_str();
+        let channel = &self.channel_id;
+        let policy = crate::retry::RetryPolicy::default();
 
-        let body: serde_json::Value =
-            resp.json()
+        crate::retry::with_retry(&policy, "slack", || async {
+            let resp = client
+                .post("https://slack.com/api/chat.postMessage")
+                .bearer_auth(token)
+                .json(&serde_json::json!({
+                    "channel": channel,
+                    "text": &text
+                }))
+                .send()
                 .await
                 .map_err(|e| AgentOSError::ToolExecutionFailed {
                     tool_name: "slack".to_string(),
                     reason: e.to_string(),
                 })?;
 
-        if body["ok"].as_bool() != Some(true) {
-            return Err(AgentOSError::ToolExecutionFailed {
-                tool_name: "slack".to_string(),
-                reason: format!(
-                    "Slack error: {}",
-                    body["error"].as_str().unwrap_or("unknown")
-                ),
-            });
-        }
+            let body: serde_json::Value =
+                resp.json()
+                    .await
+                    .map_err(|e| AgentOSError::ToolExecutionFailed {
+                        tool_name: "slack".to_string(),
+                        reason: e.to_string(),
+                    })?;
 
-        Ok(DeliveryReceipt {
-            message_id: body["ts"].as_str().unwrap_or("").to_string(),
-            delivered_at: chrono::Utc::now(),
+            if body["ok"].as_bool() != Some(true) {
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name: "slack".to_string(),
+                    reason: format!(
+                        "Slack error: {}",
+                        body["error"].as_str().unwrap_or("unknown")
+                    ),
+                });
+            }
+
+            Ok(DeliveryReceipt {
+                message_id: body["ts"].as_str().unwrap_or("").to_string(),
+                delivered_at: chrono::Utc::now(),
+            })
         })
+        .await
     }
 
     async fn start_listener(

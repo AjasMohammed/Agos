@@ -865,6 +865,7 @@ mod tests {
                 signature: None,
                 trust_tier: TrustTier::Core,
                 tags: None,
+                capability_tags: vec![],
             },
             capabilities_required: ToolCapabilities {
                 permissions: vec!["fs.user_data:r".to_string()],
@@ -887,6 +888,7 @@ mod tests {
                 weight: None,
             },
             executor: ToolExecutor::default(),
+            fallbacks: vec![],
         };
 
         let (tools, intent_map) =

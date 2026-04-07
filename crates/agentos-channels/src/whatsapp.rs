@@ -53,34 +53,41 @@ impl ChannelAdapter for WhatsAppAdapter {
             "https://graph.facebook.com/v18.0/{}/messages",
             self.phone_number_id
         );
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(self.access_token.as_str())
-            .json(&serde_json::json!({
-                "messaging_product": "whatsapp",
-                "to": self.recipient_phone,
-                "type": "text",
-                "text": {"body": text}
-            }))
-            .send()
-            .await
-            .map_err(|e| AgentOSError::ToolExecutionFailed {
-                tool_name: "whatsapp".to_string(),
-                reason: e.to_string(),
-            })?;
+        let client = &self.client;
+        let token = self.access_token.as_str();
+        let recipient = &self.recipient_phone;
+        let policy = crate::retry::RetryPolicy::default();
 
-        if !resp.status().is_success() {
-            return Err(AgentOSError::ToolExecutionFailed {
-                tool_name: "whatsapp".to_string(),
-                reason: format!("WhatsApp API error: {}", resp.status()),
-            });
-        }
+        crate::retry::with_retry(&policy, "whatsapp", || async {
+            let resp = client
+                .post(&url)
+                .bearer_auth(token)
+                .json(&serde_json::json!({
+                    "messaging_product": "whatsapp",
+                    "to": recipient,
+                    "type": "text",
+                    "text": {"body": &text}
+                }))
+                .send()
+                .await
+                .map_err(|e| AgentOSError::ToolExecutionFailed {
+                    tool_name: "whatsapp".to_string(),
+                    reason: e.to_string(),
+                })?;
 
-        Ok(DeliveryReceipt {
-            message_id: uuid::Uuid::new_v4().to_string(),
-            delivered_at: chrono::Utc::now(),
+            if !resp.status().is_success() {
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name: "whatsapp".to_string(),
+                    reason: format!("WhatsApp API error: {}", resp.status()),
+                });
+            }
+
+            Ok(DeliveryReceipt {
+                message_id: uuid::Uuid::new_v4().to_string(),
+                delivered_at: chrono::Utc::now(),
+            })
         })
+        .await
     }
 
     async fn start_listener(

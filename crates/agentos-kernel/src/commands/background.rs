@@ -76,6 +76,7 @@ impl Kernel {
             parent_task_id: None,
             spawn_depth: 0,
             is_team_coordinator: false,
+            skip_checkpoint: false,
         };
 
         self.background_pool

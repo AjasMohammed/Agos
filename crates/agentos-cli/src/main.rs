@@ -760,6 +760,7 @@ mod tests {
                         agent,
                         prompt,
                         autonomous: _,
+                        no_checkpoint: _,
                     },
             } => {
                 assert_eq!(agent, Some("analyst".to_string()));

@@ -2,6 +2,100 @@ use crate::traits::{AgentTool, ToolExecutionContext};
 use agentos_types::{AgentOSError, PermissionOp};
 use async_trait::async_trait;
 
+/// Wrap user-supplied content in `<user_data>` tags to prevent prompt injection.
+/// Escapes tag boundaries that could allow an attacker to break out of the
+/// `<user_data>` envelope or the `<output_to_verify>` wrapper used by the
+/// verification prompt.
+fn sanitize_user_data(value: &str) -> String {
+    let safe = value
+        .replace("<user_data>", "&lt;user_data&gt;")
+        .replace("</user_data>", "&lt;/user_data&gt;")
+        .replace("<output_to_verify>", "&lt;output_to_verify&gt;")
+        .replace("</output_to_verify>", "&lt;/output_to_verify&gt;");
+    format!("<user_data>{safe}</user_data>")
+}
+
+/// Verify an output by spawning a second agent as a critic/reviewer.
+/// Uses the `_kernel_action: "spawn_agent"` pattern with a verification-
+/// specific prompt wrapper so the verifier agent focuses on correctness,
+/// safety, and quality of the provided output.
+pub struct VerifyOutputTool;
+
+impl VerifyOutputTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for VerifyOutputTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl AgentTool for VerifyOutputTool {
+    fn name(&self) -> &str {
+        "verify-output"
+    }
+
+    fn required_permissions(&self) -> Vec<(String, PermissionOp)> {
+        vec![("agent.spawn".to_string(), PermissionOp::Execute)]
+    }
+
+    async fn execute(
+        &self,
+        payload: serde_json::Value,
+        _context: ToolExecutionContext,
+    ) -> Result<serde_json::Value, AgentOSError> {
+        let agent = payload
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                AgentOSError::SchemaValidation("verify-output requires 'agent' field".into())
+            })?;
+        let output = payload
+            .get("output")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                AgentOSError::SchemaValidation("verify-output requires 'output' field".into())
+            })?;
+        let criteria = payload
+            .get("criteria")
+            .and_then(|v| v.as_str())
+            .unwrap_or("correctness, safety, and completeness");
+
+        // Sanitize user-supplied content to prevent prompt injection.
+        // Wrap in <user_data> tags and escape any existing tag boundaries,
+        // consistent with the pipeline engine's sanitize_for_prompt pattern.
+        let safe_output = sanitize_user_data(output);
+        let safe_criteria = sanitize_user_data(criteria);
+
+        let prompt = format!(
+            "You are a verification agent. Review the following output and evaluate it \
+             against these criteria: {safe_criteria}.\n\n\
+             <output_to_verify>\n{safe_output}\n</output_to_verify>\n\n\
+             Respond with a JSON object: {{\"verdict\": \"pass\" | \"fail\" | \"needs_revision\", \
+             \"issues\": [\"...\"], \"summary\": \"...\"}}"
+        );
+
+        tracing::debug!(
+            agent = %agent,
+            criteria = %criteria,
+            output_len = output.len(),
+            "verify_output tool: forwarding verification to kernel"
+        );
+
+        Ok(serde_json::json!({
+            "_kernel_action": "spawn_agent",
+            "agent": agent,
+            "prompt": prompt,
+            "permissions": [],
+            "context_messages": 0,
+        }))
+    }
+}
+
 /// Spawn a sub-agent to handle a specific subtask.
 /// Uses the `_kernel_action: "spawn_agent"` pattern so the kernel intercepts
 /// the result and performs the privileged spawn operation.

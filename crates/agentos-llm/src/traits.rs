@@ -168,6 +168,7 @@ mod tests {
                 signature: None,
                 trust_tier: TrustTier::Core,
                 tags: None,
+                capability_tags: vec![],
             },
             capabilities_required: ToolCapabilities {
                 permissions: vec![],
@@ -188,6 +189,7 @@ mod tests {
                 weight: None,
             },
             executor: ToolExecutor::default(),
+            fallbacks: vec![],
         };
         // name(11) + description(12) + overhead(100) = 123 chars → ceil(123/4) = 31
         let estimate = mock.estimate_tokens(&ctx, &[manifest]);

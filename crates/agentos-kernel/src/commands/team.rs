@@ -183,6 +183,7 @@ impl Kernel {
             parent_task_id: None,
             spawn_depth: 0,
             is_team_coordinator: true, // enables reliable filtering in `team list`
+            skip_checkpoint: false,
         };
 
         self.scheduler.enqueue(coordinator_task).await;

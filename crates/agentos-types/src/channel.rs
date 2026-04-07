@@ -72,6 +72,10 @@ pub struct RegisteredChannel {
     /// ntfy-specific: base server URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_url: Option<String>,
+    /// Public URL for Telegram webhook mode.  When set, the adapter uses
+    /// `setWebhook` instead of long-polling `getUpdates`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook_url: Option<String>,
     pub connected_at: DateTime<Utc>,
     pub last_active: DateTime<Utc>,
     pub active: bool,

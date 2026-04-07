@@ -54,6 +54,15 @@ pub async fn dashboard(
             } else {
                 "ok"
             };
+            let forecast_display = s.forecast_exhaustion_hours.map(|h| {
+                if h <= 0.0 {
+                    "Exhausted".to_string()
+                } else if h < 1.0 {
+                    format!("{:.0}m", h * 60.0)
+                } else {
+                    format!("{:.1}h", h)
+                }
+            });
             context! {
                 agent_id => s.agent_id.to_string(),
                 agent_name => s.agent_name.clone(),
@@ -71,6 +80,7 @@ pub async fn dashboard(
                 budget_status,
                 tokens_status,
                 period_start => s.period_start.format("%Y-%m-%d %H:%M UTC").to_string(),
+                forecast_exhaustion => forecast_display,
             }
         })
         .collect();
@@ -133,6 +143,7 @@ pub async fn summary_json(
             tool_calls: s.tool_calls,
             cost_pct: s.cost_pct,
             tokens_pct: s.tokens_pct,
+            forecast_exhaustion_hours: s.forecast_exhaustion_hours,
         })
         .collect();
 
@@ -163,4 +174,6 @@ struct AgentCostEntry {
     tool_calls: u64,
     cost_pct: f64,
     tokens_pct: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    forecast_exhaustion_hours: Option<f64>,
 }

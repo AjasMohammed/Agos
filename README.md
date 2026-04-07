@@ -61,6 +61,7 @@ AgentOS is a purpose-built operating environment where **LLMs are the primary us
 - **Rust 1.75+** ([rustup.rs](https://rustup.rs/))
 - **Linux** (seccomp sandboxing is Linux-only)
 - **Ollama** (optional, for local LLM inference) — [ollama.com](https://ollama.com/)
+- **PipeWire user tools** (optional, for `audio` feature) — `pw-cli`, `pw-record`, `pw-play`, `wpctl`
 
 ### Build
 
@@ -126,6 +127,9 @@ See [docs/guide/07-configuration.md](docs/guide/07-configuration.md) for full co
 ```bash
 cargo test --workspace
 cargo clippy --workspace -- -D warnings
+
+# Optional audio feature
+cargo build -p agentos-hal --features audio
 ```
 
 ---

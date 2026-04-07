@@ -499,6 +499,22 @@ impl Kernel {
                                         Duration::from_secs(72 * 3600), // 72h (Spec §5)
                                     );
 
+                                    // Prune checkpoints older than 72h.
+                                    {
+                                        let cp_store = kernel.checkpoint_store.clone();
+                                        tokio::spawn(async move {
+                                            match cp_store.prune_older_than(chrono::Duration::hours(72)).await {
+                                                Ok(0) => {}
+                                                Ok(n) => {
+                                                    tracing::info!(pruned = n, "Pruned {} expired checkpoints", n);
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(error = %e, "Checkpoint pruning failed");
+                                                }
+                                            }
+                                        });
+                                    }
+
                                     // Sweep expired notification waiters (blocking ask_user
                                     // questions whose timeout has fired). Fires auto_action
                                     // and wakes blocked tasks (Architecture Review ISSUE-6).
@@ -1274,7 +1290,11 @@ impl Kernel {
                 agent_name,
                 prompt,
                 autonomous,
-            } => self.cmd_run_task(agent_name, prompt, autonomous).await,
+                no_checkpoint,
+            } => {
+                self.cmd_run_task(agent_name, prompt, autonomous, no_checkpoint)
+                    .await
+            }
             KernelCommand::ListTasks => self.cmd_list_tasks().await,
             KernelCommand::SetSecret {
                 name,
@@ -1506,6 +1526,10 @@ impl Kernel {
                 snapshot_ref,
             } => self.cmd_rollback_task(task_id, snapshot_ref).await,
 
+            // Checkpoint recovery
+            KernelCommand::ResumeTask { task_id } => self.cmd_resume_task(task_id).await,
+            KernelCommand::ListCheckpoints => self.cmd_list_checkpoints().await,
+
             // Event system
             KernelCommand::EventSubscribe {
                 agent_name,
@@ -1625,14 +1649,16 @@ impl Kernel {
                 credential_key,
                 reply_topic,
                 server_url,
+                webhook_url,
             } => {
                 self.cmd_connect_channel(
                     kind,
-                    external_id,
+                    external_id.unwrap_or_default(),
                     display_name,
                     credential_key,
                     reply_topic,
                     server_url,
+                    webhook_url,
                 )
                 .await
             }

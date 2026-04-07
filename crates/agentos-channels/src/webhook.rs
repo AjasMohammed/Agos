@@ -69,31 +69,36 @@ impl ChannelAdapter for WebhookAdapter {
                 reason: e.to_string(),
             })?;
         let signature = self.sign(&body_bytes);
+        let client = &self.client;
+        let target_url = &self.target_url;
+        let policy = crate::retry::RetryPolicy::default();
 
-        let resp = self
-            .client
-            .post(&self.target_url)
-            .header("Content-Type", "application/json")
-            .header("X-AgentOS-Signature", signature)
-            .body(body_bytes)
-            .send()
-            .await
-            .map_err(|e| AgentOSError::ToolExecutionFailed {
-                tool_name: "webhook".to_string(),
-                reason: e.to_string(),
-            })?;
+        crate::retry::with_retry(&policy, "webhook", || async {
+            let resp = client
+                .post(target_url)
+                .header("Content-Type", "application/json")
+                .header("X-AgentOS-Signature", &signature)
+                .body(body_bytes.clone())
+                .send()
+                .await
+                .map_err(|e| AgentOSError::ToolExecutionFailed {
+                    tool_name: "webhook".to_string(),
+                    reason: e.to_string(),
+                })?;
 
-        if !resp.status().is_success() {
-            return Err(AgentOSError::ToolExecutionFailed {
-                tool_name: "webhook".to_string(),
-                reason: format!("Webhook delivery failed: {}", resp.status()),
-            });
-        }
+            if !resp.status().is_success() {
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name: "webhook".to_string(),
+                    reason: format!("Webhook delivery failed: {}", resp.status()),
+                });
+            }
 
-        Ok(DeliveryReceipt {
-            message_id: uuid::Uuid::new_v4().to_string(),
-            delivered_at: chrono::Utc::now(),
+            Ok(DeliveryReceipt {
+                message_id: uuid::Uuid::new_v4().to_string(),
+                delivered_at: chrono::Utc::now(),
+            })
         })
+        .await
     }
 
     async fn start_listener(

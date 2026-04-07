@@ -20,6 +20,17 @@ pub trait AgentTool: Send + Sync {
 
     /// Return the permissions this tool requires to operate.
     fn required_permissions(&self) -> Vec<(String, PermissionOp)>;
+
+    /// Return permissions required for this specific payload.
+    ///
+    /// Default behavior preserves legacy tools that declare a static
+    /// permission set across all actions.
+    fn required_permissions_for(
+        &self,
+        _payload: &serde_json::Value,
+    ) -> Vec<(String, PermissionOp)> {
+        self.required_permissions()
+    }
 }
 
 /// Context provided to the tool at execution time.

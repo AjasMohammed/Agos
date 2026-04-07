@@ -4,11 +4,18 @@ use agentos_types::AgentOSError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
+
+struct ManagedChannel {
+    adapter: Arc<dyn ChannelAdapter>,
+    listener_handle: JoinHandle<()>,
+    cancel: CancellationToken,
+}
 
 pub struct ChannelManager {
-    adapters: RwLock<HashMap<String, Arc<dyn ChannelAdapter>>>,
+    channels: RwLock<HashMap<String, ManagedChannel>>,
     pub inbound_tx: mpsc::Sender<InboundMessage>,
     cancel: CancellationToken,
 }
@@ -16,7 +23,7 @@ pub struct ChannelManager {
 impl ChannelManager {
     pub fn new(inbound_tx: mpsc::Sender<InboundMessage>, cancel: CancellationToken) -> Self {
         Self {
-            adapters: RwLock::new(HashMap::new()),
+            channels: RwLock::new(HashMap::new()),
             inbound_tx,
             cancel,
         }
@@ -27,52 +34,99 @@ impl ChannelManager {
         instance_id: &str,
         adapter: Arc<dyn ChannelAdapter>,
     ) -> Result<(), AgentOSError> {
-        let tx = self.inbound_tx.clone();
-        let cancel = self.cancel.child_token();
-        let adapter_clone = adapter.clone();
+        let child_cancel = self.cancel.child_token();
+        let handle = Self::spawn_listener(
+            adapter.clone(),
+            self.inbound_tx.clone(),
+            child_cancel.clone(),
+        );
 
-        tokio::spawn(async move {
-            if let Err(e) = adapter_clone.start_listener(tx, cancel).await {
-                tracing::error!("Channel listener failed: {}", e);
-            }
-        });
-
-        self.adapters
-            .write()
-            .await
-            .insert(instance_id.to_string(), adapter);
+        self.channels.write().await.insert(
+            instance_id.to_string(),
+            ManagedChannel {
+                adapter,
+                listener_handle: handle,
+                cancel: child_cancel,
+            },
+        );
         info!("Registered channel adapter: {}", instance_id);
         Ok(())
     }
 
+    fn spawn_listener(
+        adapter: Arc<dyn ChannelAdapter>,
+        tx: mpsc::Sender<InboundMessage>,
+        cancel: CancellationToken,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            if let Err(e) = adapter.start_listener(tx, cancel).await {
+                tracing::error!("Channel listener failed: {}", e);
+            }
+        })
+    }
+
     pub async fn send(&self, instance_id: &str, msg: OutboundMessage) -> Result<(), AgentOSError> {
-        let adapters = self.adapters.read().await;
-        let adapter =
-            adapters
+        let channels = self.channels.read().await;
+        let managed =
+            channels
                 .get(instance_id)
                 .ok_or_else(|| AgentOSError::ToolExecutionFailed {
                     tool_name: "channel_manager".to_string(),
                     reason: format!("channel {} not found", instance_id),
                 })?;
-        adapter.send(msg).await?;
+        managed.adapter.send(msg).await?;
         Ok(())
     }
 
     pub async fn health(&self) -> HashMap<String, ChannelHealth> {
-        let adapters = self.adapters.read().await;
+        let channels = self.channels.read().await;
         let mut results = HashMap::new();
-        for (id, adapter) in adapters.iter() {
-            results.insert(id.clone(), adapter.health_check().await);
+        for (id, managed) in channels.iter() {
+            results.insert(id.clone(), managed.adapter.health_check().await);
         }
         results
     }
 
+    /// Supervision loop: checks listener health every 30 seconds and restarts
+    /// any that have exited unexpectedly.
+    pub async fn supervise(&self, cancel: CancellationToken) {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = interval.tick() => {
+                    self.check_and_restart_listeners().await;
+                }
+            }
+        }
+    }
+
+    async fn check_and_restart_listeners(&self) {
+        let mut channels = self.channels.write().await;
+        for (id, managed) in channels.iter_mut() {
+            if managed.listener_handle.is_finished() {
+                warn!(channel = %id, "Listener died, restarting");
+                // Create a new child cancel token
+                let child_cancel = self.cancel.child_token();
+                let handle = Self::spawn_listener(
+                    managed.adapter.clone(),
+                    self.inbound_tx.clone(),
+                    child_cancel.clone(),
+                );
+                managed.listener_handle = handle;
+                managed.cancel = child_cancel;
+            }
+        }
+    }
+
     pub async fn deregister(&self, instance_id: &str) {
-        self.adapters.write().await.remove(instance_id);
+        if let Some(managed) = self.channels.write().await.remove(instance_id) {
+            managed.cancel.cancel();
+        }
     }
 
     pub async fn adapter_count(&self) -> usize {
-        self.adapters.read().await.len()
+        self.channels.read().await.len()
     }
 }
 

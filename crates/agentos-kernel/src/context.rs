@@ -1,7 +1,7 @@
 use crate::config::{ContextConfig, SummarizationMode};
 use crate::cost_tracker::CostTracker;
 use agentos_types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -10,6 +10,23 @@ struct TaskContext {
     window: ContextWindow,
     /// The agent that owns this task's context. Used by LLM summarization.
     agent_id: AgentID,
+    /// Child task results already injected into this context window (idempotency guard).
+    injected_sub_agents: HashSet<TaskID>,
+    /// True once the task's original_prompt has been pushed into the context window.
+    /// Prevents `setup_task_context` from pushing a duplicate prompt when a task is
+    /// resumed after escalation or checkpoint restore.
+    prompt_pushed: bool,
+}
+
+/// Serializable snapshot of a task's context, persisted by the checkpoint store.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistedTaskContext {
+    pub window: ContextWindow,
+    pub agent_id: AgentID,
+    /// Tracks which sub-agent results have already been injected.
+    /// `#[serde(default)]` ensures old checkpoint blobs can be deserialized.
+    #[serde(default)]
+    pub injected_sub_agents: Vec<TaskID>,
 }
 
 pub struct ContextManager {
@@ -68,12 +85,25 @@ impl ContextManager {
 
     /// Create a new context window for a task with the system prompt.
     /// The system prompt is pinned with maximum importance.
+    ///
+    /// **Idempotent**: if a context window was pre-seeded via `seed_from_slice`
+    /// (e.g. by a parent spawning a child with context handoff), the existing
+    /// window is preserved and only the `agent_id` is updated. Overwriting here
+    /// would silently discard the parent context slice.
     pub async fn create_context(
         &self,
         task_id: TaskID,
         agent_id: AgentID,
         system_prompt: &str,
     ) -> ContextID {
+        let mut tasks = self.tasks.write().await;
+
+        // If a context window was pre-seeded, preserve it.
+        if let Some(tc) = tasks.get_mut(&task_id) {
+            tc.agent_id = agent_id;
+            return tc.window.id;
+        }
+
         let mut window =
             ContextWindow::with_strategy(self.max_entries, OverflowStrategy::SemanticEviction);
         let context_id = window.id;
@@ -91,10 +121,15 @@ impl ContextManager {
             is_summary: false,
         });
 
-        self.tasks
-            .write()
-            .await
-            .insert(task_id, TaskContext { window, agent_id });
+        tasks.insert(
+            task_id,
+            TaskContext {
+                window,
+                agent_id,
+                injected_sub_agents: HashSet::new(),
+                prompt_pushed: false,
+            },
+        );
         context_id
     }
 
@@ -114,6 +149,8 @@ impl ContextManager {
                 OverflowStrategy::SemanticEviction,
             ),
             agent_id,
+            injected_sub_agents: HashSet::new(),
+            prompt_pushed: false,
         });
         for entry in &slice.messages {
             tc.window.push(entry.clone());
@@ -153,6 +190,14 @@ impl ContextManager {
         };
         let mut tasks = self.tasks.write().await;
         if let Some(tc) = tasks.get_mut(&parent_task_id) {
+            if !tc.injected_sub_agents.insert(result.child_task_id) {
+                tracing::debug!(
+                    parent_task_id = %parent_task_id,
+                    child_task_id = %result.child_task_id,
+                    "inject_sub_agent_result: duplicate injection skipped"
+                );
+                return Ok(());
+            }
             tc.window.push(entry);
         } else {
             tracing::warn!(
@@ -162,6 +207,26 @@ impl ContextManager {
             );
         }
         Ok(())
+    }
+
+    /// Returns `true` if the task's original prompt has already been pushed into
+    /// the context window. Used by `setup_task_context` to prevent duplicate pushes
+    /// on task resume (escalation approval, checkpoint restore).
+    pub async fn is_prompt_pushed(&self, task_id: &TaskID) -> bool {
+        let tasks = self.tasks.read().await;
+        tasks
+            .get(task_id)
+            .map(|tc| tc.prompt_pushed)
+            .unwrap_or(false)
+    }
+
+    /// Mark the task's original prompt as pushed so future `setup_task_context`
+    /// calls on the same task (e.g. after resume) skip the duplicate push.
+    pub async fn mark_prompt_pushed(&self, task_id: &TaskID) {
+        let mut tasks = self.tasks.write().await;
+        if let Some(tc) = tasks.get_mut(task_id) {
+            tc.prompt_pushed = true;
+        }
     }
 
     /// Build a `ContextSlice` from the last `n` active entries of a task's context window.

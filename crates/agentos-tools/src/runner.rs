@@ -4,9 +4,15 @@ use crate::agent_message::AgentMessageTool;
 use crate::archival_insert::ArchivalInsert;
 use crate::archival_search::ArchivalSearch;
 use crate::ask_user::AskUserTool;
-use crate::coordination::{AwaitAgentsTool, SpawnAgentTool};
+use crate::audio::AudioTool;
+use crate::bluetooth::BluetoothTool;
+use crate::cancel_agent::CancelAgentTool;
+use crate::context_memory_read::ContextMemoryReadTool;
+use crate::context_memory_update::ContextMemoryUpdateTool;
+use crate::coordination::{AwaitAgentsTool, SpawnAgentTool, VerifyOutputTool};
 use crate::data_parser::DataParser;
 use crate::datetime::DatetimeTool;
+use crate::display::DisplayConfigTool;
 use crate::episodic_list::EpisodicList;
 use crate::escalation_status::EscalationStatusTool;
 use crate::file_delete::FileDelete;
@@ -32,11 +38,14 @@ use crate::memory_stats::MemoryStats;
 use crate::memory_write::MemoryWrite;
 use crate::network_monitor::NetworkMonitorTool;
 use crate::notify_user::NotifyUserTool;
+use crate::poll_agent::PollAgentTool;
+use crate::printer::PrinterTool;
 use crate::procedure_create::ProcedureCreate;
 use crate::procedure_delete::ProcedureDelete;
 use crate::procedure_list::ProcedureList;
 use crate::procedure_search::ProcedureSearch;
 use crate::process_manager::ProcessManagerTool;
+use crate::raw_usb::RawUsbTool;
 use crate::shell_exec::ShellExec;
 use crate::sys_monitor::SysMonitorTool;
 use crate::task_delegate::TaskDelegate;
@@ -44,7 +53,9 @@ use crate::task_list::TaskListTool;
 use crate::task_status::TaskStatusTool;
 use crate::think::ThinkTool;
 use crate::traits::{AgentTool, ToolExecutionContext};
+use crate::usb_storage::UsbStorageTool;
 use crate::web_fetch::WebFetch;
+use crate::webcam::WebcamTool;
 use agentos_memory::{Embedder, EpisodicStore, ProceduralStore, SemanticStore};
 use agentos_types::*;
 use std::collections::HashMap;
@@ -158,6 +169,8 @@ impl ToolRunner {
         self.register(Box::new(MemoryBlockReadTool::new()));
         self.register(Box::new(MemoryBlockListTool::new()));
         self.register(Box::new(MemoryBlockDeleteTool::new()));
+        self.register(Box::new(ContextMemoryReadTool::new()));
+        self.register(Box::new(ContextMemoryUpdateTool::new()));
         self.register(Box::new(DataParser::new()));
         self.register(Box::new(ShellExec::new()));
         self.register(Box::new(AgentMessageTool::new()));
@@ -171,6 +184,13 @@ impl ToolRunner {
         self.register(Box::new(LogReaderTool::new()));
         self.register(Box::new(NetworkMonitorTool::new()));
         self.register(Box::new(HardwareInfoTool::new()));
+        self.register(Box::new(AudioTool::new()));
+        self.register(Box::new(BluetoothTool::new()));
+        self.register(Box::new(DisplayConfigTool::new()));
+        self.register(Box::new(PrinterTool::new()));
+        self.register(Box::new(RawUsbTool::new()));
+        self.register(Box::new(UsbStorageTool::new()));
+        self.register(Box::new(WebcamTool::new()));
         self.register(Box::new(ThinkTool::new()));
         self.register(Box::new(DatetimeTool::new()));
         match WebFetch::new() {
@@ -187,6 +207,9 @@ impl ToolRunner {
         self.register(Box::new(AgentCallTool::new()));
         self.register(Box::new(SpawnAgentTool::new()));
         self.register(Box::new(AwaitAgentsTool::new()));
+        self.register(Box::new(VerifyOutputTool::new()));
+        self.register(Box::new(PollAgentTool::new()));
+        self.register(Box::new(CancelAgentTool::new()));
     }
 
     pub fn register(&mut self, tool: Box<dyn AgentTool>) {
@@ -259,7 +282,7 @@ impl ToolRunner {
             .ok_or_else(|| AgentOSError::ToolNotFound(tool_name.to_string()))?;
 
         // Defense-in-depth: verify permissions at the tool layer
-        let required = tool.required_permissions();
+        let required = tool.required_permissions_for(&payload);
         for (resource, op) in &required {
             if !context.permissions.check(resource, *op) {
                 tracing::warn!(

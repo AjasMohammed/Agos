@@ -233,6 +233,7 @@ mod tests {
                 signature: None,
                 trust_tier,
                 tags: None,
+                capability_tags: vec![],
             },
             capabilities_required: ToolCapabilities {
                 permissions: vec!["fs.read".into()],
@@ -255,6 +256,7 @@ mod tests {
                 weight: None,
             },
             executor: ToolExecutor::default(),
+            fallbacks: vec![],
         }
     }
 

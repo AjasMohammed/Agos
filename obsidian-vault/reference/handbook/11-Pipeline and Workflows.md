@@ -24,7 +24,7 @@ A pipeline is a YAML-defined workflow composed of sequential or parallel steps. 
 
 Steps can declare dependencies on other steps (`depends_on`), pass outputs forward via named variables (`output_var`), and specify what to do if they fail (`on_failure`). The pipeline engine topologically sorts steps to respect dependency order before executing them.
 
-The kernel's `PipelineEngine` (`crates/agentos-pipeline/src/engine.rs`) validates the pipeline, resolves variables via `{{double-brace}}` template syntax, enforces timeouts per step, and retries steps up to `retry_on_failure` times before applying the failure policy.
+The kernel's `PipelineEngine` (`crates/agentos-pipeline/src/engine.rs`) validates the pipeline, resolves variables via `{{double-brace}}` template syntax, enforces timeouts per step, retries steps up to `retry_on_failure` times before applying the failure policy, and executes independent steps concurrently using wave-based parallel execution.
 
 ---
 
@@ -172,6 +172,76 @@ Example — graceful degradation:
 ```
 
 If `sentiment` fails, `{{sentiment_label}}` resolves to `"unknown"` and `report` still runs.
+
+---
+
+## Wave-Based Parallel Execution
+
+The pipeline engine uses a **wave-based** execution model to maximize throughput. Instead of executing steps strictly one-by-one, it builds a dependency graph and identifies "waves" of independent steps that can run concurrently.
+
+### How It Works
+
+1. **Build dependency graph** — the engine constructs an in-degree map from each step's `depends_on` list
+2. **Identify wave** — all steps with in-degree 0 (no unresolved dependencies) form the current wave
+3. **Execute wave concurrently** — all steps in the wave run in parallel via `futures::future::join_all`
+4. **Process results** — completed step outputs are stored in the variable context; dependents' in-degrees are decremented
+5. **Repeat** — the next wave is identified and executed until all steps are complete
+
+Steps within the same wave read from the same context snapshot — they cannot see each other's outputs. Outputs become available to the next wave.
+
+### Circular Dependency Detection
+
+If at any iteration no steps have in-degree 0 but uncompleted steps remain, the engine detects a circular dependency and fails the pipeline run with an error.
+
+### Example
+
+```yaml
+steps:
+  - id: fetch-a
+    agent: researcher
+    task: "Fetch data from source A"
+    output_var: data_a
+
+  - id: fetch-b
+    agent: researcher
+    task: "Fetch data from source B"
+    output_var: data_b
+
+  - id: merge
+    agent: analyst
+    task: "Merge {{data_a}} and {{data_b}}"
+    depends_on: [fetch-a, fetch-b]
+```
+
+Wave 1 executes `fetch-a` and `fetch-b` concurrently. Wave 2 executes `merge` after both complete.
+
+---
+
+## Budget Enforcement
+
+The pipeline engine checks the agent's budget before each wave. If the budget is exhausted, the pipeline fails immediately with a budget error rather than starting additional steps that cannot complete.
+
+The `PipelineExecutor` trait exposes a `check_budget()` method that the kernel implements by querying the `CostTracker`:
+
+```rust
+#[async_trait]
+pub trait PipelineExecutor: Send + Sync {
+    async fn run_agent_task(&self, agent_name: &str, prompt: &str) -> Result<String, AgentOSError>;
+    async fn run_tool(&self, tool_name: &str, input: Value) -> Result<String, AgentOSError>;
+    async fn check_budget(&self) -> Result<(), AgentOSError> { Ok(()) }
+}
+```
+
+---
+
+## Variable Sanitization
+
+Template variables are sanitized differently depending on context:
+
+- **Tool step inputs** (JSON context) — values are escaped via `serde_json` serialization to handle quotes, backslashes, and control characters safely
+- **Agent step prompts** (LLM context) — user-derived values (any variable not in the built-in set `run_id`, `date`, `timestamp`) are wrapped in `<user_data>` tags with tag-boundary escaping to prevent prompt injection
+
+Built-in variables (`{{run_id}}`, `{{date}}`, `{{timestamp}}`) are kernel-controlled and interpolated without sanitization.
 
 ---
 

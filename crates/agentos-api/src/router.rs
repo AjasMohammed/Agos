@@ -23,7 +23,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::api_key::ApiKeyStore;
 use crate::handlers::{
-    agents, audit, chat, costs, notifications, pipelines, secrets, system, tasks, tools,
+    agents, audit, chat, costs, notifications, pipelines, secrets, system, tasks, tools, webhooks,
 };
 use crate::service::KernelService;
 use crate::ws;
@@ -63,7 +63,12 @@ pub fn build_router(
     // ── Public routes (no auth via header — WS uses query param) ────────
     let public_routes = Router::new()
         .route("/api/v1/health", get(system::health))
-        .route("/api/v1/ws", get(ws::ws_upgrade));
+        .route("/api/v1/ws", get(ws::ws_upgrade))
+        // Telegram webhook — public, authenticated via secret_token header.
+        .route(
+            "/api/v1/webhooks/telegram/{channel_id}",
+            post(webhooks::telegram_webhook),
+        );
 
     // ── Protected routes (require Bearer token) ─────────────────────────
     let protected_routes = Router::new()

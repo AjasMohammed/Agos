@@ -883,6 +883,7 @@ mod tests {
                 signature: None,
                 trust_tier: TrustTier::Core,
                 tags: None,
+                capability_tags: vec![],
             },
             capabilities_required: ToolCapabilities {
                 permissions: permissions.into_iter().map(str::to_string).collect(),
@@ -903,6 +904,7 @@ mod tests {
                 weight: None,
             },
             executor: ToolExecutor::default(),
+            fallbacks: vec![],
         }
     }
 

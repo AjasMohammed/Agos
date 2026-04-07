@@ -6,11 +6,15 @@ pub mod agent_self;
 pub mod archival_insert;
 pub mod archival_search;
 pub mod ask_user;
+pub mod audio;
+pub mod bluetooth;
+pub mod cancel_agent;
 pub mod context_memory_read;
 pub mod context_memory_update;
 pub mod coordination;
 pub mod data_parser;
 pub mod datetime;
+pub mod display;
 pub mod episodic_list;
 pub mod escalation_status;
 pub mod factory;
@@ -38,11 +42,14 @@ pub mod memory_stats;
 pub mod memory_write;
 pub mod network_monitor;
 pub mod notify_user;
+pub mod poll_agent;
+pub mod printer;
 pub mod procedure_create;
 pub mod procedure_delete;
 pub mod procedure_list;
 pub mod procedure_search;
 pub mod process_manager;
+pub mod raw_usb;
 pub mod runner;
 pub mod sanitize;
 pub mod scratch_delete;
@@ -62,6 +69,7 @@ pub mod think;
 pub mod traits;
 pub mod usb_storage;
 pub mod web_fetch;
+pub mod webcam;
 pub mod workspace;
 
 pub use agent_call::AgentCallTool;
@@ -72,9 +80,13 @@ pub use agent_self::AgentSelfTool;
 pub use archival_insert::ArchivalInsert;
 pub use archival_search::ArchivalSearch;
 pub use ask_user::AskUserTool;
+pub use audio::AudioTool;
+pub use bluetooth::BluetoothTool;
+pub use cancel_agent::CancelAgentTool;
 pub use coordination::{AwaitAgentsTool, SpawnAgentTool};
 pub use data_parser::DataParser;
 pub use datetime::DatetimeTool;
+pub use display::DisplayConfigTool;
 pub use episodic_list::EpisodicList;
 pub use factory::{
     build_single_tool, build_single_tool_with_model_cache,
@@ -105,11 +117,14 @@ pub use memory_stats::MemoryStats;
 pub use memory_write::MemoryWrite;
 pub use network_monitor::NetworkMonitorTool;
 pub use notify_user::NotifyUserTool;
+pub use poll_agent::PollAgentTool;
+pub use printer::PrinterTool;
 pub use procedure_create::ProcedureCreate;
 pub use procedure_delete::ProcedureDelete;
 pub use procedure_list::ProcedureList;
 pub use procedure_search::ProcedureSearch;
 pub use process_manager::ProcessManagerTool;
+pub use raw_usb::RawUsbTool;
 pub use runner::ToolRunner;
 pub use scratch_delete::ScratchDeleteTool;
 pub use scratch_graph::ScratchGraphTool;
@@ -125,7 +140,9 @@ pub use task_list::TaskListTool;
 pub use task_status::TaskStatusTool;
 pub use think::ThinkTool;
 pub use traits::{AgentTool, ToolExecutionContext};
+pub use usb_storage::UsbStorageTool;
 pub use web_fetch::WebFetch;
+pub use webcam::WebcamTool;
 
 #[cfg(test)]
 mod tests {
@@ -1906,6 +1923,7 @@ mod tests {
                 permissions: vec!["fs.user_data:r".into()],
                 input_schema: None,
                 trust_tier: "core".into(),
+                capability_tags: vec![],
             },
             crate::agent_manual::ToolSummary {
                 name: "http-client".into(),
@@ -1914,6 +1932,7 @@ mod tests {
                 permissions: vec!["network.outbound:x".into()],
                 input_schema: None,
                 trust_tier: "core".into(),
+                capability_tags: vec![],
             },
         ];
         let tool = crate::agent_manual::AgentManualTool::new(summaries);
@@ -1941,6 +1960,7 @@ mod tests {
                 serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
             ),
             trust_tier: "core".into(),
+            capability_tags: vec![],
         }];
         let tool = crate::agent_manual::AgentManualTool::new(summaries);
         let ctx = make_context(dir.path());
@@ -2132,6 +2152,7 @@ mod tests {
             permissions: vec![],
             input_schema: None,
             trust_tier: "core".into(),
+            capability_tags: vec![],
         }]);
         let tools = runner.list_tools();
         assert!(tools.contains(&"agent-manual".to_string()));

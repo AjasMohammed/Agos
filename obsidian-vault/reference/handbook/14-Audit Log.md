@@ -22,7 +22,7 @@ The audit log is an append-only SQLite database stored at the path configured by
 Key properties:
 
 - **Append-only** — entries are never deleted by normal operation (only pruned by retention policy)
-- **83 event types** across 18 categories, covering the full agent lifecycle
+- **85+ event types** across 18 categories, covering the full agent lifecycle
 - **Merkle chain** — tamper-evident via `prev_hash` / `entry_hash` columns
 - **WAL journal mode** — concurrent reads during writes
 
@@ -199,6 +199,13 @@ All 83 event types, grouped by category:
 | `DeviceApproved` | A device is approved for use |
 | `DeviceQuarantined` | A device is placed in quarantine |
 | `DeviceAccessEscalated` | A device access request is escalated for human review |
+
+### Peripheral Device Operations
+
+| Event Type | When |
+|---|---|
+| `PrintJobSubmitted` | A print job is submitted via the printer HAL driver |
+| `PrintJobCancelled` | A print job is cancelled via the printer HAL driver |
 
 ### Pubkey Events
 

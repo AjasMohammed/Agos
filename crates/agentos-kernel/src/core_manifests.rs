@@ -47,9 +47,18 @@ impl Kernel {
             "archival-search.toml",
             include_str!("../../../tools/core/archival-search.toml"),
         ),
+        ("audio.toml", include_str!("../../../tools/core/audio.toml")),
+        (
+            "bluetooth.toml",
+            include_str!("../../../tools/core/bluetooth.toml"),
+        ),
         (
             "datetime.toml",
             include_str!("../../../tools/core/datetime.toml"),
+        ),
+        (
+            "display-config.toml",
+            include_str!("../../../tools/core/display-config.toml"),
         ),
         (
             "episodic-list.toml",
@@ -128,6 +137,14 @@ impl Kernel {
             include_str!("../../../tools/core/network-monitor.toml"),
         ),
         (
+            "printer.toml",
+            include_str!("../../../tools/core/printer.toml"),
+        ),
+        (
+            "raw-usb.toml",
+            include_str!("../../../tools/core/raw-usb.toml"),
+        ),
+        (
             "procedure-create.toml",
             include_str!("../../../tools/core/procedure-create.toml"),
         ),
@@ -172,6 +189,14 @@ impl Kernel {
             include_str!("../../../tools/core/task-status.toml"),
         ),
         ("think.toml", include_str!("../../../tools/core/think.toml")),
+        (
+            "usb-storage.toml",
+            include_str!("../../../tools/core/usb-storage.toml"),
+        ),
+        (
+            "webcam.toml",
+            include_str!("../../../tools/core/webcam.toml"),
+        ),
         (
             "web-fetch.toml",
             include_str!("../../../tools/core/web-fetch.toml"),

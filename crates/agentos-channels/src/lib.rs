@@ -1,6 +1,7 @@
 pub mod discord;
 pub mod email;
 pub mod manager;
+pub mod retry;
 pub mod slack;
 pub mod telegram;
 pub mod types;

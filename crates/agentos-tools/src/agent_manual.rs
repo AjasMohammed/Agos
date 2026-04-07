@@ -21,6 +21,8 @@ pub enum ManualSection {
     Tasks,
     Procedural,
     Escalation,
+    Coordination,
+    Suggest,
 }
 
 impl ManualSection {
@@ -42,6 +44,8 @@ impl ManualSection {
             "tasks" => Some(Self::Tasks),
             "procedural" => Some(Self::Procedural),
             "escalation" => Some(Self::Escalation),
+            "coordination" => Some(Self::Coordination),
+            "suggest" => Some(Self::Suggest),
             _ => None,
         }
     }
@@ -62,6 +66,8 @@ impl ManualSection {
             "tasks",
             "procedural",
             "escalation",
+            "coordination",
+            "suggest",
         ]
     }
 }
@@ -79,6 +85,8 @@ pub struct ToolSummary {
     pub input_schema: Option<serde_json::Value>,
     /// Trust tier: "core", "verified", "community"
     pub trust_tier: String,
+    /// Semantic capability tags for discoverability.
+    pub capability_tags: Vec<String>,
 }
 
 /// The agent-manual tool. Provides queryable OS documentation.
@@ -281,6 +289,7 @@ impl AgentManualTool {
                 permissions: t.manifest.capabilities_required.permissions.clone(),
                 input_schema: t.manifest.input_schema.clone(),
                 trust_tier: format!("{:?}", t.manifest.manifest.trust_tier).to_lowercase(),
+                capability_tags: t.manifest.manifest.capability_tags.clone(),
             })
             .collect()
     }
@@ -301,7 +310,9 @@ impl AgentManualTool {
                 {"name": "agents", "description": "Peer discovery, agent-message, and task delegation patterns"},
                 {"name": "tasks", "description": "Task lifecycle, status inspection, and task-list usage"},
                 {"name": "procedural", "description": "Procedural memory: record and retrieve step-by-step procedures"},
-                {"name": "escalation", "description": "Escalation workflows: when and how to escalate to human operators"}
+                {"name": "escalation", "description": "Escalation workflows: when and how to escalate to human operators"},
+                {"name": "suggest", "description": "Find tools by intent — pass a 'query' string describing what you want to do"},
+                {"name": "coordination", "description": "Multi-agent coordination: spawn sub-agents, await results, verify outputs, run teams"}
             ],
             "usage": "Call agent-manual with {\"section\": \"<name>\"} to get details. For tool-detail, also pass {\"name\": \"<tool-name>\"}."
         }))
@@ -807,6 +818,135 @@ impl AgentManualTool {
             "example": "[FEEDBACK]\ncategory: bug\nseverity: medium\ncomponent: file-reader\ndescription: file-reader returns empty content for symlinked files\nexpected: Should follow symlink and return target file content\nactual: Returns {\"content\": \"\", \"size_bytes\": 0}\n[/FEEDBACK]"
         }))
     }
+
+    fn section_coordination(&self) -> Result<serde_json::Value, AgentOSError> {
+        Ok(serde_json::json!({
+            "section": "coordination",
+            "title": "Multi-Agent Coordination",
+            "summary": "Spawn sub-agents, hand off context, await results, verify outputs, and run agent teams.",
+            "subsections": [
+                {
+                    "title": "Spawn a Sub-Agent",
+                    "content": "Use 'spawn-agent' with {\"agent\": \"<name>\", \"prompt\": \"<task>\", \"permissions\": [], \"context_messages\": 10}. The kernel creates a child task linked to your current task. You receive a task_id you can later pass to await-agents. Required permission: agent.spawn:x. Risk level: HardApproval (requires operator approval on first use)."
+                },
+                {
+                    "title": "Await Sub-Agent Results",
+                    "content": "Use 'await-agents' with {\"task_ids\": [\"<id1>\", \"<id2>\"]}. Your task pauses until all specified children complete. Their results are injected into your context as [SUB-AGENT RESULT] blocks. Required permission: agent.spawn:x."
+                },
+                {
+                    "title": "Verify an Output",
+                    "content": "Use 'verify-output' with {\"agent\": \"<verifier>\", \"output\": \"<text to check>\", \"criteria\": \"correctness and safety\"}. Spawns a critic agent that evaluates the output and returns {\"verdict\": \"pass|fail|needs_revision\", \"issues\": [...], \"summary\": \"...\"}. Required permission: agent.spawn:x."
+                },
+                {
+                    "title": "Context Handoff",
+                    "content": "When spawning, set context_messages to control how many of your recent context entries the child receives (default 10, max 100). Set to 0 for a clean-slate child. The child sees your messages as background context but has its own independent context window."
+                },
+                {
+                    "title": "Spawn Depth Limit",
+                    "content": "The kernel enforces a maximum spawn depth of 5. Root tasks have depth 0, their children depth 1, etc. Attempts to spawn beyond the limit are rejected. Plan your agent hierarchy accordingly."
+                },
+                {
+                    "title": "Cascading Cancellation",
+                    "content": "If your task is cancelled, all your spawned children are also cancelled automatically. Design child tasks to be independently useful — do not rely on the parent staying alive to collect results."
+                },
+                {
+                    "title": "Poll Sub-Agent Progress",
+                    "content": "Use 'poll-agent' with {\"task_ids\": [\"<id1>\"], \"include_progress\": true}. Non-blocking check that returns the current state, iteration count, and recent messages from each child task. Use this to monitor long-running children without blocking. Required permission: agent.spawn:x."
+                },
+                {
+                    "title": "Cancel a Sub-Agent",
+                    "content": "Use 'cancel-agent' with {\"task_id\": \"<id>\", \"reason\": \"off-track\"}. Cancels the specified child task and cascades to any grandchildren. Only the parent agent can cancel its children. Required permission: agent.spawn:x."
+                },
+                {
+                    "title": "Best Practices",
+                    "content": "Break complex tasks into subtasks that can run in parallel. Spawn multiple children, then await them all at once. Use verify-output for safety-critical results. Use poll-agent to monitor long-running children. Cancel children that go off-track early to save tokens. Keep context_messages low (5-10) unless the child needs extensive conversation history."
+                }
+            ]
+        }))
+    }
+
+    /// Suggest tools based on a free-text query, using keyword scoring.
+    fn section_suggest(&self, query: &str) -> Result<serde_json::Value, AgentOSError> {
+        let query_lower = query.to_lowercase();
+        let query_words: Vec<&str> = query_lower.split_whitespace().collect();
+
+        // Score each tool by keyword overlap with query
+        let mut scored: Vec<(usize, f64)> = self
+            .tool_summaries
+            .iter()
+            .enumerate()
+            .map(|(i, ts)| {
+                let mut corpus = format!(
+                    "{} {} {}",
+                    ts.name,
+                    ts.description,
+                    ts.capability_tags.join(" ")
+                )
+                .to_lowercase();
+                // Also include the tool name with hyphens replaced
+                corpus.push(' ');
+                corpus.push_str(&ts.name.replace('-', " "));
+
+                let mut score = 0.0f64;
+                for word in &query_words {
+                    if word.len() < 2 {
+                        continue;
+                    }
+                    if corpus.contains(word) {
+                        score += 1.0;
+                        // Boost for name match
+                        if ts.name.to_lowercase().contains(word) {
+                            score += 0.5;
+                        }
+                        // Boost for tag match
+                        if ts
+                            .capability_tags
+                            .iter()
+                            .any(|t| t.to_lowercase().contains(word))
+                        {
+                            score += 0.3;
+                        }
+                    }
+                }
+                // Normalize by query word count
+                if !query_words.is_empty() {
+                    score /= query_words.len() as f64;
+                }
+                (i, score)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let top_k = 5;
+        let min_score = 0.3;
+        let suggestions: Vec<serde_json::Value> = scored
+            .iter()
+            .take(top_k)
+            .filter(|(_, score)| *score >= min_score)
+            .map(|(idx, score)| {
+                let ts = &self.tool_summaries[*idx];
+                serde_json::json!({
+                    "tool": ts.name,
+                    "description": ts.description,
+                    "relevance": format!("{:.2}", score),
+                    "permissions": ts.permissions,
+                    "capability_tags": ts.capability_tags,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "section": "suggest",
+            "query": query,
+            "suggestions": suggestions,
+            "hint": if suggestions.is_empty() {
+                "No tools matched your query. Try broader terms or use section 'tools' for a full listing."
+            } else {
+                "Use section 'tool-detail' with the tool name for full documentation."
+            }
+        }))
+    }
 }
 
 #[async_trait]
@@ -867,6 +1007,18 @@ impl AgentTool for AgentManualTool {
             ManualSection::Tasks => self.section_tasks(),
             ManualSection::Procedural => self.section_procedural(),
             ManualSection::Escalation => self.section_escalation(),
+            ManualSection::Coordination => self.section_coordination(),
+            ManualSection::Suggest => {
+                let query = payload
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        AgentOSError::SchemaValidation(
+                            "suggest section requires 'query' field".into(),
+                        )
+                    })?;
+                self.section_suggest(query)
+            }
         }
     }
 }
@@ -920,12 +1072,16 @@ mod tests {
             ManualSection::from_str("escalation"),
             Some(ManualSection::Escalation)
         );
+        assert_eq!(
+            ManualSection::from_str("coordination"),
+            Some(ManualSection::Coordination)
+        );
         assert_eq!(ManualSection::from_str("nonexistent"), None);
     }
 
     #[test]
     fn test_all_names_count() {
-        assert_eq!(ManualSection::all_names().len(), 13);
+        assert_eq!(ManualSection::all_names().len(), 15);
     }
 
     #[test]
@@ -943,6 +1099,7 @@ mod tests {
                 permissions: vec!["fs.user_data:r".into()],
                 input_schema: None,
                 trust_tier: "core".into(),
+                capability_tags: vec!["file-io".into(), "reading".into()],
             },
             ToolSummary {
                 name: "http-client".into(),
@@ -951,6 +1108,7 @@ mod tests {
                 permissions: vec!["network.outbound:x".into()],
                 input_schema: None,
                 trust_tier: "core".into(),
+                capability_tags: vec!["network".into(), "api".into(), "web".into()],
             },
         ]
     }
@@ -960,7 +1118,7 @@ mod tests {
         let tool = AgentManualTool::new(vec![]);
         let result = tool.section_index().unwrap();
         let sections = result["sections"].as_array().unwrap();
-        assert_eq!(sections.len(), 12); // index is not listed in index
+        assert_eq!(sections.len(), 14); // index is not listed in index
     }
 
     #[test]
@@ -1017,6 +1175,7 @@ mod tests {
                 }
             })),
             trust_tier: "core".into(),
+            capability_tags: vec![],
         }]);
 
         let result = tool.section_tool_detail("file-reader").unwrap();
@@ -1185,5 +1344,21 @@ mod tests {
             .collect();
         assert!(titles.iter().any(|t| t.contains("Record")));
         assert!(titles.iter().any(|t| t.contains("Find")));
+    }
+
+    #[test]
+    fn test_section_coordination_has_subsections() {
+        let tool = AgentManualTool::new(vec![]);
+        let result = tool.section_coordination().unwrap();
+        assert_eq!(result["section"], "coordination");
+        let subsections = result["subsections"].as_array().unwrap();
+        assert!(subsections.len() >= 5);
+        let titles: Vec<&str> = subsections
+            .iter()
+            .filter_map(|s| s["title"].as_str())
+            .collect();
+        assert!(titles.iter().any(|t| t.contains("Spawn")));
+        assert!(titles.iter().any(|t| t.contains("Await")));
+        assert!(titles.iter().any(|t| t.contains("Verify")));
     }
 }

@@ -1,0 +1,50 @@
+{% macro render_node(node) %}
+{% set has_children = node.children|length > 0 %}
+{% if has_children %}
+<details class="dag-node" open>
+    <summary>
+        <div class="dag-node-summary">
+            <span class="badge {{ node.state_class }}">{{ node.state }}</span>
+            <a href="/tasks/{{ node.id }}"><code class="id-short">{{ node.short_id }}</code></a>
+            <strong>{{ node.agent_name }}</strong>
+            <span class="muted">depth {{ node.spawn_depth }}</span>
+            <span class="muted">{{ node.duration_label }}</span>
+            <span class="muted">{{ node.child_count }} child{% if node.child_count != 1 %}ren{% endif %}</span>
+        </div>
+        <div class="dag-node-meta">
+            <span>{{ node.prompt_preview }}</span>
+        </div>
+    </summary>
+    <div class="dag-children">
+        {% for child in node.children %}
+        {{ render_node(child) }}
+        {% endfor %}
+    </div>
+</details>
+{% else %}
+<article class="dag-node dag-leaf">
+    <div class="dag-node-summary">
+        <span class="badge {{ node.state_class }}">{{ node.state }}</span>
+        <a href="/tasks/{{ node.id }}"><code class="id-short">{{ node.short_id }}</code></a>
+        <strong>{{ node.agent_name }}</strong>
+        <span class="muted">depth {{ node.spawn_depth }}</span>
+        <span class="muted">{{ node.duration_label }}</span>
+    </div>
+    <div class="dag-node-meta">
+        <span>{{ node.prompt_preview }}</span>
+    </div>
+</article>
+{% endif %}
+{% endmacro %}
+
+<div id="dag-tree" class="dag-tree">
+    {% if nodes|length == 0 %}
+    {% with icon="▶", title="No tasks in the scheduler", message="The DAG will populate as soon as agents start spawning work." %}
+    {% include "partials/empty_state.html" %}
+    {% endwith %}
+    {% else %}
+    {% for node in nodes %}
+    {{ render_node(node) }}
+    {% endfor %}
+    {% endif %}
+</div>

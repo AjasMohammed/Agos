@@ -56,6 +56,9 @@ pub enum KernelCommand {
         /// When true, runs without iteration/timeout limits (autonomous mode).
         #[serde(default)]
         autonomous: bool,
+        /// When true, the task executor skips checkpoint writes (ephemeral execution).
+        #[serde(default)]
+        no_checkpoint: bool,
     },
     ListTasks,
     GetTaskLogs {
@@ -97,6 +100,12 @@ pub enum KernelCommand {
     TeamStatus {
         team_task_id: TaskID,
     },
+    /// Resume a task from its latest checkpoint.
+    ResumeTask {
+        task_id: TaskID,
+    },
+    /// List all tasks that have checkpoints available for resume.
+    ListCheckpoints,
     /// Retrieve the execution trace for a completed task.
     TaskGetTrace {
         task_id: TaskID,
@@ -448,7 +457,10 @@ pub enum KernelCommand {
     ConnectChannel {
         kind: agentos_types::ChannelKind,
         /// Channel-specific external identifier (Telegram chat_id, ntfy topic, email address).
-        external_id: String,
+        /// Optional for Telegram — when omitted, the adapter auto-discovers the chat_id
+        /// from the first inbound message after the user sends `/start` to the bot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        external_id: Option<String>,
         display_name: String,
         /// Vault key where the credential (bot token, password) is stored.
         #[serde(default)]
@@ -459,6 +471,10 @@ pub enum KernelCommand {
         /// ntfy server URL.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         server_url: Option<String>,
+        /// Public URL for Telegram webhook mode (e.g. "https://example.com").
+        /// When set, the adapter calls `setWebhook` instead of long-polling.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        webhook_url: Option<String>,
     },
     /// Deregister a channel and stop its listener.
     DisconnectChannel {
@@ -623,6 +639,7 @@ pub enum KernelResponse {
 
     // Checkpoint / Rollback
     SnapshotList(Vec<serde_json::Value>),
+    CheckpointList(Vec<serde_json::Value>),
 
     // Audit export
     AuditChainExport(String),

@@ -142,14 +142,16 @@ impl CostTracker {
             0.0
         };
 
+        let period_start =
+            chrono::DateTime::from_timestamp(state.period_start_unix.load(Ordering::Relaxed), 0)
+                .unwrap_or_default();
+
+        let forecast_exhaustion_hours = Self::forecast_hours(period_start, cost_usd, &state.budget);
+
         CostSnapshot {
             agent_id,
             agent_name: state.agent_name.clone(),
-            period_start: chrono::DateTime::from_timestamp(
-                state.period_start_unix.load(Ordering::Relaxed),
-                0,
-            )
-            .unwrap_or_default(),
+            period_start,
             tokens_used: tokens,
             cost_usd,
             tool_calls: calls,
@@ -157,6 +159,7 @@ impl CostTracker {
             tokens_pct,
             cost_pct,
             tool_calls_pct,
+            forecast_exhaustion_hours,
         }
     }
 
@@ -179,6 +182,9 @@ impl CostTracker {
             0.0
         };
 
+        let forecast_exhaustion_hours =
+            Self::forecast_hours(snapshot.period_start, snapshot.total_cost_usd, &budget);
+
         CostSnapshot {
             agent_id: snapshot.agent_id,
             agent_name: snapshot.agent_name.clone(),
@@ -190,7 +196,36 @@ impl CostTracker {
             tokens_pct,
             cost_pct,
             tool_calls_pct,
+            forecast_exhaustion_hours,
         }
+    }
+
+    /// Linear forecast: given current spend and elapsed time since period start,
+    /// estimate hours until the cost budget is exhausted. Returns `None` when
+    /// the budget is unlimited or no measurable time/cost has elapsed.
+    fn forecast_hours(
+        period_start: chrono::DateTime<chrono::Utc>,
+        cost_usd: f64,
+        budget: &AgentBudget,
+    ) -> Option<f64> {
+        if budget.max_cost_usd_per_day <= 0.0 || cost_usd <= 0.0 {
+            return None;
+        }
+        let elapsed_secs = chrono::Utc::now()
+            .signed_duration_since(period_start)
+            .num_seconds();
+        if elapsed_secs <= 0 {
+            return None;
+        }
+        let burn_rate_per_hour = cost_usd / (elapsed_secs as f64 / 3600.0);
+        if burn_rate_per_hour <= 0.0 {
+            return None;
+        }
+        let remaining_usd = budget.max_cost_usd_per_day - cost_usd;
+        if remaining_usd <= 0.0 {
+            return Some(0.0);
+        }
+        Some(remaining_usd / burn_rate_per_hour)
     }
 
     fn next_persisted_snapshot(

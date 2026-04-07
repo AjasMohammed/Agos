@@ -1,8 +1,10 @@
+pub mod consent;
 pub mod drivers;
 pub mod hal;
 pub mod registry;
 pub mod types;
 
+pub use consent::ConsentStore;
 pub use hal::{
     discover_available_devices, DeviceAccessGate, DiscoveredDevice, HalDriver, HalEventSink,
     HalOperation, HardwareAbstractionLayer,
