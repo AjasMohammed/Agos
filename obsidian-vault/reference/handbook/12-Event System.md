@@ -34,7 +34,7 @@ The `EventBus` (`crates/agentos-kernel/src/event_bus.rs`) is a pure subscription
 
 > **Note:** Event types (`EventType`) are what agents subscribe to at runtime. These are distinct from audit event types (`AuditEventType` in the audit log), which track internal kernel operations. See [[14-Audit Log]] for the audit event types.
 
-The `EventType` enum (`agentos-types/src/event.rs`) defines **72 event types** across **11 categories**. Each event belongs to exactly one `EventCategory`, which agents can use for category-level subscriptions.
+The `EventType` enum (`agentos-types/src/event.rs`) defines **86 event types** across **11 categories**. Each event belongs to exactly one `EventCategory`, which agents can use for category-level subscriptions.
 
 ### AgentLifecycle
 
@@ -111,6 +111,20 @@ The `EventType` enum (`agentos-types/src/event.rs`) defines **72 event types** a
 | `DeviceMounted` | A device was mounted and made available. |
 | `DeviceUnmounted` | A device was unmounted. |
 | `DeviceEjected` | A device was safely ejected from the system. |
+| `PrintJobSubmitted` | A print job was submitted to a printer via the printer driver. |
+| `PrintJobCancelled` | A print job was cancelled. |
+| `AudioCaptureStarted` | An audio recording session began via the audio driver. |
+| `AudioCaptureStopped` | An audio recording session ended. |
+| `AudioPlaybackStarted` | Audio playback began via the audio driver. |
+| `WebcamCaptureStarted` | A webcam capture session began via the webcam driver. |
+| `WebcamCaptureStopped` | A webcam capture session ended. |
+| `BluetoothScanStarted` | A Bluetooth device scan was initiated. |
+| `BluetoothPairRequested` | A Bluetooth pairing request was sent. |
+| `BluetoothConnected` | A Bluetooth device was successfully connected. |
+| `DisplayConfigApplied` | A display configuration change was applied. |
+| `DisplayConfigReverted` | A display configuration change was reverted. |
+| `RawUsbDeviceOpened` | A raw USB device was opened for direct transfer. |
+| `RawUsbTransferCompleted` | A raw USB transfer (bulk/interrupt/control) completed. |
 
 ### ToolEvents
 

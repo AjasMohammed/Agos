@@ -1,0 +1,104 @@
+[manifest]
+name        = "webcam"
+version     = "1.0.0"
+description = "List webcams, capture frames, run bursts, and manage capture consent via the HAL webcam driver."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = [
+  "hardware.webcam.list:r",
+  "hardware.webcam.capture:r",
+  "hardware.webcam.capture:x",
+]
+
+[capabilities_provided]
+outputs = ["hardware.webcam", "content.structured"]
+
+[intent_schema]
+input  = "WebcamIntent"
+output = "WebcamResult"
+
+[input_schema]
+type = "object"
+description = "Webcam operation request"
+
+[input_schema.properties.action]
+type = "string"
+enum = ["list", "capture", "burst", "grant_capture_consent", "revoke_capture_consent", "list_capture_consents"]
+default = "list"
+description = "Webcam action to execute."
+
+[input_schema.properties.device]
+type = "string"
+description = "Absolute video device path like /dev/video0."
+
+[input_schema.properties.output_path]
+type = "string"
+description = "Absolute output path for captured frame(s)."
+
+[input_schema.properties.width]
+type = "integer"
+minimum = 1
+maximum = 7680
+description = "Capture width."
+
+[input_schema.properties.height]
+type = "integer"
+minimum = 1
+maximum = 4320
+description = "Capture height."
+
+[input_schema.properties.count]
+type = "integer"
+minimum = 1
+maximum = 60
+description = "Burst frame count for action='burst'."
+
+[input_schema.properties.interval_ms]
+type = "integer"
+minimum = 0
+maximum = 10000
+description = "Inter-frame delay in milliseconds for burst capture."
+
+[input_schema.properties.agent_id]
+type = "string"
+description = "Agent/session id used for capture consent tracking."
+
+[input_schema.properties.ttl_seconds]
+type = "integer"
+minimum = 1
+maximum = 3600
+description = "Consent TTL in seconds."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 256
+max_cpu_ms    = 20000
+syscalls      = []
+
+[examples]
+"List webcams" = """
+{
+  "action": "list"
+}
+"""
+
+"Capture one frame" = """
+{
+  "action": "capture",
+  "device": "/dev/video0",
+  "output_path": "/tmp/frame.jpg"
+}
+"""
+
+"Capture burst" = """
+{
+  "action": "burst",
+  "device": "/dev/video0",
+  "count": 5,
+  "interval_ms": 150
+}
+"""

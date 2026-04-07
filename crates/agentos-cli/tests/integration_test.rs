@@ -116,6 +116,7 @@ async fn test_full_lifecycle_with_mock_llm() {
                 agent_name: Some("test-agent".into()),
                 prompt: "What is the meaning of life?".into(),
                 autonomous: false,
+                no_checkpoint: false,
             })
             .await
             .unwrap();
@@ -171,6 +172,7 @@ async fn test_run_task_nonexistent_agent() {
                 agent_name: Some("nonexistent".into()),
                 prompt: "hello".into(),
                 autonomous: false,
+                no_checkpoint: false,
             })
             .await
             .unwrap();
@@ -215,6 +217,7 @@ async fn test_task_with_tool_call() {
                 agent_name: Some("tool-agent".into()),
                 prompt: "What time is it?".into(),
                 autonomous: false,
+                no_checkpoint: false,
             })
             .await
             .unwrap();

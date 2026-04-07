@@ -1,19 +1,19 @@
 //! OpenAI-compatible chat completion endpoint.
 //!
 //! `POST /api/v1/chat/completions` accepts the standard OpenAI request format
-//! and returns a full (non-streaming) response in OpenAI format.
-//!
-//! Streaming (`stream: true`) is not yet implemented and returns `501 Not
-//! Implemented`. Until `KernelService` exposes an `infer_stream` path, callers
-//! must use `stream: false`.
+//! and returns either a full response or an SSE stream in OpenAI format.
 
 use axum::extract::State;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Extension;
 use axum::Json;
 use chrono::Utc;
+use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::sync::Arc;
+use tokio_stream::wrappers::ReceiverStream;
 
 use super::require_permission;
 use crate::auth::AuthenticatedKey;
@@ -147,20 +147,13 @@ fn generate_id() -> String {
 /// NOTE: This endpoint follows the OpenAI response format for client library
 /// compatibility and does NOT use the standard `{ "data": ... }` envelope.
 ///
-/// `stream: true` returns `501 Not Implemented` — real token streaming requires
-/// wiring `KernelService::infer_stream` which is not yet available.
+/// When `stream: true`, returns an SSE stream of OpenAI-format chunks.
 pub async fn completions(
     State(svc): State<Arc<dyn KernelService>>,
     Extension(key): Extension<AuthenticatedKey>,
     Json(req): Json<OpenAIChatRequest>,
 ) -> Result<axum::response::Response, ApiError> {
     require_permission(&key, "chat:w")?;
-
-    if req.stream {
-        return Err(ApiError::NotImplemented(
-            "streaming is not yet supported; use stream: false".into(),
-        ));
-    }
 
     let agent_name = parse_model(&req.model);
     let (history, user_message) =
@@ -178,6 +171,10 @@ pub async fn completions(
         message: user_message,
         history,
     };
+
+    if req.stream {
+        return stream_completions(svc, chat_req, req.model).await;
+    }
 
     let response = svc.chat_send(chat_req).await?;
 
@@ -209,4 +206,107 @@ pub async fn completions(
     };
 
     Ok(Json(reply).into_response())
+}
+
+/// Streaming variant: runs inference via `chat_stream` and maps
+/// `ChatStreamEvent`s to OpenAI-format SSE chunks.
+async fn stream_completions(
+    svc: Arc<dyn KernelService>,
+    chat_req: ChatRequest,
+    model: String,
+) -> Result<axum::response::Response, ApiError> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<agentos_kernel::ChatStreamEvent>(32);
+    let id = generate_id();
+    let created = Utc::now().timestamp();
+
+    // Spawn inference in the background so the SSE stream starts immediately.
+    tokio::spawn(async move {
+        if let Err(e) = svc.chat_stream(chat_req, tx.clone()).await {
+            let _ = tx
+                .send(agentos_kernel::ChatStreamEvent::Error {
+                    message: e.to_string(),
+                })
+                .await;
+        }
+    });
+
+    let stream = ReceiverStream::new(rx)
+        .map(move |event| {
+            let chunk = match event {
+                agentos_kernel::ChatStreamEvent::Thinking { .. } => {
+                    // Emit an empty delta to signal the stream has started.
+                    serde_json::json!({
+                        "id": &id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": &model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"role": "assistant"},
+                            "finish_reason": serde_json::Value::Null
+                        }]
+                    })
+                }
+                agentos_kernel::ChatStreamEvent::ToolStart { tool_name, .. } => {
+                    serde_json::json!({
+                        "id": &id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": &model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": format!("\n[calling tool: {tool_name}]\n")},
+                            "finish_reason": serde_json::Value::Null
+                        }]
+                    })
+                }
+                agentos_kernel::ChatStreamEvent::ToolResult {
+                    tool_name,
+                    result_preview,
+                    ..
+                } => {
+                    serde_json::json!({
+                        "id": &id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": &model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": format!("[{tool_name} result: {result_preview}]\n")},
+                            "finish_reason": serde_json::Value::Null
+                        }]
+                    })
+                }
+                agentos_kernel::ChatStreamEvent::Done { answer, .. } => {
+                    serde_json::json!({
+                        "id": &id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": &model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": answer},
+                            "finish_reason": "stop"
+                        }]
+                    })
+                }
+                agentos_kernel::ChatStreamEvent::Error { message } => {
+                    serde_json::json!({
+                        "error": {"message": message, "type": "server_error"}
+                    })
+                }
+            };
+
+            let data = serde_json::to_string(&chunk).unwrap_or_default();
+            Event::default().data(data)
+        })
+        // Append the OpenAI-spec `[DONE]` sentinel after the channel closes.
+        .chain(futures::stream::once(async {
+            Event::default().data("[DONE]")
+        }))
+        .map(Ok::<_, Infallible>);
+
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
 }

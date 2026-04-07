@@ -337,6 +337,128 @@ agentos perm show local-dev
 
 ---
 
+## Multi-Agent Coordination
+
+AgentOS supports hierarchical multi-agent workflows where a parent agent can spawn sub-agents to handle subtasks, pass context to them, and collect their results. This enables divide-and-conquer patterns without manual orchestration.
+
+### Sub-Agent Spawning
+
+An agent spawns a sub-agent by calling the `spawn-agent` tool with a target agent name and prompt. The kernel:
+
+1. Creates a child `AgentTask` with `parent_task_id` set to the parent's task and `spawn_depth` incremented by 1
+2. Optionally copies the last N messages from the parent's context window into the child via a `ContextSlice` (controlled by `context_messages`, default 10, max 100)
+3. Generates a scoped `CapabilityToken` for the child via `scope_for_child()` — the child inherits an intersection of the parent's permissions
+4. Queues the child task for execution
+
+**Depth limit:** The kernel enforces a maximum spawn depth (configurable, default 4). Attempts to spawn beyond this depth are rejected with an error. This prevents unbounded recursive spawning.
+
+### Context Handoff
+
+When a sub-agent is spawned with `context_messages > 0`, the kernel builds a `ContextSlice` from the parent's context window:
+
+```rust
+pub struct ContextSlice {
+    pub messages: Vec<ContextEntry>,
+    pub label: String,
+}
+```
+
+The slice is seeded into the child's context via `ContextManager::seed_from_slice()`, giving the child relevant conversation history without the full parent context.
+
+### Result Injection
+
+When a sub-agent completes, its result is injected back into the parent's context window as a synthetic tool-result entry via `inject_sub_agent_result()`:
+
+```
+[SUB-AGENT RESULT: agent_name (task_id)]
+<result text, truncated to 8 KiB>
+[/SUB-AGENT RESULT]
+```
+
+An idempotency guard (`injected_sub_agents` set) prevents duplicate injection if the result is delivered more than once.
+
+### Awaiting Sub-Agents
+
+The parent agent calls the `await-agents` tool with a list of child task IDs. The kernel blocks the parent until all specified children complete, then injects their results into the parent's context in one batch.
+
+### Cascading Cancellation
+
+When a parent task is cancelled, the kernel automatically cascades the cancellation to all registered child sub-agents. This ensures no orphaned tasks continue running after the parent is terminated.
+
+### Coordination Tools
+
+| Tool | Permission | Description |
+|------|-----------|-------------|
+| `spawn-agent` | `agent.spawn:x` | Spawn a sub-agent with a prompt and optional context handoff |
+| `await-agents` | `agent.spawn:x` | Wait for spawned sub-agents to complete and collect results |
+| `verify-output` | `agent.spawn:x` | Spawn a critic agent to review an output for correctness and safety |
+
+See [[07-Tool System]] for full tool schemas.
+
+---
+
+## Agent Teams
+
+Agent teams provide a declarative way to run coordinated multi-agent workflows from a TOML configuration file. A team has a **coordinator** agent that breaks the goal into subtasks and dispatches them to **worker** agents.
+
+### Team Configuration (TOML)
+
+```toml
+name = "research-team"
+goal = "Research and summarize the topic"
+max_rounds = 10
+
+[[members]]
+agent_name = "planner"
+role = "Coordinator"
+role_description = "Breaks the goal into subtasks and synthesizes results"
+
+[[members]]
+agent_name = "researcher"
+role = "Worker"
+role_description = "Searches and retrieves information"
+
+[[members]]
+agent_name = "writer"
+role = "Worker"
+role_description = "Drafts and polishes written content"
+```
+
+### TeamConfig Structure
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Team display name |
+| `goal` | string | The objective for the team run |
+| `members` | list | Team members with roles |
+| `max_rounds` | integer | Maximum coordinator↔worker rounds before forced conclusion (default: 10) |
+
+Each member has:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `agent_name` | string | Name of a connected agent |
+| `role` | enum | `Coordinator` or `Worker` |
+| `role_description` | string | Description of the member's responsibility |
+
+### Running a Team
+
+```bash
+agentos team run <path-to-team.toml>
+```
+
+The kernel creates a coordinator task with `is_team_coordinator = true`. The coordinator agent receives the team goal and member descriptions in its prompt, then uses `spawn-agent` and `await-agents` to orchestrate the workers.
+
+### Task Identification
+
+Team tasks are identifiable in `agentos task list` output:
+
+- `is_team_coordinator` flag marks the coordinator's task
+- `parent_task_id` links worker tasks back to the coordinator
+- `spawn_depth` shows the nesting level (coordinator = 0, workers = 1)
+
+---
+
 ## Agent Registry Persistence
 
 The kernel persists agent state to disk in the configured data directory:
@@ -363,3 +485,6 @@ These files are updated on every agent registration, status change, role assignm
 | Broadcast | `agentos agent broadcast --from ... <group> "..."` | Delivers to all group members except sender |
 | Show Identity | `agentos identity show --agent <name>` | Displays public key and signing status |
 | Revoke Identity | `agentos identity revoke --agent <name>` | Permanently removes signing key |
+| Spawn Sub-Agent | `spawn-agent` tool | Creates child task with context handoff |
+| Await Sub-Agents | `await-agents` tool | Blocks until children complete, injects results |
+| Run Team | `agentos team run <team.toml>` | Coordinator dispatches work to workers |

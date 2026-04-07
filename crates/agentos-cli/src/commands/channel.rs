@@ -10,9 +10,10 @@ pub enum ChannelCommands {
         #[arg(long, short = 'k')]
         kind: String,
 
-        /// Channel-specific external identifier (Telegram chat_id, ntfy topic, email address)
+        /// Channel-specific external identifier (Telegram chat_id, ntfy topic, email address).
+        /// Optional for Telegram — omit to auto-discover from the first /start message.
         #[arg(long, short = 'e')]
-        external_id: String,
+        external_id: Option<String>,
 
         /// Human-readable display name for this channel
         #[arg(long, short = 'd')]
@@ -29,6 +30,11 @@ pub enum ChannelCommands {
         /// ntfy server URL (default: https://ntfy.sh)
         #[arg(long)]
         server_url: Option<String>,
+
+        /// Public URL for Telegram webhook mode (e.g. "https://example.com").
+        /// When set, Telegram pushes updates to this URL instead of long-polling.
+        #[arg(long)]
+        webhook_url: Option<String>,
     },
 
     /// Disconnect a registered channel
@@ -56,6 +62,7 @@ pub async fn handle(client: &mut BusClient, command: ChannelCommands) -> anyhow:
             credential_key,
             reply_topic,
             server_url,
+            webhook_url,
         } => {
             let channel_kind: ChannelKind = kind
                 .parse()
@@ -69,19 +76,22 @@ pub async fn handle(client: &mut BusClient, command: ChannelCommands) -> anyhow:
                     credential_key,
                     reply_topic,
                     server_url,
+                    webhook_url,
                 })
                 .await?;
 
             match resp {
                 KernelResponse::Success { data } => {
                     if let Some(d) = data {
-                        if let (Some(id), Some(name)) = (
-                            d.get("channel_id").and_then(|v| v.as_str()),
-                            d.get("display_name").and_then(|v| v.as_str()),
-                        ) {
-                            println!("Channel connected: {name} (id: {id})");
-                        } else {
-                            println!("Channel connected.");
+                        let id = d.get("channel_id").and_then(|v| v.as_str()).unwrap_or("?");
+                        let name = d
+                            .get("display_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        let msg = d.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                        println!("Channel connected: {name} (id: {id})");
+                        if !msg.is_empty() && msg != "Channel connected successfully" {
+                            println!("{msg}");
                         }
                     } else {
                         println!("Channel connected.");
@@ -125,12 +135,17 @@ pub async fn handle(client: &mut BusClient, command: ChannelCommands) -> anyhow:
                     println!("{}", "-".repeat(100));
 
                     for ch in &channels {
+                        let ext_display = if ch.external_id.is_empty() {
+                            "(pending discovery)".to_string()
+                        } else {
+                            truncate(&ch.external_id, 25)
+                        };
                         println!(
                             "{:<36} {:<10} {:<20} {:<25} {}",
                             ch.id,
                             ch.kind,
                             truncate(&ch.display_name, 20),
-                            truncate(&ch.external_id, 25),
+                            ext_display,
                             ch.connected_at.format("%Y-%m-%d %H:%M UTC"),
                         );
                     }

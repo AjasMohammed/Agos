@@ -67,6 +67,30 @@ pub fn discover_available_devices() -> Vec<DiscoveredDevice> {
                 device_type: "gpu".to_string(),
             });
         }
+
+        if let Ok(entries) = std::fs::read_dir("/sys/class/drm/") {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.starts_with("card") || !name.contains('-') {
+                    continue;
+                }
+
+                let status_path = entry.path().join("status");
+                let status = std::fs::read_to_string(status_path).unwrap_or_default();
+                if status.trim() != "connected" {
+                    continue;
+                }
+
+                let output_name = name
+                    .split_once('-')
+                    .map(|(_, output)| output.to_string())
+                    .unwrap_or_else(|| name.clone());
+                devices.push(DiscoveredDevice {
+                    id: format!("display:{output_name}"),
+                    device_type: "display-output".to_string(),
+                });
+            }
+        }
     }
 
     if let Ok(entries) = std::fs::read_dir("/sys/class/thermal/") {
@@ -83,6 +107,20 @@ pub fn discover_available_devices() -> Vec<DiscoveredDevice> {
         }
     }
 
+    if let Ok(entries) = std::fs::read_dir("/sys/class/video4linux/") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("video") {
+                continue;
+            }
+
+            devices.push(DiscoveredDevice {
+                id: format!("webcam:{name}"),
+                device_type: "webcam-device".to_string(),
+            });
+        }
+    }
+
     devices
 }
 
@@ -94,6 +132,14 @@ pub trait HalDriver: Send + Sync {
 
     /// The permission required to use this driver.
     fn required_permission(&self) -> (&str, PermissionOp);
+
+    /// The permission required for a specific action on this driver.
+    ///
+    /// Drivers with a single static permission can rely on the default
+    /// implementation. Drivers with action-scoped permissions should override it.
+    fn required_permission_for(&self, _params: &Value) -> (&str, PermissionOp) {
+        self.required_permission()
+    }
 
     /// Execute a typed query and return a JSON result.
     async fn query(&self, params: Value) -> Result<Value, AgentOSError>;
@@ -197,10 +243,22 @@ impl HardwareAbstractionLayer {
         hal.register(Box::new(crate::drivers::process::ProcessDriver::new()));
         hal.register(Box::new(crate::drivers::network::NetworkDriver::new()));
         hal.register(Box::new(crate::drivers::storage::StorageDriver::new()));
+        #[cfg(feature = "bluetooth")]
+        hal.register(Box::new(crate::drivers::bluetooth::BluetoothDriver::new()));
+        #[cfg(feature = "audio")]
+        hal.register(Box::new(crate::drivers::audio::AudioDriver::new()));
+        #[cfg(feature = "display")]
+        hal.register(Box::new(crate::drivers::display::DisplayDriver::new()));
+        #[cfg(feature = "printer")]
+        hal.register(Box::new(crate::drivers::printer::PrinterDriver::new()));
+        #[cfg(feature = "raw-usb")]
+        hal.register(Box::new(crate::drivers::raw_usb::RawUsbDriver::new()));
         #[cfg(feature = "usb-storage")]
         hal.register(Box::new(
             crate::drivers::usb_storage::UsbStorageDriver::new(),
         ));
+        #[cfg(feature = "webcam")]
+        hal.register(Box::new(crate::drivers::webcam::WebcamDriver::new()));
         // Note: log_reader requires paths, initialized differently usually, but we can provide defaults or leave it for Kernel.
         hal
     }
@@ -247,7 +305,7 @@ impl HardwareAbstractionLayer {
             .get(driver_name)
             .ok_or_else(|| AgentOSError::HalError(format!("Driver '{}' not found", driver_name)))?;
 
-        let (resource, op) = driver.required_permission();
+        let (resource, op) = driver.required_permission_for(&params);
 
         // --- Permission check (unchanged logic) ---
         // Special logic for process kill

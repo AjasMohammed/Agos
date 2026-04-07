@@ -2,6 +2,9 @@ use crate::types::*;
 use crate::{ChannelAdapter, ChannelCapabilities, ChannelHealth};
 use agentos_types::AgentOSError;
 use async_trait::async_trait;
+use lettre::message::header::ContentType;
+use lettre::transport::smtp::authentication::Credentials;
+use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -9,9 +12,7 @@ use zeroize::Zeroizing;
 pub struct EmailAdapter {
     pub smtp_host: String,
     pub smtp_port: u16,
-    #[allow(dead_code)]
     username: Zeroizing<String>,
-    #[allow(dead_code)]
     password: Zeroizing<String>,
     pub from_address: String,
     pub to_address: String,
@@ -38,6 +39,24 @@ impl EmailAdapter {
             instance_id,
         }
     }
+
+    fn build_transport(&self) -> Result<AsyncSmtpTransport<Tokio1Executor>, AgentOSError> {
+        let creds = Credentials::new(
+            self.username.as_str().to_string(),
+            self.password.as_str().to_string(),
+        );
+
+        let transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&self.smtp_host)
+            .map_err(|e| AgentOSError::ToolExecutionFailed {
+                tool_name: "email".to_string(),
+                reason: format!("SMTP relay error: {e}"),
+            })?
+            .port(self.smtp_port)
+            .credentials(creds)
+            .build();
+
+        Ok(transport)
+    }
 }
 
 #[async_trait]
@@ -57,11 +76,48 @@ impl ChannelAdapter for EmailAdapter {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
-        // Stub: full SMTP implementation requires the `lettre` crate (not in workspace).
-        // Returns a stub receipt; real send would use tokio::task::spawn_blocking + SMTP.
-        let _ = msg;
+        let text = msg.content.as_text();
+        let subject = msg.thread_id.as_deref().unwrap_or("[AgentOS] Notification");
+
+        let email = Message::builder()
+            .from(
+                self.from_address
+                    .parse()
+                    .map_err(|e| AgentOSError::ToolExecutionFailed {
+                        tool_name: "email".to_string(),
+                        reason: format!("Invalid from address: {e}"),
+                    })?,
+            )
+            .to(self
+                .to_address
+                .parse()
+                .map_err(|e| AgentOSError::ToolExecutionFailed {
+                    tool_name: "email".to_string(),
+                    reason: format!("Invalid to address: {e}"),
+                })?)
+            .subject(subject)
+            .header(ContentType::TEXT_PLAIN)
+            .body(text)
+            .map_err(|e| AgentOSError::ToolExecutionFailed {
+                tool_name: "email".to_string(),
+                reason: format!("Failed to build email: {e}"),
+            })?;
+
+        let transport = self.build_transport()?;
+
+        let response =
+            transport
+                .send(email)
+                .await
+                .map_err(|e| AgentOSError::ToolExecutionFailed {
+                    tool_name: "email".to_string(),
+                    reason: format!("SMTP send failed: {e}"),
+                })?;
+
+        let message_id = response.message().next().unwrap_or("unknown").to_string();
+
         Ok(DeliveryReceipt {
-            message_id: uuid::Uuid::new_v4().to_string(),
+            message_id,
             delivered_at: chrono::Utc::now(),
         })
     }
@@ -71,17 +127,21 @@ impl ChannelAdapter for EmailAdapter {
         _tx: mpsc::Sender<InboundMessage>,
         cancel: CancellationToken,
     ) -> Result<(), AgentOSError> {
-        // IMAP IDLE listener would go here.
-        // Full implementation requires async-imap crate.
+        // IMAP IDLE listener is not yet implemented.
+        // Unlike the old stub, this is clearly documented as a no-op — inbound
+        // email is not supported. Callers should check capabilities or use the
+        // REST webhook path to inject inbound email.
         cancel.cancelled().await;
         Ok(())
     }
 
     async fn health_check(&self) -> ChannelHealth {
-        // TCP connect to SMTP host to verify reachability.
-        match tokio::net::TcpStream::connect(format!("{}:{}", self.smtp_host, self.smtp_port)).await
-        {
-            Ok(_) => ChannelHealth::Connected,
+        match self.build_transport() {
+            Ok(transport) => match transport.test_connection().await {
+                Ok(true) => ChannelHealth::Connected,
+                Ok(false) => ChannelHealth::Degraded("SMTP handshake returned false".to_string()),
+                Err(e) => ChannelHealth::Disconnected(format!("SMTP connection test failed: {e}")),
+            },
             Err(e) => ChannelHealth::Disconnected(e.to_string()),
         }
     }

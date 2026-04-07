@@ -313,6 +313,81 @@ Delegate a subtask to another agent.
 
 ---
 
+### `spawn-agent`
+
+Spawn a sub-agent to handle a subtask with optional context handoff.
+
+| | |
+|---|---|
+| **Permission** | `agent.spawn:x` |
+| **Network** | No |
+| **fs_write** | No |
+| **Risk Level** | 3 (HardApproval) |
+
+**Input:**
+
+| Key | Type | Required | Default | Notes |
+|-----|------|----------|---------|-------|
+| `agent` | string | Yes | — | Target agent name (must be connected) |
+| `prompt` | string | Yes | — | Task prompt for the sub-agent |
+| `permissions` | array | No | `[]` | Additional permission strings for the child |
+| `context_messages` | integer | No | `10` | Number of parent context messages to hand off (max 100) |
+
+**Output:** Returns a `_kernel_action: "spawn_agent"` envelope; the kernel creates a child task with `parent_task_id` linking back to the caller and `spawn_depth` incremented.
+
+The kernel enforces a maximum spawn depth. Requests that exceed the limit are rejected.
+
+---
+
+### `await-agents`
+
+Wait for spawned sub-agents to complete and retrieve their results.
+
+| | |
+|---|---|
+| **Permission** | `agent.spawn:x` |
+| **Network** | No |
+| **fs_write** | No |
+
+**Input:**
+
+| Key | Type | Required | Notes |
+|-----|------|----------|-------|
+| `task_ids` | array of strings | Yes | Task IDs returned from `spawn-agent` calls. Must be non-empty. |
+
+**Output:** Returns a `_kernel_action: "await_agents"` envelope; the kernel blocks the parent task until all specified children complete, then injects their results into the parent's context window.
+
+---
+
+### `verify-output`
+
+Spawn a critic agent to review an output for correctness, safety, and completeness.
+
+| | |
+|---|---|
+| **Permission** | `agent.spawn:x` |
+| **Network** | No |
+| **fs_write** | No |
+
+**Input:**
+
+| Key | Type | Required | Default | Notes |
+|-----|------|----------|---------|-------|
+| `agent` | string | Yes | — | Agent to use as the verifier |
+| `output` | string | Yes | — | The output text to verify |
+| `criteria` | string | No | `"correctness, safety, and completeness"` | Evaluation criteria for the verifier |
+
+**Output:** The verifier agent responds with a JSON object:
+```json
+{ "verdict": "pass", "issues": [], "summary": "Output is correct and complete" }
+```
+
+Possible verdicts: `pass`, `fail`, `needs_revision`.
+
+User-supplied content in `output` and `criteria` is wrapped in `<user_data>` tags with tag-boundary escaping to prevent prompt injection attacks.
+
+---
+
 ### `log-reader`
 
 Read system and application logs via the Hardware Abstraction Layer.

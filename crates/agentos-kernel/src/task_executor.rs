@@ -4172,6 +4172,55 @@ impl Kernel {
                     break;
                 }
             }
+
+            // Write a checkpoint at the end of each iteration (after all tool calls).
+            // Skipped for ephemeral tasks or when tool_call_count is 0 (no state to save).
+            if !task.skip_checkpoint && tool_call_count > 0 {
+                if let Ok(context) = self.context_manager.get_context(&task.id).await {
+                    let persisted_ctx = crate::context::PersistedTaskContext {
+                        window: context,
+                        agent_id: task.agent_id,
+                        injected_sub_agents: Vec::new(),
+                    };
+                    let payload = crate::checkpoint_store::CheckpointPayload {
+                        schema_version: crate::checkpoint_store::CHECKPOINT_SCHEMA_VERSION,
+                        key_version: crate::checkpoint_store::CHECKPOINT_KEY_VERSION,
+                        task: task.clone(),
+                        context: persisted_ctx,
+                        tool_call_history: Vec::new(),
+                    };
+                    match serde_json::to_vec(&payload) {
+                        Ok(state_blob) => {
+                            let record = crate::checkpoint_store::CheckpointRecord {
+                                checkpoint_id: uuid::Uuid::new_v4().to_string(),
+                                task_id: task.id,
+                                agent_id: task.agent_id,
+                                step_num: completed_iterations,
+                                created_at: chrono::Utc::now(),
+                                updated_at: chrono::Utc::now(),
+                                schema_version: crate::checkpoint_store::CHECKPOINT_SCHEMA_VERSION,
+                                key_version: crate::checkpoint_store::CHECKPOINT_KEY_VERSION,
+                                state_blob,
+                            };
+                            if let Err(e) = self.checkpoint_store.write(record).await {
+                                tracing::warn!(
+                                    task_id = %task.id,
+                                    iteration = completed_iterations,
+                                    error = %e,
+                                    "Checkpoint write failed — task continues without checkpoint"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task.id,
+                                error = %e,
+                                "Failed to serialize checkpoint payload"
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         if final_answer.is_empty() {
@@ -4182,6 +4231,15 @@ impl Kernel {
         }
 
         // Task success episodic write moved to execute_task() where duration_ms is available.
+
+        // Clean up checkpoint on normal completion (no resume needed).
+        if let Err(e) = self.checkpoint_store.delete_for_task(&task.id).await {
+            tracing::warn!(
+                task_id = %task.id,
+                error = %e,
+                "Failed to delete checkpoint after task completion"
+            );
+        }
 
         self.context_manager.remove_context(&task.id).await;
         self.intent_validator.remove_task(&task.id).await;
@@ -4636,6 +4694,7 @@ mod tests {
             parent_task_id: None,
             spawn_depth: 0,
             is_team_coordinator: false,
+            skip_checkpoint: false,
         }
     }
 

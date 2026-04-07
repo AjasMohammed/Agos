@@ -1,0 +1,39 @@
+[manifest]
+name        = "poll-agent"
+version     = "1.0.0"
+description = "Non-blocking check on spawned sub-agent status. Returns current state, iteration count, last tool call, and progress summary without blocking the parent task. Use this to monitor long-running children progressively."
+author      = "agentos-core"
+trust_tier  = "core"
+capability_tags = ["multi-agent", "monitoring", "coordination", "streaming", "sub-task"]
+
+[capabilities_required]
+permissions = ["agent.spawn:x"]
+
+[capabilities_provided]
+outputs = ["agent_status"]
+
+[intent_schema]
+input  = "PollAgentIntent"
+output = "PollAgentResult"
+
+[input_schema]
+type = "object"
+required = ["task_ids"]
+
+[input_schema.properties.task_ids]
+type = "array"
+items = { type = "string" }
+description = "Task IDs of spawned sub-agents to check."
+
+[input_schema.properties.include_progress]
+type = "boolean"
+default = true
+description = "Whether to include progress event history. Default: true."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

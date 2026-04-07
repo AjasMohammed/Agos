@@ -28,6 +28,17 @@ Counters reset automatically every 24 hours using a lock-free `AtomicI64` period
 
 Every completed inference call is also logged to the audit trail as a `CostAttribution` entry with structured JSON containing agent ID, model, token counts, and cost.
 
+### Crash-Safe Persistence
+
+The `CostTracker` supports optional persistence via the `KernelStateStore`. When enabled:
+
+- Cost counters are periodically flushed to a `PersistedCostSnapshot` record in the state store
+- Each snapshot includes a monotonic `persist_version` for out-of-order-safe DB upserts — a stale write never overwrites a newer snapshot
+- On kernel restart, persisted snapshots are restored so agents resume with their pre-crash budget counters intact
+- Agents that have disconnected retain their last-known cost state in the persisted snapshots map
+
+This eliminates the previous behavior where a kernel crash would reset all budget counters to zero, allowing agents to exceed their daily limits after a restart.
+
 ---
 
 ## Viewing Cost Reports

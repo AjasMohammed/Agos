@@ -117,6 +117,19 @@ fn compact_input_schema(schema: Option<&serde_json::Value>) -> Option<String> {
     Some(format!("{{{}}}", parts.join(", ")))
 }
 
+fn manifest_enabled_for_build(tool_name: &str) -> bool {
+    match tool_name {
+        "audio" => cfg!(feature = "audio"),
+        "bluetooth" => cfg!(feature = "bluetooth"),
+        "display-config" => cfg!(feature = "display"),
+        "printer" => cfg!(feature = "printer"),
+        "raw-usb" => cfg!(feature = "raw-usb"),
+        "usb-storage" => cfg!(feature = "usb-storage"),
+        "webcam" => cfg!(feature = "webcam"),
+        _ => true,
+    }
+}
+
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
@@ -164,6 +177,14 @@ impl ToolRegistry {
             }
             let manifests = load_all_manifests(dir)?;
             for loaded in manifests {
+                let name = loaded.manifest.manifest.name.clone();
+                if !manifest_enabled_for_build(&name) {
+                    tracing::debug!(
+                        tool = %name,
+                        "Skipping manifest because corresponding kernel feature is disabled"
+                    );
+                    continue;
+                }
                 registry.register(loaded.manifest.clone())?;
                 registry.loaded.push(loaded);
             }
@@ -356,6 +377,7 @@ mod tests {
                 signature: Some("notavalidsig".to_string()),
                 trust_tier: TrustTier::Community,
                 tags: None,
+                capability_tags: vec![],
             },
             capabilities_required: ToolCapabilities {
                 permissions: vec![],
@@ -376,6 +398,7 @@ mod tests {
                 weight: None,
             },
             executor: ToolExecutor::default(),
+            fallbacks: vec![],
         }
     }
 
@@ -391,6 +414,7 @@ mod tests {
                 signature: None,
                 trust_tier: TrustTier::Core,
                 tags: None,
+                capability_tags: vec![],
             },
             capabilities_required: ToolCapabilities {
                 permissions: vec![],
@@ -411,7 +435,34 @@ mod tests {
                 weight: None,
             },
             executor: ToolExecutor::default(),
+            fallbacks: vec![],
         }
+    }
+
+    #[test]
+    fn peripheral_manifest_filters_match_compiled_features() {
+        assert_eq!(manifest_enabled_for_build("audio"), cfg!(feature = "audio"));
+        assert_eq!(
+            manifest_enabled_for_build("bluetooth"),
+            cfg!(feature = "bluetooth")
+        );
+        assert_eq!(
+            manifest_enabled_for_build("display-config"),
+            cfg!(feature = "display")
+        );
+        assert_eq!(
+            manifest_enabled_for_build("raw-usb"),
+            cfg!(feature = "raw-usb")
+        );
+        assert_eq!(
+            manifest_enabled_for_build("usb-storage"),
+            cfg!(feature = "usb-storage")
+        );
+        assert_eq!(
+            manifest_enabled_for_build("webcam"),
+            cfg!(feature = "webcam")
+        );
+        assert!(manifest_enabled_for_build("file-reader"));
     }
 
     #[test]

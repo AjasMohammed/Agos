@@ -2,6 +2,30 @@ use crate::ids::*;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawUsbDeviceOpened {
+    pub device_key: String,
+    pub vendor_id: String,
+    pub product_id: String,
+    pub interface: u8,
+    pub alt_setting: u8,
+    pub detach_kernel_driver: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawUsbTransfer {
+    pub action: String,
+    pub device_key: String,
+    pub vendor_id: String,
+    pub product_id: String,
+    pub interface: u8,
+    pub transfer_kind: Option<String>,
+    pub endpoint: Option<String>,
+    pub direction: Option<String>,
+    pub bytes_read: Option<u64>,
+    pub bytes_written: Option<u64>,
+}
+
 // ── Event Categories ──────────────────────────────────────────────
 
 /// Top-level category grouping related event types.
@@ -83,6 +107,20 @@ pub enum EventType {
     DeviceMounted,
     DeviceUnmounted,
     DeviceEjected,
+    PrintJobSubmitted,
+    PrintJobCancelled,
+    AudioCaptureStarted,
+    AudioCaptureStopped,
+    AudioPlaybackStarted,
+    WebcamCaptureStarted,
+    WebcamCaptureStopped,
+    BluetoothScanStarted,
+    BluetoothPairRequested,
+    BluetoothConnected,
+    DisplayConfigApplied,
+    DisplayConfigReverted,
+    RawUsbDeviceOpened,
+    RawUsbTransferCompleted,
 
     // ── ToolEvents (Phase 5) ──
     ToolInstalled,
@@ -94,6 +132,11 @@ pub enum EventType {
     ToolRegistryUpdated,
     ToolCallStarted,
     ToolCallCompleted,
+
+    // ── Tool Fallback (Degradation Chains) ──
+    ToolFallbackAttempted,
+    ToolFallbackSucceeded,
+    ToolFallbackExhausted,
 
     // ── AgentCommunication (Phase 4) ──
     DirectMessageReceived,
@@ -107,6 +150,11 @@ pub enum EventType {
     AgentRpcCallStarted,
     AgentRpcCallCompleted,
     AgentRpcCallTimedOut,
+
+    // ── Multi-Agent Streaming (Phase 5) ──
+    SubAgentProgress,
+    SubAgentCompleted,
+    SubAgentFailed,
 
     // ── ScheduleEvents (Phase 4) ──
     CronJobFired,
@@ -175,7 +223,21 @@ impl EventType {
             | Self::HardwareAccessGranted
             | Self::DeviceMounted
             | Self::DeviceUnmounted
-            | Self::DeviceEjected => EventCategory::HardwareEvents,
+            | Self::DeviceEjected
+            | Self::PrintJobSubmitted
+            | Self::PrintJobCancelled
+            | Self::AudioCaptureStarted
+            | Self::AudioCaptureStopped
+            | Self::AudioPlaybackStarted
+            | Self::WebcamCaptureStarted
+            | Self::WebcamCaptureStopped
+            | Self::BluetoothScanStarted
+            | Self::BluetoothPairRequested
+            | Self::BluetoothConnected
+            | Self::DisplayConfigApplied
+            | Self::DisplayConfigReverted
+            | Self::RawUsbDeviceOpened
+            | Self::RawUsbTransferCompleted => EventCategory::HardwareEvents,
 
             Self::ToolInstalled
             | Self::ToolRemoved
@@ -185,7 +247,10 @@ impl EventType {
             | Self::ToolChecksumMismatch
             | Self::ToolRegistryUpdated
             | Self::ToolCallStarted
-            | Self::ToolCallCompleted => EventCategory::ToolEvents,
+            | Self::ToolCallCompleted
+            | Self::ToolFallbackAttempted
+            | Self::ToolFallbackSucceeded
+            | Self::ToolFallbackExhausted => EventCategory::ToolEvents,
 
             Self::DirectMessageReceived
             | Self::BroadcastReceived
@@ -195,7 +260,10 @@ impl EventType {
             | Self::AgentUnreachable
             | Self::AgentRpcCallStarted
             | Self::AgentRpcCallCompleted
-            | Self::AgentRpcCallTimedOut => EventCategory::AgentCommunication,
+            | Self::AgentRpcCallTimedOut
+            | Self::SubAgentProgress
+            | Self::SubAgentCompleted
+            | Self::SubAgentFailed => EventCategory::AgentCommunication,
 
             Self::CronJobFired
             | Self::ScheduledTaskMissed

@@ -43,6 +43,7 @@ mod tests {
             parent_task_id: None,
             spawn_depth: depth,
             is_team_coordinator: false,
+            skip_checkpoint: false,
         }
     }
 
@@ -296,6 +297,7 @@ impl Kernel {
             parent_task_id: Some(parent_task_id),
             spawn_depth: child_depth,
             is_team_coordinator: false,
+            skip_checkpoint: false,
         };
 
         self.scheduler.enqueue(child_task).await;

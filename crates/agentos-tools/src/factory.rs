@@ -51,12 +51,18 @@ const MEMORY_TOOL_NAMES: &[&str] = &[
 const NETWORK_TOOL_NAMES: &[&str] = &["http-client", "web-fetch"];
 
 const HAL_TOOL_NAMES: &[&str] = &[
+    "audio",
+    "bluetooth",
+    "display-config",
     "hardware-info",
     "sys-monitor",
     "process-manager",
     "log-reader",
     "network-monitor",
+    "printer",
+    "raw-usb",
     "usb-storage",
+    "webcam",
 ];
 
 const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
@@ -72,6 +78,9 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "ask-user",
     "spawn-agent",
     "await-agents",
+    "verify-output",
+    "poll-agent",
+    "cancel-agent",
 ];
 
 const SPECIAL_CONTEXT_TOOL_NAMES: &[&str] = &["agent-manual", "agent-self"];
@@ -310,12 +319,18 @@ fn build_network_tool(name: &str) -> Result<Option<Box<dyn AgentTool>>, AgentOSE
 
 fn build_hal_tool(name: &str) -> Result<Option<Box<dyn AgentTool>>, AgentOSError> {
     let tool: Box<dyn AgentTool> = match name {
+        "audio" => Box::new(crate::audio::AudioTool::new()),
+        "bluetooth" => Box::new(crate::bluetooth::BluetoothTool::new()),
+        "display-config" => Box::new(crate::display::DisplayConfigTool::new()),
         "hardware-info" => Box::new(crate::hardware_info::HardwareInfoTool::new()),
         "sys-monitor" => Box::new(crate::sys_monitor::SysMonitorTool::new()),
         "process-manager" => Box::new(crate::process_manager::ProcessManagerTool::new()),
         "log-reader" => Box::new(crate::log_reader::LogReaderTool::new()),
         "network-monitor" => Box::new(crate::network_monitor::NetworkMonitorTool::new()),
+        "printer" => Box::new(crate::printer::PrinterTool::new()),
+        "raw-usb" => Box::new(crate::raw_usb::RawUsbTool::new()),
         "usb-storage" => Box::new(crate::usb_storage::UsbStorageTool::new()),
+        "webcam" => Box::new(crate::webcam::WebcamTool::new()),
         _ => return Ok(None),
     };
     Ok(Some(tool))

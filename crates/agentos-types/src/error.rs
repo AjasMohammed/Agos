@@ -140,3 +140,51 @@ impl From<std::io::Error> for AgentOSError {
         AgentOSError::Io(std::sync::Arc::new(e))
     }
 }
+
+impl AgentOSError {
+    /// Stable category key for fallback chain matching.
+    ///
+    /// Returns the variant name as a string so tool manifests can declare
+    /// `on_error = "StorageError"` without coupling to Rust internals.
+    pub fn error_category(&self) -> &'static str {
+        match self {
+            Self::TaskNotFound(_) => "TaskNotFound",
+            Self::AgentNotFound(_) => "AgentNotFound",
+            Self::PubkeyAlreadyRegistered { .. } => "PubkeyAlreadyRegistered",
+            Self::TaskTimeout(_) => "TaskTimeout",
+            Self::BudgetExceeded { .. } => "BudgetExceeded",
+            Self::RateLimited { .. } => "RateLimited",
+            Self::KernelShutdown => "KernelShutdown",
+            Self::KernelError { .. } => "KernelError",
+            Self::PermissionDenied { .. } => "PermissionDenied",
+            Self::InvalidToken { .. } => "InvalidToken",
+            Self::TokenExpired => "TokenExpired",
+            Self::ToolNotFound(_) => "ToolNotFound",
+            Self::ToolExecutionFailed { .. } => "ToolExecutionFailed",
+            Self::FileLocked { .. } => "FileLocked",
+            Self::ToolBlocked { .. } => "ToolBlocked",
+            Self::ToolSignatureInvalid { .. } => "ToolSignatureInvalid",
+            Self::SchemaValidation(_) => "SchemaValidation",
+            Self::LLMError { .. } => "LLMError",
+            Self::NoLLMConnected => "NoLLMConnected",
+            Self::SecretNotFound(_) => "SecretNotFound",
+            Self::VaultError(_) => "VaultError",
+            Self::StorageError(_) => "StorageError",
+            Self::BusError(_) => "BusError",
+            Self::HalError(_) => "HalError",
+            Self::DeviceQuarantined(_) => "DeviceQuarantined",
+            Self::DeviceAccessPending { .. } => "DeviceAccessPending",
+            Self::SandboxSpawnFailed { .. } => "SandboxSpawnFailed",
+            Self::SandboxTimeout { .. } => "SandboxTimeout",
+            Self::SandboxFilterError { .. } => "SandboxFilterError",
+            Self::Serialization(_) => "Serialization",
+            Self::EventSubscriptionNotFound(_) => "EventSubscriptionNotFound",
+            Self::EventLoopDetected { .. } => "EventLoopDetected",
+            Self::EventDeliveryFailed(_) => "EventDeliveryFailed",
+            Self::RpcDepthExceeded { .. } => "RpcDepthExceeded",
+            Self::RpcAborted => "RpcAborted",
+            Self::RpcFailed(_) => "RpcFailed",
+            Self::Io(_) => "Io",
+        }
+    }
+}

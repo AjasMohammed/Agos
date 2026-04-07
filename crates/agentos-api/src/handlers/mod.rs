@@ -14,6 +14,7 @@ pub mod secrets;
 pub mod system;
 pub mod tasks;
 pub mod tools;
+pub mod webhooks;
 
 use crate::auth::AuthenticatedKey;
 use crate::error::ApiError;

@@ -10,6 +10,7 @@ impl Kernel {
         agent_name: Option<String>,
         prompt: String,
         autonomous: bool,
+        no_checkpoint: bool,
     ) -> KernelResponse {
         let registry = self.agent_registry.read().await;
         let agent_id = match agent_name {
@@ -111,6 +112,7 @@ impl Kernel {
             parent_task_id: None,
             spawn_depth: 0,
             is_team_coordinator: false,
+            skip_checkpoint: no_checkpoint,
         };
 
         self.scheduler.register_external(task.clone()).await;
@@ -270,6 +272,8 @@ impl Kernel {
                     }
                 }
                 self.cleanup_task_subscriptions(&task_id).await;
+                // Release in-memory context so the ContextManager map doesn't leak.
+                self.context_manager.remove_context(&task_id).await;
                 // Finalise trace so the active-trace map doesn't leak the entry.
                 self.trace_collector
                     .finish_task(&task_id, "Cancelled", chrono::Utc::now())
@@ -378,6 +382,7 @@ impl Kernel {
             parent_task_id: None,
             spawn_depth: 0,
             is_team_coordinator: false,
+            skip_checkpoint: false,
         };
 
         // Check for circular dependencies before enqueuing
@@ -438,6 +443,182 @@ impl Kernel {
             "child_task_id": child_task.id.to_string(),
             "status": "queued",
         }))
+    }
+
+    /// Resume a task from its latest checkpoint.
+    pub(crate) async fn cmd_resume_task(&self, task_id: TaskID) -> KernelResponse {
+        // 1. Load the latest checkpoint.
+        let record = match self.checkpoint_store.get_latest(&task_id).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                return KernelResponse::Error {
+                    message: format!("no checkpoint found for task '{}'", task_id),
+                };
+            }
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: format!("failed to load checkpoint: {e}"),
+                };
+            }
+        };
+
+        // 2. Deserialize the checkpoint payload.
+        let payload: crate::checkpoint_store::CheckpointPayload =
+            match serde_json::from_slice(&record.state_blob) {
+                Ok(p) => p,
+                Err(e) => {
+                    return KernelResponse::Error {
+                        message: format!("failed to deserialize checkpoint payload: {e}"),
+                    };
+                }
+            };
+
+        // 3. Verify the agent still exists and is online.
+        let agent = {
+            let registry = self.agent_registry.read().await;
+            match registry.get_by_id(&payload.task.agent_id) {
+                Some(a) if a.status != AgentStatus::Offline => a.clone(),
+                Some(_) => {
+                    return KernelResponse::Error {
+                        message: format!(
+                            "agent '{}' is offline — cannot resume task",
+                            payload.task.agent_id
+                        ),
+                    };
+                }
+                None => {
+                    return KernelResponse::Error {
+                        message: format!(
+                            "agent '{}' not found — cannot resume task",
+                            payload.task.agent_id
+                        ),
+                    };
+                }
+            }
+        };
+
+        // 4. Issue a fresh capability token (old one may be expired).
+        let effective_permissions = {
+            let registry = self.agent_registry.read().await;
+            registry.compute_effective_permissions(&agent.id)
+        };
+        let task_timeout = Duration::from_secs(self.config.kernel.default_task_timeout_secs);
+        let capability_token = match self.capability_engine.issue_token(
+            task_id,
+            agent.id,
+            BTreeSet::new(),
+            BTreeSet::from([
+                IntentTypeFlag::Read,
+                IntentTypeFlag::Write,
+                IntentTypeFlag::Execute,
+                IntentTypeFlag::Query,
+                IntentTypeFlag::Observe,
+                IntentTypeFlag::Message,
+                IntentTypeFlag::Delegate,
+                IntentTypeFlag::Broadcast,
+                IntentTypeFlag::Escalate,
+                IntentTypeFlag::Subscribe,
+                IntentTypeFlag::Unsubscribe,
+            ]),
+            effective_permissions,
+            task_timeout,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                return KernelResponse::Error {
+                    message: format!("failed to issue capability token for resumed task: {e}"),
+                };
+            }
+        };
+
+        // 5. Rebuild AgentTask with fresh token but preserved state.
+        let resumed_task = AgentTask {
+            id: task_id,
+            state: TaskState::Queued,
+            agent_id: agent.id,
+            capability_token,
+            assigned_llm: Some(agent.id),
+            priority: payload.task.priority,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            timeout: task_timeout,
+            original_prompt: payload.task.original_prompt,
+            history: Vec::new(),
+            parent_task: payload.task.parent_task,
+            reasoning_hints: payload.task.reasoning_hints,
+            max_iterations: payload.task.max_iterations,
+            trigger_source: None,
+            autonomous: payload.task.autonomous,
+            parent_task_id: payload.task.parent_task_id,
+            spawn_depth: payload.task.spawn_depth,
+            is_team_coordinator: payload.task.is_team_coordinator,
+            skip_checkpoint: payload.task.skip_checkpoint,
+        };
+
+        // 6. Restore context window from checkpoint.
+        self.context_manager
+            .replace_context(&task_id, payload.context.window)
+            .await
+            .ok();
+
+        // 7. Enqueue the task.
+        self.scheduler.register_external(resumed_task.clone()).await;
+
+        tracing::info!(
+            task_id = %task_id,
+            agent_name = %agent.name,
+            step_restored = record.step_num,
+            "Task resumed from checkpoint"
+        );
+
+        // 8. Audit entry.
+        self.audit_log(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: agentos_audit::AuditEventType::CheckpointRestored,
+            agent_id: Some(agent.id),
+            task_id: Some(task_id),
+            tool_id: None,
+            details: serde_json::json!({
+                "step_restored": record.step_num,
+                "checkpoint_id": record.checkpoint_id,
+            }),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
+
+        KernelResponse::Success {
+            data: Some(serde_json::json!({
+                "task_id": task_id.to_string(),
+                "status": "resumed",
+                "step_restored": record.step_num,
+            })),
+        }
+    }
+
+    /// List all tasks that have checkpoints available for resume.
+    pub(crate) async fn cmd_list_checkpoints(&self) -> KernelResponse {
+        match self.checkpoint_store.list_checkpoints().await {
+            Ok(summaries) => {
+                let entries: Vec<serde_json::Value> = summaries
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "task_id": s.task_id.to_string(),
+                            "agent_id": s.agent_id.to_string(),
+                            "step_num": s.step_num,
+                            "checkpoint_id": s.checkpoint_id,
+                            "updated_at": s.updated_at.to_rfc3339(),
+                        })
+                    })
+                    .collect();
+                KernelResponse::CheckpointList(entries)
+            }
+            Err(e) => KernelResponse::Error {
+                message: format!("failed to list checkpoints: {e}"),
+            },
+        }
     }
 }
 

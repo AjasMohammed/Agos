@@ -19,4 +19,10 @@ pub struct NotificationSummary {
     pub priority: String,
     pub read: bool,
     pub timestamp: String,
+    /// Source label (e.g. "Kernel", agent name).
+    #[serde(default)]
+    pub from: String,
+    /// Truncated body text for list views.
+    #[serde(default)]
+    pub body: String,
 }

@@ -88,6 +88,11 @@ pub enum AuditEventType {
     SnapshotRestored,
     SnapshotExpired,
 
+    // Task checkpoint recovery
+    CheckpointWritten,
+    CheckpointRestored,
+    CheckpointPruned,
+
     // Cost attribution (Spec §4)
     CostAttribution,
 
@@ -115,6 +120,10 @@ pub enum AuditEventType {
     DeviceApproved,
     DeviceQuarantined,
     DeviceAccessEscalated,
+    PrintJobSubmitted,
+    PrintJobCancelled,
+    DisplayConfigApplied,
+    DisplayConfigReverted,
 
     // Agent identity / pubkey events
     /// Emitted when a pubkey is successfully registered for an agent (first-time only).

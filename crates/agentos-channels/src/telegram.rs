@@ -79,32 +79,39 @@ impl ChannelAdapter for TelegramAdapter {
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
         let text = msg.content.as_text();
-        let resp = self
-            .client
-            .post(self.api_url("sendMessage"))
-            .json(&serde_json::json!({
-                "chat_id": self.chat_id,
-                "text": text,
-                "parse_mode": "Markdown"
-            }))
-            .send()
-            .await
-            .map_err(|e| AgentOSError::ToolExecutionFailed {
-                tool_name: "telegram".to_string(),
-                reason: e.to_string(),
-            })?;
+        let url = self.api_url("sendMessage");
+        let client = &self.client;
+        let chat_id = &self.chat_id;
+        let policy = crate::retry::RetryPolicy::default();
 
-        if !resp.status().is_success() {
-            return Err(AgentOSError::ToolExecutionFailed {
-                tool_name: "telegram".to_string(),
-                reason: format!("Telegram API error: {}", resp.status()),
-            });
-        }
+        crate::retry::with_retry(&policy, "telegram", || async {
+            let resp = client
+                .post(&url)
+                .json(&serde_json::json!({
+                    "chat_id": chat_id,
+                    "text": &text,
+                    "parse_mode": "Markdown"
+                }))
+                .send()
+                .await
+                .map_err(|e| AgentOSError::ToolExecutionFailed {
+                    tool_name: "telegram".to_string(),
+                    reason: e.to_string(),
+                })?;
 
-        Ok(DeliveryReceipt {
-            message_id: uuid::Uuid::new_v4().to_string(),
-            delivered_at: chrono::Utc::now(),
+            if !resp.status().is_success() {
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name: "telegram".to_string(),
+                    reason: format!("Telegram API error: {}", resp.status()),
+                });
+            }
+
+            Ok(DeliveryReceipt {
+                message_id: uuid::Uuid::new_v4().to_string(),
+                delivered_at: chrono::Utc::now(),
+            })
         })
+        .await
     }
 
     async fn start_listener(

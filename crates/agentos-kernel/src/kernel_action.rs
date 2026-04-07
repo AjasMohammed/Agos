@@ -87,6 +87,16 @@ pub(crate) enum KernelAction {
     AwaitAgents {
         task_ids: Vec<String>,
     },
+    /// Non-blocking poll of spawned sub-agent status and progress.
+    PollAgents {
+        task_ids: Vec<String>,
+        include_progress: bool,
+    },
+    /// Cancel a spawned sub-agent (cascades to grandchildren).
+    CancelAgent {
+        task_id: String,
+        reason: String,
+    },
 }
 
 /// Why an agent is requesting human escalation.
@@ -311,6 +321,34 @@ impl KernelAction {
                     .unwrap_or_default();
                 Some(Self::AwaitAgents { task_ids })
             }
+            "poll_agents" => {
+                let task_ids = value
+                    .get("task_ids")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let include_progress = value
+                    .get("include_progress")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                Some(Self::PollAgents {
+                    task_ids,
+                    include_progress,
+                })
+            }
+            "cancel_agent" => {
+                let task_id = value.get("task_id")?.as_str()?.to_string();
+                let reason = value
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Cancelled by parent agent")
+                    .to_string();
+                Some(Self::CancelAgent { task_id, reason })
+            }
             other => {
                 tracing::warn!(action = %other, "Unknown _kernel_action, ignoring");
                 None
@@ -347,6 +385,8 @@ impl Kernel {
             KernelAction::ContextMemoryRead { .. } => "context_memory_read",
             KernelAction::SpawnAgent { .. } => "spawn_agent",
             KernelAction::AwaitAgents { .. } => "await_agents",
+            KernelAction::PollAgents { .. } => "poll_agents",
+            KernelAction::CancelAgent { .. } => "cancel_agent",
         };
 
         self.audit_log(agentos_audit::AuditEntry {
@@ -635,6 +675,149 @@ impl Kernel {
                     _ => KernelActionResult {
                         success: false,
                         result: serde_json::json!({ "error": "unexpected response from await" }),
+                    },
+                }
+            }
+            KernelAction::PollAgents {
+                task_ids,
+                include_progress,
+            } => {
+                let mut results = Vec::with_capacity(task_ids.len());
+                for id_str in &task_ids {
+                    match id_str.parse::<agentos_types::TaskID>() {
+                        Ok(tid) => {
+                            if let Some(child_task) = self.scheduler.get_task(&tid).await {
+                                // Verify the caller is the parent
+                                if child_task.parent_task_id != Some(task.id) {
+                                    results.push(serde_json::json!({
+                                        "task_id": id_str,
+                                        "error": "not parent of this task"
+                                    }));
+                                    continue;
+                                }
+                                let state_label = format!("{:?}", child_task.state);
+                                let mut entry = serde_json::json!({
+                                    "task_id": id_str,
+                                    "state": state_label,
+                                    "spawn_depth": child_task.spawn_depth,
+                                });
+                                if include_progress {
+                                    // Include last few history messages as progress
+                                    let history_len = child_task.history.len();
+                                    let recent: Vec<String> = child_task
+                                        .history
+                                        .iter()
+                                        .rev()
+                                        .take(3)
+                                        .filter_map(|m| {
+                                            m.payload
+                                                .data
+                                                .get("content")
+                                                .and_then(|v| v.as_str())
+                                                .map(|content: &str| {
+                                                    if content.len() > 200 {
+                                                        format!("{}...", &content[..200])
+                                                    } else {
+                                                        content.to_string()
+                                                    }
+                                                })
+                                        })
+                                        .collect();
+                                    if let Some(obj) = entry.as_object_mut() {
+                                        obj.insert(
+                                            "iterations".into(),
+                                            serde_json::json!(history_len / 2),
+                                        );
+                                        obj.insert(
+                                            "recent_messages".into(),
+                                            serde_json::json!(recent),
+                                        );
+                                    }
+                                }
+                                results.push(entry);
+                            } else {
+                                results.push(serde_json::json!({
+                                    "task_id": id_str,
+                                    "error": "task not found"
+                                }));
+                            }
+                        }
+                        Err(_) => {
+                            results.push(serde_json::json!({
+                                "task_id": id_str,
+                                "error": "invalid task_id"
+                            }));
+                        }
+                    }
+                }
+                KernelActionResult {
+                    success: true,
+                    result: serde_json::json!({ "results": results }),
+                }
+            }
+            KernelAction::CancelAgent { task_id, reason } => {
+                match task_id.parse::<agentos_types::TaskID>() {
+                    Ok(tid) => {
+                        // Verify the caller is the parent
+                        let is_parent = self
+                            .scheduler
+                            .get_task(&tid)
+                            .await
+                            .map(|t| t.parent_task_id == Some(task.id))
+                            .unwrap_or(false);
+                        if !is_parent {
+                            return KernelActionResult {
+                                success: false,
+                                result: serde_json::json!({
+                                    "error": "not parent of this task — cannot cancel"
+                                }),
+                            };
+                        }
+
+                        // Cancel the task (cascades to children via existing logic)
+                        let response = self.cmd_cancel_task(tid).await;
+                        self.audit_log(AuditEntry {
+                            timestamp: Utc::now(),
+                            trace_id,
+                            event_type: AuditEventType::TaskCompleted,
+                            agent_id: Some(task.agent_id),
+                            task_id: Some(tid),
+                            tool_id: None,
+                            details: serde_json::json!({
+                                "action": "cancel_agent",
+                                "reason": reason,
+                                "cancelled_by": task.id.to_string(),
+                            }),
+                            severity: AuditSeverity::Info,
+                            reversible: false,
+                            rollback_ref: None,
+                        });
+                        match response {
+                            agentos_bus::KernelResponse::Success { .. } => KernelActionResult {
+                                success: true,
+                                result: serde_json::json!({
+                                    "cancelled": true,
+                                    "task_id": task_id,
+                                    "reason": reason,
+                                }),
+                            },
+                            agentos_bus::KernelResponse::Error { message } => KernelActionResult {
+                                success: false,
+                                result: serde_json::json!({ "error": message }),
+                            },
+                            _ => KernelActionResult {
+                                success: false,
+                                result: serde_json::json!({
+                                    "error": "unexpected response from cancel"
+                                }),
+                            },
+                        }
+                    }
+                    Err(_) => KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!("invalid task_id: {}", task_id)
+                        }),
                     },
                 }
             }
@@ -1386,6 +1569,7 @@ impl Kernel {
             parent_task_id: None,
             spawn_depth: 0,
             is_team_coordinator: false,
+            skip_checkpoint: false,
         };
 
         self.scheduler.register_external(child_task.clone()).await;

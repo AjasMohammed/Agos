@@ -6,7 +6,7 @@ tags:
   - v4
   - plan
 date: 2026-04-02
-status: complete
+status: in-progress
 effort: 2w
 priority: critical
 ---
@@ -72,6 +72,7 @@ Parent Task (Coordinator)
 | 2 | Context handoff | 2d | Phase 1 | [[02-context-handoff]] | complete |
 | 3 | Coordination tools | 2d | Phase 1, 2 | [[03-coordination-tools]] | complete |
 | 4 | Agent teams | 1.5d | Phase 1, 2, 3 | [[04-agent-teams]] | complete |
+| 5 | Streaming agent communication | 2d | Phase 1, 3 | [[05-streaming-agent-communication]] | partial |
 
 ---
 
@@ -83,6 +84,8 @@ graph LR
     P1 --> P3[Phase 3: Coordination tools]
     P2 --> P3
     P3 --> P4[Phase 4: Agent teams]
+    P1 --> P5[Phase 5: Streaming agent communication]
+    P3 --> P5
 ```
 
 ---

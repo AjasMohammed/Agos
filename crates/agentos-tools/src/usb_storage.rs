@@ -41,7 +41,11 @@ impl AgentTool for UsbStorageTool {
             })?;
 
         let mut perms = agentos_types::PermissionSet::new();
-        perms.grant("hardware.usb-storage".to_string(), false, false, true, None);
+        perms.grant_op(
+            "hardware.usb-storage".to_string(),
+            PermissionOp::Execute,
+            None,
+        );
 
         hal.query(
             "usb-storage",

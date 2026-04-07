@@ -15,6 +15,9 @@ pub enum TaskCommands {
         /// Use for long-running autonomous workflows that must run to natural completion.
         #[arg(long, default_value_t = false)]
         autonomous: bool,
+        /// Skip checkpointing for this task (ephemeral execution).
+        #[arg(long, default_value_t = false)]
+        no_checkpoint: bool,
         /// The task prompt
         prompt: String,
     },
@@ -30,6 +33,13 @@ pub enum TaskCommands {
         /// Task ID
         task_id: String,
     },
+    /// Resume a task from its latest checkpoint
+    Resume {
+        /// Task ID
+        task_id: String,
+    },
+    /// List all tasks that have checkpoints available for resume
+    Checkpoints,
     /// Show execution trace for a completed task
     Trace {
         /// Task ID
@@ -57,6 +67,7 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
         TaskCommands::Run {
             agent,
             autonomous,
+            no_checkpoint,
             prompt,
         } => {
             if let Some(ref a) = agent {
@@ -82,6 +93,7 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                     agent_name: agent,
                     prompt,
                     autonomous,
+                    no_checkpoint,
                 })
                 .await?;
 
@@ -180,6 +192,60 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                 .await?;
             match response {
                 KernelResponse::Success { .. } => println!("✅ Task {} cancelled", task_id),
+                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
+                _ => eprintln!("❌ Unexpected response"),
+            }
+        }
+
+        TaskCommands::Resume { task_id } => {
+            let tid = TaskID::from_uuid(Uuid::parse_str(&task_id)?);
+            println!("🔄 Resuming task {} from checkpoint...", task_id);
+            let response = client
+                .send_command(KernelCommand::ResumeTask { task_id: tid })
+                .await?;
+            match response {
+                KernelResponse::Success { data } => {
+                    if let Some(data) = data {
+                        let step = data
+                            .get("step_restored")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        println!("✅ Task resumed from checkpoint (step {})", step);
+                    } else {
+                        println!("✅ Task resumed from checkpoint");
+                    }
+                }
+                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
+                _ => eprintln!("❌ Unexpected response"),
+            }
+        }
+
+        TaskCommands::Checkpoints => {
+            let response = client.send_command(KernelCommand::ListCheckpoints).await?;
+            match response {
+                KernelResponse::CheckpointList(entries) => {
+                    if entries.is_empty() {
+                        println!("No checkpoints available.");
+                    } else {
+                        println!("{:<38} {:<38} {:<6} UPDATED", "TASK ID", "AGENT ID", "STEP");
+                        println!("{}", "-".repeat(95));
+                        for entry in entries {
+                            println!(
+                                "{:<38} {:<38} {:<6} {}",
+                                entry.get("task_id").and_then(|v| v.as_str()).unwrap_or("-"),
+                                entry
+                                    .get("agent_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("-"),
+                                entry.get("step_num").and_then(|v| v.as_u64()).unwrap_or(0),
+                                entry
+                                    .get("updated_at")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("-"),
+                            );
+                        }
+                    }
+                }
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
                 _ => eprintln!("❌ Unexpected response"),
             }

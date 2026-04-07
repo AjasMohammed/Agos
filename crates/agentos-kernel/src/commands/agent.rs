@@ -604,6 +604,7 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         parent_task_id: None,
                         spawn_depth: 0,
                         is_team_coordinator: false,
+                        skip_checkpoint: false,
                     };
                     self.scheduler.enqueue(onboarding_task).await;
                     onboarding_task_id_opt = Some(onboarding_task_id);
@@ -902,11 +903,24 @@ fn default_permissions_for_agent(name: &str) -> PermissionSet {
     // Memory blocks — read+write for named memory blocks
     perms.grant("memory.blocks".to_string(), true, true, false, None);
 
+    // Context memory — read+write (context-memory-read, context-memory-update)
+    perms.grant("memory.context".to_string(), true, true, false, None);
+
     // Agent registry — read-only (agent-self, agent-list, agent-manual)
     perms.grant("agent.registry".to_string(), true, false, false, None);
 
     // Agent messaging — execute (agent-message, task-delegate)
     perms.grant_op("agent.message".to_string(), PermissionOp::Execute, None);
+
+    // Agent calls — execute (agent-call for direct inter-agent invocations)
+    perms.grant_op("agent.call".to_string(), PermissionOp::Execute, None);
+
+    // Agent spawning — execute (spawn-agent, await-agents, verify-output)
+    perms.grant_op("agent.spawn".to_string(), PermissionOp::Execute, None);
+
+    // User interaction — ask-user (execute) and notify-user (write)
+    perms.grant_op("user.interact".to_string(), PermissionOp::Execute, None);
+    perms.grant("user.notify".to_string(), false, true, false, None);
 
     // Hardware system info — read-only (hardware-info, sys-monitor)
     perms.grant("hardware.system".to_string(), true, false, false, None);

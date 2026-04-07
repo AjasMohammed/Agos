@@ -8,12 +8,13 @@ use crate::error::ApiError;
 use crate::service::KernelService;
 use crate::types::*;
 use crate::util::task_state_str;
-use agentos_kernel::Kernel;
+use agentos_kernel::{ChatStreamEvent, Kernel};
 use agentos_types::{
     DeliveryChannel, LLMProvider, NotificationID, SecretMetadata, SecretScope, TaskID, TaskState,
     ToolID, UserResponse,
 };
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 
 // ── Stable string serialization helpers ─────────────────────────────────────
 
@@ -370,6 +371,51 @@ impl KernelService for Kernel {
         })
     }
 
+    async fn chat_stream(
+        &self,
+        req: ChatRequest,
+        tx: mpsc::Sender<ChatStreamEvent>,
+    ) -> Result<(), ApiError> {
+        // Run the same chat_infer_with_tools path but emit events along the way.
+        // For now we perform full inference and emit Thinking → Done events.
+        // This unblocks SSE clients while a full token-level streaming implementation
+        // is wired in a future iteration.
+        let _ = tx.send(ChatStreamEvent::Thinking { iteration: 1 }).await;
+
+        let history: Vec<(String, String)> = req.history;
+        let result = self
+            .chat_infer_with_tools(&req.agent_name, &history, &req.message)
+            .await
+            .map_err(ApiError::Internal)?;
+
+        let tool_calls: Vec<agentos_kernel::kernel::ChatToolCallRecord> = result.tool_calls;
+
+        // Emit tool events
+        for tc in &tool_calls {
+            let _ = tx
+                .send(ChatStreamEvent::ToolResult {
+                    tool_name: tc.tool_name.clone(),
+                    result_preview: {
+                        let s = tc.result.to_string();
+                        s.chars().take(200).collect()
+                    },
+                    duration_ms: 0,
+                    success: true,
+                })
+                .await;
+        }
+
+        let _ = tx
+            .send(ChatStreamEvent::Done {
+                answer: result.answer,
+                tool_calls,
+                iterations: result.iterations,
+            })
+            .await;
+
+        Ok(())
+    }
+
     // ── Pipelines ───────────────────────────────────────────────────────
 
     async fn list_pipelines(&self) -> Result<Vec<ApiPipelineSummary>, ApiError> {
@@ -531,6 +577,12 @@ impl KernelService for Kernel {
                 priority: m.priority.to_string(),
                 read: m.read,
                 timestamp: m.created_at.to_rfc3339(),
+                from: match &m.from {
+                    agentos_types::NotificationSource::Agent(id) => format!("Agent {}", id),
+                    agentos_types::NotificationSource::Kernel => "Kernel".to_string(),
+                    agentos_types::NotificationSource::System => "System".to_string(),
+                },
+                body: m.body.clone(),
             })
             .collect())
     }
@@ -657,5 +709,27 @@ impl KernelService for Kernel {
             .signed_duration_since(self.started_at)
             .to_std()
             .unwrap_or_default()
+    }
+
+    async fn verify_webhook_secret(
+        &self,
+        channel_id: &str,
+        secret: &str,
+    ) -> Result<bool, ApiError> {
+        let cid: agentos_types::ChannelInstanceID = channel_id
+            .parse()
+            .map_err(|_| ApiError::BadRequest(format!("Invalid channel ID: {channel_id}")))?;
+        let secrets = self.webhook_secrets.read().await;
+        Ok(secrets.get(&cid).map(|s| s.as_str()) == Some(secret))
+    }
+
+    async fn forward_webhook_message(
+        &self,
+        message: agentos_kernel::notification_router::InboundMessage,
+    ) -> Result<(), ApiError> {
+        self.inbound_tx
+            .send(message)
+            .await
+            .map_err(|_| ApiError::Internal("Inbound message channel closed".into()))
     }
 }

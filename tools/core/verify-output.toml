@@ -1,0 +1,40 @@
+[manifest]
+name        = "verify-output"
+version     = "1.0.0"
+description = "Verify an output by spawning a critic/reviewer agent. The verifier evaluates the output against specified criteria and returns a verdict (pass/fail/needs_revision) with issues and summary."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["agent.spawn:x"]
+
+[capabilities_provided]
+outputs = ["task_id"]
+
+[intent_schema]
+input  = "VerifyOutputIntent"
+output = "VerifyOutputResult"
+
+[input_schema]
+type = "object"
+required = ["agent", "output"]
+
+[input_schema.properties.agent]
+type = "string"
+description = "Name of the agent to use as a verifier/critic."
+
+[input_schema.properties.output]
+type = "string"
+description = "The output text to be verified."
+
+[input_schema.properties.criteria]
+type = "string"
+description = "Criteria to evaluate against. Defaults to 'correctness, safety, and completeness'."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

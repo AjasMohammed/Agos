@@ -16,6 +16,7 @@ tracing = { workspace = true }
 regex = { workspace = true }
 async-trait = { workspace = true }
 rand = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

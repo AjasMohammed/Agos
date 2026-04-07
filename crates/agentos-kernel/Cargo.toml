@@ -56,8 +56,15 @@ opentelemetry-semantic-conventions = { version = "0.28", optional = true }
 tracing-opentelemetry = { version = "0.29", optional = true }
 
 [features]
-default = ["usb-storage"]
+default = ["usb-storage", "printer"]
+all-peripherals = ["audio", "bluetooth", "display", "printer", "raw-usb", "usb-storage", "webcam"]
+audio = ["agentos-hal/audio"]
 usb-storage = ["agentos-hal/usb-storage"]
+printer = ["agentos-hal/printer"]
+bluetooth = ["agentos-hal/bluetooth"]
+display = ["agentos-hal/display"]
+raw-usb = ["agentos-hal/raw-usb"]
+webcam = ["agentos-hal/webcam"]
 otel = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",

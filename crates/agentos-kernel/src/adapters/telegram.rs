@@ -5,8 +5,15 @@ use agentos_types::{
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::Deserialize;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
+
+/// Notification sent once when a Telegram chat_id is auto-discovered.
+pub struct ChatDiscovered {
+    pub channel_instance_id: ChannelInstanceID,
+    pub chat_id: String,
+}
 
 /// Telegram Bot API delivery and inbound adapter.
 ///
@@ -15,37 +22,119 @@ use tokio::sync::mpsc;
 /// Inbound: long-polls `getUpdates` in a background task; every message from
 /// the registered chat is forwarded to the `InboundRouter` via `mpsc::Sender`.
 ///
+/// When `chat_id` is empty, the adapter enters **auto-discovery mode**: it polls
+/// `getUpdates`, and the first inbound message's chat_id is captured and stored.
+/// Outbound delivery is unavailable until discovery completes.
+///
 /// Bot tokens are stored in `agentos-vault`; only the credential vault key is
 /// kept here.  The actual token is retrieved at startup by the kernel and passed
 /// to `new()`.
 pub struct TelegramDeliveryAdapter {
     bot_token: String,
-    chat_id: String,
+    chat_id: Arc<RwLock<String>>,
     channel_instance_id: ChannelInstanceID,
     client: reqwest::Client,
+    /// Fires once when chat_id is auto-discovered (empty string → real id).
+    on_chat_discovered: Arc<std::sync::Mutex<Option<mpsc::Sender<ChatDiscovered>>>>,
+    /// When true, inbound messages arrive via webhook POST, not long-polling.
+    webhook_mode: bool,
 }
 
 impl TelegramDeliveryAdapter {
     /// Construct the adapter.
     ///
     /// `bot_token` — the Telegram Bot API token (from vault).
-    /// `chat_id` — the chat/user ID to deliver to and poll.
+    /// `chat_id` — the chat/user ID to deliver to and poll.  Pass an empty
+    ///   string to enable auto-discovery from the first inbound message.
     /// `channel_instance_id` — used to tag inbound messages.
-    pub fn new(bot_token: String, chat_id: String, channel_instance_id: ChannelInstanceID) -> Self {
+    /// `on_chat_discovered` — optional sender; fired once when auto-discovery
+    ///   captures a chat_id.
+    pub fn new(
+        bot_token: String,
+        chat_id: String,
+        channel_instance_id: ChannelInstanceID,
+        on_chat_discovered: Option<mpsc::Sender<ChatDiscovered>>,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(40))
             .build()
             .unwrap_or_default();
         Self {
             bot_token,
-            chat_id,
+            chat_id: Arc::new(RwLock::new(chat_id)),
             channel_instance_id,
             client,
+            on_chat_discovered: Arc::new(std::sync::Mutex::new(on_chat_discovered)),
+            webhook_mode: false,
         }
     }
 
     fn api_url(&self, method: &str) -> String {
         format!("https://api.telegram.org/bot{}/{method}", self.bot_token)
+    }
+
+    /// Enable webhook mode. Must be called before `start_listening`.
+    pub fn set_webhook_mode(&mut self) {
+        self.webhook_mode = true;
+    }
+
+    /// Call Telegram `setWebhook` to register the given URL.
+    ///
+    /// `secret_token` is set as the `secret_token` parameter so Telegram sends it
+    /// back in the `X-Telegram-Bot-Api-Secret-Token` header on every update POST.
+    pub async fn register_webhook(
+        &self,
+        webhook_url: &str,
+        secret_token: &str,
+    ) -> Result<(), DeliveryError> {
+        let resp = self
+            .client
+            .post(self.api_url("setWebhook"))
+            .json(&serde_json::json!({
+                "url": webhook_url,
+                "secret_token": secret_token,
+                "allowed_updates": ["message", "callback_query"],
+            }))
+            .send()
+            .await
+            .map_err(|_| DeliveryError("setWebhook request failed".into()))?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(DeliveryError(format!("setWebhook failed: {body}")));
+        }
+
+        let body: serde_json::Value = serde_json::from_str(
+            &resp
+                .text()
+                .await
+                .unwrap_or_else(|_| r#"{"ok":false}"#.into()),
+        )
+        .unwrap_or_default();
+        if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            let desc = body
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            return Err(DeliveryError(format!("setWebhook rejected: {desc}")));
+        }
+        Ok(())
+    }
+
+    /// Call Telegram `deleteWebhook` to unregister the webhook and revert to polling.
+    pub async fn delete_webhook(&self) -> Result<(), DeliveryError> {
+        let resp = self
+            .client
+            .post(self.api_url("deleteWebhook"))
+            .send()
+            .await
+            .map_err(|_| DeliveryError("deleteWebhook request failed".into()))?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(DeliveryError(format!("deleteWebhook failed: {body}")));
+        }
+        Ok(())
     }
 }
 
@@ -56,11 +145,18 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
     }
 
     async fn deliver(&self, msg: &UserMessage) -> Result<(), DeliveryError> {
+        let chat_id = self.chat_id.read().await;
+        if chat_id.is_empty() {
+            return Err(DeliveryError(
+                "Telegram chat_id not yet discovered — send /start to the bot first".into(),
+            ));
+        }
+
         let text = format_telegram_message(msg);
         let reply_markup = build_inline_keyboard(msg);
 
         let mut payload = serde_json::json!({
-            "chat_id": self.chat_id,
+            "chat_id": &*chat_id,
             "text": text,
             "parse_mode": "MarkdownV2",
         });
@@ -88,7 +184,7 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
     }
 
     async fn is_available(&self) -> bool {
-        !self.bot_token.is_empty() && !self.chat_id.is_empty()
+        !self.bot_token.is_empty() && !self.chat_id.read().await.is_empty()
     }
 
     fn adapter_instance_id(&self) -> Option<String> {
@@ -96,7 +192,9 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
     }
 
     fn supports_inbound(&self) -> bool {
-        true
+        // In webhook mode, inbound messages arrive via the HTTP endpoint,
+        // not via a listener task spawned here.
+        !self.webhook_mode
     }
 
     async fn start_listening(
@@ -107,36 +205,77 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
         let chat_id = self.chat_id.clone();
         let channel_instance_id = self.channel_instance_id;
         let client = self.client.clone();
+        let on_discovered = self
+            .on_chat_discovered
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
 
         let handle = tokio::spawn(async move {
-            telegram_poll_loop(token, chat_id, channel_instance_id, client, tx).await;
+            telegram_poll_loop(
+                token,
+                chat_id,
+                channel_instance_id,
+                client,
+                tx,
+                on_discovered,
+            )
+            .await;
         });
         Ok(handle)
     }
 }
 
 /// Long-poll loop: calls `getUpdates` with a 30-second timeout repeatedly.
-/// Uses exponential backoff (5s → 80s) on transient failures.
+/// Uses exponential backoff (5s → 300s) on transient failures.
+///
+/// When `chat_id` is empty (auto-discovery mode), the first update's chat_id is
+/// captured and stored.  The `on_discovered` sender fires once to notify the
+/// kernel so it can persist the discovered chat_id in the channel registry.
 async fn telegram_poll_loop(
     token: String,
-    chat_id: String,
+    chat_id: Arc<RwLock<String>>,
     channel_instance_id: ChannelInstanceID,
     client: reqwest::Client,
     tx: mpsc::Sender<InboundMessage>,
+    on_discovered: Option<mpsc::Sender<ChatDiscovered>>,
 ) {
     let mut offset: i64 = 0;
     let mut backoff_secs: u64 = 5;
+    let mut discovery_tx = on_discovered;
+
     loop {
         // Build URL without logging it — the token must not appear in log output.
         let url =
             format!("https://api.telegram.org/bot{token}/getUpdates?offset={offset}&timeout=30");
         match client.get(&url).send().await {
             Ok(resp) => {
-                backoff_secs = 5; // reset on success
                 match resp.json::<TelegramUpdatesResponse>().await {
                     Ok(updates) if updates.ok => {
+                        backoff_secs = 5; // reset only on ok=true
                         for update in updates.result {
                             offset = update.update_id + 1;
+
+                            // Auto-discover chat_id from the first inbound message.
+                            let current = chat_id.read().await.clone();
+                            if current.is_empty() {
+                                if let Some(discovered) = extract_chat_id_from_update(&update) {
+                                    tracing::info!(
+                                        %discovered,
+                                        channel = %channel_instance_id,
+                                        "Telegram chat_id auto-discovered"
+                                    );
+                                    *chat_id.write().await = discovered.clone();
+                                    if let Some(dtx) = discovery_tx.take() {
+                                        let _ = dtx
+                                            .send(ChatDiscovered {
+                                                channel_instance_id,
+                                                chat_id: discovered,
+                                            })
+                                            .await;
+                                    }
+                                }
+                            }
 
                             // Acknowledge inline keyboard taps so Telegram
                             // dismisses the loading spinner on the button.
@@ -167,8 +306,13 @@ async fn telegram_poll_loop(
                                 }
                             }
 
-                            let inbound =
-                                extract_inbound_message(&update, &chat_id, channel_instance_id);
+                            // Re-read chat_id (may have just been set by discovery above).
+                            let active_chat_id = chat_id.read().await.clone();
+                            let inbound = extract_inbound_message(
+                                &update,
+                                &active_chat_id,
+                                channel_instance_id,
+                            );
                             if let Some(msg) = inbound {
                                 if tx.send(msg).await.is_err() {
                                     // Router dropped — kernel shutting down.
@@ -177,8 +321,15 @@ async fn telegram_poll_loop(
                             }
                         }
                     }
-                    Ok(_) => {
+                    Ok(err_resp) => {
+                        let code = err_resp.error_code.unwrap_or(0);
+                        let desc = err_resp
+                            .description
+                            .as_deref()
+                            .unwrap_or("(no description)");
                         tracing::warn!(
+                            error_code = code,
+                            description = desc,
                             "Telegram getUpdates returned ok=false; retrying in {backoff_secs}s"
                         );
                         tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
@@ -203,8 +354,21 @@ async fn telegram_poll_loop(
     }
 }
 
+/// Pull the chat_id from the first available location in a Telegram update.
+pub fn extract_chat_id_from_update(update: &TelegramUpdate) -> Option<String> {
+    if let Some(msg) = &update.message {
+        return Some(msg.chat.id.to_string());
+    }
+    if let Some(cq) = &update.callback_query {
+        if let Some(m) = &cq.message {
+            return Some(m.chat.id.to_string());
+        }
+    }
+    None
+}
+
 /// Extract an `InboundMessage` from a Telegram update, filtering to the registered chat.
-fn extract_inbound_message(
+pub fn extract_inbound_message(
     update: &TelegramUpdate,
     registered_chat_id: &str,
     channel_instance_id: ChannelInstanceID,
@@ -255,10 +419,10 @@ fn extract_inbound_message(
 /// Format a `UserMessage` for Telegram (MarkdownV2 escaping for special chars).
 fn format_telegram_message(msg: &UserMessage) -> String {
     let icon = match msg.priority {
-        NotificationPriority::Critical => "🚨",
-        NotificationPriority::Urgent => "⚠️",
-        NotificationPriority::Warning => "🔶",
-        NotificationPriority::Info => "ℹ️",
+        NotificationPriority::Critical => "\u{1f6a8}",
+        NotificationPriority::Urgent => "\u{26a0}\u{fe0f}",
+        NotificationPriority::Warning => "\u{1f536}",
+        NotificationPriority::Info => "\u{2139}\u{fe0f}",
     };
 
     let subject = escape_markdown_v2(&msg.subject);
@@ -267,9 +431,9 @@ fn format_telegram_message(msg: &UserMessage) -> String {
     let body: String = body.chars().take(2000).collect();
 
     if body.is_empty() {
-        format!("{icon} *AgentOS* — {subject}")
+        format!("{icon} *AgentOS* \u{2014} {subject}")
     } else {
-        format!("{icon} *AgentOS* — {subject}\n\n{body}")
+        format!("{icon} *AgentOS* \u{2014} {subject}\n\n{body}")
     }
 }
 
@@ -324,40 +488,46 @@ fn escape_markdown_v2(text: &str) -> String {
 // ── Telegram API response types ───────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct TelegramUpdatesResponse {
+pub struct TelegramUpdatesResponse {
     ok: bool,
     #[serde(default)]
     result: Vec<TelegramUpdate>,
+    /// Telegram error code (present when `ok` is false).
+    #[serde(default)]
+    error_code: Option<i32>,
+    /// Human-readable error description (present when `ok` is false).
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct TelegramUpdate {
-    update_id: i64,
+pub struct TelegramUpdate {
+    pub update_id: i64,
     #[serde(default)]
-    message: Option<TelegramMessage>,
+    pub message: Option<TelegramMessage>,
     #[serde(default)]
-    callback_query: Option<TelegramCallbackQuery>,
+    pub callback_query: Option<TelegramCallbackQuery>,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
-struct TelegramMessage {
+pub struct TelegramMessage {
     #[allow(dead_code)]
-    message_id: i64,
-    chat: TelegramChat,
+    pub message_id: i64,
+    pub chat: TelegramChat,
     #[serde(default)]
-    text: Option<String>,
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
-struct TelegramChat {
-    id: i64,
+pub struct TelegramChat {
+    pub id: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
-struct TelegramCallbackQuery {
-    id: String,
+pub struct TelegramCallbackQuery {
+    pub id: String,
     #[serde(default)]
-    data: Option<String>,
+    pub data: Option<String>,
     #[serde(default)]
-    message: Option<TelegramMessage>,
+    pub message: Option<TelegramMessage>,
 }

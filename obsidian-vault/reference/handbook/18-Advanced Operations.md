@@ -74,9 +74,123 @@ Device lifecycle changes are recorded in the audit log:
 | `HardwareDeviceDenied` | Device denied |
 | `HardwareDeviceRevoked` | Agent's access revoked |
 
-### Current Status
+### HAL Drivers
 
-The HAL registry and per-device quarantine/approve/deny workflow are fully implemented (Spec §9). The HAL driver layer (system monitoring, process manager, network monitor, GPU metrics) is under active development. The `sys-monitor`, `hardware-info`, `process-manager`, and `network-monitor` tools interact with HAL driver data.
+The HAL includes a suite of hardware drivers, some always available and others feature-gated at compile time:
+
+| Driver | Feature Gate | Description |
+|--------|-------------|-------------|
+| `system` | — (always) | System info: hostname, uptime, OS, CPU, memory |
+| `process` | — (always) | Process listing, signals, resource usage |
+| `network` | — (always) | Network interfaces, connections, bandwidth |
+| `storage` | — (always) | Block device listing, disk usage |
+| `sensor` | — (always) | Thermal sensor readings |
+| `gpu` | — (always) | GPU metrics (VRAM, temperature, utilization) |
+| `log_reader` | — (always) | System and application log reading |
+| `audio` | `audio` | Audio capture and playback via PipeWire/PulseAudio |
+| `bluetooth` | `bluetooth` | Bluetooth device scanning, pairing, and connection |
+| `display` | `display` | Display output configuration (resolution, refresh rate) |
+| `printer` | `printer` | Print job submission and management via CUPS |
+| `raw_usb` | `raw-usb` | Direct USB device access (bulk/interrupt/control transfers) |
+| `usb_storage` | `usb-storage` | USB mass storage mount/unmount/eject via UDisks2 |
+| `webcam` | `webcam` | Webcam image and burst capture via Video4Linux |
+
+Feature-gated drivers are compiled only when their feature flag is enabled:
+
+```bash
+# Build with specific HAL drivers
+cargo build -p agentos-kernel --features audio,bluetooth,webcam
+
+# Build with all peripheral drivers
+cargo build -p agentos-kernel --features audio,bluetooth,display,printer,raw-usb,usb-storage,webcam
+```
+
+### Consent Store
+
+Privacy-sensitive HAL drivers (webcam, audio, bluetooth) require explicit consent before accessing hardware. The `ConsentStore` (`crates/agentos-hal/src/consent.rs`) manages time-limited consent grants:
+
+| Operation | Description |
+|-----------|-------------|
+| `grant(agent_id, resource, ttl)` | Grant access to a resource for a specified duration |
+| `check(agent_id, resource)` | Check if an active, non-expired grant exists |
+| `revoke(agent_id, resource)` | Immediately revoke access |
+| `list()` | List all active grants with remaining TTL |
+
+Grants are keyed by `(agent_id, resource)` and automatically expire after their TTL. A background prune removes expired grants on every check. Example resources: `hardware.webcam.capture`, `hardware.audio.record`, `hardware.bluetooth.scan`.
+
+### Audio Driver
+
+The audio driver (`crates/agentos-hal/src/drivers/audio.rs`) provides capture and playback via PipeWire or PulseAudio.
+
+| Action | Description | Key Params |
+|--------|-------------|------------|
+| `list` | List audio sources and sinks | None |
+| `capture` | Record audio from a source | `source`, `duration_seconds`, `sample_rate` |
+| `playback` | Play an audio file to a sink | `sink`, `audio_path` |
+
+**Permission:** `hardware.audio:x` — **Events:** `AudioCaptureStarted`, `AudioCaptureStopped`, `AudioPlaybackStarted`
+
+### Bluetooth Driver
+
+The Bluetooth driver (`crates/agentos-hal/src/drivers/bluetooth.rs`) provides device discovery, pairing, and connection.
+
+| Action | Description | Key Params |
+|--------|-------------|------------|
+| `scan` | Scan for nearby Bluetooth devices | `duration_seconds` |
+| `pair` | Initiate pairing with a device | `device_address` |
+| `connect` | Connect to a paired device | `device_address` |
+| `list` | List known/paired devices | None |
+
+**Permission:** `hardware.bluetooth:x` — **Events:** `BluetoothScanStarted`, `BluetoothPairRequested`, `BluetoothConnected`
+
+### Display Driver
+
+The display driver (`crates/agentos-hal/src/drivers/display.rs`) manages display output configuration.
+
+| Action | Description | Key Params |
+|--------|-------------|------------|
+| `list` | List connected display outputs | None |
+| `configure` | Apply resolution/refresh rate | `output`, `width`, `height`, `refresh_rate` |
+| `revert` | Revert to previous configuration | `output` |
+
+**Permission:** `hardware.display:x` — **Events:** `DisplayConfigApplied`, `DisplayConfigReverted`
+
+### Printer Driver
+
+The printer driver (`crates/agentos-hal/src/drivers/printer.rs`) submits and manages print jobs via CUPS.
+
+| Action | Description | Key Params |
+|--------|-------------|------------|
+| `list` | List available printers | None |
+| `print` | Submit a print job | `printer`, `document_path`, `job_name` |
+| `cancel` | Cancel a print job | `printer`, `job_id` |
+| `status` | Check printer/job status | `printer` |
+
+**Permission:** `hardware.printer:x` — **Audit events:** `PrintJobSubmitted`, `PrintJobCancelled`
+
+### Raw USB Driver
+
+The raw USB driver (`crates/agentos-hal/src/drivers/raw_usb.rs`) provides direct device access for bulk, interrupt, and control transfers.
+
+| Action | Description | Key Params |
+|--------|-------------|------------|
+| `list` | List USB devices | None |
+| `open` | Open a USB device for transfers | `vendor_id`, `product_id`, `interface` |
+| `transfer` | Perform a USB transfer | `device_key`, `transfer_kind`, `endpoint`, `direction` |
+
+**Permission:** `hardware.raw-usb:x` — **Events:** `RawUsbDeviceOpened`, `RawUsbTransferCompleted`
+
+### Webcam Driver
+
+The webcam driver (`crates/agentos-hal/src/drivers/webcam.rs`) captures images and burst sequences via Video4Linux.
+
+| Action | Description | Key Params |
+|--------|-------------|------------|
+| `list` | List webcam devices | None |
+| `capture` | Capture a single frame | `device`, `width`, `height`, `format` |
+| `burst` | Capture multiple frames | `device`, `count`, `interval_ms` |
+
+**Permission:** `hardware.webcam:x` — **Events:** `WebcamCaptureStarted`, `WebcamCaptureStopped`
 
 ### USB Storage Driver
 

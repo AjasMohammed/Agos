@@ -29,6 +29,9 @@ A task represents a unit of work assigned to an agent. Each task has:
 - **Autonomous** — when `true`, all iteration and timeout limits are replaced by the `[kernel.autonomous_mode]` ceiling
 - **History** — accumulated tool calls and results (`Vec<IntentMessage>`)
 - **Parent task** — optional link to a parent task for delegation chains
+- **Parent task ID** — `Some(id)` when this task was spawned by another task via `spawn-agent`
+- **Spawn depth** — how many spawn hops from a root task (root = 0, child = 1, grandchild = 2, …)
+- **Is team coordinator** — `true` when this task is the coordinator of an agent team (`agentos team run`)
 
 Tasks are defined by the `AgentTask` struct in `crates/agentos-types/src/task.rs`.
 
@@ -239,7 +242,7 @@ a1b2c3d4-e5f6-7890-abcd-ef1234567890 Running     code-reviewer   Review the auth
 f0e1d2c3-b4a5-6789-0abc-def123456789 Complete    local-dev       Summarize the contents of /data/...
 ```
 
-The `TaskSummary` includes: `id`, `state`, `agent_id`, `prompt_preview` (first 100 characters), `created_at`, `tool_calls` count, and `tokens_used`.
+The `TaskSummary` includes: `id`, `state`, `agent_id`, `prompt_preview` (first 100 characters), `created_at`, `tool_calls` count, `tokens_used`, `is_team_coordinator`, `parent_task_id`, and `spawn_depth`.
 
 ---
 
@@ -528,6 +531,45 @@ Tasks can form dependency chains through delegation. The kernel maintains a `Tas
 # The kernel tracks: parent task waits on child task
 # When child completes, parent is requeued to continue
 ```
+
+---
+
+## Sub-Agent Tasks
+
+Tasks spawned via the `spawn-agent` coordination tool form a parent-child hierarchy tracked by the kernel. These tasks differ from delegation in that they use the `_kernel_action` pattern for privileged spawn operations.
+
+### Sub-Agent Task Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `parent_task_id` | `Option<TaskID>` | Set when spawned by another task. Links child to parent. |
+| `spawn_depth` | `u8` | Nesting level: root = 0, child = 1, grandchild = 2, … |
+| `is_team_coordinator` | `bool` | `true` when this task coordinates an agent team |
+
+### Depth Limit Enforcement
+
+The kernel rejects spawn requests that would exceed the maximum spawn depth (default: 4). This prevents:
+
+- Unbounded recursive agent spawning
+- Resource exhaustion from deep nesting chains
+- Circular spawn patterns
+
+### Cascading Cancellation
+
+When a parent task is cancelled, the kernel cascades the cancellation to all registered child sub-agents. Children at any depth in the hierarchy are terminated.
+
+### Team Coordinator Tasks
+
+Tasks created by `agentos team run` have `is_team_coordinator = true`. The coordinator task:
+
+- Receives the team goal and member descriptions in its prompt
+- Uses `spawn-agent` to dispatch subtasks to worker agents
+- Uses `await-agents` to collect results
+- Synthesizes a final answer from worker outputs
+
+Worker tasks spawned by the coordinator have `parent_task_id` pointing to the coordinator and `spawn_depth = 1`.
+
+See [[05-Agent Management]] for the full multi-agent coordination reference.
 
 ---
 

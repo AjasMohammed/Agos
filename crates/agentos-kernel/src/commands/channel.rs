@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 impl Kernel {
     /// Register a new bidirectional channel and start its listener.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn cmd_connect_channel(
         &self,
         kind: ChannelKind,
@@ -18,6 +19,7 @@ impl Kernel {
         credential_key: String,
         reply_topic: Option<String>,
         server_url: Option<String>,
+        webhook_url: Option<String>,
     ) -> KernelResponse {
         let now = Utc::now();
         let ch = RegisteredChannel {
@@ -28,6 +30,7 @@ impl Kernel {
             credential_key: credential_key.clone(),
             reply_topic: reply_topic.clone(),
             server_url: server_url.clone(),
+            webhook_url: webhook_url.clone(),
             connected_at: now,
             last_active: now,
             active: true,
@@ -49,6 +52,7 @@ impl Kernel {
                 &credential_key,
                 &reply_topic,
                 &server_url,
+                &webhook_url,
                 ch_id,
             )
             .await;
@@ -98,12 +102,18 @@ impl Kernel {
             rollback_ref: None,
         });
 
+        let status_msg = if external_id.is_empty() {
+            "Channel connected (waiting for /start — send a message to the bot to complete setup)"
+        } else {
+            "Channel connected successfully"
+        };
+
         KernelResponse::Success {
             data: Some(serde_json::json!({
                 "channel_id": ch_id.to_string(),
                 "kind": kind.to_string(),
                 "display_name": display_name,
-                "message": "Channel connected successfully",
+                "message": status_msg,
             })),
         }
     }
@@ -119,7 +129,7 @@ impl Kernel {
             }
         };
 
-        match self.channel_registry.get_by_id(&id).await {
+        let channel = match self.channel_registry.get_by_id(&id).await {
             Ok(None) => {
                 return KernelResponse::Error {
                     message: format!("Channel '{channel_id}' not found"),
@@ -130,7 +140,24 @@ impl Kernel {
                     message: format!("Failed to look up channel: {e}"),
                 }
             }
-            Ok(Some(_)) => {}
+            Ok(Some(ch)) => ch,
+        };
+
+        // If this was a webhook-mode Telegram channel, delete the webhook
+        // and remove the stored secret.
+        if channel.kind == ChannelKind::Telegram && channel.webhook_url.is_some() {
+            if let Ok(bot_token) = self.vault.get(&channel.credential_key).await {
+                let adapter = crate::adapters::telegram::TelegramDeliveryAdapter::new(
+                    bot_token.as_str().to_string(),
+                    String::new(),
+                    id,
+                    None,
+                );
+                if let Err(e) = adapter.delete_webhook().await {
+                    tracing::warn!(error = %e, "Failed to delete Telegram webhook on disconnect");
+                }
+            }
+            self.webhook_secrets.write().await.remove(&id);
         }
 
         self.channel_listener_registry.stop(&id).await;
@@ -234,6 +261,7 @@ impl Kernel {
     }
 
     /// Build a `DeliveryAdapter` for the given channel kind.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn build_channel_adapter(
         &self,
         kind: &ChannelKind,
@@ -241,6 +269,7 @@ impl Kernel {
         credential_key: &str,
         reply_topic: &Option<String>,
         server_url: &Option<String>,
+        webhook_url: &Option<String>,
         channel_instance_id: ChannelInstanceID,
     ) -> Result<Option<Box<dyn crate::notification_router::DeliveryAdapter>>, String> {
         match kind {
@@ -257,11 +286,70 @@ impl Kernel {
                     .get(credential_key)
                     .await
                     .map_err(|e| format!("Failed to retrieve bot token from vault: {e}"))?;
-                let adapter = crate::adapters::telegram::TelegramDeliveryAdapter::new(
+
+                // When external_id (chat_id) is empty, enable auto-discovery:
+                // the adapter will capture the chat_id from the first inbound
+                // message and notify us so we can persist it in the registry.
+                let discovery_tx = if external_id.is_empty() {
+                    let (tx, mut rx) =
+                        tokio::sync::mpsc::channel::<crate::adapters::telegram::ChatDiscovered>(1);
+                    let registry = self.channel_registry.clone();
+                    tokio::spawn(async move {
+                        if let Some(ev) = rx.recv().await {
+                            if let Err(e) = registry
+                                .update_external_id(&ev.channel_instance_id, &ev.chat_id)
+                                .await
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Failed to persist auto-discovered Telegram chat_id"
+                                );
+                            }
+                        }
+                    });
+                    Some(tx)
+                } else {
+                    None
+                };
+
+                let mut adapter = crate::adapters::telegram::TelegramDeliveryAdapter::new(
                     bot_token.as_str().to_string(),
                     external_id.to_string(),
                     channel_instance_id,
+                    discovery_tx,
                 );
+
+                // Webhook mode: call setWebhook and store the secret for the API handler.
+                if let Some(wh_url) = webhook_url {
+                    // Generate a 64-char hex secret from two UUIDs (no extra rand dependency).
+                    let secret = format!(
+                        "{}{}",
+                        uuid::Uuid::new_v4().as_simple(),
+                        uuid::Uuid::new_v4().as_simple()
+                    );
+
+                    let full_url = format!(
+                        "{}/api/v1/webhooks/telegram/{channel_instance_id}",
+                        wh_url.trim_end_matches('/')
+                    );
+                    adapter
+                        .register_webhook(&full_url, &secret)
+                        .await
+                        .map_err(|e| format!("Failed to register Telegram webhook: {e}"))?;
+                    adapter.set_webhook_mode();
+
+                    self.webhook_secrets
+                        .write()
+                        .await
+                        .insert(channel_instance_id, secret);
+
+                    tracing::info!(
+                        channel_id = %channel_instance_id,
+                        url = %full_url,
+                        "Telegram webhook registered"
+                    );
+                }
+
                 Ok(Some(Box::new(adapter)))
             }
             ChannelKind::Ntfy => {

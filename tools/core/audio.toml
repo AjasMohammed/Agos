@@ -1,0 +1,103 @@
+[manifest]
+name        = "audio"
+version     = "1.0.0"
+description = "List audio devices, capture audio, play back audio files, and adjust volume through the HAL audio driver."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = [
+  "hardware.audio.list:r",
+  "hardware.audio.capture:r",
+  "hardware.audio.capture:x",
+  "hardware.audio.playback:x",
+  "hardware.audio.volume:r",
+  "hardware.audio.volume:w",
+]
+
+[capabilities_provided]
+outputs = ["hardware.audio", "content.structured"]
+
+[intent_schema]
+input  = "AudioIntent"
+output = "AudioResult"
+
+[input_schema]
+type = "object"
+description = "Audio operation request"
+
+[input_schema.properties.action]
+type = "string"
+enum = ["list", "capture", "playback", "volume", "grant_capture_consent", "revoke_capture_consent", "list_capture_consents"]
+default = "list"
+description = "Audio action to execute."
+
+[input_schema.properties.source]
+type = "string"
+description = "Capture source id (for capture/consent actions)."
+
+[input_schema.properties.sink]
+type = "string"
+description = "Playback sink id (optional for playback)."
+
+[input_schema.properties.node_id]
+type = "string"
+description = "Alternative audio node id for volume or playback/capture targeting."
+
+[input_schema.properties.duration_seconds]
+type = "integer"
+minimum = 1
+maximum = 300
+description = "Capture duration in seconds."
+
+[input_schema.properties.output_path]
+type = "string"
+description = "Absolute output path for captured audio."
+
+[input_schema.properties.audio_path]
+type = "string"
+description = "Absolute path to an audio file for playback."
+
+[input_schema.properties.volume]
+type = "number"
+minimum = 0
+maximum = 1
+description = "Volume level between 0.0 and 1.0. Omit to read current level."
+
+[input_schema.properties.ttl_seconds]
+type = "integer"
+minimum = 1
+maximum = 3600
+description = "Consent TTL in seconds for capture permission grants."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 256
+max_cpu_ms    = 20000
+syscalls      = []
+
+[examples]
+"List sources and sinks" = """
+{
+  "action": "list"
+}
+"""
+
+"Capture 10 seconds from source audio:47" = """
+{
+  "action": "capture",
+  "source": "audio:47",
+  "duration_seconds": 10,
+  "output_path": "/tmp/agentos-capture.wav"
+}
+"""
+
+"Play back a local audio file" = """
+{
+  "action": "playback",
+  "audio_path": "/tmp/alert.wav",
+  "sink": "audio:62"
+}
+"""

@@ -1,7 +1,9 @@
 use crate::error::ApiError;
 use crate::types::*;
+use agentos_kernel::ChatStreamEvent;
 use agentos_types::{NotificationID, SecretMetadata, TaskID, ToolID};
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 
 /// Core service trait defining the complete API surface for interacting with
 /// the AgentOS kernel. Implemented by `Kernel` in `kernel_impl.rs`.
@@ -59,6 +61,14 @@ pub trait KernelService: Send + Sync {
 
     async fn chat_send(&self, req: ChatRequest) -> Result<ChatResponse, ApiError>;
 
+    /// Streaming chat: spawns inference and sends `ChatStreamEvent`s to the
+    /// provided channel. The channel is closed when inference is complete.
+    async fn chat_stream(
+        &self,
+        req: ChatRequest,
+        tx: mpsc::Sender<ChatStreamEvent>,
+    ) -> Result<(), ApiError>;
+
     // ── Pipelines ───────────────────────────────────────────────────────────
 
     async fn list_pipelines(&self) -> Result<Vec<ApiPipelineSummary>, ApiError>;
@@ -110,4 +120,17 @@ pub trait KernelService: Send + Sync {
     async fn get_status(&self) -> Result<SystemStatus, ApiError>;
 
     async fn get_uptime(&self) -> std::time::Duration;
+
+    // ── Webhooks ───────────────────────────────────────────────────────────
+
+    /// Verify a webhook secret token for a given channel instance ID.
+    /// Returns `true` if the secret matches the stored one.
+    async fn verify_webhook_secret(&self, channel_id: &str, secret: &str)
+        -> Result<bool, ApiError>;
+
+    /// Forward a raw inbound message from a webhook to the kernel's inbound router.
+    async fn forward_webhook_message(
+        &self,
+        message: agentos_kernel::notification_router::InboundMessage,
+    ) -> Result<(), ApiError>;
 }

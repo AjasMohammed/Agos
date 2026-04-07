@@ -5,6 +5,7 @@ pub mod channel;
 pub mod context;
 pub mod error;
 pub mod event;
+pub mod fallback;
 pub mod ids;
 pub mod intent;
 pub mod notification;
@@ -33,8 +34,9 @@ pub use context::{
 pub use error::AgentOSError;
 pub use event::{
     EventCategory, EventMessage, EventSeverity, EventSource, EventSubscription, EventType,
-    EventTypeFilter, SubscriptionPriority, ThrottlePolicy,
+    EventTypeFilter, RawUsbDeviceOpened, RawUsbTransfer, SubscriptionPriority, ThrottlePolicy,
 };
+pub use fallback::{apply_transforms, TransformOp};
 pub use ids::NotificationID;
 pub use ids::*;
 pub use intent::{
@@ -56,10 +58,11 @@ pub use skill::SkillManifest;
 pub use task::TriggerSource;
 pub use task::{
     AgentBudget, AgentTask, BudgetAction, ComplexityLevel, CostSnapshot, ModelDowngradeTier,
-    PreemptionLevel, TaskReasoningHints, TaskState, TaskSummary,
+    PreemptionLevel, TaskReasoningHints, TaskState, TaskSummary, ToolCallRecord,
 };
 pub use tool::{
-    ExecutorType, RegisteredTool, ToolExecutor, ToolManifest, ToolSandbox, ToolStatus, TrustTier,
+    ExecutorType, FallbackRule, RegisteredTool, ToolExecutor, ToolManifest, ToolSandbox,
+    ToolStatus, TrustTier,
 };
 pub mod task_trace;
 pub use task_trace::{

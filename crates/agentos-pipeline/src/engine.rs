@@ -132,101 +132,169 @@ impl PipelineEngine {
         );
         context.insert("timestamp".to_string(), Utc::now().timestamp().to_string());
 
-        // Topologically sort steps
-        let sorted_steps = Self::topological_sort(&definition.steps)?;
+        // Build dependency graph for wave-based parallel execution.
+        // Steps with no unresolved dependencies form a "wave" and execute
+        // concurrently via join_all. Once a wave completes, dependent steps
+        // whose in-degree reaches zero enter the next wave.
+        let step_map: HashMap<&str, &PipelineStep> = definition
+            .steps
+            .iter()
+            .map(|s| (s.id.as_str(), s))
+            .collect();
+        let mut in_degree: HashMap<&str, usize> = HashMap::new();
+        let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+        for step in &definition.steps {
+            in_degree.entry(step.id.as_str()).or_insert(0);
+            for dep in &step.depends_on {
+                dependents
+                    .entry(dep.as_str())
+                    .or_default()
+                    .push(step.id.as_str());
+                *in_degree.entry(step.id.as_str()).or_insert(0) += 1;
+            }
+        }
 
-        // Execute each step in order
-        for step in sorted_steps {
-            // Check budget before executing each step
-            if let Err(e) = executor.check_budget().await {
-                tracing::warn!(step = %step.id, error = %e, "Pipeline step rejected: budget exhausted");
+        let mut completed_count = 0usize;
+        let total_steps = definition.steps.len();
+
+        while completed_count < total_steps {
+            // Collect the next wave: all steps with in_degree == 0.
+            let wave: Vec<&str> = in_degree
+                .iter()
+                .filter(|(_, &deg)| deg == 0)
+                .map(|(&id, _)| id)
+                .collect();
+
+            if wave.is_empty() {
                 run.status = PipelineRunStatus::Failed;
-                run.error = Some(format!("Budget exhausted before step '{}': {}", step.id, e));
+                run.error = Some("Circular dependency detected during execution".into());
                 run.completed_at = Some(Utc::now());
                 self.store.update_run(&run)?;
                 return Ok(run);
             }
 
-            let result = self.execute_step(step, &context, &run, executor).await;
+            // Remove wave entries from in_degree so they aren't picked again.
+            for &id in &wave {
+                in_degree.remove(id);
+            }
 
-            match result {
-                Ok(step_result) => {
-                    // Store output in variable context
-                    if let Some(ref var_name) = step.output_var {
-                        if let Some(ref output) = step_result.output {
-                            context.insert(var_name.clone(), output.clone());
-                        }
-                    }
+            // Check budget once before the wave.
+            if let Err(e) = executor.check_budget().await {
+                tracing::warn!(error = %e, "Pipeline wave rejected: budget exhausted");
+                run.status = PipelineRunStatus::Failed;
+                run.error = Some(format!("Budget exhausted: {}", e));
+                run.completed_at = Some(Utc::now());
+                self.store.update_run(&run)?;
+                return Ok(run);
+            }
 
-                    self.store.record_step_execution(&run.id, &step_result)?;
-                    run.step_results.insert(step.id.clone(), step_result);
-                }
-                Err(e) => {
-                    let error_msg = e.to_string();
+            // Execute all steps in this wave concurrently.
+            // Use a shared reference to context (each step in the same wave
+            // reads from the same snapshot; they cannot see each other's outputs).
+            let ctx_ref = &context;
+            let run_ref = &run;
+            let futs: Vec<_> = wave
+                .iter()
+                .filter_map(|&id| step_map.get(id).copied())
+                .map(|step| async move {
+                    let result = self.execute_step(step, ctx_ref, run_ref, executor).await;
+                    (step, result)
+                })
+                .collect();
 
-                    match &step.on_failure {
-                        OnFailure::Fail => {
-                            let failed_result = StepResult {
-                                step_id: step.id.clone(),
-                                status: StepStatus::Failed,
-                                output: None,
-                                error: Some(error_msg.clone()),
-                                started_at: Some(Utc::now()),
-                                completed_at: Some(Utc::now()),
-                                attempt: 1,
-                                duration_ms: Some(0),
-                            };
-                            self.store.record_step_execution(&run.id, &failed_result)?;
-                            run.step_results.insert(step.id.clone(), failed_result);
-                            run.status = PipelineRunStatus::Failed;
-                            run.error = Some(error_msg);
-                            run.completed_at = Some(Utc::now());
-                            self.store.update_run(&run)?;
-                            return Ok(run);
-                        }
-                        OnFailure::Skip => {
-                            tracing::warn!(step = %step.id, "Step failed, skipping (on_failure=skip)");
-                            let skipped_result = StepResult {
-                                step_id: step.id.clone(),
-                                status: StepStatus::Skipped,
-                                output: None,
-                                error: Some(error_msg),
-                                started_at: Some(Utc::now()),
-                                completed_at: Some(Utc::now()),
-                                attempt: 1,
-                                duration_ms: Some(0),
-                            };
-                            self.store.record_step_execution(&run.id, &skipped_result)?;
-                            run.step_results.insert(step.id.clone(), skipped_result);
-                            // Continue to next step
-                        }
-                        OnFailure::UseDefault => {
-                            let default_val = step.default_value.clone().unwrap_or_default();
-                            tracing::warn!(
-                                step = %step.id,
-                                default = %default_val,
-                                "Step failed, using default value (on_failure=use_default)"
-                            );
-                            // Insert the default value into the variable context
-                            if let Some(ref var_name) = step.output_var {
-                                context.insert(var_name.clone(), default_val.clone());
+            let wave_results = futures::future::join_all(futs).await;
+
+            // Process wave results (context updates and error handling).
+            let mut pipeline_failed = false;
+            for (step, result) in wave_results {
+                match result {
+                    Ok(step_result) => {
+                        if let Some(ref var_name) = step.output_var {
+                            if let Some(ref output) = step_result.output {
+                                context.insert(var_name.clone(), output.clone());
                             }
-                            let default_result = StepResult {
-                                step_id: step.id.clone(),
-                                status: StepStatus::Complete,
-                                output: Some(default_val),
-                                error: Some(error_msg),
-                                started_at: Some(Utc::now()),
-                                completed_at: Some(Utc::now()),
-                                attempt: 1,
-                                duration_ms: Some(0),
-                            };
-                            self.store.record_step_execution(&run.id, &default_result)?;
-                            run.step_results.insert(step.id.clone(), default_result);
-                            // Continue to next step
+                        }
+                        self.store.record_step_execution(&run.id, &step_result)?;
+                        run.step_results.insert(step.id.clone(), step_result);
+                    }
+                    Err(e) => {
+                        let error_msg = e.to_string();
+                        match &step.on_failure {
+                            OnFailure::Fail => {
+                                let failed_result = StepResult {
+                                    step_id: step.id.clone(),
+                                    status: StepStatus::Failed,
+                                    output: None,
+                                    error: Some(error_msg.clone()),
+                                    started_at: Some(Utc::now()),
+                                    completed_at: Some(Utc::now()),
+                                    attempt: 1,
+                                    duration_ms: Some(0),
+                                };
+                                self.store.record_step_execution(&run.id, &failed_result)?;
+                                run.step_results.insert(step.id.clone(), failed_result);
+                                run.status = PipelineRunStatus::Failed;
+                                run.error = Some(error_msg);
+                                run.completed_at = Some(Utc::now());
+                                self.store.update_run(&run)?;
+                                pipeline_failed = true;
+                                break;
+                            }
+                            OnFailure::Skip => {
+                                tracing::warn!(step = %step.id, "Step failed, skipping");
+                                let skipped_result = StepResult {
+                                    step_id: step.id.clone(),
+                                    status: StepStatus::Skipped,
+                                    output: None,
+                                    error: Some(error_msg),
+                                    started_at: Some(Utc::now()),
+                                    completed_at: Some(Utc::now()),
+                                    attempt: 1,
+                                    duration_ms: Some(0),
+                                };
+                                self.store.record_step_execution(&run.id, &skipped_result)?;
+                                run.step_results.insert(step.id.clone(), skipped_result);
+                            }
+                            OnFailure::UseDefault => {
+                                let default_val = step.default_value.clone().unwrap_or_default();
+                                tracing::warn!(
+                                    step = %step.id,
+                                    default = %default_val,
+                                    "Step failed, using default"
+                                );
+                                if let Some(ref var_name) = step.output_var {
+                                    context.insert(var_name.clone(), default_val.clone());
+                                }
+                                let default_result = StepResult {
+                                    step_id: step.id.clone(),
+                                    status: StepStatus::Complete,
+                                    output: Some(default_val),
+                                    error: Some(error_msg),
+                                    started_at: Some(Utc::now()),
+                                    completed_at: Some(Utc::now()),
+                                    attempt: 1,
+                                    duration_ms: Some(0),
+                                };
+                                self.store.record_step_execution(&run.id, &default_result)?;
+                                run.step_results.insert(step.id.clone(), default_result);
+                            }
                         }
                     }
                 }
+
+                // Decrement in-degree for dependents of this completed step.
+                if let Some(deps) = dependents.get(step.id.as_str()) {
+                    for &dep_id in deps {
+                        if let Some(deg) = in_degree.get_mut(dep_id) {
+                            *deg = deg.saturating_sub(1);
+                        }
+                    }
+                }
+                completed_count += 1;
+            }
+
+            if pipeline_failed {
+                return Ok(run);
             }
         }
 
