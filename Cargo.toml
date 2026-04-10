@@ -25,6 +25,8 @@ members = [
     "crates/agentos-api",
     "crates/agentos-skills",
     "crates/agentos-channels",
+    "crates/agentos-connectors",
+    "crates/agentos-runtime",
 ]
 
 [workspace.package]
@@ -64,9 +66,14 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
+dialoguer = { version = "0.11", features = ["fuzzy-select"] }
+indicatif = "0.17"
+toml_edit = "0.22"
+notify = { version = "6", features = ["macos_fsevent"] }
 
 # HTTP client (for Ollama adapter)
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+url = "2"
 
 # Error handling
 thiserror = "2"
@@ -103,6 +110,12 @@ wasmtime-wasi = "41"
 
 # JSON Schema validation
 jsonschema = "0.28"
+
+# Container runtime
+bollard = "0.18"
+
+# IoT protocols
+rumqttc = "0.24"
 
 # Email (SMTP)
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport", "hostname"] }

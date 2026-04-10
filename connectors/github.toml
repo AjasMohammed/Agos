@@ -1,0 +1,93 @@
+[connector]
+id = "github"
+name = "GitHub"
+version = "1.0.0"
+description = "GitHub REST API connector — issues, PRs, repos, and more"
+base_url = "https://api.github.com"
+max_response_bytes = 32768
+
+[connector.auth]
+type = "oauth2"
+scopes = ["repo", "read:org"]
+
+[connector.rate_limit]
+requests_per_minute = 30
+burst = 60
+
+# --- Repository tools ---
+
+[[tools]]
+name = "list_repos"
+description = "List repositories for the authenticated user"
+method = "get"
+path = "/user/repos"
+query_params = ["per_page", "sort", "direction", "type"]
+
+[[tools]]
+name = "get_repo"
+description = "Get a repository by owner and name"
+method = "get"
+path = "/repos/{owner}/{repo}"
+
+# --- Issue tools ---
+
+[[tools]]
+name = "list_issues"
+description = "List issues in a repository"
+method = "get"
+path = "/repos/{owner}/{repo}/issues"
+query_params = ["state", "labels", "sort", "direction", "per_page"]
+
+[[tools]]
+name = "create_issue"
+description = "Create an issue in a repository"
+method = "post"
+path = "/repos/{owner}/{repo}/issues"
+
+[[tools]]
+name = "get_issue"
+description = "Get a single issue by number"
+method = "get"
+path = "/repos/{owner}/{repo}/issues/{issue_number}"
+
+[[tools]]
+name = "update_issue"
+description = "Update an issue (title, body, state, labels, assignees)"
+method = "patch"
+path = "/repos/{owner}/{repo}/issues/{issue_number}"
+
+# --- Pull request tools ---
+
+[[tools]]
+name = "list_pulls"
+description = "List pull requests in a repository"
+method = "get"
+path = "/repos/{owner}/{repo}/pulls"
+query_params = ["state", "sort", "direction", "per_page"]
+
+[[tools]]
+name = "create_pull"
+description = "Create a pull request"
+method = "post"
+path = "/repos/{owner}/{repo}/pulls"
+
+[[tools]]
+name = "get_pull"
+description = "Get a single pull request by number"
+method = "get"
+path = "/repos/{owner}/{repo}/pulls/{pull_number}"
+
+# --- Content tools ---
+
+[[tools]]
+name = "get_readme"
+description = "Get the README for a repository"
+method = "get"
+path = "/repos/{owner}/{repo}/readme"
+
+[[tools]]
+name = "get_content"
+description = "Get file contents from a repository"
+method = "get"
+path = "/repos/{owner}/{repo}/contents/{path}"
+query_params = ["ref"]

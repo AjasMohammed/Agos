@@ -1,0 +1,24 @@
+[manifest]
+name = "iot-ha-call-service"
+version = "1.0.0"
+risk_class  = "control_plane"
+description = "Call a Home Assistant service (e.g., turn_on, set_temperature) to control smart home devices."
+author = "agentos-core"
+trust_tier = "core"
+tags = ["iot", "homeassistant", "hardware"]
+
+[capabilities_required]
+permissions = ["hardware.homeassistant:w"]
+
+[capabilities_provided]
+outputs = ["result"]
+
+[intent_schema]
+input = "IotHaCallServiceIntent"
+output = "IotHaCallServiceResult"
+
+[sandbox]
+network = false
+fs_write = false
+max_memory_mb = 32
+max_cpu_ms = 10000

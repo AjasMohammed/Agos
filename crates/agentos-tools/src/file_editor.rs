@@ -86,8 +86,11 @@ impl AgentTool for FileEditor {
         }
 
         // SECURITY: resolve path, checking workspace paths before falling back to data_dir.
-        let resolved =
-            crate::traits::resolve_tool_path(path_str, &context.data_dir, &context.workspace_paths);
+        let resolved = crate::traits::resolve_tool_path(
+            path_str,
+            &context.data_dir,
+            &context.workspace_paths,
+        )?;
 
         let canonical = resolved
             .canonicalize()

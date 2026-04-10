@@ -1,6 +1,7 @@
 [manifest]
 name        = "memory-write"
 version     = "1.0.0"
+risk_class  = "write_scoped"
 description = "Write new knowledge entries to semantic or episodic memory for long-term recall"
 author      = "agentos-core"
 trust_tier  = "core"

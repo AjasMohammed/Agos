@@ -77,6 +77,7 @@ impl Kernel {
             spawn_depth: 0,
             is_team_coordinator: false,
             skip_checkpoint: false,
+            thinking_level: ThinkingLevel::Off,
         };
 
         self.background_pool

@@ -237,6 +237,15 @@ impl ToolRegistry {
         Ok(tool_id)
     }
 
+    /// Unregister a tool by its `ToolID`. No-op if the ID is not registered.
+    /// Used by the plugin registry to clean up tools when a plugin is deactivated.
+    pub fn unregister(&mut self, tool_id: &ToolID) {
+        if let Some(tool) = self.tools.remove(tool_id) {
+            self.name_index.remove(&tool.manifest.manifest.name);
+            tracing::debug!(tool_id = %tool_id, name = %tool.manifest.manifest.name, "Tool unregistered");
+        }
+    }
+
     pub fn get_by_name(&self, name: &str) -> Option<&RegisteredTool> {
         self.name_index.get(name).and_then(|id| self.tools.get(id))
     }
@@ -399,6 +408,7 @@ mod tests {
             },
             executor: ToolExecutor::default(),
             fallbacks: vec![],
+            risk_class: Default::default(),
         }
     }
 
@@ -436,6 +446,7 @@ mod tests {
             },
             executor: ToolExecutor::default(),
             fallbacks: vec![],
+            risk_class: Default::default(),
         }
     }
 

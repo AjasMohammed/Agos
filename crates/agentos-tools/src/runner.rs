@@ -1,3 +1,4 @@
+use crate::a2a_tools::A2ADelegateTool;
 use crate::agent_call::AgentCallTool;
 use crate::agent_list::AgentListTool;
 use crate::agent_message::AgentMessageTool;
@@ -55,6 +56,7 @@ use crate::think::ThinkTool;
 use crate::traits::{AgentTool, ToolExecutionContext};
 use crate::usb_storage::UsbStorageTool;
 use crate::web_fetch::WebFetch;
+use crate::web_search::WebSearchTool;
 use crate::webcam::WebcamTool;
 use agentos_memory::{Embedder, EpisodicStore, ProceduralStore, SemanticStore};
 use agentos_types::*;
@@ -66,6 +68,8 @@ use tracing::warn;
 pub struct ToolRunner {
     tools: HashMap<String, Box<dyn AgentTool>>,
     file_lock_registry: Arc<FileLockRegistry>,
+    /// Tools registered at runtime (e.g. via `agentos mcp attach`).
+    dynamic_tools: std::sync::RwLock<HashMap<String, Arc<dyn AgentTool>>>,
 }
 
 impl ToolRunner {
@@ -80,6 +84,7 @@ impl ToolRunner {
         let mut runner = Self {
             tools: HashMap::new(),
             file_lock_registry: Arc::new(FileLockRegistry::new()),
+            dynamic_tools: std::sync::RwLock::new(HashMap::new()),
         };
 
         // Initialize shared memory stores
@@ -118,6 +123,7 @@ impl ToolRunner {
         let mut runner = Self {
             tools: HashMap::new(),
             file_lock_registry: Arc::new(FileLockRegistry::new()),
+            dynamic_tools: std::sync::RwLock::new(HashMap::new()),
         };
         runner.register_memory_tools(semantic, episodic, procedural);
         runner
@@ -197,6 +203,7 @@ impl ToolRunner {
             Ok(tool) => self.register(Box::new(tool)),
             Err(e) => tracing::error!("Failed to initialize web-fetch tool: {}", e),
         }
+        self.register(Box::new(WebSearchTool::new()));
         self.register(Box::new(FileDiff::new()));
         self.register(Box::new(EscalationStatusTool::new()));
         self.register(Box::new(AgentListTool::new()));
@@ -210,10 +217,34 @@ impl ToolRunner {
         self.register(Box::new(VerifyOutputTool::new()));
         self.register(Box::new(PollAgentTool::new()));
         self.register(Box::new(CancelAgentTool::new()));
+        self.register(Box::new(A2ADelegateTool::new()));
     }
 
     pub fn register(&mut self, tool: Box<dyn AgentTool>) {
         self.tools.insert(tool.name().to_string(), tool);
+    }
+
+    /// Register a tool at runtime without requiring `&mut self`.
+    ///
+    /// Used by `agentos mcp attach` to add MCP tools to a running kernel.
+    /// Dynamic tools are consulted after static tools — if a name conflicts,
+    /// the static tool takes precedence. Dynamic registrations are lost on
+    /// kernel restart (they are not persisted to config).
+    pub fn register_dynamic(&self, tool: Box<dyn AgentTool>) {
+        let name = tool.name().to_string();
+        self.dynamic_tools
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name, Arc::from(tool));
+    }
+
+    /// Remove a dynamically registered tool by name. Returns `true` if removed.
+    pub fn unregister_dynamic(&self, name: &str) -> bool {
+        self.dynamic_tools
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name)
+            .is_some()
     }
 
     /// Register scratchpad tools with a shared `ScratchpadStore`.
@@ -276,10 +307,24 @@ impl ToolRunner {
         // exclusive access across concurrent agents.
         context.file_lock_registry = Some(self.file_lock_registry.clone());
 
-        let tool = self
-            .tools
-            .get(tool_name)
-            .ok_or_else(|| AgentOSError::ToolNotFound(tool_name.to_string()))?;
+        // Check static tools first; fall back to dynamic (runtime-registered) tools.
+        // The Arc clone releases the RwLock guard before any await point.
+        let dynamic: Option<Arc<dyn AgentTool>> = if !self.tools.contains_key(tool_name) {
+            self.dynamic_tools
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(tool_name)
+                .cloned()
+        } else {
+            None
+        };
+        let tool: &dyn AgentTool = match self.tools.get(tool_name) {
+            Some(t) => t.as_ref(),
+            None => match dynamic.as_deref() {
+                Some(t) => t,
+                None => return Err(AgentOSError::ToolNotFound(tool_name.to_string())),
+            },
+        };
 
         // Defense-in-depth: verify permissions at the tool layer
         let required = tool.required_permissions_for(&payload);
@@ -324,11 +369,27 @@ impl ToolRunner {
 
     /// Get the list of all registered tools (for system prompt).
     pub fn list_tools(&self) -> Vec<String> {
-        self.tools.keys().cloned().collect()
+        let dynamic = self.dynamic_tools.read().unwrap_or_else(|e| e.into_inner());
+        let mut names: Vec<String> = self.tools.keys().cloned().collect();
+        // Extend with dynamic tools, skipping any name already in static map.
+        names.extend(
+            dynamic
+                .keys()
+                .filter(|n| !self.tools.contains_key(*n))
+                .cloned(),
+        );
+        names
     }
 
     /// Get the required permissions for a given tool.
     pub fn get_required_permissions(&self, tool_name: &str) -> Option<Vec<(String, PermissionOp)>> {
-        self.tools.get(tool_name).map(|t| t.required_permissions())
+        if let Some(t) = self.tools.get(tool_name) {
+            return Some(t.required_permissions());
+        }
+        self.dynamic_tools
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(tool_name)
+            .map(|t| t.required_permissions())
     }
 }

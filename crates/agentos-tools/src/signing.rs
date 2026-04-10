@@ -217,7 +217,7 @@ mod tests {
     use super::*;
     use agentos_types::{
         tool::{ToolCapabilities, ToolInfo, ToolOutputs, ToolSchema},
-        ToolExecutor, ToolManifest, ToolSandbox, TrustTier,
+        RiskClass, ToolExecutor, ToolManifest, ToolSandbox, TrustTier,
     };
     use ed25519_dalek::{Signer, SigningKey};
 
@@ -257,6 +257,7 @@ mod tests {
             },
             executor: ToolExecutor::default(),
             fallbacks: vec![],
+            risk_class: RiskClass::ReadonlyScoped,
         }
     }
 

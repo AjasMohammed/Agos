@@ -337,7 +337,16 @@ impl LLMCore for AnthropicCore {
             .map(|e| e.content.as_str())
             .unwrap_or("");
 
-        let max_tokens = options.max_tokens.unwrap_or(self.max_tokens);
+        // Extended thinking requires max_tokens > budget_tokens because both
+        // thinking tokens and response tokens count against max_tokens.
+        // We ensure at least 4 096 response-token headroom beyond the thinking budget.
+        let mut max_tokens = options.max_tokens.unwrap_or(self.max_tokens);
+        if let Some(budget) = options.thinking_budget_tokens {
+            let minimum = budget.saturating_add(4_096);
+            if max_tokens < minimum {
+                max_tokens = minimum;
+            }
+        }
 
         // If options disable tools, exclude them from the request.
         let effective_tools = if matches!(options.tool_choice, Some(ToolChoice::None)) {
@@ -347,12 +356,35 @@ impl LLMCore for AnthropicCore {
         };
         let (anthropic_tools, intent_by_tool) = Self::build_anthropic_tools(effective_tools);
 
+        // Prompt caching: wrap system prompt as content-block array with cache_control
+        // when enabled. This instructs Anthropic to cache the prefix on the server side,
+        // cutting costs by up to 90% on repeated calls with the same system prompt.
+        let system_value = if options.enable_prompt_caching && !system_prompt.is_empty() {
+            json!([{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": { "type": "ephemeral" }
+            }])
+        } else {
+            json!(system_prompt)
+        };
+
         let mut body = json!({
             "model": self.model,
             "max_tokens": max_tokens,
-            "system": system_prompt,
+            "system": system_value,
             "messages": messages,
         });
+
+        // Extended thinking: inject the thinking block and enable the beta feature.
+        // Only supported on claude-3-7-sonnet and newer models.
+        // NOTE: When thinking is enabled temperature must be 1.0 (Anthropic requirement).
+        if let Some(budget) = options.thinking_budget_tokens {
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": budget
+            });
+        }
 
         if !anthropic_tools.is_empty() {
             body["tools"] = Value::Array(anthropic_tools);
@@ -372,20 +404,32 @@ impl LLMCore for AnthropicCore {
         }
 
         if let Some(temp) = options.temperature {
-            body["temperature"] = json!(temp);
+            // Anthropic rejects any temperature != 1.0 when extended thinking is enabled.
+            // Skip non-1.0 values silently rather than erroring; the thinking block is
+            // more important than a temperature override.
+            let thinking_active = options.thinking_budget_tokens.is_some();
+            if !thinking_active || (temp - 1.0_f32).abs() < f32::EPSILON {
+                body["temperature"] = json!(temp);
+            }
         }
 
+        let thinking_enabled = options.thinking_budget_tokens.is_some();
         let res = crate::retry::send_with_retry(
             "anthropic",
             &self.retry_policy,
             &self.circuit_breaker,
             || {
-                self.client
+                let mut req = self
+                    .client
                     .post(&url)
                     .header("x-api-key", self.api_key.expose_secret())
                     .header("anthropic-version", "2023-06-01")
-                    .header("Content-Type", "application/json")
-                    .json(&body)
+                    .header("Content-Type", "application/json");
+                // Extended thinking requires the interleaved-thinking beta header.
+                if thinking_enabled {
+                    req = req.header("anthropic-beta", "interleaved-thinking-2025-05-14");
+                }
+                req.json(&body)
             },
         )
         .await?;
@@ -889,6 +933,7 @@ mod tests {
             },
             executor: ToolExecutor::default(),
             fallbacks: vec![],
+            risk_class: Default::default(),
         };
 
         let (tools, intent_map) =

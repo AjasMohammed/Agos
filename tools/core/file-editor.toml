@@ -4,6 +4,7 @@ version     = "1.0.0"
 description = "Applies exact string replacements to a file within data_dir. Acquires an exclusive write lock for the full read-modify-write cycle. Each edit must match exactly once — errors if old_text is not found or is ambiguous."
 author      = "agentos-core"
 trust_tier  = "core"
+risk_class  = "write_scoped"
 
 [capabilities_required]
 permissions = ["fs.user_data:w"]

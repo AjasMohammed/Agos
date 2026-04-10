@@ -23,8 +23,8 @@ struct ProxyTokenEntry {
 }
 
 pub struct SecretsVault {
-    conn: Mutex<Connection>,
-    master_key: MasterKey,
+    conn: Arc<Mutex<Connection>>,
+    master_key: Arc<MasterKey>,
     audit: Arc<AuditLog>,
     /// In-memory proxy token store. Token handles are opaque to tools.
     proxy_tokens: Mutex<HashMap<String, ProxyTokenEntry>>,
@@ -97,9 +97,12 @@ impl SecretsVault {
         )
         .map_err(|e| AgentOSError::VaultError(format!("Failed to save sentinel: {}", e)))?;
 
+        // Create OAuth tables (idempotent)
+        crate::oauth::create_oauth_tables(&conn)?;
+
         Ok(Self {
-            conn: Mutex::new(conn),
-            master_key,
+            conn: Arc::new(Mutex::new(conn)),
+            master_key: Arc::new(master_key),
             audit,
             proxy_tokens: Mutex::new(HashMap::new()),
             locked_down: AtomicBool::new(false),
@@ -151,9 +154,12 @@ impl SecretsVault {
             return Err(AgentOSError::VaultError("Invalid passphrase".to_string()));
         }
 
+        // Create OAuth tables if they don't exist (idempotent migration)
+        crate::oauth::create_oauth_tables(&conn)?;
+
         Ok(Self {
-            conn: Mutex::new(conn),
-            master_key,
+            conn: Arc::new(Mutex::new(conn)),
+            master_key: Arc::new(master_key),
             audit,
             proxy_tokens: Mutex::new(HashMap::new()),
             locked_down: AtomicBool::new(false),
@@ -659,6 +665,15 @@ impl SecretsVault {
     /// Check if the vault is in emergency lockdown mode.
     pub fn is_locked_down(&self) -> bool {
         self.locked_down.load(Ordering::SeqCst)
+    }
+
+    /// Create an `OAuthStore` that shares this vault's connection and master key.
+    pub fn oauth_store(&self) -> crate::oauth::OAuthStore {
+        crate::oauth::OAuthStore::new(
+            Arc::clone(&self.conn),
+            Arc::clone(&self.master_key),
+            Arc::clone(&self.audit),
+        )
     }
 
     pub fn is_initialized(path: &Path) -> bool {

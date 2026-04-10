@@ -1,0 +1,23 @@
+[package]
+name = "agentos-connectors"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agentos-types = { path = "../agentos-types" }
+agentos-vault = { path = "../agentos-vault" }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+percent-encoding = "2"
+
+[dev-dependencies]
+agentos-audit = { path = "../agentos-audit" }
+tempfile = "3.10"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

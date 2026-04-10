@@ -44,6 +44,7 @@ mod tests {
             spawn_depth: depth,
             is_team_coordinator: false,
             skip_checkpoint: false,
+            thinking_level: Default::default(),
         }
     }
 
@@ -298,9 +299,18 @@ impl Kernel {
             spawn_depth: child_depth,
             is_team_coordinator: false,
             skip_checkpoint: false,
+            thinking_level: ThinkingLevel::Off,
         };
 
         self.scheduler.enqueue(child_task).await;
+
+        // Fire AgentSpawned hook so audit and metrics hooks can track the spawn event.
+        self.hook_registry
+            .fire(&agentos_types::HookEvent::AgentSpawned {
+                parent_task: parent_task_id,
+                child_agent: agent.id,
+            })
+            .await;
 
         // Register child for cascade-cancel: cancelling the parent cancels all children.
         self.scheduler

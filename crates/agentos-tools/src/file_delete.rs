@@ -42,8 +42,11 @@ impl AgentTool for FileDelete {
         tracing::debug!(path = path_str, "file-delete: starting");
 
         // SECURITY: resolve path, checking workspace paths before falling back to data_dir.
-        let resolved =
-            crate::traits::resolve_tool_path(path_str, &context.data_dir, &context.workspace_paths);
+        let resolved = crate::traits::resolve_tool_path(
+            path_str,
+            &context.data_dir,
+            &context.workspace_paths,
+        )?;
 
         // canonicalize verifies the file actually exists and resolves symlinks.
         let canonical = resolved

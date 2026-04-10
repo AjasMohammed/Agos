@@ -50,11 +50,20 @@ pub fn apply_transforms(
 ) -> serde_json::Value {
     let mut result = payload.clone();
     for (key, transform_str) in transforms {
-        if let Ok(op) = TransformOp::parse(transform_str) {
-            let current = result.get(key).and_then(|v| v.as_str());
-            let new_value = op.apply(current);
-            if let Some(obj) = result.as_object_mut() {
-                obj.insert(key.clone(), serde_json::json!(new_value));
+        match TransformOp::parse(transform_str) {
+            Ok(op) => {
+                let current = result.get(key).and_then(|v| v.as_str());
+                let new_value = op.apply(current);
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert(key.clone(), serde_json::json!(new_value));
+                }
+                // If payload is not an object, the transform is a no-op — this is
+                // acceptable since tool payloads are always objects in practice.
+            }
+            Err(_e) => {
+                // Malformed transform string in a manifest — skip rather than panic,
+                // so a bad manifest entry doesn't break unrelated payload keys.
+                // Callers with logging capability will see this via FallbackResolver's tracing.
             }
         }
     }

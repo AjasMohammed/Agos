@@ -54,6 +54,15 @@ pub struct InferenceOptions {
     /// Seed for reproducible output (OpenAI only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+    /// Extended thinking budget in tokens (Anthropic claude-3-7+ only).
+    /// When set, the model reasons before responding, improving complex task quality.
+    /// Typical values: 1024 (low), 8192 (medium), 32768 (high), 100000 (max).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget_tokens: Option<u32>,
+    /// Whether to inject Anthropic prompt-cache control markers on the system prompt.
+    /// Enables up to 90% token cost savings on repeated context. Default: false.
+    #[serde(default)]
+    pub enable_prompt_caching: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -406,6 +415,8 @@ And here is the rest of the response."#;
             max_tokens: Some(4096),
             json_mode: true,
             seed: Some(42),
+            thinking_budget_tokens: None,
+            enable_prompt_caching: false,
         };
         let json = serde_json::to_string(&opts).unwrap();
         let deserialized: InferenceOptions = serde_json::from_str(&json).unwrap();

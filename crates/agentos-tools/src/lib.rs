@@ -1,3 +1,4 @@
+pub mod a2a_tools;
 pub mod agent_call;
 pub mod agent_list;
 pub mod agent_manual;
@@ -69,9 +70,11 @@ pub mod think;
 pub mod traits;
 pub mod usb_storage;
 pub mod web_fetch;
+pub mod web_search;
 pub mod webcam;
 pub mod workspace;
 
+pub use a2a_tools::A2ADelegateTool;
 pub use agent_call::AgentCallTool;
 pub use agent_list::AgentListTool;
 pub use agent_manual::AgentManualTool;

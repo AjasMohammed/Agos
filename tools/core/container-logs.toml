@@ -1,0 +1,23 @@
+[manifest]
+name = "container-logs"
+version = "1.0.0"
+description = "Read stdout/stderr logs from a running or stopped container."
+author = "agentos-core"
+trust_tier = "core"
+tags = ["compute", "container"]
+
+[capabilities_required]
+permissions = ["container.logs:r"]
+
+[capabilities_provided]
+outputs = ["logs"]
+
+[intent_schema]
+input = "ContainerLogsIntent"
+output = "ContainerLogsResult"
+
+[sandbox]
+network = false
+fs_write = false
+max_memory_mb = 32
+max_cpu_ms = 5000

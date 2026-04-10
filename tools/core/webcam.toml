@@ -4,6 +4,7 @@ version     = "1.0.0"
 description = "List webcams, capture frames, run bursts, and manage capture consent via the HAL webcam driver."
 author      = "agentos-core"
 trust_tier  = "core"
+risk_class  = "control_plane"
 
 [capabilities_required]
 permissions = [

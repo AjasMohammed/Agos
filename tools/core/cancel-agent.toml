@@ -4,6 +4,7 @@ version     = "1.0.0"
 description = "Cancel a spawned sub-agent that is going off-track or no longer needed. Transitions the child to Cancelled state and cascades to any grandchildren."
 author      = "agentos-core"
 trust_tier  = "core"
+risk_class  = "control_plane"
 capability_tags = ["multi-agent", "coordination", "cancellation", "intervention"]
 
 [capabilities_required]

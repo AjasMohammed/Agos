@@ -29,6 +29,7 @@ impl Kernel {
         roles: Vec<String>,
         test_mode: bool,
         extra_permissions: Vec<String>,
+        root: bool,
     ) -> KernelResponse {
         if !is_valid_agent_name(&name) {
             return KernelResponse::Error {
@@ -41,145 +42,182 @@ impl Kernel {
 
         let now = chrono::Utc::now();
 
-        // Instantiate LLMCore based on provider
-        let core: Result<Arc<dyn LLMCore>, String> = match &provider {
-            LLMProvider::Ollama => {
-                let host = base_url
-                    .or_else(|| {
-                        std::env::var("AGENTOS_OLLAMA_HOST")
-                            .ok()
-                            .filter(|s| !s.trim().is_empty())
-                    })
-                    .unwrap_or_else(|| self.config.ollama.host.clone());
-                Ok(Arc::new(
-                    OllamaCore::new(&host, &model)
-                        .with_request_timeout(self.config.ollama.request_timeout_secs)
-                        .with_context_window(self.config.llm.ollama_context_window),
-                ))
-            }
-            LLMProvider::OpenAI => {
-                let key_result = match self.vault.get(&format!("{}_openai_api_key", name)).await {
-                    ok @ Ok(_) => ok,
-                    Err(_) => self.vault.get("openai_api_key").await,
-                };
-                match key_result {
-                    Ok(entry) => {
-                        let sec = SecretString::new(entry.as_str().to_string());
-                        let resolved_base_url = base_url
-                            .or_else(|| {
-                                std::env::var("AGENTOS_OPENAI_BASE_URL")
-                                    .ok()
-                                    .filter(|s| !s.trim().is_empty())
-                            })
-                            .or_else(|| self.config.llm.openai_base_url.clone());
-                        if let Some(url) = resolved_base_url {
-                            Ok(Arc::new(OpenAICore::with_base_url(sec, model.clone(), url)))
-                        } else {
-                            Ok(Arc::new(OpenAICore::new(sec, model.clone())))
-                        }
-                    }
-                    _ => {
-                        Err("Missing 'openai_api_key' in vault. Please store it first.".to_string())
-                    }
-                }
-            }
-            LLMProvider::Anthropic => {
-                let key_result = match self.vault.get(&format!("{}_anthropic_api_key", name)).await
-                {
-                    ok @ Ok(_) => ok,
-                    Err(_) => self.vault.get("anthropic_api_key").await,
-                };
-                match key_result {
-                    Ok(entry) => {
-                        let sec = SecretString::new(entry.as_str().to_string());
-                        let base_url =
-                            base_url.or_else(|| self.config.llm.anthropic_base_url.clone());
-                        let adapter = if let Some(url) = base_url {
-                            AnthropicCore::with_base_url(sec, model.clone(), url)
-                        } else {
-                            AnthropicCore::new(sec, model.clone())
-                        };
-                        Ok(Arc::new(
-                            adapter.with_max_tokens(self.config.llm.max_tokens),
-                        ))
-                    }
-                    _ => Err(
-                        "Missing 'anthropic_api_key' in vault. Please store it first.".to_string(),
-                    ),
-                }
-            }
-            LLMProvider::Gemini => {
-                let key_result = match self.vault.get(&format!("{}_gemini_api_key", name)).await {
-                    ok @ Ok(_) => ok,
-                    Err(_) => self.vault.get("gemini_api_key").await,
-                };
-                match key_result {
-                    Ok(entry) => {
-                        let sec = SecretString::new(entry.as_str().to_string());
-                        Ok(Arc::new(GeminiCore::new(sec, model.clone())))
-                    }
-                    _ => {
-                        Err("Missing 'gemini_api_key' in vault. Please store it first.".to_string())
-                    }
-                }
-            }
-            LLMProvider::Custom(ref custom_name) => {
-                // Check the provider catalog first for known providers.
-                if let Some(catalog_entry) = self.provider_catalog.lookup(custom_name) {
-                    // Catalog-based provider: use catalog's base_url and API key env var.
-                    let sec = if !catalog_entry.api_key_env.is_empty() {
-                        // Try vault first, then env var
-                        match self
-                            .vault
-                            .get(&format!("{}_{}_api_key", name, custom_name))
-                            .await
-                        {
-                            Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
-                            Err(_) => std::env::var(&catalog_entry.api_key_env)
-                                .ok()
-                                .filter(|s| !s.trim().is_empty())
-                                .map(SecretString::new),
-                        }
-                    } else {
-                        None
-                    };
-                    // Allow --base-url to override catalog URL
-                    let url = base_url.unwrap_or_else(|| catalog_entry.base_url.clone());
-                    // Use catalog default model if the user specified the provider's default
-                    let effective_model = if model == "default" || model.is_empty() {
-                        catalog_entry.default_model.clone()
-                    } else {
-                        model.clone()
-                    };
-                    Ok(Arc::new(CustomCore::new(sec, effective_model, url)))
-                } else {
-                    // Fallback: original custom provider logic
-                    let sec = match self.vault.get(&format!("{}_custom_api_key", name)).await {
-                        Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
-                        Err(_) => match self.vault.get("custom_api_key").await {
-                            Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
-                            _ => None,
-                        },
-                    };
-                    let url = match base_url
+        // Instantiate LLMCore based on provider.
+        // Returns (core_result, effective_base_url) so the resolved URL can be stored on the
+        // AgentProfile and later mutated via `agent set-url`.
+        let (core, effective_base_url): (Result<Arc<dyn LLMCore>, String>, Option<String>) =
+            match &provider {
+                LLMProvider::Ollama => {
+                    let host = base_url
                         .or_else(|| {
-                            std::env::var("AGENTOS_LLM_URL")
+                            std::env::var("AGENTOS_OLLAMA_HOST")
                                 .ok()
                                 .filter(|s| !s.trim().is_empty())
                         })
-                        .or_else(|| self.config.llm.custom_base_url.clone())
-                    {
-                        Some(url) => url,
-                        None => {
-                            return KernelResponse::Error {
-                                message: "Missing custom LLM endpoint. Provide --base-url, set AGENTOS_LLM_URL, or configure llm.custom_base_url in config.".to_string(),
-                            };
-                        }
-                    };
-                    Ok(Arc::new(CustomCore::new(sec, model.clone(), url)))
+                        .unwrap_or_else(|| self.config.ollama.host.clone());
+                    let effective = Some(host.clone());
+                    (
+                        Ok(Arc::new(
+                            OllamaCore::new(&host, &model)
+                                .with_request_timeout(self.config.ollama.request_timeout_secs)
+                                .with_context_window(self.config.llm.ollama_context_window),
+                        )),
+                        effective,
+                    )
                 }
-            }
-        };
+                LLMProvider::OpenAI => {
+                    let key_result = match self.vault.get(&format!("{}_openai_api_key", name)).await
+                    {
+                        ok @ Ok(_) => ok,
+                        Err(_) => self.vault.get("openai_api_key").await,
+                    };
+                    match key_result {
+                        Ok(entry) => {
+                            let sec = SecretString::new(entry.as_str().to_string());
+                            let resolved_base_url = base_url
+                                .or_else(|| {
+                                    std::env::var("AGENTOS_OPENAI_BASE_URL")
+                                        .ok()
+                                        .filter(|s| !s.trim().is_empty())
+                                })
+                                .or_else(|| self.config.llm.openai_base_url.clone());
+                            if let Some(url) = resolved_base_url {
+                                (
+                                    Ok(Arc::new(OpenAICore::with_base_url(
+                                        sec,
+                                        model.clone(),
+                                        url.clone(),
+                                    ))),
+                                    Some(url),
+                                )
+                            } else {
+                                (Ok(Arc::new(OpenAICore::new(sec, model.clone()))), None)
+                            }
+                        }
+                        _ => (
+                            Err("Missing 'openai_api_key' in vault. Please store it first."
+                                .to_string()),
+                            None,
+                        ),
+                    }
+                }
+                LLMProvider::Anthropic => {
+                    let key_result =
+                        match self.vault.get(&format!("{}_anthropic_api_key", name)).await {
+                            ok @ Ok(_) => ok,
+                            Err(_) => self.vault.get("anthropic_api_key").await,
+                        };
+                    match key_result {
+                        Ok(entry) => {
+                            let sec = SecretString::new(entry.as_str().to_string());
+                            let resolved_url =
+                                base_url.or_else(|| self.config.llm.anthropic_base_url.clone());
+                            let adapter = if let Some(ref url) = resolved_url {
+                                AnthropicCore::with_base_url(sec, model.clone(), url.clone())
+                            } else {
+                                AnthropicCore::new(sec, model.clone())
+                            };
+                            (
+                                Ok(Arc::new(
+                                    adapter.with_max_tokens(self.config.llm.max_tokens),
+                                )),
+                                resolved_url,
+                            )
+                        }
+                        _ => (
+                            Err(
+                                "Missing 'anthropic_api_key' in vault. Please store it first."
+                                    .to_string(),
+                            ),
+                            None,
+                        ),
+                    }
+                }
+                LLMProvider::Gemini => {
+                    let key_result = match self.vault.get(&format!("{}_gemini_api_key", name)).await
+                    {
+                        ok @ Ok(_) => ok,
+                        Err(_) => self.vault.get("gemini_api_key").await,
+                    };
+                    match key_result {
+                        Ok(entry) => {
+                            let sec = SecretString::new(entry.as_str().to_string());
+                            (Ok(Arc::new(GeminiCore::new(sec, model.clone()))), None)
+                        }
+                        _ => (
+                            Err("Missing 'gemini_api_key' in vault. Please store it first."
+                                .to_string()),
+                            None,
+                        ),
+                    }
+                }
+                LLMProvider::Custom(ref custom_name) => {
+                    // Check the provider catalog first for known providers.
+                    let catalog_entry_opt = self
+                        .provider_catalog
+                        .read()
+                        .unwrap()
+                        .lookup(custom_name)
+                        .cloned();
+                    if let Some(catalog_entry) = catalog_entry_opt {
+                        // Catalog-based provider: use catalog's base_url and API key env var.
+                        let sec = if !catalog_entry.api_key_env.is_empty() {
+                            match self
+                                .vault
+                                .get(&format!("{}_{}_api_key", name, custom_name))
+                                .await
+                            {
+                                Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
+                                Err(_) => std::env::var(&catalog_entry.api_key_env)
+                                    .ok()
+                                    .filter(|s| !s.trim().is_empty())
+                                    .map(SecretString::new),
+                            }
+                        } else {
+                            None
+                        };
+                        // Allow --base-url to override catalog URL; default to catalog entry
+                        let url = base_url.unwrap_or_else(|| catalog_entry.base_url.clone());
+                        let effective_model = if model == "default" || model.is_empty() {
+                            catalog_entry.default_model.clone()
+                        } else {
+                            model.clone()
+                        };
+                        (
+                            Ok(Arc::new(CustomCore::new(sec, effective_model, url.clone()))),
+                            Some(url),
+                        )
+                    } else {
+                        // Fallback: original custom provider logic
+                        let sec = match self.vault.get(&format!("{}_custom_api_key", name)).await {
+                            Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
+                            Err(_) => match self.vault.get("custom_api_key").await {
+                                Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
+                                _ => None,
+                            },
+                        };
+                        let url = match base_url
+                            .or_else(|| {
+                                std::env::var("AGENTOS_LLM_URL")
+                                    .ok()
+                                    .filter(|s| !s.trim().is_empty())
+                            })
+                            .or_else(|| self.config.llm.custom_base_url.clone())
+                        {
+                            Some(url) => url,
+                            None => {
+                                return KernelResponse::Error {
+                                    message: "Missing custom LLM endpoint. Provide --base-url, set AGENTOS_LLM_URL, or configure llm.custom_base_url in config.".to_string(),
+                                };
+                            }
+                        };
+                        (
+                            Ok(Arc::new(CustomCore::new(sec, model.clone(), url.clone()))),
+                            Some(url),
+                        )
+                    }
+                }
+            };
 
         let llm_adapter = match core {
             Ok(adapter) => adapter,
@@ -225,8 +263,17 @@ impl Kernel {
                 ),
             };
 
+            let mut persisted_permissions = if root {
+                let mut perms = PermissionSet::new();
+                perms.grant("*".to_string(), true, true, true, None);
+                perms.grant_op("*".to_string(), PermissionOp::Query, None);
+                perms.grant_op("*".to_string(), PermissionOp::Observe, None);
+                perms
+            } else {
+                persisted_permissions
+            };
+
             // Apply extra permissions supplied via --grant flags
-            let mut persisted_permissions = persisted_permissions;
             for perm_str in &extra_permissions {
                 if let Some((resource, read, write, execute, query, observe)) =
                     Self::parse_permission(perm_str)
@@ -348,6 +395,7 @@ impl Kernel {
                 created_at,
                 last_active: now,
                 public_key_hex,
+                base_url: effective_base_url,
             };
 
             // Remove stale Offline entry with same name when a new agent connects with a
@@ -605,6 +653,7 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         spawn_depth: 0,
                         is_team_coordinator: false,
                         skip_checkpoint: false,
+                        thinking_level: ThinkingLevel::Off,
                     };
                     self.scheduler.enqueue(onboarding_task).await;
                     onboarding_task_id_opt = Some(onboarding_task_id);
@@ -698,6 +747,129 @@ Once you have explored, briefly summarise what you found and confirm you are rea
         )
         .await;
 
+        KernelResponse::Success { data: None }
+    }
+
+    /// Change the LLM endpoint URL for a connected agent. The new LLMCore is built
+    /// immediately using the same provider/model/credentials and replaces the old one
+    /// in `active_llms`, so the change takes effect on the next task without reconnecting.
+    pub(crate) async fn cmd_set_agent_base_url(&self, name: String, url: String) -> KernelResponse {
+        // Look up the agent
+        let (agent_id, provider, model) = {
+            let registry = self.agent_registry.read().await;
+            match registry.get_by_name(&name) {
+                Some(p) if p.status != AgentStatus::Offline => {
+                    (p.id, p.provider.clone(), p.model.clone())
+                }
+                Some(_) => {
+                    return KernelResponse::Error {
+                        message: format!("Agent '{}' is offline — reconnect it first", name),
+                    }
+                }
+                None => {
+                    return KernelResponse::Error {
+                        message: format!("Agent '{}' not found", name),
+                    }
+                }
+            }
+        };
+
+        // Build a new LLMCore with the new URL using the same credentials
+        let new_core: Result<Arc<dyn LLMCore>, String> = match &provider {
+            LLMProvider::Ollama => Ok(Arc::new(
+                OllamaCore::new(&url, &model)
+                    .with_request_timeout(self.config.ollama.request_timeout_secs)
+                    .with_context_window(self.config.llm.ollama_context_window),
+            )),
+            LLMProvider::OpenAI => {
+                let key_result = match self.vault.get(&format!("{}_openai_api_key", name)).await {
+                    ok @ Ok(_) => ok,
+                    Err(_) => self.vault.get("openai_api_key").await,
+                };
+                match key_result {
+                    Ok(entry) => {
+                        let sec = SecretString::new(entry.as_str().to_string());
+                        Ok(Arc::new(OpenAICore::with_base_url(
+                            sec,
+                            model.clone(),
+                            url.clone(),
+                        )))
+                    }
+                    _ => Err("Missing 'openai_api_key' in vault.".to_string()),
+                }
+            }
+            LLMProvider::Anthropic => {
+                let key_result = match self.vault.get(&format!("{}_anthropic_api_key", name)).await
+                {
+                    ok @ Ok(_) => ok,
+                    Err(_) => self.vault.get("anthropic_api_key").await,
+                };
+                match key_result {
+                    Ok(entry) => {
+                        let sec = SecretString::new(entry.as_str().to_string());
+                        Ok(Arc::new(
+                            AnthropicCore::with_base_url(sec, model.clone(), url.clone())
+                                .with_max_tokens(self.config.llm.max_tokens),
+                        ))
+                    }
+                    _ => Err("Missing 'anthropic_api_key' in vault.".to_string()),
+                }
+            }
+            LLMProvider::Gemini => Err(
+                "Gemini does not support custom base URLs — reconnect with a different provider."
+                    .to_string(),
+            ),
+            LLMProvider::Custom(ref custom_name) => {
+                let catalog_entry_opt = self
+                    .provider_catalog
+                    .read()
+                    .unwrap()
+                    .lookup(custom_name)
+                    .cloned();
+                let sec = if let Some(ref ce) = catalog_entry_opt {
+                    if !ce.api_key_env.is_empty() {
+                        match self
+                            .vault
+                            .get(&format!("{}_{}_api_key", name, custom_name))
+                            .await
+                        {
+                            Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
+                            Err(_) => std::env::var(&ce.api_key_env)
+                                .ok()
+                                .filter(|s| !s.trim().is_empty())
+                                .map(SecretString::new),
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    match self.vault.get(&format!("{}_custom_api_key", name)).await {
+                        Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
+                        Err(_) => match self.vault.get("custom_api_key").await {
+                            Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
+                            _ => None,
+                        },
+                    }
+                };
+                Ok(Arc::new(CustomCore::new(sec, model.clone(), url.clone())))
+            }
+        };
+
+        let new_core = match new_core {
+            Ok(c) => c,
+            Err(e) => return KernelResponse::Error { message: e },
+        };
+
+        // Swap into active_llms
+        self.active_llms.write().await.insert(agent_id, new_core);
+
+        // Persist the new URL on the profile
+        self.agent_registry
+            .write()
+            .await
+            .update_base_url(&agent_id, url.clone());
+
+        tracing::info!(agent = %name, url = %url, "Agent base URL updated");
         KernelResponse::Success { data: None }
     }
 

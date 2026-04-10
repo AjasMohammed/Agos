@@ -4,6 +4,7 @@ version     = "1.0.0"
 description = "List audio devices, capture audio, play back audio files, and adjust volume through the HAL audio driver."
 author      = "agentos-core"
 trust_tier  = "core"
+risk_class  = "control_plane"
 
 [capabilities_required]
 permissions = [

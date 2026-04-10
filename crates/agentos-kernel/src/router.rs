@@ -167,6 +167,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_active: chrono::Utc::now(),
             public_key_hex: None,
+            base_url: None,
         }
     }
 

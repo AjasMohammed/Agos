@@ -1,0 +1,24 @@
+[manifest]
+name = "container-exec"
+version = "1.0.0"
+description = "Execute a command inside a running container. Returns stdout, stderr, exit code, and duration."
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "exec_capable"
+tags = ["compute", "sandbox", "container"]
+
+[capabilities_required]
+permissions = ["container.exec:x"]
+
+[capabilities_provided]
+outputs = ["exit_code", "stdout", "stderr", "duration_ms"]
+
+[intent_schema]
+input = "ContainerExecIntent"
+output = "ContainerExecResult"
+
+[sandbox]
+network = false
+fs_write = false
+max_memory_mb = 32
+max_cpu_ms = 60000

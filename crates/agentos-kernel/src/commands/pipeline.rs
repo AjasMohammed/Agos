@@ -354,6 +354,7 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
                 prompt.to_string(),
                 false,
                 false,
+                ThinkingLevel::Off,
             )
             .await;
         match response {

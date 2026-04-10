@@ -1,14 +1,18 @@
 {% for entry in recent_audit %}
-<tr>
-    <td><code class="ts">{{ entry.timestamp }}</code></td>
-    <td><code class="event-type">{{ entry.event_type }}</code></td>
-    <td><span class="badge badge-{{ entry.severity|lower }}">{{ entry.severity }}</span></td>
-    <td>{% if entry.agent_id %}<code class="id-short" title="{{ entry.agent_id }}">{{ entry.agent_id[:8] }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
-</tr>
+<div class="activity-item">
+    <span class="activity-dot activity-dot-{% if entry.severity == 'Error' %}error{% elif entry.severity == 'Warn' %}warning{% elif entry.severity == 'Security' %}security{% else %}info{% endif %}" aria-hidden="true"></span>
+    <div class="activity-content">
+        <div class="activity-event">
+            <span class="activity-event-type">{{ entry.event_type }}</span>
+            {% if entry.agent_id %}
+            <span class="activity-agent">&#183; <code class="id-short" title="{{ entry.agent_id }}">{{ entry.agent_id[:8] }}</code></span>
+            {% endif %}
+        </div>
+    </div>
+    <span class="activity-ts">{{ entry.timestamp }}</span>
+</div>
 {% else %}
-<tr>
-    <td colspan="4" style="text-align: center; color: var(--pico-muted-color); padding: 1.5rem;">
-        No recent activity.
-    </td>
-</tr>
+<div style="text-align: center; padding: 2rem 1rem; color: var(--pico-muted-color); font-size: 0.85rem;">
+    No recent activity. Events will stream here in real-time.
+</div>
 {% endfor %}

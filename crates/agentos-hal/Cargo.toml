@@ -26,6 +26,12 @@ wayland-client = { version = "0.31", optional = true }
 wayland-protocols-wlr = { version = "0.3", optional = true }
 nusb = { version = "0.2", optional = true, features = ["tokio"] }
 v4l = { version = "0.14", optional = true }
+rumqttc = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+tokio-util = { workspace = true }
+zeroize = { workspace = true }
+rusqlite = { workspace = true }
+toml = { workspace = true }
 
 [features]
 default = []
@@ -36,6 +42,8 @@ bluetooth = ["dep:bluer"]
 display = ["dep:zbus", "dep:wayland-client", "dep:wayland-protocols-wlr"]
 raw-usb = ["dep:nusb"]
 webcam = ["dep:v4l"]
+mqtt = ["dep:rumqttc"]
+homeassistant = ["dep:reqwest"]
 
 [dev-dependencies]
 tempfile.workspace = true

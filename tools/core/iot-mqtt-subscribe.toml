@@ -1,0 +1,23 @@
+[manifest]
+name = "iot-mqtt-subscribe"
+version = "1.0.0"
+description = "Subscribe to an MQTT topic to receive sensor data from IoT devices."
+author = "agentos-core"
+trust_tier = "core"
+tags = ["iot", "mqtt", "hardware"]
+
+[capabilities_required]
+permissions = ["hardware.mqtt:r"]
+
+[capabilities_provided]
+outputs = ["subscribed"]
+
+[intent_schema]
+input = "IotMqttSubscribeIntent"
+output = "IotMqttSubscribeResult"
+
+[sandbox]
+network = false
+fs_write = false
+max_memory_mb = 32
+max_cpu_ms = 5000

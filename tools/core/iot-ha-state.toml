@@ -1,0 +1,23 @@
+[manifest]
+name = "iot-ha-state"
+version = "1.0.0"
+description = "Query Home Assistant entity state (lights, sensors, thermostats, etc.)."
+author = "agentos-core"
+trust_tier = "core"
+tags = ["iot", "homeassistant", "hardware"]
+
+[capabilities_required]
+permissions = ["hardware.homeassistant:r"]
+
+[capabilities_provided]
+outputs = ["entities", "state"]
+
+[intent_schema]
+input = "IotHaStateIntent"
+output = "IotHaStateResult"
+
+[sandbox]
+network = false
+fs_write = false
+max_memory_mb = 32
+max_cpu_ms = 5000

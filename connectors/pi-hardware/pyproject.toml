@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=64.0", "setuptools-scm>=8", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pi-hardware-mcp"
+version = "0.1.0"
+description = "MCP server exposing Raspberry Pi GPIO, I2C, SPI, UART, and PWM as AgentOS tools"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+
+# No hard dependencies — all hardware libs are optional and the server
+# falls back to mock mode when they are missing.
+dependencies = []
+
+[project.optional-dependencies]
+# Install on Raspberry Pi for real hardware access.
+pi = [
+    "gpiozero>=2.0",
+    "RPi.GPIO>=0.7",
+    "smbus2>=0.4.3",
+    "spidev>=3.6",
+    "pyserial>=3.5",
+]
+dev = [
+    "pytest>=7.0",
+    "pyserial>=3.5",
+]
+
+[project.scripts]
+pi-hardware-mcp = "pi_hardware_mcp.server:main"
+
+[tool.setuptools.packages.find]
+include = ["pi_hardware_mcp*"]

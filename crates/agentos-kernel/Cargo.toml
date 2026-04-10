@@ -20,6 +20,8 @@ agentos-pipeline = { path = "../agentos-pipeline" }
 agentos-scratch = { path = "../agentos-scratch" }
 agentos-skills = { path = "../agentos-skills" }
 agentos-channels = { path = "../agentos-channels" }
+agentos-connectors = { path = "../agentos-connectors" }
+agentos-runtime = { path = "../agentos-runtime" }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -28,6 +30,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 toml = { workspace = true }
+toml_edit = { workspace = true }
+notify = { workspace = true }
 anyhow = { workspace = true }
 regex = "1"
 unicode-normalization = { workspace = true }
@@ -46,6 +50,7 @@ hex = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 reqwest = { workspace = true }
+url = { workspace = true }
 percent-encoding = "2"
 libc = { workspace = true }
 futures = { workspace = true }
@@ -57,7 +62,7 @@ tracing-opentelemetry = { version = "0.29", optional = true }
 
 [features]
 default = ["usb-storage", "printer"]
-all-peripherals = ["audio", "bluetooth", "display", "printer", "raw-usb", "usb-storage", "webcam"]
+all-peripherals = ["audio", "bluetooth", "display", "printer", "raw-usb", "usb-storage", "webcam", "mqtt", "homeassistant"]
 audio = ["agentos-hal/audio"]
 usb-storage = ["agentos-hal/usb-storage"]
 printer = ["agentos-hal/printer"]
@@ -65,6 +70,8 @@ bluetooth = ["agentos-hal/bluetooth"]
 display = ["agentos-hal/display"]
 raw-usb = ["agentos-hal/raw-usb"]
 webcam = ["agentos-hal/webcam"]
+mqtt = ["agentos-hal/mqtt"]
+homeassistant = ["agentos-hal/homeassistant"]
 otel = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",

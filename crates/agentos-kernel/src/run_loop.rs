@@ -515,6 +515,11 @@ impl Kernel {
                                         });
                                     }
 
+                                    // Sweep expired OAuth pending flows (10min TTL)
+                                    if let Err(e) = kernel.vault.oauth_store().sweep_expired_flows().await {
+                                        tracing::warn!(error = %e, "OAuth pending flow sweep failed");
+                                    }
+
                                     // Sweep expired notification waiters (blocking ask_user
                                     // questions whose timeout has fired). Fires auto_action
                                     // and wakes blocked tasks (Architecture Review ISSUE-6).
@@ -790,6 +795,22 @@ impl Kernel {
             Self::spawn_tracked_task(&mut join_set, &mut task_id_map, *kind, self.clone());
         }
 
+        // Start config file watcher — sends on reload_rx when config/default.toml changes.
+        // The watcher is kept alive by holding it in a local variable.
+        let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(4);
+        let config_path = std::path::PathBuf::from("config/default.toml");
+        let _config_watcher =
+            match crate::config_watcher::ConfigWatcher::start(config_path, reload_tx) {
+                Ok(w) => {
+                    tracing::info!("Hot config reload enabled");
+                    Some(w)
+                }
+                Err(e) => {
+                    tracing::warn!("Config watcher unavailable (hot reload disabled): {}", e);
+                    None
+                }
+            };
+
         // Install Prometheus metrics recorder and start health/readiness/metrics HTTP server
         if let Some(prom_handle) = crate::health::install_prometheus_recorder() {
             if let Err(e) = crate::health::start_health_server(self.clone(), prom_handle).await {
@@ -812,10 +833,72 @@ impl Kernel {
             tokio::select! {
                 _ = self.cancellation_token.cancelled() => {
                     tracing::info!("Kernel shutdown requested, stopping supervisor");
+
+                    // Log any tasks that are still in-flight so operators know what was lost.
+                    let in_flight: Vec<_> = self
+                        .scheduler
+                        .list_tasks()
+                        .await
+                        .into_iter()
+                        .filter(|t| {
+                            matches!(
+                                t.state,
+                                agentos_types::TaskState::Running | agentos_types::TaskState::Waiting
+                            )
+                        })
+                        .collect();
+                    if in_flight.is_empty() {
+                        tracing::info!("Shutdown: no in-flight tasks");
+                    } else {
+                        tracing::warn!(
+                            count = in_flight.len(),
+                            "Shutdown: {} task(s) abandoned mid-execution",
+                            in_flight.len()
+                        );
+                        for t in &in_flight {
+                            tracing::warn!(
+                                task_id = %t.id,
+                                agent_id = %t.agent_id,
+                                state = ?t.state,
+                                "Abandoned task on shutdown"
+                            );
+                        }
+                    }
+
                     join_set.abort_all();
                     self.channel_listener_registry.stop_all().await;
+                    // Fire Shutdown hook before final audit entry so hooks can flush state.
+                    self.hook_registry
+                        .fire(&agentos_types::HookEvent::Shutdown)
+                        .await;
                     self.audit_shutdown("cancellation_token", agentos_audit::AuditSeverity::Info);
                     break;
+                }
+
+                // Hot config reload: fired when the config file changes on disk.
+                // Drains all queued signals first to avoid redundant reloads on rapid saves.
+                // NOTE: Full live-reload of subsystems (LLM provider, bus, etc.) is a future
+                // enhancement. For now this logs the event and signals the audit log so operators
+                // know a config change occurred without restarting the kernel.
+                Some(()) = reload_rx.recv() => {
+                    while reload_rx.try_recv().is_ok() {}
+                    tracing::info!("Config file changed on disk (restart kernel to apply changes)");
+                    // Fire ConfigReloaded hook — lets hooks (audit, metrics) observe the change.
+                    self.hook_registry
+                        .fire(&agentos_types::HookEvent::ConfigReloaded)
+                        .await;
+                    self.audit_log(agentos_audit::AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        trace_id: agentos_types::TraceID::new(),
+                        event_type: agentos_audit::AuditEventType::KernelConfigChanged,
+                        agent_id: None,
+                        task_id: None,
+                        tool_id: None,
+                        details: serde_json::json!({ "source": "config_watcher" }),
+                        severity: agentos_audit::AuditSeverity::Info,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
                 }
 
                 // Fire any pending restarts whose deadline has passed.
@@ -1262,6 +1345,7 @@ impl Kernel {
                 roles,
                 test_mode,
                 extra_permissions,
+                root,
             } => {
                 // Intentionally calls cmd_connect_agent directly (not api_connect_agent):
                 // the bus command carries test_mode and extra_permissions which are
@@ -1274,10 +1358,14 @@ impl Kernel {
                     roles,
                     test_mode,
                     extra_permissions,
+                    root,
                 )
                 .await
             }
             KernelCommand::ListAgents => self.cmd_list_agents().await,
+            KernelCommand::SetAgentBaseUrl { name, url } => {
+                self.cmd_set_agent_base_url(name, url).await
+            }
             KernelCommand::DisconnectAgent { agent_id } => {
                 // Route through api_* so any future shared logic (validation, audit hooks)
                 // applies to both CLI and REST paths.
@@ -1291,9 +1379,16 @@ impl Kernel {
                 prompt,
                 autonomous,
                 no_checkpoint,
+                thinking_level,
             } => {
-                self.cmd_run_task(agent_name, prompt, autonomous, no_checkpoint)
-                    .await
+                self.cmd_run_task(
+                    agent_name,
+                    prompt,
+                    autonomous,
+                    no_checkpoint,
+                    thinking_level,
+                )
+                .await
             }
             KernelCommand::ListTasks => self.cmd_list_tasks().await,
             KernelCommand::SetSecret {
@@ -1667,7 +1762,57 @@ impl Kernel {
             }
             KernelCommand::ListChannels => self.cmd_list_channels().await,
             KernelCommand::TestChannel { channel_id } => self.cmd_test_channel(channel_id).await,
+            KernelCommand::ListPlugins => self.cmd_list_plugins().await,
+            KernelCommand::EnablePlugin { plugin_id } => self.cmd_enable_plugin(plugin_id).await,
+            KernelCommand::DisablePlugin { plugin_id } => self.cmd_disable_plugin(plugin_id).await,
             KernelCommand::McpStatus => self.cmd_mcp_status().await,
+            KernelCommand::McpAttach {
+                name,
+                command,
+                args,
+                url,
+                auth_token,
+                oauth_connector_id,
+                timeout_secs,
+                env,
+            } => {
+                self.cmd_mcp_attach(
+                    name,
+                    command,
+                    args,
+                    url,
+                    auth_token,
+                    oauth_connector_id,
+                    timeout_secs,
+                    env,
+                )
+                .await
+            }
+            KernelCommand::McpDetach { name } => self.cmd_mcp_detach(name).await,
+            KernelCommand::McpOAuthStore {
+                connector_id,
+                provider,
+                access_token,
+                refresh_token,
+                token_endpoint,
+                client_id,
+                client_secret,
+                scopes,
+                expires_in_secs,
+            } => {
+                self.cmd_mcp_oauth_store(
+                    connector_id,
+                    provider,
+                    access_token,
+                    refresh_token,
+                    token_endpoint,
+                    client_id,
+                    client_secret,
+                    scopes,
+                    expires_in_secs,
+                )
+                .await
+            }
 
             // Context memory
             KernelCommand::ContextMemoryRead { agent_id } => {
@@ -1727,6 +1872,9 @@ impl Kernel {
 
             // Provider catalog
             KernelCommand::ListProviders => self.cmd_list_providers().await,
+            KernelCommand::SetProviderUrl { name, url } => {
+                self.cmd_set_provider_url(name, url).await
+            }
 
             // Sub-agent coordination
             KernelCommand::SpawnSubAgent {
@@ -1756,6 +1904,59 @@ impl Kernel {
             KernelCommand::TeamStatus { team_task_id } => {
                 // Return the task summary for the coordinator task.
                 self.cmd_get_task_logs(team_task_id).await
+            }
+
+            // Webhook endpoint management
+            KernelCommand::CreateWebhookEndpoint {
+                agent_name,
+                provider,
+                debounce_seconds,
+            } => {
+                self.cmd_create_webhook_endpoint(&agent_name, &provider, debounce_seconds)
+                    .await
+            }
+            KernelCommand::ListWebhookEndpoints { agent_name } => {
+                self.cmd_list_webhook_endpoints(agent_name.as_deref()).await
+            }
+            KernelCommand::DeleteWebhookEndpoint { endpoint_id } => {
+                self.cmd_delete_webhook_endpoint(&endpoint_id).await
+            }
+
+            // Container runtime management
+            KernelCommand::ContainerCreate {
+                agent_name,
+                image,
+                memory_mb,
+                cpu,
+                network,
+                ttl_seconds,
+            } => {
+                self.cmd_container_create(agent_name, image, memory_mb, cpu, network, ttl_seconds)
+                    .await
+            }
+            KernelCommand::ContainerExec {
+                agent_name,
+                container_id,
+                command,
+                timeout_ms,
+            } => {
+                self.cmd_container_exec(agent_name, container_id, command, timeout_ms)
+                    .await
+            }
+            KernelCommand::ContainerLogs {
+                agent_name,
+                container_id,
+                tail,
+            } => {
+                self.cmd_container_logs(agent_name, container_id, tail)
+                    .await
+            }
+            KernelCommand::ContainerDestroy {
+                agent_name,
+                container_id,
+            } => self.cmd_container_destroy(agent_name, container_id).await,
+            KernelCommand::ContainerList { agent_name } => {
+                self.cmd_container_list(agent_name).await
             }
         }
     }

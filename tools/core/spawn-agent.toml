@@ -4,6 +4,7 @@ version     = "1.0.0"
 description = "Spawn a sub-agent to handle a specific subtask. The child runs independently and its result is injected back into your context when complete. Returns the task_id to use with await-agents."
 author      = "agentos-core"
 trust_tier  = "core"
+risk_class  = "control_plane"
 
 [capabilities_required]
 permissions = ["agent.spawn:x"]

@@ -1,21 +1,27 @@
 use crate::Commands;
 use agentos_bus::client::BusClient;
 
+pub mod a2a;
 pub mod agent;
 pub mod audit;
 pub mod bg;
 pub mod channel;
+pub mod config_cmd;
 pub mod cost;
+pub mod doctor;
 pub mod escalation;
 pub mod event;
 pub mod hal;
 pub mod healthz;
 pub mod identity;
+pub mod init;
 pub mod log;
 pub mod mcp;
 pub mod notifications;
+pub mod onboard;
 pub mod perm;
 pub mod pipeline;
+pub mod plugin;
 pub mod provider;
 pub mod resource;
 pub mod role;
@@ -57,6 +63,7 @@ pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow
         Commands::Skill { command } => skill::handle(client, command).await,
         Commands::Provider { command } => provider::handle(client, command).await,
         Commands::Team { command } => team::handle(client, command).await,
+        Commands::Plugin { command } => plugin::handle(client, command).await,
         _ => unreachable!(),
     }
 }

@@ -86,6 +86,7 @@ mod tests {
             prompt: large_data.clone(),
             autonomous: false,
             no_checkpoint: false,
+            thinking_level: agentos_types::ThinkingLevel::Off,
         };
         client
             .send_message(&BusMessage::Command(cmd))

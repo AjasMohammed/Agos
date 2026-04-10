@@ -1,0 +1,184 @@
+# AgentOS configuration optimized for Raspberry Pi Zero / Zero 2 W.
+#
+# Key differences from default.toml:
+#   - Reduced concurrency and context budget for 512MB RAM
+#   - MCP server for Pi hardware (GPIO, I2C, SPI, UART, PWM)
+#   - Ollama pointed at a network LLM host (Pi Zero can't run LLMs locally)
+#   - Persistent data paths under ~/.agentos/ instead of /tmp
+
+[kernel]
+max_concurrent_tasks = 2
+default_task_timeout_secs = 3600
+context_window_max_entries = 200
+# Context window holds the active conversation; context_budget.total_tokens
+# (32K below) includes system prompt, tool descriptions, and knowledge —
+# the window budget is intentionally smaller.
+context_window_token_budget = 16000
+state_db_path = "/home/pi/.agentos/data/kernel_state.db"
+sandbox_policy = "trust_aware"
+
+[kernel.task_limits]
+max_iterations_low = 25
+max_iterations_medium = 100
+max_iterations_high = 500
+
+[kernel.tool_calls]
+allow_parallel = true
+max_parallel = 4
+
+[kernel.autonomous_mode]
+max_iterations = 2000
+task_timeout_secs = 43200    # 12 hours
+tool_timeout_seconds = 300
+max_parallel_tool_calls = 4
+
+[kernel.events]
+channel_capacity = 256
+
+[kernel.tool_execution]
+max_output_bytes = 65536     # 64 KiB (reduced for memory)
+default_timeout_seconds = 120
+
+[secrets]
+vault_path = "/home/pi/.agentos/vault/secrets.db"
+
+[audit]
+log_path = "/home/pi/.agentos/data/audit.db"
+max_audit_entries = 50000    # Limit to save SD card space
+verify_last_n_entries = 200
+
+[tools]
+core_tools_dir = "/home/pi/.agentos/tools/core"
+user_tools_dir = "/home/pi/.agentos/tools/user"
+data_dir = "/home/pi/.agentos/data"
+
+[tools.workspace]
+allowed_paths = ["/home/pi/projects", "/media", "/run/media"]
+
+[bus]
+socket_path = "/home/pi/.agentos/agentos.sock"
+
+[ollama]
+# Pi Zero cannot run LLMs locally. Point to a network host.
+# Override with AGENTOS_OLLAMA_HOST environment variable.
+host = "http://192.168.1.100:11434"
+default_model = "llama3.2"
+request_timeout_secs = 300
+
+[llm]
+openai_base_url = "https://api.openai.com/v1"
+anthropic_base_url = "https://api.anthropic.com/v1"
+gemini_base_url = "https://generativelanguage.googleapis.com/v1beta"
+max_tokens = 4096
+ollama_context_window = 16384
+
+[memory]
+model_cache_dir = "/home/pi/.agentos/models"
+
+[memory.extraction]
+enabled = true
+conflict_threshold = 0.85
+max_facts_per_result = 3
+min_result_length = 50
+
+[memory.consolidation]
+enabled = true
+min_pattern_occurrences = 5
+task_completions_trigger = 200
+time_trigger_hours = 48
+max_episodes_per_cycle = 200
+
+[memory.context]
+enabled = true
+max_tokens = 2048
+max_versions = 20
+db_path = "context_memory.db"
+
+[context_budget]
+total_tokens = 32000         # Reduced for Pi Zero's 512MB RAM
+reserve_pct = 0.25
+system_pct = 0.15
+tools_pct = 0.18
+knowledge_pct = 0.25
+history_pct = 0.25
+task_pct = 0.12
+chars_per_token = 4.0
+
+[context]
+summarization_mode = "llm"
+summarization_max_input_chars = 4000
+
+[logging]
+log_dir = "/home/pi/.agentos/logs"
+log_level = "info"
+log_format = "text"
+
+[otel]
+enabled = false
+
+[notifications]
+max_inbox_size = 200
+notify_on_task_complete = true
+notify_on_task_failed = true
+
+[notifications.adapters.webhook]
+enabled = false
+url = ""
+secret = ""
+
+[notifications.adapters.desktop]
+enabled = false              # Pi Zero typically headless
+min_priority = "warning"
+
+[notifications.adapters.slack]
+enabled = false
+
+[health_monitor]
+enabled = true
+check_interval_secs = 60    # Less frequent to save CPU
+
+[health_monitor.thresholds]
+cpu_warning_percent = 90.0
+memory_warning_percent = 85.0
+disk_warning_percent = 90.0
+disk_critical_percent = 95.0
+gpu_vram_warning_percent = 90.0
+
+[scratchpad]
+enabled = true
+db_path = "scratchpad.db"
+context_depth = 1
+max_context_pages = 3
+max_context_bytes = 4096
+max_page_size = 32768
+max_pages_per_agent = 200
+auto_write_on_completion = true
+auto_write_min_steps = 3
+auto_write_max_summary = 1024
+
+[skills]
+core_skills_dir = "skills/core"
+user_skills_dir = "skills/user"
+
+[registry]
+url = "https://registry.agentos.dev"
+
+[api]
+enabled = false
+
+# ── Pi Hardware MCP Server ────────────────────────────────────────────────────
+# Spawns a Python MCP server that exposes GPIO, I2C, SPI, UART, and PWM tools.
+# The server auto-detects available hardware and falls back to mock mode if
+# libraries are missing.
+#
+# Prerequisites:
+#   cd connectors/pi-hardware && pip install -e ".[pi]"
+
+[[mcp.servers]]
+name = "pi-hardware"
+command = "python3"
+args = ["-m", "pi_hardware_mcp.server"]
+auto_reconnect = true
+health_check_interval_secs = 60
+rate_limit_rpm = 120
+timeout_secs = 30

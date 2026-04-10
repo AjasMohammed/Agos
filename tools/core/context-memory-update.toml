@@ -1,6 +1,7 @@
 [manifest]
 name        = "context-memory-update"
 version     = "1.0.0"
+risk_class  = "write_scoped"
 description = "Update your persistent context memory — a markdown document injected into your context window at the start of every future task. Use this to save patterns, preferences, and knowledge for your future self."
 author      = "agentos-core"
 trust_tier  = "core"

@@ -16,6 +16,10 @@ use agentos_hal::drivers::audio::AudioDriver;
 use agentos_hal::drivers::bluetooth::BluetoothDriver;
 #[cfg(feature = "display")]
 use agentos_hal::drivers::display::DisplayDriver;
+#[cfg(feature = "homeassistant")]
+use agentos_hal::drivers::homeassistant::HomeAssistantDriver;
+#[cfg(feature = "mqtt")]
+use agentos_hal::drivers::mqtt::MqttDriver;
 #[cfg(feature = "printer")]
 use agentos_hal::drivers::printer::PrinterDriver;
 #[cfg(feature = "raw-usb")]
@@ -645,6 +649,7 @@ pub struct Kernel {
     pub injection_scanner: Arc<crate::injection_scanner::InjectionScanner>,
     pub resource_arbiter: Arc<crate::resource_arbiter::ResourceArbiter>,
     pub checkpoint_store: Arc<crate::checkpoint_store::CheckpointStore>,
+    pub mcp_attachment_store: Arc<crate::mcp_attachment_store::McpAttachmentStore>,
     pub snapshot_manager: Arc<crate::snapshot::SnapshotManager>,
     pub trace_collector: Arc<crate::trace_collector::TraceCollector>,
     pub rpc_manager: Arc<crate::rpc_manager::RpcManager>,
@@ -665,6 +670,23 @@ pub struct Kernel {
     /// Broadcast channel for task status updates.
     /// Phase 2 SSE and external adapters subscribe via `status_update_sender.subscribe()`.
     /// Messages are silently dropped if there are no active receivers.
+    /// API connector registry — routes namespaced tool calls to external services.
+    pub connector_registry: Arc<agentos_connectors::ConnectorRegistry>,
+    /// Container runtime — provisions and manages ephemeral compute containers.
+    pub compute_runtime: Option<Arc<dyn agentos_runtime::ComputeRuntime>>,
+    /// Per-agent container quota enforcement.
+    pub quota_enforcer: Arc<agentos_runtime::QuotaEnforcer>,
+    /// Webhook endpoint registry — manages inbound webhook endpoints for agents.
+    pub webhook_registry: Arc<crate::webhook_registry::WebhookRegistry>,
+    /// Webhook rate limiter — per-endpoint token bucket.
+    pub webhook_throttle: Arc<crate::webhook_throttle::WebhookThrottle>,
+    /// Webhook event batcher — debounces and aggregates events before agent wake-up.
+    pub webhook_batcher: Arc<crate::webhook_batcher::WebhookBatcher>,
+    /// Receiver for batched webhook events ready for agent task creation.
+    /// Consumed once at boot by the webhook wake-up loop.
+    pub(crate) webhook_batch_rx: Arc<
+        tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::webhook_batcher::BatchReady>>>,
+    >,
     pub status_update_sender: tokio::sync::broadcast::Sender<agentos_bus::StatusUpdate>,
     /// Task-scoped subscriptions that should be removed when a task reaches terminal state.
     pub(crate) task_scoped_subscriptions: Arc<RwLock<HashMap<TaskID, Vec<SubscriptionID>>>>,
@@ -704,13 +726,19 @@ pub struct Kernel {
     /// MCP security gate for output validation, rate limiting, and audit logging.
     pub mcp_security_gate: Arc<agentos_mcp::McpSecurityGate>,
     /// Provider catalog for auto-configuring OpenAI-compatible LLM providers.
-    pub provider_catalog: Arc<agentos_llm::ProviderCatalog>,
+    pub provider_catalog: Arc<std::sync::RwLock<agentos_llm::ProviderCatalog>>,
+    /// Path to `providers.toml` so runtime URL overrides can be persisted.
+    pub(crate) catalog_path: Option<PathBuf>,
     /// Manages bidirectional channel adapters (Discord, Slack, Telegram, etc.).
     pub channel_manager: Arc<agentos_channels::manager::ChannelManager>,
     /// Receiver for inbound messages from ChannelManager adapters.
     pub(crate) channel_manager_rx: Arc<
         tokio::sync::Mutex<tokio::sync::mpsc::Receiver<agentos_channels::types::InboundMessage>>,
     >,
+    /// Lifecycle hook registry — fired at task/tool/agent lifecycle points.
+    pub hook_registry: Arc<crate::hooks::HookRegistry>,
+    /// Plugin registry — discovers and activates plugin manifests.
+    pub plugin_registry: Arc<crate::plugin_registry::PluginRegistry>,
     /// Token used to signal graceful shutdown to all kernel loops.
     pub cancellation_token: CancellationToken,
     /// Set to `true` once the first `KernelShutdown` audit entry has been written.
@@ -1676,22 +1704,27 @@ impl Kernel {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("providers.toml");
-        let provider_catalog = match agentos_llm::ProviderCatalog::from_file(&catalog_path) {
-            Ok(catalog) => {
-                if !catalog.is_empty() {
-                    tracing::info!(
-                        path = %catalog_path.display(),
-                        providers = catalog.len(),
-                        "Loaded provider catalog"
-                    );
+        let (provider_catalog, resolved_catalog_path) =
+            match agentos_llm::ProviderCatalog::from_file(&catalog_path) {
+                Ok(catalog) => {
+                    if !catalog.is_empty() {
+                        tracing::info!(
+                            path = %catalog_path.display(),
+                            providers = catalog.len(),
+                            "Loaded provider catalog"
+                        );
+                    }
+                    let path = Some(catalog_path);
+                    (Arc::new(std::sync::RwLock::new(catalog)), path)
                 }
-                Arc::new(catalog)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to load provider catalog, continuing without it");
-                Arc::new(agentos_llm::ProviderCatalog::empty())
-            }
-        };
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to load provider catalog, continuing without it");
+                    (
+                        Arc::new(std::sync::RwLock::new(agentos_llm::ProviderCatalog::empty())),
+                        None,
+                    )
+                }
+            };
 
         // 1.5 Run pre-flight system health checks before any subsystem init
         preflight_checks(&config)?;
@@ -1846,7 +1879,8 @@ impl Kernel {
         // Wire the registry into the HAL immediately for compatibility with tests
         // and non-kernel callers; the richer approval gate is attached later once
         // the escalation manager exists.
-        let hal = hal.with_registry(Arc::clone(&hardware_registry));
+        #[allow(unused_mut)]
+        let mut hal = hal.with_registry(Arc::clone(&hardware_registry));
 
         // 5. Load tools (with optional CRL enforcement)
         // NOTE: Tools are loaded before the event channel exists, so boot-time
@@ -2020,7 +2054,10 @@ impl Kernel {
             tool_runner.register_agent_self(tool_names);
         }
 
-        // 6.5 Initialize MCP supervisor and security gate.
+        // Create hook registry early so it can be shared with the plugin registry.
+        let hook_registry_arc = crate::hooks::HookRegistry::new();
+
+        // 6.5 Initialize MCP supervisor, security gate, and attachment store.
         let kernel_cancellation_token = CancellationToken::new();
         let (mcp_event_tx, mut mcp_event_rx) = tokio::sync::mpsc::channel(100);
         let mcp_cancellation = kernel_cancellation_token.child_token();
@@ -2032,6 +2069,13 @@ impl Kernel {
             audit.clone(),
             1024 * 1024, // 1MB default
         ));
+        let mcp_attachment_store = Arc::new(
+            crate::mcp_attachment_store::McpAttachmentStore::open(
+                data_dir.join("mcp_attachments.db"),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("McpAttachmentStore init failed: {e}"))?,
+        );
 
         // 6.6 Spawn all configured MCP servers in parallel.
         let mut mcp_add_tasks = Vec::new();
@@ -2184,10 +2228,260 @@ impl Kernel {
             }
         }
 
-        // 6.7 Spawn health check loop.
+        // 6.7 Load persisted runtime MCP attachments (from previous `mcp attach` calls).
+        //
+        // These are spawned sequentially after config-based servers so they use the
+        // same `seen` set and skip any name collisions with already-registered tools.
+        {
+            match mcp_attachment_store.list_all().await {
+                Ok(records) => {
+                    for record in records {
+                        tracing::info!(
+                            mcp_server = %record.name,
+                            "Restoring persisted MCP attachment"
+                        );
+
+                        // Resolve vault secrets in env vars. Abort this server
+                        // if any required secret is missing — a partial env would
+                        // cause confusing auth failures downstream.
+                        let mut resolved_env: std::collections::HashMap<String, String> =
+                            std::collections::HashMap::new();
+                        let mut env_ok = true;
+                        for (k, v) in &record.env {
+                            if let Some(secret_name) = v.strip_prefix("vault:") {
+                                match vault.get(secret_name).await {
+                                    Ok(s) => {
+                                        resolved_env.insert(k.clone(), s.as_str().to_string());
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            mcp_server = %record.name,
+                                            env_key = %k,
+                                            secret = %secret_name,
+                                            error = %e,
+                                            "vault secret missing for persisted MCP env var — skipping server"
+                                        );
+                                        env_ok = false;
+                                        break;
+                                    }
+                                }
+                            } else {
+                                resolved_env.insert(k.clone(), v.clone());
+                            }
+                        }
+                        if !env_ok {
+                            continue;
+                        }
+
+                        let transport_factory: Option<Arc<dyn agentos_mcp::McpTransportFactory>>;
+                        let transport: Arc<dyn agentos_mcp::McpTransport> = match (
+                            &record.command,
+                            &record.url,
+                        ) {
+                            (Some(cmd), None) => {
+                                let factory = Arc::new(
+                                    agentos_mcp::transport::stdio::StdioTransportFactory::new(
+                                        format!("stdio:{}", record.name),
+                                        cmd.clone(),
+                                        record.args.clone(),
+                                        resolved_env.clone(),
+                                        None,
+                                        record.timeout_secs,
+                                    ),
+                                );
+                                transport_factory = Some(factory);
+                                match agentos_mcp::transport::stdio::StdioTransport::spawn(
+                                    format!("stdio:{}", record.name),
+                                    cmd.clone(),
+                                    record.args.clone(),
+                                    resolved_env,
+                                    None,
+                                    record.timeout_secs,
+                                )
+                                .await
+                                {
+                                    Ok(t) => Arc::new(t),
+                                    Err(e) => {
+                                        tracing::warn!(mcp_server = %record.name, error = %e, "Failed to restore persisted MCP server");
+                                        continue;
+                                    }
+                                }
+                            }
+                            (None, Some(url)) => {
+                                transport_factory = None;
+                                // OAuth2 mode takes precedence over static token.
+                                if let Some(ref connector_id) = record.oauth_connector_id {
+                                    let provider =
+                                        match crate::mcp_oauth_provider::VaultOAuthProvider::new(
+                                            connector_id.clone(),
+                                            &vault,
+                                        ) {
+                                            Ok(p) => Arc::new(p),
+                                            Err(e) => {
+                                                tracing::warn!(mcp_server = %record.name, error = %e, "Failed to build OAuth provider on restore — skipping");
+                                                continue;
+                                            }
+                                        };
+                                    match agentos_mcp::transport::http::StreamableHttpTransport::new_with_oauth(
+                                        format!("http:{}", record.name),
+                                        url.clone(),
+                                        provider,
+                                        record.timeout_secs,
+                                    ) {
+                                        Ok(t) => Arc::new(t),
+                                        Err(e) => {
+                                            tracing::warn!(mcp_server = %record.name, error = %e, "Failed to restore persisted MCP OAuth HTTP server");
+                                            continue;
+                                        }
+                                    }
+                                } else {
+                                    // Resolve vault:KEY reference — static tokens are auto-vaulted
+                                    // at attach time, so the persisted value is "vault:mcp.<name>.auth_token".
+                                    let resolved_token = match &record.auth_token {
+                                        Some(v) if v.starts_with("vault:") => {
+                                            let key = &v["vault:".len()..];
+                                            match vault.get(key).await {
+                                                Ok(s) => Some(s.as_str().to_string()),
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        mcp_server = %record.name,
+                                                        vault_key = %key,
+                                                        error = %e,
+                                                        "Failed to resolve auth_token from vault on restore — skipping server"
+                                                    );
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        other => other.clone(),
+                                    };
+                                    match agentos_mcp::transport::http::StreamableHttpTransport::new(
+                                        format!("http:{}", record.name),
+                                        url.clone(),
+                                        resolved_token,
+                                        record.timeout_secs,
+                                    ) {
+                                        Ok(t) => Arc::new(t),
+                                        Err(e) => {
+                                            tracing::warn!(mcp_server = %record.name, error = %e, "Failed to restore persisted MCP HTTP server");
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                tracing::warn!(mcp_server = %record.name, "Persisted MCP attachment has neither command nor url — skipping");
+                                continue;
+                            }
+                        };
+
+                        let resolved_config = agentos_mcp::McpServerResolvedConfig {
+                            name: record.name.clone(),
+                            timeout_secs: record.timeout_secs.unwrap_or(30),
+                            auto_reconnect: true,
+                            health_check_interval_secs: 30,
+                        };
+                        let policy = agentos_mcp::McpServerPolicy {
+                            name: record.name.clone(),
+                            max_response_bytes: 1024 * 1024,
+                            allowed_tools: vec![],
+                            denied_tools: vec![],
+                            rate_limit_rpm: 60,
+                        };
+                        mcp_security_gate.register_server_policy(policy).await;
+
+                        match mcp_supervisor
+                            .add_server_with_factory(resolved_config, transport, transport_factory)
+                            .await
+                        {
+                            Ok(tools) => {
+                                for tool_def in tools {
+                                    if seen.contains(&tool_def.name) {
+                                        tracing::warn!(mcp_server = %record.name, tool = %tool_def.name, "Skipping restored MCP tool — name conflict");
+                                        continue;
+                                    }
+                                    seen.insert(tool_def.name.clone());
+
+                                    // Register into ToolRegistry (LLM visibility).
+                                    let manifest = agentos_types::ToolManifest {
+                                        manifest: agentos_types::tool::ToolInfo {
+                                            name: tool_def.name.clone(),
+                                            version: "0.1.0".to_string(),
+                                            description: tool_def.description.clone(),
+                                            author: format!("mcp:{}", record.name),
+                                            checksum: None,
+                                            author_pubkey: None,
+                                            signature: None,
+                                            trust_tier: agentos_types::TrustTier::Core,
+                                            tags: Some(vec![
+                                                "mcp".to_string(),
+                                                record.name.clone(),
+                                            ]),
+                                            capability_tags: vec![],
+                                        },
+                                        capabilities_required:
+                                            agentos_types::tool::ToolCapabilities {
+                                                permissions: vec![format!(
+                                                    "mcp.{}",
+                                                    tool_def.name.replace('-', "_").to_lowercase()
+                                                )],
+                                            },
+                                        capabilities_provided: agentos_types::tool::ToolOutputs {
+                                            outputs: vec!["content.text".to_string()],
+                                        },
+                                        intent_schema: agentos_types::tool::ToolSchema {
+                                            input: "McpToolInput".to_string(),
+                                            output: "McpToolOutput".to_string(),
+                                        },
+                                        input_schema: Some(tool_def.input_schema.clone()),
+                                        sandbox: agentos_types::ToolSandbox {
+                                            network: true,
+                                            fs_write: false,
+                                            gpu: false,
+                                            max_memory_mb: 256,
+                                            max_cpu_ms: 30_000,
+                                            syscalls: vec![],
+                                            weight: Some("network".to_string()),
+                                        },
+                                        executor: agentos_types::ToolExecutor::default(),
+                                        fallbacks: vec![],
+                                        // MCP tools may perform arbitrary operations — default
+                                        // to ExecCapable so approval is required unless the
+                                        // operator has an explicit auto-approve rule.
+                                        risk_class: agentos_types::RiskClass::ExecCapable,
+                                    };
+                                    {
+                                        let mut reg = tool_registry.write().await;
+                                        let _ = reg.register(manifest);
+                                    }
+
+                                    // Register into ToolRunner via dynamic path so
+                                    // `mcp detach` can remove it via unregister_dynamic.
+                                    let adapter = agentos_mcp::McpToolAdapter::new(
+                                        Arc::clone(&mcp_supervisor),
+                                        Arc::clone(&mcp_security_gate),
+                                        record.name.clone(),
+                                        tool_def,
+                                    );
+                                    tool_runner.register_dynamic(Box::new(adapter));
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(mcp_server = %record.name, error = %e, "Failed to reconnect persisted MCP server");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to load persisted MCP attachments — continuing without them");
+                }
+            }
+        }
+
+        // 6.8 Spawn health check loop.
         let _health_loop_handle = mcp_supervisor.spawn_health_loop();
 
-        // 6.8 Forward MCP lifecycle events to audit log.
+        // 6.9 Forward MCP lifecycle events to audit log.
         {
             tokio::spawn(async move {
                 while let Some(event) = mcp_event_rx.recv().await {
@@ -2377,6 +2671,54 @@ impl Kernel {
         const NOTIF_CHANNEL_CAPACITY: usize = 1024;
 
         let (event_sender, event_receiver) = tokio::sync::mpsc::channel(event_channel_capacity);
+
+        // Register IoT protocol drivers (feature-gated, config-conditional)
+        #[cfg(feature = "mqtt")]
+        {
+            if let (Ok(host), Ok(port_str)) = (
+                std::env::var("AGENTOS_MQTT_HOST"),
+                std::env::var("AGENTOS_MQTT_PORT"),
+            ) {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    let client_id = std::env::var("AGENTOS_MQTT_CLIENT_ID")
+                        .unwrap_or_else(|_| "agentos".to_string());
+                    let creds = std::env::var("AGENTOS_MQTT_USER").ok().map(|user| {
+                        let pass = std::env::var("AGENTOS_MQTT_PASS").unwrap_or_default();
+                        (user, pass)
+                    });
+                    let creds_ref = creds.as_ref().map(|(u, p)| (u.as_str(), p.as_str()));
+                    match MqttDriver::new(
+                        &host,
+                        port,
+                        &client_id,
+                        creds_ref,
+                        kernel_cancellation_token.child_token(),
+                    )
+                    .await
+                    {
+                        Ok(driver) => {
+                            hal.register(Box::new(driver));
+                            tracing::info!(host = %host, port, "MQTT HAL driver registered");
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to initialize MQTT driver");
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(feature = "homeassistant")]
+        {
+            if let Ok(base_url) = std::env::var("AGENTOS_HA_URL") {
+                let token = std::env::var("AGENTOS_HA_TOKEN").unwrap_or_default();
+                if !token.is_empty() {
+                    hal.register(Box::new(HomeAssistantDriver::new(&base_url, &token)));
+                    tracing::info!(url = %base_url, "Home Assistant HAL driver registered");
+                }
+            }
+        }
+
         let hal = Arc::new(
             hal.with_device_access_gate(Arc::new(KernelDeviceAccessGate::new(
                 hardware_registry.clone(),
@@ -2534,6 +2876,48 @@ impl Kernel {
             kernel_cancellation_token.clone(),
         ));
 
+        let connector_registry = Arc::new(agentos_connectors::ConnectorRegistry::new(Arc::clone(
+            &vault,
+        )));
+
+        // Container runtime — attempt Docker connection, fall back to None
+        let quota_enforcer = Arc::new(agentos_runtime::QuotaEnforcer::new(
+            agentos_runtime::ContainerQuota::default(),
+        ));
+        let compute_runtime: Option<Arc<dyn agentos_runtime::ComputeRuntime>> =
+            match agentos_runtime::DockerRuntime::new(vec![
+                "python:3.11-slim".into(),
+                "python:3.12-slim".into(),
+                "node:20-alpine".into(),
+                "node:22-alpine".into(),
+                "ubuntu:22.04".into(),
+                "ubuntu:24.04".into(),
+                "rust:1.78-slim".into(),
+                "alpine:3.19".into(),
+            ])
+            .await
+            {
+                Ok(rt) => {
+                    tracing::info!("Container runtime (Docker) initialized");
+                    Some(Arc::new(rt))
+                }
+                Err(e) => {
+                    tracing::info!(error = %e, "Docker not available — container runtime disabled");
+                    None
+                }
+            };
+
+        let webhook_db_path = data_dir.join("webhook_endpoints.db");
+        let webhook_registry =
+            Arc::new(crate::webhook_registry::WebhookRegistry::new(&webhook_db_path).await?);
+
+        let webhook_throttle = Arc::new(crate::webhook_throttle::WebhookThrottle::new(60, 30));
+        let (webhook_batch_tx, webhook_batch_rx) = tokio::sync::mpsc::channel(256);
+        let webhook_batcher = Arc::new(crate::webhook_batcher::WebhookBatcher::new(
+            webhook_batch_tx,
+            50,
+        ));
+
         let kernel = Kernel {
             config,
             audit,
@@ -2542,7 +2926,7 @@ impl Kernel {
             scheduler,
             context_manager,
             context_compiler,
-            tool_registry,
+            tool_registry: tool_registry.clone(),
             agent_registry,
             bus,
             tool_runner,
@@ -2580,6 +2964,7 @@ impl Kernel {
                 Arc::new(arbiter)
             },
             checkpoint_store,
+            mcp_attachment_store,
             snapshot_manager,
             trace_collector,
             rpc_manager: Arc::new(crate::rpc_manager::RpcManager::new()),
@@ -2590,6 +2975,13 @@ impl Kernel {
             channel_listener_registry,
             inbound_tx,
             webhook_secrets: Arc::new(RwLock::new(HashMap::new())),
+            connector_registry,
+            compute_runtime,
+            quota_enforcer,
+            webhook_registry,
+            webhook_throttle,
+            webhook_batcher,
+            webhook_batch_rx: Arc::new(tokio::sync::Mutex::new(Some(webhook_batch_rx))),
             status_update_sender,
             task_scoped_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             event_sender,
@@ -2608,6 +3000,7 @@ impl Kernel {
             mcp_supervisor,
             mcp_security_gate,
             provider_catalog,
+            catalog_path: resolved_catalog_path,
             data_dir,
             workspace_paths,
             started_at: chrono::Utc::now(),
@@ -2615,10 +3008,84 @@ impl Kernel {
             shutdown_audited: std::sync::atomic::AtomicBool::new(false),
             channel_manager: channel_manager_arc,
             channel_manager_rx: Arc::new(tokio::sync::Mutex::new(channel_manager_inbound_rx)),
+            hook_registry: Arc::clone(&hook_registry_arc),
+            plugin_registry: crate::plugin_registry::PluginRegistry::new(
+                Arc::clone(&hook_registry_arc),
+                Arc::clone(&tool_registry),
+            ),
         };
+
+        // Register the built-in audit hook as the first hook.
+        // It fires on every event and writes to the append-only AuditLog.
+        {
+            let audit_hook = crate::hooks::AuditHook::new(Arc::clone(&kernel.audit));
+            kernel.hook_registry.register(audit_hook).await;
+        }
+
+        // Register the approval hook — creates escalations for high-risk tool calls.
+        // Audit hook runs first so all tool calls are logged before approval can abort.
+        {
+            let approval_hook = crate::hooks::ApprovalHook::new(
+                crate::hooks::AutoApprovePolicy::default_rules(),
+                Arc::clone(&kernel.escalation_manager),
+                Arc::clone(&kernel.tool_registry),
+            );
+            kernel.hook_registry.register(approval_hook).await;
+        }
+
+        // Discover plugin manifests from the plugins/ directories.
+        // Resolve relative paths against the kernel's data_dir so discovery
+        // works regardless of the process working directory.
+        // Discovery is fast (TOML reads only, no code loaded).
+        {
+            let base = kernel.data_dir.parent().unwrap_or(&kernel.data_dir);
+            let plugin_dirs = vec![base.join("plugins/core"), base.join("plugins/user")];
+            let count = kernel.plugin_registry.discover(&plugin_dirs).await;
+            if count > 0 {
+                tracing::info!("Discovered {} plugins from manifests", count);
+            }
+        }
 
         // Restore bidirectional channels persisted from the previous run.
         kernel.restore_channels().await;
+
+        // Load connector manifests from the connectors/ directory.
+        {
+            let connectors_dir = kernel.data_dir.join("connectors");
+            match agentos_connectors::load_connector_manifests(&connectors_dir) {
+                Ok(manifests) => {
+                    for manifest in manifests {
+                        if let Err(e) = kernel.connector_registry.register(manifest).await {
+                            tracing::warn!(error = %e, "Failed to register connector");
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "Failed to load connector manifests"),
+            }
+        }
+
+        // Start the webhook batcher flush loop.
+        {
+            let batcher = Arc::clone(&kernel.webhook_batcher);
+            let cancel = kernel.cancellation_token.clone();
+            tokio::spawn(async move {
+                batcher.run_flush_loop(cancel).await;
+            });
+        }
+
+        // Start the container reaper (TTL enforcement) if Docker is available.
+        if let Some(ref rt) = kernel.compute_runtime {
+            let reaper = Arc::new(agentos_runtime::ContainerReaper::new(
+                Arc::clone(rt),
+                kernel.cancellation_token.clone(),
+            ));
+            reaper.start();
+            tracing::info!("Container reaper started");
+        }
+
+        // Note: webhook wake-up loop is started after the kernel is wrapped in
+        // Arc, via `start_webhook_wakeup()`. This is because the wake-up service
+        // needs Arc<Kernel> to create tasks.
 
         // Emit KernelStarted audit event
         kernel.audit_log(agentos_audit::AuditEntry {
@@ -2638,6 +3105,25 @@ impl Kernel {
         });
 
         Ok(kernel)
+    }
+
+    /// Start the webhook wake-up loop. Must be called after the kernel is
+    /// wrapped in `Arc`, since the wake-up service needs `Arc<Kernel>` to
+    /// create tasks via the scheduler.
+    pub async fn start_webhook_wakeup(self: &Arc<Self>) {
+        let rx = self.webhook_batch_rx.lock().await.take();
+        if let Some(rx) = rx {
+            let wakeup = crate::webhook_wakeup::WebhookWakeUp::new(
+                Arc::clone(self),
+                rx,
+                32768, // 32KB max context per batch
+            );
+            let cancel = self.cancellation_token.clone();
+            tokio::spawn(async move {
+                wakeup.run(cancel).await;
+            });
+            tracing::info!("Webhook wake-up loop started");
+        }
     }
 
     /// Write a `KernelShutdown` audit entry exactly once per kernel lifecycle.
@@ -2701,7 +3187,7 @@ impl Kernel {
         roles: Vec<String>,
     ) -> Result<(), String> {
         match self
-            .cmd_connect_agent(name, provider, model, base_url, roles, false, vec![])
+            .cmd_connect_agent(name, provider, model, base_url, roles, false, vec![], false)
             .await
         {
             agentos_bus::KernelResponse::Success { .. } => Ok(()),

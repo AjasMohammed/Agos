@@ -5,7 +5,11 @@ pub mod bluetooth;
 #[cfg(feature = "display")]
 pub mod display;
 pub mod gpu;
+#[cfg(feature = "homeassistant")]
+pub mod homeassistant;
 pub mod log_reader;
+#[cfg(feature = "mqtt")]
+pub mod mqtt;
 pub mod network;
 #[cfg(feature = "printer")]
 pub mod printer;

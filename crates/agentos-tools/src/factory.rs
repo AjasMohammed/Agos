@@ -48,7 +48,7 @@ const MEMORY_TOOL_NAMES: &[&str] = &[
     "procedure-search",
 ];
 
-const NETWORK_TOOL_NAMES: &[&str] = &["http-client", "web-fetch"];
+const NETWORK_TOOL_NAMES: &[&str] = &["http-client", "web-fetch", "web-search"];
 
 const HAL_TOOL_NAMES: &[&str] = &[
     "audio",
@@ -81,6 +81,7 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "verify-output",
     "poll-agent",
     "cancel-agent",
+    "a2a-delegate",
 ];
 
 const SPECIAL_CONTEXT_TOOL_NAMES: &[&str] = &["agent-manual", "agent-self"];
@@ -312,6 +313,7 @@ fn build_network_tool(name: &str) -> Result<Option<Box<dyn AgentTool>>, AgentOSE
                 reason: format!("Failed to initialize web-fetch: {}", e),
             }
         })?),
+        "web-search" => Box::new(crate::web_search::WebSearchTool::new()),
         _ => return Ok(None),
     };
     Ok(Some(tool))

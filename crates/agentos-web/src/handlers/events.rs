@@ -21,7 +21,8 @@ pub async fn dashboard_stream(
         let kernel = kernel.clone();
         let templates = templates.clone();
         async move {
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            // 1s interval means each of the 3 rotating events updates every 3s (not 9s).
+            tokio::time::sleep(Duration::from_secs(1)).await;
 
             let event = match tick % 3 {
                 0 => {

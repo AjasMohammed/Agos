@@ -74,6 +74,7 @@ async fn register_mock_agent(kernel: &Kernel, name: &str, responses: Vec<String>
         created_at: now,
         last_active: now,
         public_key_hex: None,
+        base_url: None,
     };
 
     {
@@ -117,6 +118,7 @@ async fn test_full_lifecycle_with_mock_llm() {
                 prompt: "What is the meaning of life?".into(),
                 autonomous: false,
                 no_checkpoint: false,
+                thinking_level: agentos_types::ThinkingLevel::Off,
             })
             .await
             .unwrap();
@@ -173,6 +175,7 @@ async fn test_run_task_nonexistent_agent() {
                 prompt: "hello".into(),
                 autonomous: false,
                 no_checkpoint: false,
+                thinking_level: agentos_types::ThinkingLevel::Off,
             })
             .await
             .unwrap();
@@ -218,6 +221,7 @@ async fn test_task_with_tool_call() {
                 prompt: "What time is it?".into(),
                 autonomous: false,
                 no_checkpoint: false,
+                thinking_level: agentos_types::ThinkingLevel::Off,
             })
             .await
             .unwrap();

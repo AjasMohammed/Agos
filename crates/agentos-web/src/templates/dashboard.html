@@ -1,8 +1,14 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="page-header">
-    <h1>Dashboard</h1>
-    <a href="/agents" role="button" class="outline btn-sm">Connect Agent</a>
+    <div>
+        <h1>Dashboard</h1>
+    </div>
+    <div class="quick-actions">
+        <a href="/agents" class="quick-action-btn">Connect Agent</a>
+        <a href="/chat" class="quick-action-btn">New Chat</a>
+        <a href="/tasks" class="quick-action-btn">View Tasks</a>
+    </div>
 </div>
 
 <div hx-ext="sse" sse-connect="/events/dashboard">
@@ -11,48 +17,36 @@
     </section>
 
     <div class="dashboard-panels">
-        <article>
+        <article class="dashboard-card">
             <header>
                 <strong>Agents</strong>
-                <a href="/agents" class="muted" style="margin-left: auto; font-size: 0.85rem;">View all</a>
+                <a href="/agents" class="muted" style="font-size: 0.78rem;">View all &rarr;</a>
             </header>
-            <div id="dashboard-agents" sse-swap="dashboard-agents">
+            <div class="dashboard-card-body" id="dashboard-agents" sse-swap="dashboard-agents">
                 {% include "partials/dashboard_agents.html" %}
             </div>
         </article>
 
-        <article>
+        <article class="dashboard-card">
             <header>
                 <strong>Task Status</strong>
-                <a href="/tasks" class="muted" style="margin-left: auto; font-size: 0.85rem;">View all</a>
+                <a href="/tasks" class="muted" style="font-size: 0.78rem;">View all &rarr;</a>
             </header>
-            <div id="dashboard-tasks"
+            <div class="dashboard-card-body" id="dashboard-tasks"
                  hx-get="/dashboard-tasks" hx-trigger="every 5s" hx-swap="innerHTML">
                 {% include "partials/dashboard_tasks.html" %}
             </div>
         </article>
     </div>
 
-    <article>
+    <article class="dashboard-card">
         <header>
-            <strong>Recent Activity</strong>
-            <a href="/audit" class="muted" style="margin-left: auto; font-size: 0.85rem;">View all</a>
+            <strong>Live Activity</strong>
+            <a href="/audit" class="muted" style="font-size: 0.78rem;">Full log &rarr;</a>
         </header>
-        <figure>
-        <table class="audit-table">
-            <thead>
-                <tr>
-                    <th>Timestamp</th>
-                    <th>Event</th>
-                    <th>Severity</th>
-                    <th>Agent</th>
-                </tr>
-            </thead>
-            <tbody id="dashboard-recent-audit" sse-swap="dashboard-audit">
-                {% include "partials/dashboard_audit.html" %}
-            </tbody>
-        </table>
-        </figure>
+        <div class="activity-feed" id="dashboard-recent-audit" sse-swap="dashboard-audit">
+            {% include "partials/dashboard_audit.html" %}
+        </div>
     </article>
 </div>
 {% endblock %}

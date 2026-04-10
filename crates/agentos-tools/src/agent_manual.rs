@@ -461,11 +461,11 @@ impl AgentManualTool {
                 },
                 {
                     "category": "ToolEvents",
-                    "events": ["ToolInstalled", "ToolRemoved", "ToolExecutionFailed", "ToolSandboxViolation", "ToolResourceQuotaExceeded", "ToolChecksumMismatch", "ToolRegistryUpdated", "ToolCallStarted", "ToolCallCompleted"]
+                    "events": ["ToolInstalled", "ToolRemoved", "ToolExecutionFailed", "ToolSandboxViolation", "ToolResourceQuotaExceeded", "ToolChecksumMismatch", "ToolRegistryUpdated", "ToolCallStarted", "ToolCallCompleted", "ToolFallbackAttempted", "ToolFallbackSucceeded", "ToolFallbackExhausted"]
                 },
                 {
                     "category": "AgentCommunication",
-                    "events": ["DirectMessageReceived", "BroadcastReceived", "DelegationReceived", "DelegationResponseReceived", "MessageDeliveryFailed", "AgentUnreachable"]
+                    "events": ["DirectMessageReceived", "BroadcastReceived", "DelegationReceived", "DelegationResponseReceived", "MessageDeliveryFailed", "AgentUnreachable", "AgentRpcCallStarted", "AgentRpcCallCompleted", "AgentRpcCallTimedOut", "SubAgentProgress", "SubAgentCompleted", "SubAgentFailed"]
                 },
                 {
                     "category": "ScheduleEvents",

@@ -16,8 +16,10 @@ pub enum AgentCommands {
         /// Agent display name
         #[arg(long)]
         name: String,
-        /// Optional base URL for custom providers
-        #[arg(long)]
+        /// Base URL for the LLM endpoint. Defaults to AGENTOS_LLM_URL env var if set,
+        /// otherwise falls back to the provider catalog URL or llm.custom_base_url in config.
+        /// Example: http://localhost:1234/v1
+        #[arg(long, env = "AGENTOS_LLM_URL")]
         base_url: Option<String>,
         /// Role(s) for the agent — may be repeated (e.g. --role orchestrator).
         /// Supported: orchestrator, security-monitor, sysops, memory-manager, tool-manager, general.
@@ -32,6 +34,9 @@ pub enum AgentCommands {
         /// May be repeated: --grant process.exec:x --grant fs.data:rw
         #[arg(long = "grant")]
         grants: Vec<String>,
+        /// Grant full root access to the ecosystem (all permissions)
+        #[arg(long, default_value_t = false)]
+        root: bool,
     },
     /// List connected agents
     List,
@@ -57,6 +62,13 @@ pub enum AgentCommands {
         /// Number of recent messages to show
         #[arg(long, default_value = "10")]
         last: u32,
+    },
+    /// Change the LLM endpoint URL for a connected agent (takes effect immediately)
+    SetUrl {
+        /// Agent name
+        name: String,
+        /// New base URL (e.g. http://localhost:5678/v1)
+        url: String,
     },
     /// Manage agent groups
     Group {
@@ -139,6 +151,7 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
             roles,
             test,
             grants,
+            root,
         } => {
             let provider = parse_provider(&provider)?;
             let response = client
@@ -150,6 +163,7 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                     roles,
                     test_mode: test,
                     extra_permissions: grants,
+                    root,
                 })
                 .await?;
 
@@ -268,6 +282,21 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                             );
                         }
                     }
+                }
+                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
+                _ => eprintln!("❌ Unexpected response"),
+            }
+        }
+        AgentCommands::SetUrl { name, url } => {
+            let response = client
+                .send_command(KernelCommand::SetAgentBaseUrl {
+                    name: name.clone(),
+                    url: url.clone(),
+                })
+                .await?;
+            match response {
+                KernelResponse::Success { .. } => {
+                    println!("Agent '{}' base URL updated to '{}'", name, url);
                 }
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
                 _ => eprintln!("❌ Unexpected response"),

@@ -102,7 +102,7 @@ impl AgentTool for FileGrep {
             &search_path,
             &context.data_dir,
             &context.workspace_paths,
-        );
+        )?;
 
         let canonical_root =
             resolved

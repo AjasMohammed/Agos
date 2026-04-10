@@ -4,6 +4,7 @@ version     = "1.0.0"
 description = "Moves or renames a file within data_dir. Both source and destination must be within data_dir. Acquires write lock on source, creates destination parent directories automatically."
 author      = "agentos-core"
 trust_tier  = "core"
+risk_class  = "write_scoped"
 
 [capabilities_required]
 permissions = ["fs.user_data:w"]

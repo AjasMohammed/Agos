@@ -1,0 +1,23 @@
+[manifest]
+name = "hardware-get-twin"
+version = "1.0.0"
+description = "Get the device twin (desired + reported state) for an IoT device. Shows what the agent wants vs. what the sensor reports."
+author = "agentos-core"
+trust_tier = "core"
+tags = ["iot", "hardware"]
+
+[capabilities_required]
+permissions = ["hardware.iot:r"]
+
+[capabilities_provided]
+outputs = ["device_id", "desired_state", "reported_state", "reconciled"]
+
+[intent_schema]
+input = "HardwareGetTwinIntent"
+output = "HardwareGetTwinResult"
+
+[sandbox]
+network = false
+fs_write = false
+max_memory_mb = 32
+max_cpu_ms = 5000
