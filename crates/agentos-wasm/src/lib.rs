@@ -24,7 +24,6 @@ impl WasmToolExecutor {
     /// Create a new executor. Called once during kernel boot.
     pub fn new(data_dir: impl Into<std::path::PathBuf>) -> Result<Self, anyhow::Error> {
         let mut cfg = Config::new();
-        cfg.async_support(true);
         // Epoch-based interruption lets us enforce max_cpu_ms without busy-polling.
         cfg.epoch_interruption(true);
         let engine = Engine::new(&cfg)?;

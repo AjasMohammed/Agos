@@ -105,8 +105,8 @@ rpassword = "7"
 libc = "0.2"
 
 # WASM runtime
-wasmtime = { version = "41", features = ["async", "cranelift"] }
-wasmtime-wasi = "41"
+wasmtime = { version = "43", features = ["async", "cranelift"] }
+wasmtime-wasi = "43"
 
 # JSON Schema validation
 jsonschema = "0.28"
@@ -115,7 +115,7 @@ jsonschema = "0.28"
 bollard = "0.18"
 
 # IoT protocols
-rumqttc = "0.24"
+rumqttc = "0.25"
 
 # Email (SMTP)
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport", "hostname"] }
