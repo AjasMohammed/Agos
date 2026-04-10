@@ -1,0 +1,11 @@
+id = "teams"
+display_name = "Microsoft Teams"
+version = "1.0.0"
+description = "Microsoft Teams channel via Incoming Webhook"
+trust_tier = "core"
+permissions = ["network.outbound", "channel.send"]
+
+[[channels]]
+id = "teams"
+display_name = "Microsoft Teams"
+capabilities = ["send", "receive"]

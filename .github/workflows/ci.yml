@@ -53,4 +53,7 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Audit dependencies
-        run: cargo audit
+        # RUSTSEC-2026-0049: rustls-webpki CRL Distribution Point bug in rumqttc 0.25.1.
+        # Unfixable until rumqttc upgrades to rustls-webpki >=0.103.10. Only affects
+        # CRL-based revocation (not used in default AgentOS MQTT config). See audit.toml.
+        run: cargo audit --ignore RUSTSEC-2026-0049

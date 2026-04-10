@@ -37,7 +37,7 @@ impl ResourceLimiter for WasiState {
         _current: usize,
         desired: usize,
         _maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool, wasmtime::Error> {
         Ok(desired <= MAX_WASM_MEMORY_BYTES)
     }
 
@@ -46,7 +46,7 @@ impl ResourceLimiter for WasiState {
         _current: usize,
         _desired: usize,
         _maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool, wasmtime::Error> {
         Ok(true)
     }
 }
@@ -194,7 +194,7 @@ impl AgentTool for WasmTool {
         let instance = linker
             .instantiate_async(&mut store, &self.module)
             .await
-            .map_err(|e: anyhow::Error| AgentOSError::ToolExecutionFailed {
+            .map_err(|e| AgentOSError::ToolExecutionFailed {
                 tool_name: self.name.clone(),
                 reason: format!("WASM instantiation failed: {}", e),
             })?;

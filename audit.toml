@@ -1,0 +1,22 @@
+# Security advisory exceptions for AgentOS
+# This file documents known advisory exceptions and their rationale.
+# CI invokes: cargo audit --ignore RUSTSEC-2026-0049
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# RUSTSEC-2026-0049 — rustls-webpki 0.102.8 CRL Distribution Point matching bug
+# ─────────────────────────────────────────────────────────────────────────────
+# Crate:   rustls-webpki 0.102.8
+# Fix:     Upgrade to >= 0.103.10
+# Path:    rumqttc 0.25.1 → rustls-webpki 0.102.8 (direct dep in agentos-hal)
+#
+# Status: CANNOT FIX — rumqttc 0.25.1 is the latest release and pins
+# rustls-webpki 0.102.8 directly. No upstream fix available as of 2026-04-10.
+#
+# Risk assessment:
+# - Vulnerability only fires when CRL Distribution Point-based revocation is
+#   enabled on the MQTT broker. This is not the case in any AgentOS deployment.
+# - The mqtt feature in agentos-hal is opt-in (Cargo feature flag).
+# - CRL Distribution Point revocation is an edge case for IoT broker connections.
+#
+# Track: https://github.com/bytebeamio/rumqtt/issues — re-evaluate when
+# rumqttc 0.26+ is released.
