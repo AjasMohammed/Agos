@@ -1,0 +1,11 @@
+id = "mattermost"
+display_name = "Mattermost"
+version = "1.0.0"
+description = "Mattermost channel via REST API and WebSocket"
+trust_tier = "core"
+permissions = ["network.outbound", "channel.send", "channel.receive"]
+
+[[channels]]
+id = "mattermost"
+display_name = "Mattermost"
+capabilities = ["send", "receive", "reactions", "threads", "attachments"]
