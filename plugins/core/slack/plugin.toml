@@ -1,0 +1,11 @@
+id = "slack"
+display_name = "Slack"
+version = "1.0.0"
+description = "Slack channel integration (polling)"
+trust_tier = "core"
+permissions = ["network.outbound", "channel.send", "channel.receive"]
+
+[[channels]]
+id = "slack"
+display_name = "Slack"
+capabilities = ["send", "receive", "reactions", "threads", "attachments"]

@@ -1,0 +1,11 @@
+id = "matrix"
+display_name = "Matrix"
+version = "1.0.0"
+description = "Matrix protocol channel via Client-Server HTTP API"
+trust_tier = "core"
+permissions = ["network.outbound", "channel.send", "channel.receive"]
+
+[[channels]]
+id = "matrix"
+display_name = "Matrix"
+capabilities = ["send", "receive", "reactions", "threads", "attachments"]

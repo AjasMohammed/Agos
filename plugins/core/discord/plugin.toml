@@ -1,0 +1,11 @@
+id = "discord"
+display_name = "Discord"
+version = "1.0.0"
+description = "Discord channel integration (WebSocket gateway)"
+trust_tier = "core"
+permissions = ["network.outbound", "channel.send", "channel.receive"]
+
+[[channels]]
+id = "discord"
+display_name = "Discord"
+capabilities = ["send", "receive", "presence", "reactions", "threads"]

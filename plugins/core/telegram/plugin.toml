@@ -1,0 +1,11 @@
+id = "telegram"
+display_name = "Telegram"
+version = "1.0.0"
+description = "Telegram channel integration (long-poll)"
+trust_tier = "core"
+permissions = ["network.outbound", "channel.send", "channel.receive"]
+
+[[channels]]
+id = "telegram"
+display_name = "Telegram"
+capabilities = ["send", "receive", "attachments"]

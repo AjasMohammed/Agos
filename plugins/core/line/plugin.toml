@@ -1,0 +1,11 @@
+id = "line"
+display_name = "LINE"
+version = "1.0.0"
+description = "LINE Messaging API channel"
+trust_tier = "core"
+permissions = ["network.outbound", "channel.send", "channel.receive"]
+
+[[channels]]
+id = "line"
+display_name = "LINE"
+capabilities = ["send", "receive", "attachments"]
