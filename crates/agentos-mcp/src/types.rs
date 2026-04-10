@@ -51,6 +51,69 @@ pub struct McpToolDef {
     pub input_schema: serde_json::Value,
 }
 
+// ── MCP Resource types ──────────────────────────────────────────────────────
+
+/// An MCP resource definition as returned by `resources/list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpResourceDef {
+    /// Unique URI identifying this resource (e.g. "agentos://agents", "agentos://tasks").
+    pub uri: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// MIME type hint (e.g. "application/json").
+    #[serde(default, rename = "mimeType")]
+    pub mime_type: String,
+}
+
+/// Content returned when reading a resource via `resources/read`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpResourceContent {
+    pub uri: String,
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+    /// The resource payload (typically JSON-serialised).
+    pub text: String,
+}
+
+// ── MCP Prompt types ────────────────────────────────────────────────────────
+
+/// An MCP prompt template as returned by `prompts/list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpPromptDef {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Arguments the prompt accepts.
+    #[serde(default)]
+    pub arguments: Vec<McpPromptArgument>,
+}
+
+/// A single argument in a prompt template.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpPromptArgument {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// A message returned by `prompts/get`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpPromptMessage {
+    pub role: String, // "user" or "assistant"
+    pub content: McpPromptContent,
+}
+
+/// Content of a prompt message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpPromptContent {
+    #[serde(rename = "type")]
+    pub content_type: String, // "text"
+    pub text: String,
+}
+
 /// Server identity block returned in `initialize` response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerInfo {

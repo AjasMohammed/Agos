@@ -94,8 +94,11 @@ impl AgentTool for FileWriter {
         );
 
         // SECURITY: resolve path, checking workspace paths before falling back to data_dir.
-        let resolved =
-            crate::traits::resolve_tool_path(path_str, &context.data_dir, &context.workspace_paths);
+        let resolved = crate::traits::resolve_tool_path(
+            path_str,
+            &context.data_dir,
+            &context.workspace_paths,
+        )?;
 
         // Normalize lexically (can't use canonicalize — file may not exist yet).
         let normalized = normalize_path(&resolved);

@@ -1,0 +1,24 @@
+[manifest]
+name = "iot-mqtt-publish"
+version = "1.0.0"
+risk_class  = "write_scoped"
+description = "Publish a message to an MQTT topic for IoT actuator control."
+author = "agentos-core"
+trust_tier = "core"
+tags = ["iot", "mqtt", "hardware"]
+
+[capabilities_required]
+permissions = ["hardware.mqtt:w"]
+
+[capabilities_provided]
+outputs = ["published"]
+
+[intent_schema]
+input = "IotMqttPublishIntent"
+output = "IotMqttPublishResult"
+
+[sandbox]
+network = false
+fs_write = false
+max_memory_mb = 32
+max_cpu_ms = 5000

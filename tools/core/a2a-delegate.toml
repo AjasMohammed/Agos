@@ -1,0 +1,51 @@
+[manifest]
+name        = "a2a-delegate"
+version     = "1.0.0"
+risk_class  = "control_plane"
+description = "Delegate a task to an external A2A-compliant agent (LangGraph, PydanticAI, Google ADK, etc.). Discovers the agent's capabilities via its Agent Card and submits a task delegation."
+author      = "agentos-core"
+trust_tier  = "core"
+capability_tags = ["a2a", "multi-agent", "inter-framework", "delegation", "external-agent"]
+
+[capabilities_required]
+permissions = ["network.outbound:x", "a2a.delegate:x"]
+
+[capabilities_provided]
+outputs = ["a2a_task_result"]
+
+[intent_schema]
+input  = "A2ADelegateIntent"
+output = "A2ADelegateResult"
+
+[input_schema]
+type = "object"
+required = ["agent_url", "capability"]
+
+[input_schema.properties.agent_url]
+type = "string"
+description = "Base URL of the external A2A agent (e.g. 'http://external-agent.example.com'). The tool fetches /.well-known/agent.json to discover capabilities."
+
+[input_schema.properties.capability]
+type = "string"
+description = "Capability name to invoke on the external agent (must appear in its Agent Card)."
+
+[input_schema.properties.input]
+type = "object"
+description = "Input payload for the capability invocation."
+
+[input_schema.properties.token]
+type = "string"
+description = "Optional Bearer token for authenticating with the external agent."
+
+[input_schema.properties.wait_for_result]
+type = "boolean"
+default = false
+description = "When true, poll until the external task reaches a terminal state and return the result. When false (default), return immediately with the task ID."
+
+[sandbox]
+network       = true
+fs_write      = false
+gpu           = false
+max_memory_mb = 32
+max_cpu_ms    = 30000
+syscalls      = []

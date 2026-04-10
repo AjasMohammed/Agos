@@ -65,8 +65,11 @@ impl AgentTool for FileGlob {
             });
         }
 
-        let base_resolved =
-            crate::traits::resolve_tool_path(sub_path, &context.data_dir, &context.workspace_paths);
+        let base_resolved = crate::traits::resolve_tool_path(
+            sub_path,
+            &context.data_dir,
+            &context.workspace_paths,
+        )?;
 
         let canonical_data_dir =
             context

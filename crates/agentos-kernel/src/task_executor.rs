@@ -10,6 +10,10 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 use tracing::Instrument;
 
+/// Maximum time (seconds) to wait for a single LLM inference call before aborting the task.
+/// Prevents tasks from blocking a slot indefinitely when the LLM provider hangs.
+const LLM_INFERENCE_TIMEOUT_SECS: u64 = 120;
+
 /// Result of synchronous task execution, carrying data needed by the outer
 /// `execute_task()` method for enriched episodic memory recording.
 pub(crate) struct TaskResult {
@@ -536,6 +540,97 @@ impl Kernel {
                 .map(|ts| ts.chain_depth + 1)
                 .unwrap_or(0);
 
+            // --- Connector routing: namespaced tool calls (e.g., "github.create_issue") ---
+            // If the tool name contains a dot, try routing through the connector registry
+            // before falling through to the normal tool registry lookup.
+            if agentos_connectors::ConnectorRegistry::is_connector_call(&tool_call.tool_name) {
+                // Permission check: require "connector.<id>:x" in the agent's PermissionSet.
+                let connector_id = tool_call.tool_name.split('.').next().unwrap_or("");
+                let connector_perm = format!("connector.{connector_id}");
+                if !task
+                    .capability_token
+                    .permissions
+                    .check(&connector_perm, PermissionOp::Execute)
+                {
+                    self.audit_log(agentos_audit::AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        trace_id,
+                        event_type: agentos_audit::AuditEventType::PermissionDenied,
+                        agent_id: Some(task.agent_id),
+                        task_id: Some(task.id),
+                        tool_id: None,
+                        details: serde_json::json!({
+                            "tool": tool_call.tool_name,
+                            "required_permission": connector_perm,
+                            "reason": "connector_permission_denied",
+                        }),
+                        severity: agentos_audit::AuditSeverity::Security,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
+                    let error_result = serde_json::json!({
+                        "error": format!("Permission denied: connector '{}' requires '{connector_perm}:x'", connector_id)
+                    });
+                    let _ = self
+                        .context_manager
+                        .push_tool_result(
+                            &task.id,
+                            &tool_call.tool_name,
+                            &error_result,
+                            tool_call.id.clone(),
+                        )
+                        .await;
+                    continue;
+                }
+
+                if let Some(result) = self
+                    .connector_registry
+                    .route(&tool_call.tool_name, tool_call.payload.clone())
+                    .await
+                {
+                    let (tool_result, is_error) = match &result {
+                        Ok(value) => (value.clone(), false),
+                        Err(e) => (serde_json::json!({ "error": e.to_string() }), true),
+                    };
+
+                    // Audit log every connector invocation
+                    self.audit_log(agentos_audit::AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        trace_id,
+                        event_type: agentos_audit::AuditEventType::ToolExecutionCompleted,
+                        agent_id: Some(task.agent_id),
+                        task_id: Some(task.id),
+                        tool_id: None,
+                        details: serde_json::json!({
+                            "tool": tool_call.tool_name,
+                            "connector": connector_id,
+                            "success": !is_error,
+                        }),
+                        severity: if is_error {
+                            agentos_audit::AuditSeverity::Warn
+                        } else {
+                            agentos_audit::AuditSeverity::Info
+                        },
+                        reversible: false,
+                        rollback_ref: None,
+                    });
+
+                    if let Err(e) = self
+                        .context_manager
+                        .push_tool_result(
+                            &task.id,
+                            &tool_call.tool_name,
+                            &tool_result,
+                            tool_call.id.clone(),
+                        )
+                        .await
+                    {
+                        tracing::error!(error = %e, task_id = %task.id, tool = %tool_call.tool_name, "Failed to push connector result to context");
+                    }
+                    continue;
+                }
+            }
+
             let requested_tool_id = {
                 let registry = self.tool_registry.read().await;
                 match registry.get_by_name(&tool_call.tool_name) {
@@ -807,6 +902,12 @@ impl Kernel {
                         &tool_call.tool_name,
                         &format!("coherence_rejected: {reason}"),
                     );
+                    // Record the rejected call so the loop counter accumulates correctly
+                    // across iterations. Without this, the counter resets to zero after each
+                    // rejection and the agent can bypass the loop detector indefinitely.
+                    self.intent_validator
+                        .record_tool_call(&task.id, &tool_call)
+                        .await;
                     continue;
                 }
                 Ok(IntentCoherenceResult::Suspicious { reason, .. }) => {
@@ -1152,6 +1253,7 @@ impl Kernel {
             let tool_call = call.tool_call;
             let sandbox_plan = call.sandbox_plan;
             let tool_cancellation = self.cancellation_token.child_token();
+            let hook_registry = Arc::clone(&self.hook_registry);
             let execution_mode: &'static str = if sandbox_plan.is_some() {
                 "sandbox"
             } else {
@@ -1214,6 +1316,34 @@ impl Kernel {
 
                     let tool_start = std::time::Instant::now();
                     let payload = tool_call.payload.clone();
+
+                    // Fire ToolPre hook; abort if any hook denies the call.
+                    let pre_result = hook_registry
+                        .fire(&agentos_types::HookEvent::ToolPre {
+                            task_id,
+                            agent_id,
+                            tool_name: tool_call.tool_name.clone(),
+                            input_json: serde_json::to_string(&tool_call.payload)
+                                .unwrap_or_default(),
+                        })
+                        .await;
+                    if let agentos_types::HookResult::Abort(reason) = pre_result {
+                        let tool_name = tool_call.tool_name.clone();
+                        return ParallelToolOutcome {
+                            order,
+                            tool_call,
+                            trace_id,
+                            snapshot_ref,
+                            tool_payload_preview,
+                            duration_ms: tool_start.elapsed().as_millis() as u64,
+                            result: Err(agentos_types::AgentOSError::ToolExecutionFailed {
+                                tool_name,
+                                reason: format!("Blocked by hook: {}", reason),
+                            }),
+                            execution_mode,
+                        };
+                    }
+
                     let result = if let Some((config, category_overhead_bytes, manifest_weight)) =
                         sandbox_plan
                     {
@@ -1267,13 +1397,27 @@ impl Kernel {
                         }
                     };
 
+                    let duration_ms = tool_start.elapsed().as_millis() as u64;
+
+                    // Fire ToolPost hook — informational, always fires regardless of result.
+                    let output_json = match &result {
+                        Ok(v) => serde_json::to_string(v).unwrap_or_default(),
+                        Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                    };
+                    hook_registry
+                        .fire(&agentos_types::HookEvent::ToolPost {
+                            task_id,
+                            agent_id,
+                            tool_name: tool_call.tool_name.clone(),
+                            output_json,
+                            duration_ms,
+                        })
+                        .await;
+
                     tool_span.set_string_attribute("task.id", task_id.to_string());
                     tool_span.set_string_attribute("agent.id", agent_id.to_string());
                     tool_span.set_string_attribute("execution.mode", execution_mode);
-                    tool_span.set_i64_attribute(
-                        "tool.duration_ms",
-                        tool_start.elapsed().as_millis() as i64,
-                    );
+                    tool_span.set_i64_attribute("tool.duration_ms", duration_ms as i64);
                     match &result {
                         Ok(_) => tool_span.set_bool_attribute("tool.success", true),
                         Err(err) => {
@@ -1288,7 +1432,7 @@ impl Kernel {
                         trace_id,
                         snapshot_ref,
                         tool_payload_preview,
-                        duration_ms: tool_start.elapsed().as_millis() as u64,
+                        duration_ms,
                         result,
                         execution_mode,
                     }
@@ -1673,6 +1817,19 @@ impl Kernel {
                 ));
             }
         };
+
+        // Fire TaskStart hook — allows hooks to observe or cancel task startup.
+        {
+            let hook_event = agentos_types::HookEvent::TaskStart {
+                task_id: task.id,
+                agent_id: task.agent_id,
+            };
+            if let agentos_types::HookResult::Abort(reason) =
+                self.hook_registry.fire(&hook_event).await
+            {
+                anyhow::bail!("Task aborted by hook: {}", reason);
+            }
+        }
 
         // `current_llm` is mutable so it can be swapped when a model downgrade is triggered.
         let mut current_llm = llm;
@@ -2092,20 +2249,49 @@ impl Kernel {
 
             tracing::info!("Task {} iteration {}: calling LLM", task.id, iteration);
 
-            let inference = match current_llm
-                .infer_with_tools(&compiled_context, &llm_tool_manifests)
-                .await
+            // Build per-call options, wiring in thinking level from the task definition.
+            // Prompt caching is always enabled — safe for non-Anthropic providers (they
+            // ignore the flag) and provides up to 90% cost savings on repeated context.
+            let inference_opts = agentos_llm::InferenceOptions {
+                thinking_budget_tokens: task.thinking_level.budget_tokens(),
+                enable_prompt_caching: true,
+                ..Default::default()
+            };
+
+            let inference = match tokio::time::timeout(
+                Duration::from_secs(LLM_INFERENCE_TIMEOUT_SECS),
+                current_llm.infer_with_options(
+                    &compiled_context,
+                    &llm_tool_manifests,
+                    &inference_opts,
+                ),
+            )
+            .await
             {
-                Ok(mut result) => {
+                Err(_elapsed) => {
+                    tracing::error!(
+                        task_id = %task.id,
+                        timeout_secs = LLM_INFERENCE_TIMEOUT_SECS,
+                        "LLM inference timed out — aborting task"
+                    );
+                    self.context_manager.remove_context(&task.id).await;
+                    self.intent_validator.remove_task(&task.id).await;
+                    anyhow::bail!(
+                        "LLM inference timed out after {}s",
+                        LLM_INFERENCE_TIMEOUT_SECS
+                    );
+                }
+                Ok(Err(e)) => {
+                    self.context_manager.remove_context(&task.id).await;
+                    self.intent_validator.remove_task(&task.id).await;
+                    anyhow::bail!("LLM error: {}", e);
+                }
+                Ok(Ok(mut result)) => {
                     // Parse uncertainty declarations from the LLM response
                     if result.uncertainty.is_none() {
                         result.uncertainty = agentos_llm::parse_uncertainty(&result.text);
                     }
                     result
-                }
-                Err(e) => {
-                    self.context_manager.remove_context(&task.id).await;
-                    anyhow::bail!("LLM error: {}", e);
                 }
             };
 
@@ -2711,6 +2897,11 @@ impl Kernel {
                                 {
                                     tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                                 }
+                                // Record the rejected call so the loop counter accumulates across
+                                // iterations and the agent cannot bypass the detector indefinitely.
+                                self.intent_validator
+                                    .record_tool_call(&task.id, &tool_call)
+                                    .await;
                                 continue;
                             }
                             Ok(
@@ -3063,6 +3254,11 @@ impl Kernel {
                                 &tool_call.tool_name,
                                 &format!("coherence_rejected: {reason}"),
                             );
+                            // Record the rejected call so the loop counter accumulates across
+                            // iterations and the agent cannot bypass the detector indefinitely.
+                            self.intent_validator
+                                .record_tool_call(&task.id, &tool_call)
+                                .await;
                             continue;
                         }
                         Ok(IntentCoherenceResult::Suspicious { reason, .. }) => {
@@ -4209,6 +4405,12 @@ impl Kernel {
                                     error = %e,
                                     "Checkpoint write failed — task continues without checkpoint"
                                 );
+                            } else {
+                                self.hook_registry
+                                    .fire(&agentos_types::HookEvent::CheckpointWritten {
+                                        task_id: task.id,
+                                    })
+                                    .await;
                             }
                         }
                         Err(e) => {
@@ -4243,6 +4445,16 @@ impl Kernel {
 
         self.context_manager.remove_context(&task.id).await;
         self.intent_validator.remove_task(&task.id).await;
+
+        // Fire TaskEnd hook (informational — result already computed).
+        self.hook_registry
+            .fire(&agentos_types::HookEvent::TaskEnd {
+                task_id: task.id,
+                agent_id: task.agent_id,
+                success: true,
+            })
+            .await;
+
         Ok(TaskResult {
             answer: final_answer,
             tool_call_count,
@@ -4334,6 +4546,15 @@ impl Kernel {
             }
             Err(e) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
+                // Fire TaskEnd with success=false so hooks observing task lifecycle
+                // always see a symmetric start/end pair regardless of outcome.
+                self.hook_registry
+                    .fire(&agentos_types::HookEvent::TaskEnd {
+                        task_id: task.id,
+                        agent_id: task.agent_id,
+                        success: false,
+                    })
+                    .await;
                 self.trace_collector
                     .finish_task(&task.id, "Failed", chrono::Utc::now())
                     .await;
@@ -4695,6 +4916,7 @@ mod tests {
             spawn_depth: 0,
             is_team_coordinator: false,
             skip_checkpoint: false,
+            thinking_level: Default::default(),
         }
     }
 

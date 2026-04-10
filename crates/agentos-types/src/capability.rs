@@ -202,7 +202,8 @@ impl PermissionSet {
             // that "fs:/home/user" does NOT match "fs:/home/username".
             // Grants that already end with '/' (e.g. "fs:/home/user/") or that contain no '/'
             // (e.g. "net:", "fs.user_data") use plain prefix matching unchanged.
-            let resource_matches = e.resource == resource
+            let resource_matches = e.resource == "*"
+                || e.resource == resource
                 || (resource.starts_with(e.resource.as_str()) && {
                     if e.resource.contains('/') && !e.resource.ends_with('/') {
                         // Require next char to be '/' to avoid partial segment matches

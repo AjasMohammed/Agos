@@ -1,6 +1,7 @@
 use agentos_bus::client::BusClient;
 use agentos_bus::message::{KernelCommand, KernelResponse};
 use clap::Subcommand;
+use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum SkillCommands {
@@ -33,6 +34,283 @@ pub enum SkillCommands {
         /// Skill name
         name: String,
     },
+
+    // ── Offline skill development commands ────────────────────────────
+    /// Create a new skill project from a template
+    New {
+        /// Skill name (becomes the directory name)
+        name: String,
+    },
+
+    /// Validate a SKILL.toml manifest without installing it
+    Validate {
+        /// Path to the skill directory containing SKILL.toml
+        #[arg(default_value = ".")]
+        path: String,
+    },
+
+    /// Publish a skill to a local package index
+    Publish {
+        /// Path to the skill directory containing SKILL.toml
+        #[arg(default_value = ".")]
+        path: String,
+        /// Path to the package index JSON file
+        #[arg(long)]
+        index: Option<PathBuf>,
+    },
+
+    /// Search the local package index for skills
+    Search {
+        /// Search query (matches name, description, tags, author)
+        query: String,
+        /// Path to the package index JSON file
+        #[arg(long)]
+        index: Option<PathBuf>,
+    },
+}
+
+/// Returns true if this subcommand can run without a kernel bus connection.
+pub fn is_offline(cmd: &SkillCommands) -> bool {
+    matches!(
+        cmd,
+        SkillCommands::New { .. }
+            | SkillCommands::Validate { .. }
+            | SkillCommands::Publish { .. }
+            | SkillCommands::Search { .. }
+    )
+}
+
+/// Handle offline skill subcommands that don't require a kernel connection.
+pub async fn handle_offline(command: SkillCommands) -> anyhow::Result<()> {
+    match command {
+        SkillCommands::New { name } => {
+            cmd_skill_new(&name)?;
+        }
+        SkillCommands::Validate { path } => {
+            cmd_skill_validate(&path)?;
+        }
+        SkillCommands::Publish { path, index } => {
+            cmd_skill_publish(&path, index.as_deref())?;
+        }
+        SkillCommands::Search { query, index } => {
+            cmd_skill_search(&query, index.as_deref())?;
+        }
+        _ => unreachable!("non-offline command dispatched to handle_offline"),
+    }
+    Ok(())
+}
+
+fn cmd_skill_new(name: &str) -> anyhow::Result<()> {
+    // Validate name: alphanumeric, hyphens, underscores only — no path separators or injection
+    if name.is_empty() {
+        anyhow::bail!("Skill name must not be empty");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!(
+            "Skill name must contain only alphanumeric characters, hyphens, or underscores"
+        );
+    }
+    if name.contains("..") {
+        anyhow::bail!("Skill name must not contain '..'");
+    }
+
+    let dir = std::path::Path::new(name);
+    if dir.exists() {
+        anyhow::bail!("Directory '{}' already exists", name);
+    }
+    std::fs::create_dir_all(dir)?;
+
+    let skill_toml = format!(
+        r#"[skill]
+name        = "{name}"
+version     = "0.1.0"
+description = "A new AgentOS skill"
+author      = "your-name"
+license     = "MIT"
+trust_tier  = "community"
+
+[agent]
+system_prompt = """
+You are a helpful agent. Your job is to ...
+"""
+default_provider = "anthropic"
+default_model    = "claude-opus-4-6"
+
+[tools]
+required = []
+optional = []
+
+[permissions]
+required = []
+
+[budget]
+max_cost_per_run    = 0.10
+max_tokens_per_run  = 50000
+
+[triggers]
+schedule = ""
+events   = []
+"#
+    );
+    std::fs::write(dir.join("SKILL.toml"), &skill_toml)?;
+    std::fs::write(
+        dir.join("README.md"),
+        format!("# {name}\n\nAn AgentOS skill.\n"),
+    )?;
+
+    println!("Created skill project '{name}'");
+    println!("  Edit {name}/SKILL.toml to configure your skill.");
+    println!("  Run 'agentos skill validate {name}' to check the manifest.");
+    println!("  Run 'agentos skill install {name}' to install.");
+    Ok(())
+}
+
+fn cmd_skill_validate(path: &str) -> anyhow::Result<()> {
+    let skill_toml_path = std::path::Path::new(path).join("SKILL.toml");
+    if !skill_toml_path.exists() {
+        anyhow::bail!("SKILL.toml not found at '{}'", skill_toml_path.display());
+    }
+    let content = std::fs::read_to_string(&skill_toml_path)?;
+    // Parse as generic TOML to validate syntax
+    let parsed: toml::Value =
+        toml::from_str(&content).map_err(|e| anyhow::anyhow!("TOML parse error: {}", e))?;
+
+    // Check required top-level fields
+    let skill = parsed
+        .get("skill")
+        .ok_or_else(|| anyhow::anyhow!("Missing [skill] table"))?;
+
+    let name = skill
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing skill.name"))?;
+    let version = skill
+        .get("version")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing skill.version"))?;
+    let description = skill
+        .get("description")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing skill.description"))?;
+
+    parsed
+        .get("agent")
+        .ok_or_else(|| anyhow::anyhow!("Missing [agent] table"))?;
+
+    println!("SKILL.toml valid:");
+    println!("  name:        {name}");
+    println!("  version:     {version}");
+    println!("  description: {description}");
+    Ok(())
+}
+
+fn cmd_skill_publish(path: &str, index_path: Option<&std::path::Path>) -> anyhow::Result<()> {
+    use crate::package_index::{default_index_path, PackageEntry, PackageIndex};
+
+    let skill_toml_path = std::path::Path::new(path).join("SKILL.toml");
+    if !skill_toml_path.exists() {
+        anyhow::bail!("SKILL.toml not found at '{}'", skill_toml_path.display());
+    }
+    let content = std::fs::read_to_string(&skill_toml_path)?;
+    let parsed: toml::Value =
+        toml::from_str(&content).map_err(|e| anyhow::anyhow!("TOML parse error: {}", e))?;
+
+    let skill = parsed
+        .get("skill")
+        .ok_or_else(|| anyhow::anyhow!("Missing [skill] table"))?;
+    let name = skill
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing skill.name"))?
+        .to_string();
+    let version = skill
+        .get("version")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing skill.version"))?
+        .to_string();
+    let description = skill
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let author = skill
+        .get("author")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let tags: Vec<String> = parsed
+        .get("skill")
+        .and_then(|s| s.get("tags"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let index_path = index_path
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(default_index_path);
+
+    let mut index = PackageIndex::load(&index_path)?;
+    index.upsert_skill(PackageEntry {
+        name: name.clone(),
+        version: version.clone(),
+        description,
+        author,
+        trust_tier: agentos_types::TrustTier::Community,
+        signature: None,
+        download_url: None,
+        tags,
+        manifest_path: Some(
+            skill_toml_path
+                .canonicalize()
+                .unwrap_or(skill_toml_path)
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        published_at: chrono::Utc::now().to_rfc3339(),
+    });
+    index.save(&index_path)?;
+    println!(
+        "Published skill '{name}' v{version} to {}",
+        index_path.display()
+    );
+    Ok(())
+}
+
+fn cmd_skill_search(query: &str, index_path: Option<&std::path::Path>) -> anyhow::Result<()> {
+    use crate::package_index::{default_index_path, PackageIndex};
+
+    let index_path = index_path
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(default_index_path);
+
+    let index = PackageIndex::load(&index_path)?;
+    let results = index.search_skills(query);
+
+    if results.is_empty() {
+        println!("No skills found matching '{query}'.");
+    } else {
+        println!(
+            "{:<25} {:<10} {:<15} DESCRIPTION",
+            "NAME", "VERSION", "AUTHOR"
+        );
+        println!("{}", "-".repeat(75));
+        for entry in results {
+            let short_desc: String = entry.description.chars().take(30).collect();
+            println!(
+                "{:<25} {:<10} {:<15} {}",
+                entry.name, entry.version, entry.author, short_desc
+            );
+        }
+    }
+    Ok(())
 }
 
 pub async fn handle(client: &mut BusClient, command: SkillCommands) -> anyhow::Result<()> {
@@ -146,6 +424,14 @@ pub async fn handle(client: &mut BusClient, command: SkillCommands) -> anyhow::R
                 }
                 _ => eprintln!("Unexpected response"),
             }
+        }
+
+        // Offline commands — should have been handled before reaching here.
+        SkillCommands::New { .. }
+        | SkillCommands::Validate { .. }
+        | SkillCommands::Publish { .. }
+        | SkillCommands::Search { .. } => {
+            eprintln!("Internal error: offline skill command reached online handler");
         }
     }
     Ok(())

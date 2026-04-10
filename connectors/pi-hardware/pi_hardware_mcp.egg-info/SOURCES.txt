@@ -1,0 +1,7 @@
+README.md
+pyproject.toml
+setup.cfg
+pi_hardware_mcp.egg-info/PKG-INFO
+pi_hardware_mcp.egg-info/SOURCES.txt
+pi_hardware_mcp.egg-info/dependency_links.txt
+pi_hardware_mcp.egg-info/top_level.txt

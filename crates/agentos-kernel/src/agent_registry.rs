@@ -156,6 +156,17 @@ impl AgentRegistry {
         }
     }
 
+    /// Update the stored base URL for an agent. Returns `false` if the ID is unknown.
+    pub fn update_base_url(&mut self, id: &AgentID, url: String) -> bool {
+        if let Some(agent) = self.agents.get_mut(id) {
+            agent.base_url = Some(url);
+            self.save_to_disk();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn remove(&mut self, id: &AgentID) {
         if let Some(agent) = self.agents.remove(id) {
             self.name_index.remove(&agent.name);
@@ -586,6 +597,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_active: chrono::Utc::now(),
             public_key_hex: None,
+            base_url: None,
         }
     }
 

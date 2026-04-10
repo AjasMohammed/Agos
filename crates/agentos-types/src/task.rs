@@ -38,7 +38,7 @@ pub struct AgentTask {
     #[serde(default)]
     pub autonomous: bool,
     /// `Some(id)` when this task was spawned by another task.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_task_id: Option<TaskID>,
     /// How many spawn hops from a root task (root = 0, child = 1, grandchild = 2, …).
     #[serde(default)]
@@ -51,6 +51,42 @@ pub struct AgentTask {
     /// Set by `--no-checkpoint` CLI flag for ephemeral one-shot tasks.
     #[serde(default)]
     pub skip_checkpoint: bool,
+    /// Requested extended-thinking level for this task.
+    /// Translates to `InferenceOptions::thinking_budget_tokens` at execution time.
+    #[serde(default)]
+    pub thinking_level: ThinkingLevel,
+}
+
+/// Controls how much extended thinking budget the LLM is given for a task.
+/// Maps to the `budget_tokens` field of the Anthropic thinking API.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingLevel {
+    /// No extended thinking — fastest and cheapest (default).
+    #[default]
+    Off,
+    /// 1 024 token budget — light reasoning pass.
+    Low,
+    /// 8 192 token budget — balanced reasoning for moderately complex tasks.
+    Medium,
+    /// 32 768 token budget — deep reasoning for complex multi-step tasks.
+    High,
+    /// 100 000 token budget — maximum reasoning for the hardest problems.
+    Max,
+}
+
+impl ThinkingLevel {
+    /// Convert to the `budget_tokens` value expected by the Anthropic API.
+    /// Returns `None` when thinking is disabled.
+    pub fn budget_tokens(&self) -> Option<u32> {
+        match self {
+            ThinkingLevel::Off => None,
+            ThinkingLevel::Low => Some(1_024),
+            ThinkingLevel::Medium => Some(8_192),
+            ThinkingLevel::High => Some(32_768),
+            ThinkingLevel::Max => Some(100_000),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -66,6 +102,41 @@ mod tests {
         };
         assert!(task.parent_task_id.is_none());
         assert_eq!(task.spawn_depth, 0);
+    }
+
+    #[test]
+    fn test_thinking_level_budget_tokens() {
+        assert_eq!(ThinkingLevel::Off.budget_tokens(), None);
+        assert_eq!(ThinkingLevel::Low.budget_tokens(), Some(1_024));
+        assert_eq!(ThinkingLevel::Medium.budget_tokens(), Some(8_192));
+        assert_eq!(ThinkingLevel::High.budget_tokens(), Some(32_768));
+        assert_eq!(ThinkingLevel::Max.budget_tokens(), Some(100_000));
+    }
+
+    #[test]
+    fn test_thinking_level_serde_roundtrip() {
+        for level in [
+            ThinkingLevel::Off,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::Max,
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            let deserialized: ThinkingLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(level, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_thinking_level_defaults_when_missing_from_json() {
+        // Simulate a checkpoint serialized before thinking_level was added.
+        // The field should default to Off without a parse error.
+        let task = AgentTask::default();
+        let mut json: serde_json::Value = serde_json::to_value(&task).unwrap();
+        json.as_object_mut().unwrap().remove("thinking_level");
+        let restored: AgentTask = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.thinking_level, ThinkingLevel::Off);
     }
 }
 
@@ -102,6 +173,7 @@ impl Default for AgentTask {
             spawn_depth: 0,
             is_team_coordinator: false,
             skip_checkpoint: false,
+            thinking_level: ThinkingLevel::Off,
         }
     }
 }
@@ -260,9 +332,9 @@ pub struct AgentBudget {
 impl Default for AgentBudget {
     fn default() -> Self {
         Self {
-            max_tokens_per_day: 500_000,
-            max_cost_usd_per_day: 5.0,
-            max_tool_calls_per_day: 200,
+            max_tokens_per_day: 5_000_000,
+            max_cost_usd_per_day: 50.0,
+            max_tool_calls_per_day: 10_000,
             warn_at_pct: 80,
             pause_at_pct: 95,
             on_hard_limit: BudgetAction::Suspend,

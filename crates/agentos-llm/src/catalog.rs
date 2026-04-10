@@ -89,6 +89,56 @@ impl ProviderCatalog {
     pub fn len(&self) -> usize {
         self.providers.len()
     }
+
+    /// Return a cloned copy of this catalog (used for snapshot-before-write).
+    pub fn clone_inner(&self) -> Self {
+        Self {
+            providers: self.providers.clone(),
+        }
+    }
+
+    /// Override the base URL for an existing provider. Returns `true` if the
+    /// provider was found and updated, `false` if the name is unknown.
+    pub fn set_base_url(&mut self, name: &str, url: String) -> bool {
+        let key = name.to_lowercase();
+        if let Some(entry) = self.providers.get_mut(&key) {
+            entry.base_url = url;
+            true
+        } else if let Some(entry) = self.providers.get_mut(name) {
+            entry.base_url = url;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Serialize the catalog back to TOML and write it to `path`.
+    pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), String> {
+        let mut lines = String::new();
+        // Sort entries for stable output
+        let mut entries: Vec<&CatalogEntry> = self.providers.values().collect();
+        entries.sort_by_key(|e| &e.name);
+        for entry in entries {
+            lines.push_str("[[provider]]\n");
+            lines.push_str(&format!("name = {:?}\n", entry.name));
+            lines.push_str(&format!("display_name = {:?}\n", entry.display_name));
+            lines.push_str(&format!("base_url = {:?}\n", entry.base_url));
+            lines.push_str(&format!("api_key_env = {:?}\n", entry.api_key_env));
+            lines.push_str(&format!("compatible_with = {:?}\n", entry.compatible_with));
+            lines.push_str(&format!("default_model = {:?}\n", entry.default_model));
+            if !entry.models.is_empty() {
+                let models_str = entry
+                    .models
+                    .iter()
+                    .map(|m| format!("{:?}", m))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push_str(&format!("models = [{}]\n", models_str));
+            }
+            lines.push('\n');
+        }
+        std::fs::write(path, lines).map_err(|e| format!("Failed to write provider catalog: {}", e))
+    }
 }
 
 #[cfg(test)]

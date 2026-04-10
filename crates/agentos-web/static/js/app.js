@@ -1,26 +1,85 @@
 // AgentOS Web UI — client-side utilities
 
-// Theme toggle (Alpine.js component)
-function themeToggle() {
+// ── SSE Connection Status (Alpine.js component) ───────────
+// Monitors SSE connections on the page and exposes state for the topbar indicator.
+// Note: relies on htmx-internal-data (HTMX internal API) — pin HTMX version.
+function sseStatus() {
     return {
-        dark: localStorage.getItem('agentos-theme') === 'dark',
-        toggle: function() {
-            this.dark = !this.dark;
-            document.documentElement.setAttribute(
-                'data-theme', this.dark ? 'dark' : 'light'
-            );
-            localStorage.setItem('agentos-theme', this.dark ? 'dark' : 'light');
-        },
+        state: 'disconnected',
+        label: 'Offline',
+        _intervalId: null,
         init: function() {
-            if (this.dark) {
-                document.documentElement.setAttribute('data-theme', 'dark');
+            var self = this;
+            function check() {
+                var els = document.querySelectorAll('[sse-connect]');
+                if (els.length === 0) {
+                    self.state = 'disconnected';
+                    self.label = 'No stream';
+                    return;
+                }
+                var connected = 0;
+                var reconnecting = 0;
+                els.forEach(function(el) {
+                    var d = el['htmx-internal-data'];
+                    if (d && d.sseEventSource) {
+                        var rs = d.sseEventSource.readyState;
+                        if (rs === EventSource.OPEN) connected++;
+                        else if (rs === EventSource.CONNECTING) reconnecting++;
+                    }
+                });
+                if (connected > 0) {
+                    self.state = 'connected';
+                    self.label = 'Live';
+                } else if (reconnecting > 0) {
+                    self.state = 'reconnecting';
+                    self.label = 'Reconnecting';
+                } else {
+                    self.state = 'disconnected';
+                    self.label = 'Offline';
+                }
+            }
+            check();
+            self._intervalId = setInterval(check, 2000);
+        },
+        destroy: function() {
+            if (this._intervalId) {
+                clearInterval(this._intervalId);
+                this._intervalId = null;
             }
         }
     };
 }
 
-// SSE connection lifecycle: close connections when the tab is hidden to save resources.
-// The HTMX SSE extension stores the EventSource on the element as `htmx-internal-data`.
+// ── SSE Update Flash Animation ────────────────────────────
+// When HTMX swaps in new SSE content, briefly flash the target to give visual feedback.
+document.body.addEventListener('htmx:sseMessage', function(event) {
+    var target = event.detail.elt;
+    if (!target) return;
+
+    // Add flash class
+    target.classList.add('sse-flash');
+
+    // Animate stat values that changed
+    var newValues = target.querySelectorAll('.stat-value[data-animate]');
+    newValues.forEach(function(el) {
+        var key = el.closest('.stat-card') ? el.textContent.trim() : null;
+        if (key) {
+            var prev = el.getAttribute('data-prev');
+            if (prev !== null && prev !== key) {
+                el.classList.add('value-changed');
+                setTimeout(function() { el.classList.remove('value-changed'); }, 350);
+            }
+            el.setAttribute('data-prev', key);
+        }
+    });
+
+    // Remove flash after animation
+    setTimeout(function() { target.classList.remove('sse-flash'); }, 650);
+});
+
+// ── SSE connection lifecycle ──────────────────────────────
+// Close connections when the tab is hidden to save resources,
+// and re-establish them when the tab becomes visible again.
 document.addEventListener('visibilitychange', function () {
     if (document.hidden) {
         document.querySelectorAll('[sse-connect]').forEach(function (el) {
@@ -29,10 +88,16 @@ document.addEventListener('visibilitychange', function () {
                 internalData.sseEventSource.close();
             }
         });
+    } else {
+        // Tab is visible again — ask HTMX to re-process SSE elements
+        // so it re-creates the closed EventSource connections.
+        document.querySelectorAll('[sse-connect]').forEach(function (el) {
+            htmx.process(el);
+        });
     }
 });
 
-// Keyboard shortcuts (Alpine.js component)
+// ── Keyboard shortcuts (Alpine.js component) ──────────────
 function keyboardNav() {
     return {
         awaitingGoto: false,
@@ -58,7 +123,8 @@ function keyboardNav() {
                     self.awaitingGoto = false;
                     var routes = {
                         d: '/', a: '/agents', t: '/tasks', o: '/tools',
-                        s: '/secrets', p: '/pipelines', l: '/audit'
+                        s: '/secrets', p: '/pipelines', l: '/audit',
+                        c: '/chat', n: '/notifications'
                     };
                     if (routes[e.key]) {
                         e.preventDefault();
@@ -70,7 +136,7 @@ function keyboardNav() {
     };
 }
 
-// Toast notification store (Alpine.js component)
+// ── Toast notification store (Alpine.js component) ────────
 function toastStore() {
     return {
         toasts: [],

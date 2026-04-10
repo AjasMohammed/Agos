@@ -51,6 +51,41 @@ impl Default for ToolExecutor {
     }
 }
 
+/// Classifies a tool's risk level for the interactive approval workflow.
+///
+/// Operations with higher risk require explicit human approval before execution.
+/// The `ApprovalHook` checks this before every tool call.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskClass {
+    /// Read-only access to local data (file read, memory search). Auto-approved.
+    #[default]
+    ReadonlyScoped,
+    /// Read-only external access (web fetch, web search). Auto-approved.
+    ReadonlyExternal,
+    /// Write operations in the working directory (file write, create). Approval required.
+    WriteScoped,
+    /// Arbitrary shell command execution. Always requires approval.
+    ExecCapable,
+    /// Control plane operations (spawn agent, modify config). Always requires approval.
+    ControlPlane,
+    /// Interactive: the tool itself requires human input to proceed.
+    Interactive,
+}
+
+impl RiskClass {
+    /// Returns `true` when this risk class requires human approval before execution.
+    pub fn requires_approval(&self) -> bool {
+        matches!(
+            self,
+            RiskClass::WriteScoped
+                | RiskClass::ExecCapable
+                | RiskClass::ControlPlane
+                | RiskClass::Interactive
+        )
+    }
+}
+
 /// A tool's manifest, parsed from tool.toml at install time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolManifest {
@@ -70,6 +105,11 @@ pub struct ToolManifest {
     /// Fallback chains: tried in order when the tool fails with a matching error category.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallbacks: Vec<FallbackRule>,
+    /// Risk classification for the interactive approval workflow.
+    /// High-risk operations (WriteScoped, ExecCapable, ControlPlane) trigger
+    /// a human approval request before execution.
+    #[serde(default)]
+    pub risk_class: RiskClass,
 }
 
 /// A single fallback rule in a tool manifest's degradation chain.
@@ -85,7 +125,11 @@ pub struct FallbackRule {
     /// Payload key transformations (key → "op:value", e.g., "prepend:/tmp/").
     #[serde(default)]
     pub transform: HashMap<String, String>,
-    /// Max retries for this specific fallback (default 1, kernel ceiling 3).
+    /// Maximum number of times to retry this specific fallback before moving to the
+    /// next rule in the chain. Reserved for future use — the current kernel resolver
+    /// treats the chain depth as the retry mechanism (each entry in `fallbacks` is one
+    /// attempt). This field is preserved for forward compatibility with manifests that
+    /// declare it, but is not yet evaluated at runtime.
     #[serde(default = "default_max_retries")]
     pub max_retries: u8,
 }

@@ -1,6 +1,7 @@
 [manifest]
 name        = "memory-delete"
 version     = "1.0.0"
+risk_class  = "exec_capable"
 description = "Delete a memory entry by ID from semantic or episodic memory"
 author      = "agentos-core"
 trust_tier  = "core"

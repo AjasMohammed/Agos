@@ -13,8 +13,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::AuthToken;
 use crate::handlers::{
-    agent_detail, agents, audit, chat, costs, dashboard, events, marketplace, notifications,
-    pipeline_ui, pipelines, secrets, tasks, tools,
+    agent_detail, agents, audit, chat, connectors, costs, dashboard, events, marketplace,
+    notifications, oauth, pipeline_ui, pipelines, secrets, tasks, tools, webhooks,
 };
 use crate::state::AppState;
 
@@ -29,7 +29,9 @@ async fn add_security_headers(request: Request<axum::body::Body>, next: Next) ->
             // (Alpine.js components, log terminal, cost chart) are moved to /static/js/ files.
             // style-src 'unsafe-inline' is also required while Alpine.js and Pico CSS
             // inject inline style attributes at runtime.
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; \
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; \
+             style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+             font-src 'self' https://fonts.gstatic.com; \
              img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
         ),
     );
@@ -84,6 +86,19 @@ pub fn build_router(
             .finish()
             .ok_or_else(|| anyhow::anyhow!("invalid governor rate-limit config"))?,
     );
+
+    // Unauthenticated routes — external services cannot carry our auth token.
+    // These are merged AFTER the authenticated router so they bypass the auth layer
+    // but still get security headers, compression, tracing, and rate limiting.
+    let webhook_routes = Router::new()
+        .route(
+            "/api/v1/webhooks/incoming/{endpoint_id}",
+            axum::routing::post(webhooks::incoming_webhook),
+        )
+        // Restrict body size on the unauthenticated webhook endpoint to prevent
+        // memory exhaustion DoS. Most webhook payloads are well under 100 KiB.
+        .layer(axum::extract::DefaultBodyLimit::max(256 * 1024)) // 256 KiB
+        .with_state(Arc::new(state.clone()));
 
     Ok(Router::new()
         .route("/", axum::routing::get(dashboard::index))
@@ -146,6 +161,27 @@ pub fn build_router(
             axum::routing::get(secrets::list).post(secrets::create),
         )
         .route("/secrets/{name}", axum::routing::delete(secrets::revoke))
+        // Connectors & OAuth
+        .route(
+            "/connectors",
+            axum::routing::get(connectors::list_connectors),
+        )
+        .route(
+            "/connectors/{connector_id}/disconnect",
+            axum::routing::post(connectors::disconnect_connector),
+        )
+        .route(
+            "/api/connectors",
+            axum::routing::get(connectors::list_connectors_json),
+        )
+        .route(
+            "/auth/{connector_id}/start",
+            axum::routing::get(oauth::start_oauth),
+        )
+        .route(
+            "/auth/{connector_id}/callback",
+            axum::routing::get(oauth::oauth_callback),
+        )
         // Pipelines
         .route("/pipelines", axum::routing::get(pipeline_ui::list))
         .route(
@@ -270,6 +306,9 @@ pub fn build_router(
         .layer(axum::middleware::from_fn(crate::auth::require_auth))
         // Extension layer — adds auth_token to every request before auth middleware runs.
         .layer(axum::Extension(auth_token))
+        // Merge unauthenticated webhook routes — placed after auth layer so they
+        // bypass auth/CSRF but still get security headers, compression, and rate limiting.
+        .merge(webhook_routes)
         // Security headers on all responses.
         .layer(axum::middleware::from_fn(add_security_headers))
         .layer(CompressionLayer::new())

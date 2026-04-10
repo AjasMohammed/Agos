@@ -1,6 +1,7 @@
 [manifest]
 name        = "scratch-write"
 version     = "1.0.0"
+risk_class  = "write_scoped"
 description = "Write a markdown page to the agent's scratchpad. Use [[Page Title]] to link pages."
 author      = "agentos-core"
 trust_tier  = "core"

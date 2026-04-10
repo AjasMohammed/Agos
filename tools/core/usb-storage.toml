@@ -1,6 +1,7 @@
 [manifest]
 name        = "usb-storage"
 version     = "1.0.0"
+risk_class  = "control_plane"
 description = "Mount, unmount, and eject USB storage devices via UDisks2 D-Bus API."
 author      = "agentos-core"
 trust_tier  = "core"

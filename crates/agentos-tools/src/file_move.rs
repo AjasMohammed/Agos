@@ -56,8 +56,11 @@ impl AgentTool for FileMove {
                 })?;
 
         // SECURITY: resolve source, checking workspace paths first.
-        let from_resolved =
-            crate::traits::resolve_tool_path(from_str, &context.data_dir, &context.workspace_paths);
+        let from_resolved = crate::traits::resolve_tool_path(
+            from_str,
+            &context.data_dir,
+            &context.workspace_paths,
+        )?;
         let canonical_from =
             from_resolved
                 .canonicalize()
@@ -90,7 +93,7 @@ impl AgentTool for FileMove {
         // SECURITY: resolve destination, checking workspace paths first.
         // The destination may not exist yet → use lexical normalize_path.
         let to_resolved =
-            crate::traits::resolve_tool_path(to_str, &context.data_dir, &context.workspace_paths);
+            crate::traits::resolve_tool_path(to_str, &context.data_dir, &context.workspace_paths)?;
         let normalized_to = normalize_path(&to_resolved);
 
         let to_in_workspace = context

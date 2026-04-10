@@ -6,10 +6,32 @@ use clap::Subcommand;
 pub enum ProviderCommands {
     /// List all available LLM providers (built-in + catalog)
     List,
+    /// Override the base URL for a catalog provider (persisted to providers.toml)
+    SetUrl {
+        /// Provider name (e.g. lmstudio, groq)
+        name: String,
+        /// New base URL (e.g. http://localhost:5678/v1)
+        url: String,
+    },
 }
 
 pub async fn handle(client: &mut BusClient, command: ProviderCommands) -> anyhow::Result<()> {
     match command {
+        ProviderCommands::SetUrl { name, url } => {
+            let response = client
+                .send_command(KernelCommand::SetProviderUrl {
+                    name: name.clone(),
+                    url: url.clone(),
+                })
+                .await?;
+            match response {
+                KernelResponse::Success { .. } => {
+                    println!("Provider '{}' base URL updated to '{}'", name, url);
+                }
+                KernelResponse::Error { message } => eprintln!("Error: {}", message),
+                _ => eprintln!("Unexpected response"),
+            }
+        }
         ProviderCommands::List => {
             let response = client.send_command(KernelCommand::ListProviders).await?;
             match response {

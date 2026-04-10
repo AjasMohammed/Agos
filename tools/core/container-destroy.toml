@@ -1,0 +1,24 @@
+[manifest]
+name = "container-destroy"
+version = "1.0.0"
+description = "Destroy a container, stopping it if running and removing all resources."
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "exec_capable"
+tags = ["compute", "container"]
+
+[capabilities_required]
+permissions = ["container.destroy:x"]
+
+[capabilities_provided]
+outputs = ["destroyed"]
+
+[intent_schema]
+input = "ContainerDestroyIntent"
+output = "ContainerDestroyResult"
+
+[sandbox]
+network = false
+fs_write = false
+max_memory_mb = 32
+max_cpu_ms = 15000

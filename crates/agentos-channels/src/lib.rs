@@ -1,8 +1,14 @@
 pub mod discord;
 pub mod email;
+pub mod health;
+pub mod line;
 pub mod manager;
+pub mod matrix;
+pub mod mattermost;
+pub mod pairing;
 pub mod retry;
 pub mod slack;
+pub mod teams;
 pub mod telegram;
 pub mod types;
 pub mod webhook;

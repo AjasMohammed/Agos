@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block content %}
+<div>
+    <div class="page-header">
+        <div>
+            <h1>Connected Services</h1>
+            <p class="page-meta">{{ connectors|length }} connector{{ "s" if connectors|length != 1 else "" }} configured</p>
+        </div>
+    </div>
+
+    <figure>
+    <table aria-label="Connected services">
+        <thead>
+            <tr>
+                <th>Service</th>
+                <th>Status</th>
+                <th>Scopes</th>
+                <th>Token Expires</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for c in connectors %}
+            <tr>
+                <td><strong>{{ c.name }}</strong><br><small>{{ c.id }}</small></td>
+                <td>
+                    {% if c.connected %}
+                    <mark>Connected</mark>
+                    {% else %}
+                    <span>{{ c.status }}</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% for scope in c.scopes %}
+                    <kbd>{{ scope }}</kbd>{{ " " if not loop.last }}
+                    {% endfor %}
+                    {% if c.scopes|length == 0 %}
+                    <span>—</span>
+                    {% endif %}
+                </td>
+                <td>{{ c.expires_at }}</td>
+                <td>
+                    {% if c.connected %}
+                    <form method="post" action="/connectors/{{ c.id }}/disconnect"
+                          hx-post="/connectors/{{ c.id }}/disconnect"
+                          hx-target="body" hx-push-url="true"
+                          hx-confirm="Disconnect {{ c.name }}? Active agents will lose access to {{ c.id }}.* tools.">
+                        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                        <button class="secondary outline" type="submit">Disconnect</button>
+                    </form>
+                    {% else %}
+                    <a href="/auth/{{ c.id }}/start" role="button" class="outline">Connect</a>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </figure>
+
+    {% if connectors|length == 0 %}
+    {% with icon="🔌", title="No connectors configured", message="Configure OAuth providers in config/oauth_providers.toml, then connect them here. Agents will be able to use external APIs without seeing raw credentials." %}
+    {% include "partials/empty_state.html" %}
+    {% endwith %}
+    {% endif %}
+</div>
+{% endblock %}

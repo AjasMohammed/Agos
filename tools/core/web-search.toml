@@ -1,0 +1,40 @@
+[manifest]
+name        = "web-search"
+version     = "1.0.0"
+description = "Search the web and return results with titles, URLs, and snippets. Tries Brave Search, Tavily, Serper, and DuckDuckGo in order. Configure BRAVE_API_KEY, TAVILY_API_KEY, or SERPER_API_KEY for best results."
+author      = "agentos-core"
+trust_tier  = "core"
+risk_class  = "readonly_external"
+
+[capabilities_required]
+permissions = ["network.outbound:x"]
+
+[capabilities_provided]
+outputs = ["search.results"]
+
+[intent_schema]
+input  = "WebSearchIntent"
+output = "WebSearchResult"
+
+[input_schema]
+type = "object"
+required = ["query"]
+
+[input_schema.properties.query]
+type        = "string"
+description = "Search query"
+
+[input_schema.properties.limit]
+type        = "integer"
+default     = 5
+minimum     = 1
+maximum     = 20
+description = "Maximum number of results to return"
+
+[sandbox]
+network       = true
+fs_write      = false
+gpu           = false
+max_memory_mb = 32
+max_cpu_ms    = 15000
+syscalls      = []

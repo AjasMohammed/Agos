@@ -16,15 +16,35 @@ use tracing_subscriber::Layer;
 
 mod commands;
 mod embedded;
+pub mod package_index;
+
+#[derive(clap::Subcommand)]
+pub enum ConfigSubcommand {
+    /// Read a configuration value by dotted key (e.g. llm.primary)
+    Get {
+        /// Dotted key path (e.g. llm.primary)
+        key: String,
+    },
+    /// Write a configuration value by dotted key
+    Set {
+        /// Dotted key path (e.g. llm.primary)
+        key: String,
+        /// New value to set
+        value: String,
+    },
+    /// List all top-level config sections
+    List,
+}
+
 use commands::{
-    agent::AgentCommands, audit::AuditCommands, bg::BgCommands, channel::ChannelCommands,
-    cost::CostCommands, escalation::EscalationCommands, event::EventCommands, hal::HalCommands,
-    identity::IdentityCommands, log::LogCommands, mcp::McpCommands,
-    notifications::NotificationCommands, perm::PermCommands, pipeline::PipelineCommands,
-    provider::ProviderCommands, resource::ResourceCommands, role::RoleCommands,
-    schedule::ScheduleCommands, scratchpad::ScratchpadCommands, secret::SecretCommands,
-    skill::SkillCommands, snapshot::SnapshotCommands, task::TaskCommands, team::TeamCommands,
-    tool::ToolCommands, web::WebCommands,
+    a2a::A2ACommands, agent::AgentCommands, audit::AuditCommands, bg::BgCommands,
+    channel::ChannelCommands, cost::CostCommands, escalation::EscalationCommands,
+    event::EventCommands, hal::HalCommands, identity::IdentityCommands, init::InitTemplate,
+    log::LogCommands, mcp::McpCommands, notifications::NotificationCommands, perm::PermCommands,
+    pipeline::PipelineCommands, provider::ProviderCommands, resource::ResourceCommands,
+    role::RoleCommands, schedule::ScheduleCommands, scratchpad::ScratchpadCommands,
+    secret::SecretCommands, skill::SkillCommands, snapshot::SnapshotCommands, task::TaskCommands,
+    team::TeamCommands, tool::ToolCommands, web::WebCommands,
 };
 
 #[derive(Parser)]
@@ -208,10 +228,61 @@ pub enum Commands {
         command: McpCommands,
     },
 
+    /// A2A (Agent-to-Agent) protocol — discover and delegate to external agents
+    A2a {
+        #[command(subcommand)]
+        command: A2ACommands,
+    },
+
     /// List and inspect available LLM providers (built-in + catalog)
     Provider {
         #[command(subcommand)]
         command: ProviderCommands,
+    },
+
+    /// Manage plugins — list, enable, disable, and inspect plugin manifests.
+    Plugin {
+        #[command(subcommand)]
+        command: commands::plugin::PluginCommands,
+    },
+
+    /// Interactive setup wizard — configure providers, agents, and data paths.
+    Onboard,
+
+    /// Diagnose configuration issues and optionally auto-repair them.
+    Doctor {
+        /// Attempt to auto-repair detected issues.
+        #[arg(long, default_value_t = false)]
+        fix: bool,
+    },
+
+    /// Read or write configuration values without editing TOML manually.
+    Config {
+        #[command(subcommand)]
+        command: ConfigSubcommand,
+    },
+
+    /// Scaffold a new AgentOS project from a template.
+    ///
+    /// Creates a project directory with a working agent configuration,
+    /// tool manifests, and an inline README explaining the security model.
+    ///
+    /// Templates:
+    ///   hello-world     — Minimal agent that responds to a prompt
+    ///   secure-agent    — Agent with restricted CapabilityToken (recommended)
+    ///   mcp-server      — Agent exposed as an MCP server
+    ///   multi-agent     — Coordinator + 2 specialist agents
+    ///
+    /// Examples:
+    ///   agentos init my-project
+    ///   agentos init my-project --template secure-agent
+    Init {
+        /// Project name (becomes the directory name)
+        name: String,
+
+        /// Template to use (default: secure-agent)
+        #[arg(long, short, default_value = "secure-agent")]
+        template: InitTemplate,
     },
 }
 
@@ -298,7 +369,12 @@ async fn tokio_main() -> anyhow::Result<()> {
             commands::tool::handle_offline(command).await?;
         }
 
-        // MCP subcommands: `serve` and `list` are offline; `status` requires a running kernel.
+        // Offline skill subcommands run without a kernel connection
+        Commands::Skill { command } if commands::skill::is_offline(&command) => {
+            commands::skill::handle_offline(command).await?;
+        }
+
+        // MCP subcommands: `serve` and `list` are offline; the rest require a running kernel.
         Commands::Mcp {
             command: McpCommands::Status,
         } => {
@@ -310,8 +386,115 @@ async fn tokio_main() -> anyhow::Result<()> {
             let mut bus_client = BusClient::connect(Path::new(&config.bus.socket_path)).await?;
             commands::mcp::cmd_mcp_status(&mut bus_client).await?;
         }
+        Commands::Mcp {
+            command:
+                McpCommands::Attach {
+                    name,
+                    url,
+                    token,
+                    oauth_connector,
+                    timeout,
+                    env_vars,
+                    command_and_args,
+                },
+        } => {
+            let config_path = Path::new(&cli.config);
+            if !config_path.exists() {
+                anyhow::bail!("Config file not found: {}", cli.config);
+            }
+            let config = agentos_kernel::config::load_config(config_path)?;
+            let mut bus_client = BusClient::connect(Path::new(&config.bus.socket_path)).await?;
+            commands::mcp::cmd_mcp_attach(
+                &mut bus_client,
+                name,
+                command_and_args,
+                url,
+                token,
+                oauth_connector,
+                timeout,
+                env_vars,
+            )
+            .await?;
+        }
+        Commands::Mcp {
+            command: McpCommands::Detach { name },
+        } => {
+            let config_path = Path::new(&cli.config);
+            if !config_path.exists() {
+                anyhow::bail!("Config file not found: {}", cli.config);
+            }
+            let config = agentos_kernel::config::load_config(config_path)?;
+            let mut bus_client = BusClient::connect(Path::new(&config.bus.socket_path)).await?;
+            commands::mcp::cmd_mcp_detach(&mut bus_client, name).await?;
+        }
+        Commands::Mcp {
+            command:
+                McpCommands::OauthStore {
+                    connector_id,
+                    provider,
+                    access_token,
+                    refresh_token,
+                    token_endpoint,
+                    client_id,
+                    client_secret,
+                    scopes,
+                    expires_in,
+                },
+        } => {
+            let config_path = Path::new(&cli.config);
+            if !config_path.exists() {
+                anyhow::bail!("Config file not found: {}", cli.config);
+            }
+            let config = agentos_kernel::config::load_config(config_path)?;
+            let mut bus_client = BusClient::connect(Path::new(&config.bus.socket_path)).await?;
+            commands::mcp::cmd_mcp_oauth_store(
+                &mut bus_client,
+                connector_id,
+                provider,
+                access_token,
+                refresh_token,
+                token_endpoint,
+                client_id,
+                client_secret,
+                scopes,
+                expires_in,
+            )
+            .await?;
+        }
         Commands::Mcp { command } => {
             commands::mcp::handle(command, &cli.config).await?;
+        }
+
+        Commands::Init { name, template } => {
+            commands::init::handle(&name, template)?;
+        }
+
+        // Onboarding wizard — no kernel connection needed
+        Commands::Onboard => {
+            commands::onboard::handle().await?;
+        }
+
+        // Doctor — offline diagnostics
+        Commands::Doctor { fix } => {
+            commands::doctor::handle(fix).await?;
+        }
+
+        // Config get/set/list — offline TOML editing
+        Commands::Config { command } => match command {
+            ConfigSubcommand::Get { key } => {
+                commands::config_cmd::handle_get(&key)?;
+            }
+            ConfigSubcommand::Set { key, value } => {
+                commands::config_cmd::handle_set(&key, &value)?;
+            }
+            ConfigSubcommand::List => {
+                commands::config_cmd::handle_list(None)?;
+            }
+        },
+
+        // A2A commands are offline (direct HTTP to A2A server, no kernel bus needed)
+        Commands::A2a { command } => {
+            commands::a2a::handle(command).await?;
         }
 
         Commands::Healthz { port } => {
@@ -615,6 +798,9 @@ async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
 
     let kernel = Arc::new(Kernel::boot(config_path, &passphrase).await?);
 
+    // Start the webhook wake-up loop now that kernel is wrapped in Arc.
+    kernel.start_webhook_wakeup().await;
+
     println!("✅ Kernel started");
     println!("   Bus: {}", kernel.config.bus.socket_path);
     println!(
@@ -727,10 +913,7 @@ mod tests {
                         provider,
                         model,
                         name,
-                        base_url: _,
-                        roles: _,
-                        test: _,
-                        grants: _,
+                        ..
                     },
             } => {
                 assert_eq!(provider, "openai");
@@ -761,6 +944,7 @@ mod tests {
                         prompt,
                         autonomous: _,
                         no_checkpoint: _,
+                        thinking: _,
                     },
             } => {
                 assert_eq!(agent, Some("analyst".to_string()));

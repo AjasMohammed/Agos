@@ -17,6 +17,7 @@ use crate::types::{JsonRpcRequest, JsonRpcResponse};
 /// The variant determines reconnect behavior in the supervisor:
 /// - `Connection` and `Timeout` → supervisor should attempt reconnect
 /// - `Protocol` → server is alive, no reconnect needed
+/// - `Auth` → credential failure; reconnect does not help — caller must refresh token
 #[derive(Debug)]
 pub enum McpTransportError {
     /// Connection-level failure: broken pipe, process crash, HTTP connection refused.
@@ -25,6 +26,10 @@ pub enum McpTransportError {
     Protocol { code: i64, message: String },
     /// Timeout waiting for response.
     Timeout(Duration),
+    /// Authentication failure (HTTP 401). Reconnect will not help; the OAuth
+    /// token needs to be refreshed. The transport handles one automatic retry
+    /// after forcing a refresh — this error is only surfaced if the retry also fails.
+    Auth(String),
 }
 
 impl fmt::Display for McpTransportError {
@@ -35,6 +40,7 @@ impl fmt::Display for McpTransportError {
                 write!(f, "MCP protocol error (code {}): {}", code, message)
             }
             Self::Timeout(d) => write!(f, "MCP request timed out after {:?}", d),
+            Self::Auth(msg) => write!(f, "MCP authentication error: {}", msg),
         }
     }
 }
@@ -45,6 +51,11 @@ impl McpTransportError {
     /// Returns `true` if this error indicates reconnection should be attempted.
     pub fn should_reconnect(&self) -> bool {
         matches!(self, Self::Connection(_) | Self::Timeout(_))
+    }
+
+    /// Returns `true` if this is an authentication error (OAuth token rejected).
+    pub fn is_auth_error(&self) -> bool {
+        matches!(self, Self::Auth(_))
     }
 }
 

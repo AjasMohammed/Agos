@@ -178,6 +178,7 @@ pub async fn register_mock_agent(kernel: &Kernel, name: &str, responses: Vec<Str
         created_at: now,
         last_active: now,
         public_key_hex: None,
+        base_url: None,
     };
 
     kernel.agent_registry.write().await.register(profile);
@@ -212,6 +213,7 @@ pub async fn register_mock_agent_with_responses(
         created_at: now,
         last_active: now,
         public_key_hex: None,
+        base_url: None,
     };
 
     kernel.agent_registry.write().await.register(profile);

@@ -36,7 +36,15 @@ impl Kernel {
         }
 
         // Catalog providers
-        for entry in self.provider_catalog.list() {
+        let catalog_entries: Vec<agentos_llm::CatalogEntry> = self
+            .provider_catalog
+            .read()
+            .unwrap()
+            .list()
+            .into_iter()
+            .cloned()
+            .collect();
+        for entry in &catalog_entries {
             let key_set = if entry.api_key_env.is_empty() {
                 true // Local providers don't need an API key
             } else {
@@ -58,5 +66,53 @@ impl Kernel {
         }
 
         KernelResponse::ProviderList(entries)
+    }
+
+    /// Update the base URL for a named catalog provider, persisting the change
+    /// back to `providers.toml`.
+    pub(crate) async fn cmd_set_provider_url(&self, name: String, url: String) -> KernelResponse {
+        // Update in-memory catalog
+        let updated = self
+            .provider_catalog
+            .write()
+            .unwrap()
+            .set_base_url(&name, url.clone());
+
+        if !updated {
+            return KernelResponse::Error {
+                message: format!(
+                    "Provider '{}' not found in catalog. Run 'agentos provider list' to see available providers.",
+                    name
+                ),
+            };
+        }
+
+        // Persist to file
+        if let Some(path) = &self.catalog_path {
+            let catalog_snapshot = self.provider_catalog.read().unwrap().clone_inner();
+            let path = path.clone();
+            let result =
+                tokio::task::spawn_blocking(move || catalog_snapshot.save_to_file(&path)).await;
+
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    return KernelResponse::Error {
+                        message: format!("URL updated in memory but could not save to file: {}", e),
+                    }
+                }
+                Err(e) => {
+                    return KernelResponse::Error {
+                        message: format!(
+                            "URL updated in memory but file write task panicked: {}",
+                            e
+                        ),
+                    }
+                }
+            }
+        }
+
+        tracing::info!(provider = %name, url = %url, "Provider base URL updated");
+        KernelResponse::Success { data: None }
     }
 }

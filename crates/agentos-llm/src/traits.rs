@@ -190,6 +190,7 @@ mod tests {
             },
             executor: ToolExecutor::default(),
             fallbacks: vec![],
+            risk_class: Default::default(),
         };
         // name(11) + description(12) + overhead(100) = 123 chars → ceil(123/4) = 31
         let estimate = mock.estimate_tokens(&ctx, &[manifest]);

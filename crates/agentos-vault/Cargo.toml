@@ -20,6 +20,9 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
+reqwest = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.10"

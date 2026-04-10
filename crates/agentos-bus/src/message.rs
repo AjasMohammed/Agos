@@ -40,13 +40,20 @@ pub enum KernelCommand {
         /// instead of starting idle. Used for evaluating AgentOS usability.
         #[serde(default)]
         test_mode: bool,
-        /// Extra permissions to grant on connect (format: "resource:flags", e.g. "process.exec:x").
         #[serde(default)]
         extra_permissions: Vec<String>,
+        /// When true, grants full root access to all resources.
+        #[serde(default)]
+        root: bool,
     },
     ListAgents,
     DisconnectAgent {
         agent_id: AgentID,
+    },
+    /// Change the LLM endpoint URL for a connected agent (takes effect immediately).
+    SetAgentBaseUrl {
+        name: String,
+        url: String,
     },
 
     // Task management
@@ -59,6 +66,9 @@ pub enum KernelCommand {
         /// When true, the task executor skips checkpoint writes (ephemeral execution).
         #[serde(default)]
         no_checkpoint: bool,
+        /// Extended thinking level for the task (off/low/medium/high/max).
+        #[serde(default)]
+        thinking_level: agentos_types::ThinkingLevel,
     },
     ListTasks,
     GetTaskLogs {
@@ -486,8 +496,84 @@ pub enum KernelCommand {
     TestChannel {
         channel_id: String,
     },
+    // Plugin management
+    /// List all discovered plugins with their status.
+    ListPlugins,
+    /// Activate a plugin by ID.
+    EnablePlugin {
+        plugin_id: String,
+    },
+    /// Deactivate a plugin by ID.
+    DisablePlugin {
+        plugin_id: String,
+    },
+
     /// Query the health status of all configured MCP server connections.
     McpStatus,
+    /// Attach a new MCP server to the running kernel at runtime.
+    ///
+    /// Spawns the server process (stdio) or opens an HTTP connection, performs
+    /// the MCP handshake, discovers tools, and registers them with the kernel's
+    /// `ToolRunner`. Does not modify `config/default.toml` — the attachment is
+    /// ephemeral and lost on kernel restart.
+    McpAttach {
+        /// Unique name for this server (used in logs, status, and detach).
+        name: String,
+        /// Executable to spawn for stdio transport (e.g. `"npx"`).
+        /// Mutually exclusive with `url`.
+        command: Option<String>,
+        /// Arguments passed to the executable.
+        #[serde(default)]
+        args: Vec<String>,
+        /// HTTP endpoint URL for HTTP transport. Mutually exclusive with `command`.
+        url: Option<String>,
+        /// Static Bearer auth token for HTTP transport.
+        /// Mutually exclusive with `oauth_connector_id`.
+        auth_token: Option<String>,
+        /// OAuth2 connector ID referencing a credential stored in the vault via
+        /// `McpOAuthStore`. Mutually exclusive with `auth_token`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        oauth_connector_id: Option<String>,
+        /// Per-request timeout in seconds (default: 30).
+        timeout_secs: Option<u64>,
+        /// Environment variables for the subprocess.
+        /// Values of the form `"vault:KEY"` are resolved from the kernel vault at attach time.
+        #[serde(default)]
+        env: std::collections::HashMap<String, String>,
+    },
+    /// Detach a previously attached (or boot-configured) MCP server.
+    ///
+    /// Closes the connection, removes the server from the supervisor, and
+    /// deletes the persistence record so it is not restored on next restart.
+    McpDetach {
+        /// Name of the server to detach.
+        name: String,
+    },
+    /// Store an OAuth2 credential in the vault for use with an MCP server.
+    ///
+    /// The credential is encrypted at rest and can be referenced by `connector_id`
+    /// in subsequent `McpAttach` commands via the `oauth_connector_id` field.
+    McpOAuthStore {
+        /// Unique identifier for this credential (e.g. "zomato").
+        connector_id: String,
+        /// Human-readable provider name (e.g. "zomato", "github").
+        provider: String,
+        /// OAuth2 access token.
+        access_token: String,
+        /// OAuth2 refresh token (used to obtain new access tokens).
+        refresh_token: Option<String>,
+        /// OAuth2 token endpoint URL (e.g. "https://accounts.zomato.com/oauth/token").
+        token_endpoint: String,
+        /// OAuth2 client ID registered with the provider.
+        client_id: String,
+        /// OAuth2 client secret (for confidential clients).
+        client_secret: Option<String>,
+        /// Scopes granted by this token (e.g. ["order:read", "order:write"]).
+        #[serde(default)]
+        scopes: Vec<String>,
+        /// Token lifetime in seconds (used to compute `expires_at`).
+        expires_in_secs: Option<i64>,
+    },
 
     // Agent context memory
     /// Read an agent's context memory document.
@@ -544,6 +630,11 @@ pub enum KernelCommand {
     // Provider catalog
     /// List all available LLM providers (built-in + catalog).
     ListProviders,
+    /// Override the base URL for a catalog provider (persisted to providers.toml).
+    SetProviderUrl {
+        name: String,
+        url: String,
+    },
 
     // Scratchpad management
     /// List all scratchpad pages for an agent.
@@ -566,6 +657,55 @@ pub enum KernelCommand {
         title: String,
         depth: usize,
     },
+
+    // Webhook endpoint management
+    /// Create a new webhook endpoint for an agent.
+    CreateWebhookEndpoint {
+        agent_name: String,
+        provider: String,
+        debounce_seconds: u64,
+    },
+    /// List webhook endpoints (optionally filtered by agent).
+    ListWebhookEndpoints {
+        agent_name: Option<String>,
+    },
+    /// Delete a webhook endpoint.
+    DeleteWebhookEndpoint {
+        endpoint_id: String,
+    },
+
+    // Container runtime management
+    /// Create a new container for an agent.
+    ContainerCreate {
+        agent_name: String,
+        image: String,
+        memory_mb: u64,
+        cpu: f64,
+        network: String,
+        ttl_seconds: u64,
+    },
+    /// Execute a command in a running container (ownership verified).
+    ContainerExec {
+        agent_name: String,
+        container_id: String,
+        command: Vec<String>,
+        timeout_ms: u64,
+    },
+    /// Read logs from a container (ownership verified).
+    ContainerLogs {
+        agent_name: String,
+        container_id: String,
+        tail: usize,
+    },
+    /// Destroy a container (ownership verified).
+    ContainerDestroy {
+        agent_name: String,
+        container_id: String,
+    },
+    /// List containers (optionally filtered by agent).
+    ContainerList {
+        agent_name: Option<String>,
+    },
 }
 
 impl KernelCommand {
@@ -584,6 +724,7 @@ impl KernelCommand {
             KernelCommand::SendAgentMessage { from_name, .. } => Some(from_name.clone()),
             KernelCommand::BroadcastToGroup { from_name, .. } => Some(from_name.clone()),
             KernelCommand::EventSubscribe { agent_name, .. } => Some(agent_name.clone()),
+            KernelCommand::ContainerCreate { agent_name, .. } => Some(agent_name.clone()),
             KernelCommand::RunPipeline {
                 agent_name: Some(name),
                 ..
@@ -668,6 +809,17 @@ pub enum KernelResponse {
 
     // MCP server health
     McpServerStatusList(Vec<McpServerStatus>),
+    /// MCP server successfully attached; includes the names of registered tools.
+    McpAttached {
+        tool_count: usize,
+        tools: Vec<String>,
+    },
+    /// MCP server successfully detached.
+    McpDetached,
+    /// OAuth credential successfully stored in the vault.
+    McpOAuthStored {
+        connector_id: String,
+    },
 
     // Provider catalog
     ProviderList(Vec<serde_json::Value>),
@@ -701,6 +853,11 @@ pub enum KernelResponse {
         coordinator_task_id: TaskID,
         /// Task IDs of pre-spawned workers (empty if workers are spawned dynamically).
         worker_task_ids: Vec<TaskID>,
+    },
+
+    // Webhook endpoints
+    WebhookEndpointList {
+        endpoints: Vec<agentos_types::WebhookEndpointMeta>,
     },
 }
 

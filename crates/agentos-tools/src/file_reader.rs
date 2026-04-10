@@ -49,8 +49,11 @@ impl AgentTool for FileReader {
         tracing::debug!(path = path_str, mode, "file-reader: starting");
 
         // SECURITY: resolve path, checking workspace paths before falling back to data_dir.
-        let resolved =
-            crate::traits::resolve_tool_path(path_str, &context.data_dir, &context.workspace_paths);
+        let resolved = crate::traits::resolve_tool_path(
+            path_str,
+            &context.data_dir,
+            &context.workspace_paths,
+        )?;
 
         // Canonicalize to verify containment. For directories that don't exist yet
         // we fall through to a clear error; for existing paths this enforces the boundary.

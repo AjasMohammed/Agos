@@ -92,3 +92,93 @@ api_key_env = "SAMBANOVA_API_KEY"
 compatible_with = "openai"
 default_model = "Meta-Llama-3.3-70B-Instruct"
 models = ["Meta-Llama-3.3-70B-Instruct"]
+
+[[provider]]
+name = "mistral"
+display_name = "Mistral AI"
+base_url = "https://api.mistral.ai/v1"
+api_key_env = "MISTRAL_API_KEY"
+compatible_with = "openai"
+default_model = "mistral-large-latest"
+models = ["mistral-large-latest", "mistral-medium-latest", "mistral-small-latest", "open-mistral-nemo", "codestral-latest"]
+
+[[provider]]
+name = "xai"
+display_name = "xAI (Grok)"
+base_url = "https://api.x.ai/v1"
+api_key_env = "XAI_API_KEY"
+compatible_with = "openai"
+default_model = "grok-3"
+models = ["grok-3", "grok-3-mini", "grok-2", "grok-2-vision"]
+
+[[provider]]
+name = "cohere"
+display_name = "Cohere"
+base_url = "https://api.cohere.com/compatibility/v1"
+api_key_env = "COHERE_API_KEY"
+compatible_with = "openai"
+default_model = "command-r-plus"
+models = ["command-r-plus", "command-r", "command-a-03-2025"]
+
+[[provider]]
+name = "azure"
+display_name = "Azure OpenAI"
+base_url = "https://YOUR_RESOURCE.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT"
+api_key_env = "AZURE_OPENAI_API_KEY"
+compatible_with = "openai"
+default_model = "gpt-4o"
+models = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"]
+
+[[provider]]
+name = "cerebras"
+display_name = "Cerebras"
+base_url = "https://api.cerebras.ai/v1"
+api_key_env = "CEREBRAS_API_KEY"
+compatible_with = "openai"
+default_model = "llama3.1-70b"
+models = ["llama3.1-70b", "llama3.1-8b", "llama-3.3-70b"]
+
+[[provider]]
+name = "arcee"
+display_name = "Arcee AI"
+base_url = "https://conductor.arcee.ai/v1"
+api_key_env = "ARCEE_API_KEY"
+compatible_with = "openai"
+default_model = "auto"
+models = ["auto", "arcee-spark", "arcee-nova"]
+
+[[provider]]
+name = "moonshot"
+display_name = "Moonshot AI"
+base_url = "https://api.moonshot.cn/v1"
+api_key_env = "MOONSHOT_API_KEY"
+compatible_with = "openai"
+default_model = "moonshot-v1-128k"
+models = ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"]
+
+[[provider]]
+name = "nvidia"
+display_name = "NVIDIA NIM"
+base_url = "https://integrate.api.nvidia.com/v1"
+api_key_env = "NVIDIA_API_KEY"
+compatible_with = "openai"
+default_model = "meta/llama-3.3-70b-instruct"
+models = ["meta/llama-3.3-70b-instruct", "nvidia/llama-3.1-nemotron-70b-instruct"]
+
+[[provider]]
+name = "hyperbolic"
+display_name = "Hyperbolic"
+base_url = "https://api.hyperbolic.xyz/v1"
+api_key_env = "HYPERBOLIC_API_KEY"
+compatible_with = "openai"
+default_model = "meta-llama/Llama-3.3-70B-Instruct"
+models = ["meta-llama/Llama-3.3-70B-Instruct", "Qwen/QwQ-32B"]
+
+[[provider]]
+name = "anyscale"
+display_name = "Anyscale"
+base_url = "https://api.endpoints.anyscale.com/v1"
+api_key_env = "ANYSCALE_API_KEY"
+compatible_with = "openai"
+default_model = "meta-llama/Llama-3-70b-chat-hf"
+models = ["meta-llama/Llama-3-70b-chat-hf", "mistralai/Mixtral-8x7B-Instruct-v0.1"]

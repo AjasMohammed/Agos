@@ -905,6 +905,7 @@ mod tests {
             },
             executor: ToolExecutor::default(),
             fallbacks: vec![],
+            risk_class: Default::default(),
         }
     }
 

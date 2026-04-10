@@ -1,6 +1,7 @@
 [manifest]
 name        = "http-client"
 version     = "1.0.0"
+risk_class  = "readonly_external"
 description = "Make outbound HTTP requests (GET, POST, PUT, PATCH, DELETE, HEAD). Supports redirect following, SSE streaming, multipart upload, and direct file download. Credentials injected from the secrets vault."
 author      = "agentos-core"
 trust_tier  = "core"

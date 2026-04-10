@@ -1,0 +1,23 @@
+[manifest]
+name = "container-list"
+version = "1.0.0"
+description = "List active containers with their status, resource usage, and expiry times."
+author = "agentos-core"
+trust_tier = "core"
+tags = ["compute", "container"]
+
+[capabilities_required]
+permissions = ["container.list:r"]
+
+[capabilities_provided]
+outputs = ["containers"]
+
+[intent_schema]
+input = "ContainerListIntent"
+output = "ContainerListResult"
+
+[sandbox]
+network = false
+fs_write = false
+max_memory_mb = 32
+max_cpu_ms = 5000

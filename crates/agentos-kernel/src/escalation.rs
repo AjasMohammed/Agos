@@ -18,6 +18,10 @@ pub enum AutoAction {
 /// Default escalation timeout in seconds (5 minutes per Spec §12).
 const DEFAULT_ESCALATION_TIMEOUT_SECS: i64 = 300;
 
+/// Maximum number of escalations a single task may create.
+/// Looping agents can otherwise flood the escalation log with identical entries.
+const MAX_ESCALATIONS_PER_TASK: usize = 5;
+
 /// A pending escalation awaiting human review.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingEscalation {
@@ -145,9 +149,27 @@ impl EscalationManager {
         trace_id: TraceID,
         auto_action: Option<AutoAction>,
     ) -> u64 {
+        // Acquire the write lock once so the cap check and push are atomic,
+        // preventing a TOCTOU race where two concurrent callers both pass the check.
+        let mut escalations = self.escalations.write().await;
+        let task_count = escalations
+            .iter()
+            .filter(|e| e.task_id == task_id && !e.resolved)
+            .count();
+        if task_count >= MAX_ESCALATIONS_PER_TASK {
+            tracing::warn!(
+                task_id = %task_id,
+                count = task_count,
+                max = MAX_ESCALATIONS_PER_TASK,
+                "Escalation cap reached for task — suppressing new escalation"
+            );
+            return u64::MAX;
+        }
+
         let mut next_id = self.next_id.write().await;
         let id = *next_id;
         *next_id += 1;
+        drop(next_id);
 
         let now = chrono::Utc::now();
         let expires_at = now + chrono::Duration::seconds(self.timeout_secs);
@@ -173,7 +195,8 @@ impl EscalationManager {
             resolved_at: None,
         };
 
-        self.escalations.write().await.push(escalation.clone());
+        escalations.push(escalation.clone());
+        drop(escalations);
         self.persist_escalation(escalation).await;
         tracing::info!(
             escalation_id = id,

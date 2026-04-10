@@ -5,7 +5,8 @@ description = "Execute shell commands with path-restricted sandboxing (requires 
 author = "agentos-core"
 author_pubkey = "66ee96d2ad35e39ae0f8c9be90bd0f72826d609fe6394ecd1429c3196b79f399"
 signature = "37051a107207c15a124386a084d292b867962039b0f92c25a3d3564b5484072b25c295e08a4d9fe6f49ea50c8b01265c1b50b92c2866cdb61dfc1f849526ed08"
-trust_tier = "core"
+trust_tier  = "core"
+risk_class  = "exec_capable"
 
 [capabilities_required]
 permissions = [

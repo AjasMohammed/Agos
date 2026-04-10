@@ -23,6 +23,10 @@ pub struct AgentProfile {
     /// None if identity has not been generated yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_key_hex: Option<String>,
+    /// The effective base URL used for this agent's LLM endpoint.
+    /// None means the provider's built-in default is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

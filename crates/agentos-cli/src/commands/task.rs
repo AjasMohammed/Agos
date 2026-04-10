@@ -18,6 +18,10 @@ pub enum TaskCommands {
         /// Skip checkpointing for this task (ephemeral execution).
         #[arg(long, default_value_t = false)]
         no_checkpoint: bool,
+        /// Extended thinking level: off, low, medium, high, max (Anthropic models only).
+        /// Higher levels give better reasoning at increased token cost and latency.
+        #[arg(long, default_value = "off")]
+        thinking: String,
         /// The task prompt
         prompt: String,
     },
@@ -68,8 +72,24 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
             agent,
             autonomous,
             no_checkpoint,
+            thinking,
             prompt,
         } => {
+            use agentos_types::ThinkingLevel;
+            let thinking_level = match thinking.to_lowercase().as_str() {
+                "off" | "" => ThinkingLevel::Off,
+                "low" => ThinkingLevel::Low,
+                "medium" => ThinkingLevel::Medium,
+                "high" => ThinkingLevel::High,
+                "max" => ThinkingLevel::Max,
+                other => {
+                    eprintln!(
+                        "Warning: unrecognized thinking level '{}'. Valid: off, low, medium, high, max. Defaulting to 'off'.",
+                        other
+                    );
+                    ThinkingLevel::Off
+                }
+            };
             if let Some(ref a) = agent {
                 println!("📝 Submitting task to agent '{}'...", a);
             } else {
@@ -77,6 +97,9 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
             }
             if autonomous {
                 println!("   Mode: autonomous (no iteration/timeout limits)");
+            }
+            if thinking_level != ThinkingLevel::Off {
+                println!("   Thinking: {:?}", thinking_level);
             }
 
             println!(
@@ -94,6 +117,7 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                     prompt,
                     autonomous,
                     no_checkpoint,
+                    thinking_level,
                 })
                 .await?;
 

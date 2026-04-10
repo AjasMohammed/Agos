@@ -5,8 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ page_title }} - AgentOS</title>
     <meta name="csrf-token" content="{{ csrf_token }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/pico.min.css">
-    <link rel="stylesheet" href="/static/css/app.css">
+    <link rel="stylesheet" href="/static/css/app.css?v=2">
     <script src="/static/js/htmx.min.js"></script>
     <script src="/static/js/sse.js" defer></script>
     <script src="/static/js/alpine.min.js" defer></script>
@@ -27,21 +30,28 @@
         </div>
         <nav>
             <ul class="sidebar-nav">
-                <li><a href="/" data-nav="/"><span class="nav-icon" aria-hidden="true">&#9632;</span> Dashboard</a></li>
-                <li><a href="/agents" data-nav="/agents"><span class="nav-icon" aria-hidden="true">&#9679;</span> Agents</a></li>
-                <li><a href="/tasks" data-nav="/tasks"><span class="nav-icon" aria-hidden="true">&#9654;</span> Tasks</a></li>
-                <li><a href="/tools" data-nav="/tools"><span class="nav-icon" aria-hidden="true">&#9881;</span> Tools</a></li>
-                <li><a href="/marketplace" data-nav="/marketplace"><span class="nav-icon" aria-hidden="true">&#127978;</span> Marketplace</a></li>
-                <li><a href="/secrets" data-nav="/secrets"><span class="nav-icon" aria-hidden="true">&#128274;</span> Secrets</a></li>
-                <li><a href="/pipelines" data-nav="/pipelines"><span class="nav-icon" aria-hidden="true">&#8658;</span> Pipelines</a></li>
-                <li><a href="/chat" data-nav="/chat"><span class="nav-icon" aria-hidden="true">&#128172;</span> Chat</a></li>
-                <li><a href="/notifications" data-nav="/notifications"><span class="nav-icon" aria-hidden="true">&#128276;</span> Notifications</a></li>
-                <li><a href="/costs" data-nav="/costs"><span class="nav-icon" aria-hidden="true">&#128176;</span> Costs</a></li>
-                <li><a href="/audit" data-nav="/audit"><span class="nav-icon" aria-hidden="true">&#128196;</span> Audit</a></li>
+                <li><a href="/" data-nav="/">Dashboard</a></li>
+
+                <li class="sidebar-nav-group">Operations</li>
+                <li><a href="/agents" data-nav="/agents">Agents</a></li>
+                <li><a href="/tasks" data-nav="/tasks">Tasks</a></li>
+                <li><a href="/chat" data-nav="/chat">Chat</a></li>
+                <li><a href="/pipelines" data-nav="/pipelines">Pipelines</a></li>
+
+                <li class="sidebar-nav-group">Resources</li>
+                <li><a href="/tools" data-nav="/tools">Tools</a></li>
+                <li><a href="/marketplace" data-nav="/marketplace">Marketplace</a></li>
+
+                <li class="sidebar-nav-group">System</li>
+                <li><a href="/connectors" data-nav="/connectors">Connectors</a></li>
+                <li><a href="/notifications" data-nav="/notifications">Notifications</a></li>
+                <li><a href="/secrets" data-nav="/secrets">Secrets</a></li>
+                <li><a href="/costs" data-nav="/costs">Costs</a></li>
+                <li><a href="/audit" data-nav="/audit">Audit</a></li>
             </ul>
         </nav>
         <div class="sidebar-footer">
-            <small class="muted">AgentOS Web UI</small>
+            <small>AgentOS v3</small>
         </div>
     </aside>
 
@@ -72,13 +82,19 @@
                 </nav>
                 {% endif %}
             </div>
-            <div class="topbar-right" x-data="themeToggle()">
+            <div class="topbar-right">
+                <!-- SSE connection status indicator -->
+                <span class="connection-indicator" x-data="sseStatus()" x-init="init()">
+                    <span class="connection-dot" :class="state" :title="label" x-text=""></span>
+                    <span x-text="label" style="user-select:none"></span>
+                </span>
+
                 <!-- Notification bell: live-updated via SSE -->
                 <span x-data="notificationBell()" x-init="init()" style="margin-right:0.5rem">
                     <a href="/notifications" role="button" class="outline topbar-btn"
                        aria-label="Notifications" title="Notifications"
                        style="position:relative;padding-right:0.25rem">
-                        &#128276;
+                        Alerts
                         <span x-show="unreadCount > 0"
                               x-text="unreadCount"
                               style="position:absolute;top:-4px;right:-8px;background:var(--pico-color-red-500,#e53e3e);color:#fff;border-radius:50%;padding:1px 5px;font-size:0.7rem;min-width:1.1rem;text-align:center"
@@ -86,11 +102,6 @@
                               aria-label="unread notifications"></span>
                     </a>
                 </span>
-                <button class="topbar-btn" @click="toggle()"
-                        :title="dark ? 'Switch to light theme' : 'Switch to dark theme'"
-                        aria-label="Toggle theme">
-                    <span x-text="dark ? '&#9788;' : '&#9790;'">&#9790;</span>
-                </button>
             </div>
         </header>
 

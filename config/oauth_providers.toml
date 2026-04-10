@@ -1,0 +1,30 @@
+# OAuth Provider Configuration
+#
+# Each section defines an OAuth2 provider that agents can authenticate with.
+# Client IDs are read from environment variables; client secrets from the vault.
+#
+# To connect a provider:
+# 1. Set the environment variable with your client ID
+# 2. Store the client secret in the vault: agentos secret set <vault_key> <secret>
+# 3. Visit /connectors in the web UI and click "Connect"
+
+# [github]
+# authorize_url = "https://github.com/login/oauth/authorize"
+# token_url = "https://github.com/login/oauth/access_token"
+# client_id_env = "GITHUB_CLIENT_ID"
+# client_secret_vault_key = "github_client_secret"
+# default_scopes = ["repo", "read:org"]
+
+# [google]
+# authorize_url = "https://accounts.google.com/o/oauth2/v2/auth"
+# token_url = "https://oauth2.googleapis.com/token"
+# client_id_env = "GOOGLE_CLIENT_ID"
+# client_secret_vault_key = "google_client_secret"
+# default_scopes = ["https://www.googleapis.com/auth/calendar.readonly"]
+
+# [slack]
+# authorize_url = "https://slack.com/oauth/v2/authorize"
+# token_url = "https://slack.com/api/oauth.v2.access"
+# client_id_env = "SLACK_CLIENT_ID"
+# client_secret_vault_key = "slack_client_secret"
+# default_scopes = ["chat:write", "channels:read"]

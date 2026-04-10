@@ -1,5 +1,4 @@
 use crate::state::AppState;
-use agentos_api::types::AuditFilter;
 use agentos_types::TaskState;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -129,26 +128,24 @@ struct TaskSummary {
 }
 
 async fn build_agent_list(state: &AppState) -> (Vec<minijinja::Value>, usize) {
-    let agents_api = match state.service.list_agents().await {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::error!("Failed to list agents: {e}");
-            vec![]
-        }
-    };
-    let agents: Vec<_> = agents_api
+    // Use the kernel registry directly (like the SSE handler) so we get
+    // the real current_task value on the initial page render.
+    let registry = state.kernel.agent_registry.read().await;
+    let online = registry.list_online();
+    let agents: Vec<_> = online
         .iter()
         .map(|a| {
             context! {
                 name => a.name.clone(),
-                provider => a.provider.clone(),
+                provider => format!("{:?}", a.provider),
                 model => a.model.clone(),
-                status => a.status.clone(),
-                current_task => Option::<String>::None,
+                status => format!("{:?}", a.status),
+                current_task => a.current_task.as_ref().map(|t| t.to_string()),
             }
         })
         .collect();
     let count = agents.len();
+    drop(registry);
     (agents, count)
 }
 
@@ -180,19 +177,21 @@ async fn fetch_recent_audit(
     state: &AppState,
     limit: u32,
 ) -> Result<Vec<minijinja::Value>, agentos_api::ApiError> {
-    let filter = AuditFilter {
-        limit: Some(limit),
-        ..Default::default()
-    };
-    let entries = state.service.query_audit(filter).await?;
+    // Use kernel audit directly (like the SSE handler) so we get real severity values
+    // for the activity feed dot coloring on initial render.
+    let audit = state.kernel.audit.clone();
+    let entries =
+        tokio::task::spawn_blocking(move || audit.query_recent(limit).unwrap_or_default())
+            .await
+            .unwrap_or_default();
     Ok(entries
         .iter()
         .map(|e| {
             context! {
                 timestamp => e.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
-                event_type => e.event_type.trim_matches('"').to_string(),
-                severity => String::new(),
-                agent_id => e.agent_id.clone(),
+                event_type => format!("{:?}", e.event_type),
+                severity => format!("{:?}", e.severity),
+                agent_id => e.agent_id.as_ref().map(|id| id.to_string()),
             }
         })
         .collect())

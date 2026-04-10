@@ -1,0 +1,39 @@
+# AgentOS Security Demo — Restricted Agent Configuration
+#
+# This agent manifest demonstrates a deliberately restricted agent.
+# The CapabilityToken limits this agent to:
+#   - file:read  (only within /tmp/demo-workspace/)
+#   - shell:execute (only echo, ls — no destructive commands)
+#
+# All other operations (vault access, network, unrestricted shell) are DENIED.
+
+[agent]
+name = "demo-restricted-agent"
+description = "A deliberately restricted agent for the security demo"
+model = "mock"  # Uses MockLLMCore for deterministic demo output
+
+[capabilities]
+# Allowed permissions — minimal surface area
+allowed_tools = ["file-reader", "shell-exec"]
+
+[capabilities.permissions]
+# Read access restricted to demo workspace
+"fs.user_data" = "read"
+
+[capabilities.deny]
+# Explicit deny list — blocks even if somehow granted
+entries = [
+    "fs:/etc/",
+    "fs:/var/",
+    "fs:/root/",
+    "net:http://evil.example.com",
+    "shell:rm",
+    "shell:curl",
+    "shell:wget",
+    "shell:sqlite3",
+    "vault:kernel",
+]
+
+[workspace]
+data_dir = "/tmp/demo-workspace"
+allowed_paths = []

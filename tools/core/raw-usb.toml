@@ -4,6 +4,7 @@ version     = "1.0.0"
 description = "Enumerate whitelisted USB devices and perform stateless bulk, interrupt, and control transfers."
 author      = "agentos-core"
 trust_tier  = "core"
+risk_class  = "control_plane"
 
 [capabilities_required]
 permissions = [

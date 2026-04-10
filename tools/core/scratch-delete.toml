@@ -1,6 +1,7 @@
 [manifest]
 name        = "scratch-delete"
 version     = "1.0.0"
+risk_class  = "exec_capable"
 description = "Delete a scratchpad page by title"
 author      = "agentos-core"
 trust_tier  = "core"

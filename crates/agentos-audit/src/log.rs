@@ -173,6 +173,38 @@ pub enum AuditEventType {
     McpToolCall,
     /// Emitted when a potential injection attempt is detected in MCP output.
     McpInjectionDetected,
+
+    // OAuth credential lifecycle
+    /// Emitted when an OAuth credential is stored or updated in the vault.
+    OAuthCredentialStored,
+    /// Emitted when an OAuth credential is deleted from the vault.
+    OAuthCredentialDeleted,
+    /// Emitted when an OAuth access token is successfully refreshed.
+    OAuthTokenRefreshed,
+    /// Emitted when an OAuth token refresh fails (e.g., invalid_grant).
+    OAuthTokenExpired,
+    /// Emitted when an OAuth authorization code flow is initiated.
+    OAuthFlowStarted,
+    /// Emitted when an OAuth authorization code flow completes successfully.
+    OAuthFlowCompleted,
+
+    // Container runtime lifecycle
+    /// Emitted when a container is provisioned for an agent.
+    ContainerProvisioned,
+    /// Emitted when a command is executed inside a container.
+    ContainerExecRun,
+    /// Emitted when a container is destroyed.
+    ContainerDestroyed,
+    /// Emitted when a container provision is rejected due to quota limits.
+    ContainerQuotaExceeded,
+
+    // Device twin & safety engine
+    /// Emitted when an agent sets the desired state of an IoT device twin.
+    DesiredStateSet,
+    /// Emitted when a safety rule blocks an IoT actuator command.
+    SafetyRuleViolation,
+    /// Emitted when a device's reported state is updated from a sensor.
+    ReportedStateUpdated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -35,6 +35,8 @@ html2text = "0.12"
 similar = { version = "2", features = ["text"] }
 tokio-util = { workspace = true }
 anyhow = { workspace = true }
+urlencoding = "2"
+zeroize = { workspace = true }
 
 [dev-dependencies]
 agentos-audit = { path = "../agentos-audit" }

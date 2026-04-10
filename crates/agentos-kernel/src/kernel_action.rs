@@ -97,6 +97,14 @@ pub(crate) enum KernelAction {
         task_id: String,
         reason: String,
     },
+    /// Delegate a task to an external A2A-compliant agent via HTTP.
+    A2ADelegate {
+        agent_url: String,
+        capability: String,
+        input: serde_json::Value,
+        token: Option<String>,
+        wait_for_result: bool,
+    },
 }
 
 /// Why an agent is requesting human escalation.
@@ -349,6 +357,26 @@ impl KernelAction {
                     .to_string();
                 Some(Self::CancelAgent { task_id, reason })
             }
+            "a2a_delegate" => {
+                let agent_url = value.get("agent_url")?.as_str()?.to_string();
+                let capability = value.get("capability")?.as_str()?.to_string();
+                let input = value.get("input").cloned().unwrap_or(serde_json::json!({}));
+                let token = value
+                    .get("token")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let wait_for_result = value
+                    .get("wait_for_result")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                Some(Self::A2ADelegate {
+                    agent_url,
+                    capability,
+                    input,
+                    token,
+                    wait_for_result,
+                })
+            }
             other => {
                 tracing::warn!(action = %other, "Unknown _kernel_action, ignoring");
                 None
@@ -387,6 +415,7 @@ impl Kernel {
             KernelAction::AwaitAgents { .. } => "await_agents",
             KernelAction::PollAgents { .. } => "poll_agents",
             KernelAction::CancelAgent { .. } => "cancel_agent",
+            KernelAction::A2ADelegate { .. } => "a2a_delegate",
         };
 
         self.audit_log(agentos_audit::AuditEntry {
@@ -682,6 +711,18 @@ impl Kernel {
                 task_ids,
                 include_progress,
             } => {
+                // Cap the number of task IDs to bound per-call scheduler work.
+                if task_ids.len() > 50 {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!(
+                                "poll_agents supports at most 50 task_ids per call (got {})",
+                                task_ids.len()
+                            )
+                        }),
+                    };
+                }
                 let mut results = Vec::with_capacity(task_ids.len());
                 for id_str in &task_ids {
                     match id_str.parse::<agentos_types::TaskID>() {
@@ -715,8 +756,10 @@ impl Kernel {
                                                 .get("content")
                                                 .and_then(|v| v.as_str())
                                                 .map(|content: &str| {
-                                                    if content.len() > 200 {
-                                                        format!("{}...", &content[..200])
+                                                    let truncated: String =
+                                                        content.chars().take(200).collect();
+                                                    if truncated.len() < content.chars().count() {
+                                                        format!("{}...", truncated)
                                                     } else {
                                                         content.to_string()
                                                     }
@@ -725,7 +768,7 @@ impl Kernel {
                                         .collect();
                                     if let Some(obj) = entry.as_object_mut() {
                                         obj.insert(
-                                            "iterations".into(),
+                                            "iterations_approx".into(),
                                             serde_json::json!(history_len / 2),
                                         );
                                         obj.insert(
@@ -779,12 +822,13 @@ impl Kernel {
                         self.audit_log(AuditEntry {
                             timestamp: Utc::now(),
                             trace_id,
-                            event_type: AuditEventType::TaskCompleted,
+                            event_type: AuditEventType::TaskStateChanged,
                             agent_id: Some(task.agent_id),
                             task_id: Some(tid),
                             tool_id: None,
                             details: serde_json::json!({
                                 "action": "cancel_agent",
+                                "new_state": "cancelled",
                                 "reason": reason,
                                 "cancelled_by": task.id.to_string(),
                             }),
@@ -817,6 +861,96 @@ impl Kernel {
                         success: false,
                         result: serde_json::json!({
                             "error": format!("invalid task_id: {}", task_id)
+                        }),
+                    },
+                }
+            }
+            KernelAction::A2ADelegate {
+                agent_url,
+                capability,
+                input,
+                token,
+                wait_for_result,
+            } => {
+                // SSRF protection: resolve the hostname and reject private/internal addresses.
+                if let Some(ssrf_err) = check_a2a_url_ssrf(&agent_url).await {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": ssrf_err,
+                            "agent_url": agent_url,
+                        }),
+                    };
+                }
+
+                let mut client = agentos_mcp::a2a::A2AClient::new(&agent_url);
+                if let Some(ref t) = token {
+                    client = client.with_token(t);
+                }
+
+                let sender_url = format!("agentos://agent/{}", task.agent_id);
+
+                match client
+                    .submit_task(&capability, input.clone(), &sender_url)
+                    .await
+                {
+                    Ok(task_id) => {
+                        if !wait_for_result {
+                            KernelActionResult {
+                                success: true,
+                                result: serde_json::json!({
+                                    "task_id": task_id,
+                                    "agent_url": agent_url,
+                                    "capability": capability,
+                                    "status": "submitted",
+                                }),
+                            }
+                        } else {
+                            // Poll until terminal with 5-minute timeout
+                            let deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(300);
+                            loop {
+                                if std::time::Instant::now() > deadline {
+                                    break KernelActionResult {
+                                        success: false,
+                                        result: serde_json::json!({
+                                            "error": "A2A task timed out after 300s",
+                                            "task_id": task_id,
+                                        }),
+                                    };
+                                }
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                match client.poll_task(&task_id).await {
+                                    Ok(a2a_task) if a2a_task.is_terminal() => {
+                                        break KernelActionResult {
+                                            success: matches!(
+                                                a2a_task.status,
+                                                agentos_mcp::a2a::A2ATaskStatus::Completed { .. }
+                                            ),
+                                            result: serde_json::to_value(&a2a_task)
+                                                .unwrap_or(serde_json::json!({})),
+                                        };
+                                    }
+                                    Ok(_) => continue,
+                                    Err(e) => {
+                                        break KernelActionResult {
+                                            success: false,
+                                            result: serde_json::json!({
+                                                "error": format!("Poll failed: {}", e),
+                                                "task_id": task_id,
+                                            }),
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!("A2A delegation failed: {}", e),
+                            "agent_url": agent_url,
+                            "capability": capability,
                         }),
                     },
                 }
@@ -1570,6 +1704,7 @@ impl Kernel {
             spawn_depth: 0,
             is_team_coordinator: false,
             skip_checkpoint: false,
+            thinking_level: ThinkingLevel::Off,
         };
 
         self.scheduler.register_external(child_task.clone()).await;
@@ -1758,6 +1893,88 @@ impl Kernel {
                     "rpc_task_id": child_task_id.to_string(),
                 }),
             }
+        }
+    }
+}
+
+/// SSRF protection for outbound A2A delegation requests.
+///
+/// Parses the URL, resolves the hostname, and checks every resolved IP against
+/// private/internal ranges. Returns `Some(error_message)` if the URL should be
+/// blocked, `None` if it is safe to proceed.
+async fn check_a2a_url_ssrf(url: &str) -> Option<String> {
+    let parsed = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(e) => return Some(format!("Invalid agent_url: {}", e)),
+    };
+
+    // Only allow http/https schemes
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Some(format!(
+                "Blocked scheme '{}' — only http/https allowed",
+                other
+            ))
+        }
+    }
+
+    let host = match parsed.host_str() {
+        Some(h) => h.to_string(),
+        None => return Some("agent_url has no host".to_string()),
+    };
+
+    let port = parsed.port_or_known_default().unwrap_or(80);
+
+    // Resolve and check each IP
+    let addrs: Vec<std::net::IpAddr> =
+        match tokio::net::lookup_host(format!("{}:{}", host, port)).await {
+            Ok(iter) => iter.map(|sa| sa.ip()).collect(),
+            Err(e) => return Some(format!("DNS resolution failed for '{}': {}", host, e)),
+        };
+
+    for ip in &addrs {
+        if is_private_addr(ip) {
+            tracing::warn!(
+                url = %url,
+                %ip,
+                "A2A delegation SSRF blocked: private/internal IP"
+            );
+            return Some(format!(
+                "SSRF blocked: '{}' resolves to private/internal IP {}",
+                host, ip
+            ));
+        }
+    }
+
+    None
+}
+
+/// Returns true if `ip` is a private, loopback, link-local, or otherwise
+/// internal address that should never be reachable via agent-initiated A2A.
+fn is_private_addr(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_unspecified()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                // 100.64.0.0/10 — Carrier-Grade NAT (RFC 6598)
+                || {
+                    let o = v4.octets();
+                    o[0] == 100 && o[1] >= 64 && o[1] < 128
+                }
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_addr(&std::net::IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
         }
     }
 }

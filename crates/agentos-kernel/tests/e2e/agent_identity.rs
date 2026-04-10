@@ -20,6 +20,7 @@ async fn test_reconnect_same_provider_model_reuses_agent_id() {
             roles: vec![],
             test_mode: false,
             extra_permissions: vec![],
+            root: false,
         })
         .await
         .expect("first ConnectAgent")
@@ -51,6 +52,7 @@ async fn test_reconnect_same_provider_model_reuses_agent_id() {
             roles: vec![],
             test_mode: false,
             extra_permissions: vec![],
+            root: false,
         })
         .await
         .expect("second ConnectAgent")
@@ -95,6 +97,7 @@ async fn test_reconnect_different_model_issues_new_agent_id() {
             roles: vec![],
             test_mode: false,
             extra_permissions: vec![],
+            root: false,
         })
         .await
         .expect("first ConnectAgent")
@@ -125,6 +128,7 @@ async fn test_reconnect_different_model_issues_new_agent_id() {
             roles: vec![],
             test_mode: false,
             extra_permissions: vec![],
+            root: false,
         })
         .await
         .expect("second ConnectAgent different model")

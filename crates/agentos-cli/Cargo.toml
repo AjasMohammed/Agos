@@ -35,9 +35,13 @@ tracing-appender = { workspace = true }
 anyhow = { workspace = true }
 rpassword = { workspace = true }
 reqwest = { workspace = true }
+dialoguer = { workspace = true }
+indicatif = { workspace = true }
+toml_edit = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 libc = { workspace = true }
+subtle = "2"
 
 [features]
 default = []

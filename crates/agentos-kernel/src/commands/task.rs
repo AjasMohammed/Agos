@@ -11,6 +11,7 @@ impl Kernel {
         prompt: String,
         autonomous: bool,
         no_checkpoint: bool,
+        thinking_level: ThinkingLevel,
     ) -> KernelResponse {
         let registry = self.agent_registry.read().await;
         let agent_id = match agent_name {
@@ -113,6 +114,7 @@ impl Kernel {
             spawn_depth: 0,
             is_team_coordinator: false,
             skip_checkpoint: no_checkpoint,
+            thinking_level,
         };
 
         self.scheduler.register_external(task.clone()).await;
@@ -383,6 +385,7 @@ impl Kernel {
             spawn_depth: 0,
             is_team_coordinator: false,
             skip_checkpoint: false,
+            thinking_level: ThinkingLevel::Off,
         };
 
         // Check for circular dependencies before enqueuing
@@ -553,6 +556,7 @@ impl Kernel {
             spawn_depth: payload.task.spawn_depth,
             is_team_coordinator: payload.task.is_team_coordinator,
             skip_checkpoint: payload.task.skip_checkpoint,
+            thinking_level: payload.task.thinking_level,
         };
 
         // 6. Restore context window from checkpoint.

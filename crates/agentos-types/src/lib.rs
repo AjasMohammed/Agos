@@ -6,9 +6,11 @@ pub mod context;
 pub mod error;
 pub mod event;
 pub mod fallback;
+pub mod hook;
 pub mod ids;
 pub mod intent;
 pub mod notification;
+pub mod plugin;
 pub mod registry_query;
 pub mod role;
 pub mod schedule;
@@ -37,6 +39,7 @@ pub use event::{
     EventTypeFilter, RawUsbDeviceOpened, RawUsbTransfer, SubscriptionPriority, ThrottlePolicy,
 };
 pub use fallback::{apply_transforms, TransformOp};
+pub use hook::{HookEvent, HookResult};
 pub use ids::NotificationID;
 pub use ids::*;
 pub use intent::{
@@ -48,6 +51,7 @@ pub use notification::{
     DeliveryChannel, DeliveryStatus, InteractionRequest, NotificationPriority, NotificationSource,
     TaskOutcome, UserMessage, UserMessageKind, UserResponse,
 };
+pub use plugin::{ChannelDeclaration, PluginManifest};
 pub use registry_query::{
     AgentRegistryQuery, AgentRegistrySnapshot, AgentSummary, EscalationQuery, EscalationSnapshot,
     EscalationSummary, TaskIntrospectionSummary, TaskQuery, TaskSnapshot,
@@ -58,10 +62,10 @@ pub use skill::SkillManifest;
 pub use task::TriggerSource;
 pub use task::{
     AgentBudget, AgentTask, BudgetAction, ComplexityLevel, CostSnapshot, ModelDowngradeTier,
-    PreemptionLevel, TaskReasoningHints, TaskState, TaskSummary, ToolCallRecord,
+    PreemptionLevel, TaskReasoningHints, TaskState, TaskSummary, ThinkingLevel, ToolCallRecord,
 };
 pub use tool::{
-    ExecutorType, FallbackRule, RegisteredTool, ToolExecutor, ToolManifest, ToolSandbox,
+    ExecutorType, FallbackRule, RegisteredTool, RiskClass, ToolExecutor, ToolManifest, ToolSandbox,
     ToolStatus, TrustTier,
 };
 pub mod task_trace;
@@ -70,3 +74,7 @@ pub use task_trace::{
 };
 pub mod team;
 pub use team::{TeamConfig, TeamMember, TeamRole};
+pub mod webhook;
+pub use webhook::{
+    SignatureAlgorithm, WebhookEndpoint, WebhookEndpointMeta, WebhookEvent, WebhookProvider,
+};

@@ -1,6 +1,7 @@
 [manifest]
 name        = "process-manager"
 version     = "1.0.0"
+risk_class  = "exec_capable"
 description = "List running processes or terminate a process by PID via the Hardware Abstraction Layer."
 author      = "agentos-core"
 trust_tier  = "core"

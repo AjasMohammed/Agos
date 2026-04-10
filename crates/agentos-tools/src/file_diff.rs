@@ -104,7 +104,7 @@ impl AgentTool for FileDiff {
 
                 let resolve = |p: &str| -> Result<std::path::PathBuf, AgentOSError> {
                     let resolved =
-                        resolve_tool_path(p, &context.data_dir, &context.workspace_paths);
+                        resolve_tool_path(p, &context.data_dir, &context.workspace_paths)?;
                     resolved
                         .canonicalize()
                         .map_err(|_| AgentOSError::ToolExecutionFailed {

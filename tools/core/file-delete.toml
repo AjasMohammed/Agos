@@ -4,6 +4,7 @@ version     = "1.0.0"
 description = "Deletes a file within data_dir after acquiring an exclusive write lock. Refuses to delete directories. Path traversal is blocked via canonicalize + starts_with check."
 author      = "agentos-core"
 trust_tier  = "core"
+risk_class  = "exec_capable"
 
 [capabilities_required]
 permissions = ["fs.user_data:w"]
