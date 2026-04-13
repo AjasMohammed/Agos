@@ -1,0 +1,35 @@
+[manifest]
+name = "build-test"
+version = "1.0.0"
+description = "Run tests with auto-detected ecosystem (Rust/Python/Node.js/Go)"
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "exec_capable"
+
+[capabilities_required]
+permissions = ["build.test:x"]
+
+[capabilities_provided]
+outputs = ["content.json"]
+
+[intent_schema]
+input = "BuildTestIntent"
+output = "BuildTestResult"
+
+[input_schema]
+type = "object"
+
+[input_schema.properties.working_dir]
+description = "Project directory (auto-detects ecosystem from Cargo.toml, package.json, etc.)"
+type = "string"
+
+[sandbox]
+network = false
+fs_write = true
+gpu = false
+max_memory_mb = 512
+max_cpu_ms = 120000
+syscalls = []
+
+[executor]
+type = "inline"

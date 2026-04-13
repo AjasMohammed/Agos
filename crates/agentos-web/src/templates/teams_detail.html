@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Team {{ root.id }}</h1>
+        <p class="page-meta">Coordinator hierarchy and spawned task lineage</p>
+    </div>
+</div>
+
+<article>
+    <header><strong>Coordinator</strong></header>
+    <table>
+        <tbody>
+            <tr><th scope="row">Task</th><td><a href="/tasks/{{ root.id }}"><code>{{ root.id }}</code></a></td></tr>
+            <tr><th scope="row">Status</th><td>{{ root.state }}</td></tr>
+            <tr><th scope="row">Agent</th><td><code>{{ root.agent_id }}</code></td></tr>
+            <tr><th scope="row">Created</th><td>{{ root.created_at }}</td></tr>
+            <tr><th scope="row">Spawn Depth</th><td>{{ root.spawn_depth }}</td></tr>
+            <tr><th scope="row">Tool Calls</th><td>{{ root.tool_calls }}</td></tr>
+            <tr><th scope="row">Tokens</th><td>{{ root.tokens_used }}</td></tr>
+            <tr><th scope="row">Direct Children</th><td>{{ child_count }}</td></tr>
+            <tr><th scope="row">Total Descendants</th><td>{{ descendant_count }}</td></tr>
+            <tr><th scope="row">Prompt Preview</th><td>{{ root.prompt_preview }}</td></tr>
+        </tbody>
+    </table>
+</article>
+
+{% if child_rows|length == 0 %}
+<article><p class="muted">No child tasks were recorded for this team coordinator.</p></article>
+{% else %}
+<table>
+    <thead>
+        <tr>
+            <th>Task</th>
+            <th>Depth</th>
+            <th>Status</th>
+            <th>Agent</th>
+            <th>Prompt</th>
+            <th>Created</th>
+            <th>Tool Calls</th>
+            <th>Tokens</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for row in child_rows %}
+        <tr>
+            <td><a href="/tasks/{{ row.id }}"><code>{{ row.id }}</code></a></td>
+            <td>{{ row.depth }}</td>
+            <td>{{ row.state }}</td>
+            <td><code>{{ row.agent_id }}</code></td>
+            <td>{{ row.prompt_preview }}</td>
+            <td>{{ row.created_at }}</td>
+            <td>{{ row.tool_calls }}</td>
+            <td>{{ row.tokens_used }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

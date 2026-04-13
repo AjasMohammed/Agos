@@ -70,6 +70,8 @@ pub struct ToolExecutionContext {
 
 All built-in tools ship as `trust_tier = "core"` manifests in `tools/core/`. They are compiled into the kernel as Rust code — no external binary or WASM module is loaded.
 
+The kernel registers **78 built-in tools** spanning twelve domains (including 17 KMC capability tools): file I/O, memory (semantic / episodic / archival / procedural / blocks), scratchpad knowledge graph, multi-agent coordination, task management, system & hardware (HAL), data & utilities, agent introspection, user notifications, and the network family. Use the `agent-manual` tool with `{"section": "tools"}` to enumerate them at runtime; `{"section": "tool-detail", "name": "<tool>"}` returns the full input schema for any tool.
+
 ### `file-reader`
 
 Read files from the agent's data directory with line-based pagination and directory listing.
@@ -692,6 +694,7 @@ The following tools were added in v3. Use `agent-manual` with `{"section": "tool
 | Tool | Permission | Description |
 |------|------------|-------------|
 | `web-fetch` | `network.outbound:x` | Fetch a web page and extract text content (HTML stripped) |
+| `web-search` | `network.outbound:x` | Search the web with provider fallback (Brave → Tavily → Serper → DuckDuckGo). SSRF guard on scraped URLs. |
 
 #### Scratchpad
 
@@ -712,6 +715,12 @@ The following tools were added in v3. Use `agent-manual` with `{"section": "tool
 | `agent-call` | `agent.rpc:x` | Invoke another agent via RPC |
 | `task-list` | `task.query:r` | List active and recent tasks |
 | `task-status` | `task.query:r` | Inspect status of a specific task by ID |
+| `task-delegate` | `agent.delegate:x` | Delegate a sub-task to another agent (non-blocking) |
+| `spawn-agent` | `agent.spawn:x` | Spawn a child sub-agent task with scoped permissions and context handoff |
+| `await-agents` | `agent.spawn:x` | Wait for one or more sub-agent tasks and collect their results |
+| `verify-output` | `agent.spawn:x` | Spawn a critic agent to validate an output against criteria |
+| `poll-agent` | `agent.spawn:x` | Non-blocking check of sub-agent state and recent messages |
+| `cancel-agent` | `agent.spawn:x` | Cancel a child sub-agent task; cascades to its descendants |
 
 #### User Communication
 
@@ -735,9 +744,19 @@ The following tools were added in v3. Use `agent-manual` with `{"section": "tool
 
 #### Hardware
 
+These tools wrap the HAL drivers — each one runs through the device approval workflow and emits the corresponding HAL audit events.
+
 | Tool | Permission | Description |
 |------|------------|-------------|
-| `usb-storage` | `hardware.usb:rx` | Access USB storage devices |
+| `hardware-info` | `hardware.system:r` | Cross-driver overview: CPU, memory, disk, GPU, sensors |
+| `audio-tool` | `hardware.audio:x` | Capture and playback via PipeWire/PulseAudio |
+| `bluetooth-tool` | `hardware.bluetooth:x` | Scan, pair, and connect to Bluetooth devices |
+| `display-config` | `hardware.display:x` | Apply / revert display output configuration |
+| `printer` | `hardware.printer:x` | Submit and cancel CUPS print jobs |
+| `raw-usb` | `hardware.raw-usb:x` | Open USB devices and run bulk/interrupt/control transfers |
+| `usb-storage` | `hardware.usb:rx` | Mount, unmount, and eject USB mass storage |
+| `webcam` | `hardware.webcam:x` | Single-frame capture and burst capture via Video4Linux |
+| `sys-monitor` | `hardware.system:r` | Streaming system metrics (CPU, memory, disk I/O) |
 
 #### Utilities
 
@@ -748,11 +767,57 @@ The following tools were added in v3. Use `agent-manual` with `{"section": "tool
 | `agent-manual` | (none) | Query structured AgentOS documentation |
 | `agent-self` | (none) | View own agent state: permissions, budget, tools, subscriptions |
 
+### Kernel-Mediated Capability Tools (KMC)
+
+These 17 tools provide system-level capabilities mediated by the kernel's capability providers. They are bridge tools that dispatch to the kernel's `CapabilityProvider` implementations. See [[27-Kernel Mediated Capabilities]] for the full reference.
+
+**Managed Environments:**
+
+| Tool | Permission | Description |
+|------|-----------|-------------|
+| `env-create` | `env.create:x` | Create isolated workspace (Python/Node.js/Rust/Generic) |
+| `env-install` | `env.install:x`, `net.outbound:x` | Install package (validated against allowlist) |
+| `env-list` | `env.list:r` | List installed packages in workspace |
+| `env-destroy` | `env.destroy:x` | Remove workspace and packages |
+
+**Managed Storage Zones:**
+
+| Tool | Permission | Description |
+|------|-----------|-------------|
+| `storage-zone-create` | `storage.zone.create:x` | Request access to a filesystem directory |
+| `storage-zone-list` | `storage.zone.list:r` | List active zones |
+| `storage-zone-revoke` | `storage.zone.revoke:x` | Revoke a zone |
+
+**Managed Processes:**
+
+| Tool | Permission | Description |
+|------|-----------|-------------|
+| `proc-spawn` | `proc.spawn:x` | Spawn a managed background process |
+| `proc-signal` | `proc.signal:x` | Send signal to a process |
+| `proc-output` | `proc.output:r` | Read recent stdout/stderr |
+| `proc-list` | `proc.list:r` | List agent's processes |
+| `proc-wait` | `proc.wait:r` | Wait for process to exit |
+
+**Managed Networking:**
+
+| Tool | Permission | Description |
+|------|-----------|-------------|
+| `net-http` | `net.http:x` | HTTP request through policy proxy |
+| `net-dns` | `net.dns:r` | DNS resolution with rebinding defense |
+
+**Managed Builds:**
+
+| Tool | Permission | Description |
+|------|-----------|-------------|
+| `build-run` | `build.run:x` | Execute build command with structured output |
+| `build-test` | `build.test:x` | Run tests (auto-detects ecosystem) |
+| `build-lint` | `build.lint:x` | Run linter (auto-detects ecosystem) |
+
 ---
 
 ## Tool Manifests
 
-Every tool — built-in or external — is described by a TOML manifest. The kernel reads manifests from `tools/core/` (distribution-shipped) and `tools/user/` (operator-installed).
+Every tool -- built-in or external -- is described by a TOML manifest. The kernel reads manifests from `tools/core/` (distribution-shipped) and `tools/user/` (operator-installed).
 
 **Annotated example (`tools/core/file-reader.toml`):**
 

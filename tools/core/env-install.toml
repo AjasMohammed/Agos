@@ -1,0 +1,47 @@
+[manifest]
+name = "env-install"
+version = "1.0.0"
+description = "Install a package into a managed workspace (validates against allowlist)"
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "exec_capable"
+
+[capabilities_required]
+permissions = [
+    "env.install:x",
+    "net.outbound:x",
+]
+
+[capabilities_provided]
+outputs = ["content.json"]
+
+[intent_schema]
+input = "EnvInstallIntent"
+output = "EnvInstallResult"
+
+[input_schema]
+required = ["package", "workspace"]
+type = "object"
+
+[input_schema.properties.package]
+description = "Package name to install (e.g., flask, express, serde)"
+type = "string"
+
+[input_schema.properties.version]
+description = "Version constraint (e.g., '3.0.0', '>=2.0'). Omit for latest."
+type = "string"
+
+[input_schema.properties.workspace]
+description = "Name of the workspace to install into (must exist)"
+type = "string"
+
+[sandbox]
+network = true
+fs_write = true
+gpu = false
+max_memory_mb = 256
+max_cpu_ms = 120000
+syscalls = []
+
+[executor]
+type = "inline"

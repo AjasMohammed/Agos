@@ -1,5 +1,6 @@
 use crate::capability::PermissionSet;
 use crate::ids::*;
+use crate::ThinkingLevel;
 use serde::{Deserialize, Serialize};
 
 /// Profile of a connected LLM agent.
@@ -27,6 +28,13 @@ pub struct AgentProfile {
     /// None means the provider's built-in default is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Per-agent default thinking level used when a task request does not ask for
+    /// explicit extended thinking.
+    #[serde(default)]
+    pub default_thinking_level: ThinkingLevel,
+    /// Optional custom system prompt extension for this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

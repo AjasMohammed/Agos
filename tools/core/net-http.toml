@@ -1,0 +1,49 @@
+[manifest]
+name = "net-http"
+version = "1.0.0"
+description = "Make HTTP requests through the kernel's policy-controlled network proxy"
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "readonly_external"
+
+[capabilities_required]
+permissions = ["net.http:x"]
+
+[capabilities_provided]
+outputs = ["content.json"]
+
+[intent_schema]
+input = "NetHttpIntent"
+output = "NetHttpResult"
+
+[input_schema]
+required = ["url"]
+type = "object"
+
+[input_schema.properties.url]
+description = "Full URL to request"
+type = "string"
+
+[input_schema.properties.method]
+description = "HTTP method (default: GET)"
+type = "string"
+default = "GET"
+
+[input_schema.properties.headers]
+description = "Request headers as key-value pairs"
+type = "object"
+
+[input_schema.properties.body]
+description = "Request body (for POST/PUT)"
+type = "string"
+
+[sandbox]
+network = true
+fs_write = false
+gpu = false
+max_memory_mb = 128
+max_cpu_ms = 30000
+syscalls = []
+
+[executor]
+type = "inline"

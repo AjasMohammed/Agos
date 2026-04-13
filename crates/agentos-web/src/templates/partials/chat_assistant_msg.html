@@ -1,0 +1,15 @@
+<div class="chat-row chat-row-agent" data-msg-id="{{ msg.id|default('') }}">
+    <div class="chat-agent-avatar" aria-hidden="true">{{ agent_name[:1]|upper }}</div>
+    <div class="chat-agent-column">
+        <div class="chat-agent-name muted">{{ agent_name }}</div>
+        <div class="chat-bubble chat-bubble-agent">
+            <div class="chat-bubble-content-agent markdown-content">{{ msg.content|markdown }}</div>
+            <div class="chat-bubble-meta chat-bubble-meta-left">
+                <span>{{ msg.created_at|relative_time }}</span>
+                {% if msg.tokens_used %}<span>· {{ msg.tokens_used }} tokens</span>{% endif %}
+                {% if msg.cost_usd %}<span>· ${{ msg.cost_usd }}</span>{% endif %}
+                <button class="chat-msg-action" title="Copy" onclick="navigator.clipboard.writeText(this.closest('.chat-bubble').querySelector('.chat-bubble-content-agent').innerText)">Copy</button>
+            </div>
+        </div>
+    </div>
+</div>

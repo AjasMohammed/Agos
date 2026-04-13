@@ -10,14 +10,14 @@
     </div>
 
     <dialog :open="showModal" @close="showModal = false"
+            x-on:close-agent-modal.window="showModal = false"
             aria-labelledby="connect-agent-title" role="dialog">
         <article>
             <header>
                 <button aria-label="Close dialog" rel="prev" @click="showModal = false"></button>
                 <h3 id="connect-agent-title">Connect Agent</h3>
             </header>
-            <form method="post" action="/agents" hx-post="/agents" hx-target="#agent-grid" hx-swap="innerHTML"
-                  @htmx:after-request="showModal = false">
+            <form method="post" action="/agents" hx-post="/agents" hx-target="#agent-grid" hx-swap="innerHTML">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <label for="name">Agent Name
                     <input type="text" id="name" name="name" required aria-required="true"
@@ -26,20 +26,42 @@
                 <small id="name-hint" class="muted">A unique name for this agent</small>
                 <label for="provider">Provider
                     <select id="provider" name="provider" required aria-required="true">
-                        <option value="ollama">Ollama</option>
-                        <option value="openai">OpenAI</option>
-                        <option value="anthropic">Anthropic</option>
-                        <option value="gemini">Gemini</option>
+                        {% for p in providers %}
+                        <option value="{{ p.id }}">{{ p.label }}</option>
+                        {% endfor %}
                     </select>
                 </label>
                 <label for="model">Model
                     <input type="text" id="model" name="model" required aria-required="true"
                            placeholder="e.g. llama3.2, gpt-4o, claude-opus-4-6">
                 </label>
+                <label for="base_url">Base URL
+                    <input type="text" id="base_url" name="base_url"
+                           placeholder="Optional custom endpoint">
+                </label>
+                <label for="roles">Roles
+                    <input type="text" id="roles" name="roles"
+                           placeholder="Comma-separated, e.g. researcher, reviewer">
+                </label>
                 <label for="description">Description
                     <input type="text" id="description" name="description"
                            placeholder="Optional description">
                 </label>
+                <label for="thinking_level">Default Thinking Level
+                    <select id="thinking_level" name="thinking_level">
+                        <option value="">Provider default</option>
+                        <option value="off">Off</option>
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">High</option>
+                        <option value="max">Max</option>
+                    </select>
+                </label>
+                <label for="system_prompt">System Prompt
+                    <textarea id="system_prompt" name="system_prompt" rows="4"
+                              placeholder="Optional custom instructions appended to the base system prompt"></textarea>
+                </label>
+                <small class="form-error" id="connect-form-error" role="alert"></small>
                 <button type="submit">Connect</button>
             </form>
         </article>

@@ -1,6 +1,8 @@
+use crate::chat_inflight::InFlightInference;
 use crate::state::AppState;
 use agentos_kernel::kernel::ChatStreamEvent;
 use axum::extract::{Form, Path, State};
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -30,6 +32,93 @@ pub struct NewSessionForm {
 #[derive(Deserialize)]
 pub struct SendForm {
     pub message: String,
+}
+
+#[derive(Deserialize)]
+pub struct RenameSessionForm {
+    pub title: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ForkSessionForm {
+    pub title: Option<String>,
+}
+
+fn spawn_streaming_inference(
+    state: &AppState,
+    session_id: String,
+    agent_name: String,
+    history: Vec<(String, String)>,
+    user_msg: String,
+    inflight_handle: Arc<InFlightInference>,
+) {
+    let kernel = state.kernel.clone();
+    let chat_store = Arc::clone(&state.chat_store);
+    let inflight_map = Arc::clone(&state.inflight_chat);
+
+    tokio::spawn(async move {
+        let (kernel_tx, mut kernel_rx) = tokio::sync::mpsc::channel::<ChatStreamEvent>(64);
+        let forwarder = {
+            let inflight = Arc::clone(&inflight_handle);
+            tokio::spawn(async move {
+                while let Some(event) = kernel_rx.recv().await {
+                    inflight.push(event).await;
+                }
+            })
+        };
+
+        let result = kernel
+            .chat_infer_streaming(&agent_name, &history, &user_msg, kernel_tx)
+            .await;
+        let _ = forwarder.await;
+
+        match result {
+            Ok(inf) => {
+                if !inf.tool_calls.is_empty() {
+                    let store = Arc::clone(&chat_store);
+                    let sid = session_id.clone();
+                    let calls = inf.tool_calls.clone();
+                    match tokio::task::spawn_blocking(move || store.add_tool_calls(&sid, &calls))
+                        .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => tracing::error!("Failed to save chat tool calls: {e}"),
+                        Err(e) => tracing::error!("spawn_blocking panicked saving tool calls: {e}"),
+                    }
+                }
+
+                let store = Arc::clone(&chat_store);
+                let sid = session_id.clone();
+                let answer = inf.answer.clone();
+                match tokio::task::spawn_blocking(move || {
+                    store.add_message(&sid, "assistant", &answer)
+                })
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::error!("Failed to save assistant message: {e}"),
+                    Err(e) => tracing::error!("spawn_blocking panicked saving assistant: {e}"),
+                }
+                tracing::info!(
+                    target: "agentos::chat",
+                    session_id = %session_id,
+                    answer_len = inf.answer.len(),
+                    iterations = inf.iterations,
+                    tool_calls = inf.tool_calls.len(),
+                    "Streaming chat completed and persisted"
+                );
+            }
+            Err(e) => {
+                inflight_handle
+                    .push(ChatStreamEvent::Error { message: e.clone() })
+                    .await;
+                tracing::error!("Streaming chat inference failed: {e}");
+            }
+        }
+
+        inflight_handle.mark_done().await;
+        inflight_map.schedule_cleanup(session_id);
+    });
 }
 
 /// GET /chat — session list + new session compose form.
@@ -70,6 +159,7 @@ pub async fn list(State(state): State<AppState>, jar: CookieJar) -> Response {
             context! {
                 id => s.id.clone(),
                 agent_name => s.agent_name.clone(),
+                title => s.title.clone(),
                 updated_at => s.updated_at.clone(),
                 preview,
             }
@@ -85,6 +175,197 @@ pub async fn list(State(state): State<AppState>, jar: CookieJar) -> Response {
         csrf_token,
     };
     super::render(&state.templates, "chat.html", ctx)
+}
+
+/// POST /chat/{session_id}/rename — rename a session title.
+pub async fn rename_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Form(form): Form<RenameSessionForm>,
+) -> Response {
+    if uuid::Uuid::parse_str(&session_id).is_err() {
+        return (StatusCode::BAD_REQUEST, "Invalid session ID").into_response();
+    }
+    let title = form.title.as_deref().map(str::trim).unwrap_or("");
+    if title.len() > 120 {
+        return (StatusCode::BAD_REQUEST, "Title too long (max 120 chars)").into_response();
+    }
+    let title_opt = if title.is_empty() {
+        None
+    } else {
+        Some(title.to_string())
+    };
+    let store = Arc::clone(&state.chat_store);
+    let sid = session_id.clone();
+    match tokio::task::spawn_blocking(move || store.rename_session(&sid, title_opt.as_deref()))
+        .await
+    {
+        Ok(Ok(())) => Redirect::to(&format!("/chat/{}", session_id)).into_response(),
+        Ok(Err(rusqlite::Error::QueryReturnedNoRows)) => {
+            (StatusCode::NOT_FOUND, "Session not found").into_response()
+        }
+        Ok(Err(e)) => {
+            tracing::error!(session_id = %session_id, error = %e, "Failed to rename session");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to rename session",
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(session_id = %session_id, error = %e, "Rename session task failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+        }
+    }
+}
+
+/// POST /chat/{session_id}/delete — delete a chat session.
+pub async fn delete_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Response {
+    if uuid::Uuid::parse_str(&session_id).is_err() {
+        return (StatusCode::BAD_REQUEST, "Invalid session ID").into_response();
+    }
+    let store = Arc::clone(&state.chat_store);
+    let sid = session_id.clone();
+    match tokio::task::spawn_blocking(move || store.delete_session(&sid)).await {
+        Ok(Ok(())) => Redirect::to("/chat").into_response(),
+        Ok(Err(rusqlite::Error::QueryReturnedNoRows)) => {
+            (StatusCode::NOT_FOUND, "Session not found").into_response()
+        }
+        Ok(Err(e)) => {
+            tracing::error!(session_id = %session_id, error = %e, "Failed to delete session");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to delete session",
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(session_id = %session_id, error = %e, "Delete session task failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+        }
+    }
+}
+
+/// POST /chat/{session_id}/fork — duplicate a session into a new one.
+pub async fn fork_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Form(form): Form<ForkSessionForm>,
+) -> Response {
+    if uuid::Uuid::parse_str(&session_id).is_err() {
+        return (StatusCode::BAD_REQUEST, "Invalid session ID").into_response();
+    }
+    let title = form.title.as_deref().map(str::trim).unwrap_or("");
+    if title.len() > 120 {
+        return (StatusCode::BAD_REQUEST, "Title too long (max 120 chars)").into_response();
+    }
+    let title_opt = if title.is_empty() {
+        None
+    } else {
+        Some(title.to_string())
+    };
+    let store = Arc::clone(&state.chat_store);
+    let sid = session_id.clone();
+    match tokio::task::spawn_blocking(move || store.fork_session(&sid, title_opt.as_deref())).await
+    {
+        Ok(Ok(new_id)) => Redirect::to(&format!("/chat/{}", new_id)).into_response(),
+        Ok(Err(rusqlite::Error::QueryReturnedNoRows)) => {
+            (StatusCode::NOT_FOUND, "Session not found").into_response()
+        }
+        Ok(Err(e)) => {
+            tracing::error!(session_id = %session_id, error = %e, "Failed to fork session");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to fork session").into_response()
+        }
+        Err(e) => {
+            tracing::error!(session_id = %session_id, error = %e, "Fork session task failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+        }
+    }
+}
+
+/// GET /chat/{session_id}/export — export a session as markdown.
+pub async fn export_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Response {
+    if uuid::Uuid::parse_str(&session_id).is_err() {
+        return (StatusCode::BAD_REQUEST, "Invalid session ID").into_response();
+    }
+    let (session, messages) = {
+        let store = Arc::clone(&state.chat_store);
+        let sid = session_id.clone();
+        match tokio::task::spawn_blocking(move || {
+            let session = store.get_session(&sid)?;
+            let messages = store.get_messages(&sid)?;
+            Ok::<_, rusqlite::Error>((session, messages))
+        })
+        .await
+        {
+            Ok(Ok((Some(s), m))) => (s, m),
+            Ok(Ok((None, _))) => {
+                return (StatusCode::NOT_FOUND, "Session not found").into_response()
+            }
+            Ok(Err(e)) => {
+                tracing::error!(session_id = %session_id, error = %e, "Failed to export session");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to export session",
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::error!(session_id = %session_id, error = %e, "Export session task failed");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
+            }
+        }
+    };
+
+    let mut out = String::new();
+    let title = session
+        .title
+        .clone()
+        .unwrap_or_else(|| format!("Chat with {}", session.agent_name));
+    out.push_str(&format!("# {}\n\n", title));
+    for msg in messages {
+        match msg.role.as_str() {
+            "user" => out.push_str("## You\n\n"),
+            "assistant" => out.push_str(&format!("## {}\n\n", session.agent_name)),
+            "tool" => {
+                let tool_name = msg.tool_name.unwrap_or_else(|| "tool".to_string());
+                out.push_str(&format!("### Tool: {}\n\n", tool_name));
+                if let Some(payload) = msg.tool_payload_json {
+                    out.push_str("#### Input\n\n```json\n");
+                    out.push_str(&payload);
+                    out.push_str("\n```\n\n");
+                }
+                if let Some(result) = msg.tool_result_json {
+                    out.push_str("#### Result\n\n```json\n");
+                    out.push_str(&result);
+                    out.push_str("\n```\n\n");
+                }
+            }
+            _ => out.push_str("## Message\n\n"),
+        }
+        if msg.role != "tool" {
+            out.push_str(&msg.content);
+            out.push_str("\n\n");
+        }
+    }
+
+    let mut response = out.into_response();
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/markdown; charset=utf-8"),
+    );
+    let filename = format!("chat-{}.md", &session_id[..8]);
+    let disposition = format!("attachment; filename=\"{}\"", filename);
+    if let Ok(h) = axum::http::HeaderValue::from_str(&disposition) {
+        response.headers_mut().insert(CONTENT_DISPOSITION, h);
+    }
+    response
 }
 
 /// POST /chat/new — create a session and send the first message.
@@ -153,84 +434,43 @@ pub async fn new_session(
         }
     };
 
-    // Run inference directly against the agent's LLM (no task created).
-    // TODO: Migrate to state.service.chat_send() once ChatRequest supports passing
-    // through tool call results and the service method exposes a non-streaming path
-    // that returns tool_calls alongside the assistant response.
-    let result = match state
-        .kernel
-        .chat_infer_with_tools(&agent_name, &[], &message)
-        .await
-    {
-        Ok(result) => {
-            if !result.tool_calls.is_empty() {
-                tracing::debug!(
-                    iterations = result.iterations,
-                    tool_calls = result.tool_calls.len(),
-                    "Chat inference completed with tool calls"
-                );
-            }
-            result
-        }
-        Err(e) => {
-            tracing::error!("Chat inference failed: {e}");
+    let inflight = match state.inflight_chat.try_start(&session_id) {
+        Some(h) => h,
+        None => {
             return (
-                StatusCode::BAD_GATEWAY,
-                "Agent is unavailable. Check server logs.",
+                StatusCode::CONFLICT,
+                "A reply is already being generated for this session",
             )
                 .into_response();
         }
     };
 
-    // Save tool call records before the assistant message.
-    if !result.tool_calls.is_empty() {
-        let store = Arc::clone(&state.chat_store);
-        let sid = session_id.clone();
-        let calls = result.tool_calls.clone();
-        match tokio::task::spawn_blocking(move || store.add_tool_calls(&sid, &calls)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::error!("Failed to save tool calls: {e}"),
-            Err(e) => tracing::error!("spawn_blocking panicked saving tool calls: {e}"),
-        }
-    }
-
-    // Save assistant response.
-    let store = Arc::clone(&state.chat_store);
-    let sid = session_id.clone();
-    let response = result.answer.clone();
-    if response.trim().is_empty() {
-        tracing::warn!(
-            target: "agentos::chat",
-            session_id = %session_id,
-            "Saving empty assistant response to chat store"
-        );
-    }
-    tracing::info!(
-        target: "agentos::chat",
-        session_id = %session_id,
-        answer_len = response.len(),
-        iterations = result.iterations,
-        tool_calls = result.tool_calls.len(),
-        "Persisting chat assistant response"
+    // First message has no prior user/assistant history (excluding the just-persisted user turn).
+    spawn_streaming_inference(
+        &state,
+        session_id.clone(),
+        agent_name.clone(),
+        Vec::new(),
+        message,
+        inflight,
     );
-    match tokio::task::spawn_blocking(move || store.add_message(&sid, "assistant", &response)).await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => tracing::error!("Failed to save assistant response: {e}"),
-        Err(e) => tracing::error!("spawn_blocking panicked saving assistant response: {e}"),
-    }
 
     Redirect::to(&format!("/chat/{}", session_id)).into_response()
 }
 
 /// POST /chat/{session_id}/send — continue an existing session.
+///
+/// Reserves an in-flight inference slot for the session, persists the user message,
+/// then spawns a detached inference task that streams events into the in-flight buffer.
+/// The HTMX partial returned by this handler opens an EventSource to `/stream` which
+/// attaches to that buffer. A refresh of the page before or during streaming no longer
+/// orphans the user message — the spawned task runs to completion independently, and
+/// a reconnect can replay the events from cursor 0.
 pub async fn send(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Form(form): Form<SendForm>,
 ) -> Response {
-    // Reject non-UUID session IDs immediately — UUIDs are ASCII-only which also
-    // makes subsequent byte-offset slicing safe.
     if uuid::Uuid::parse_str(&session_id).is_err() {
         return (StatusCode::BAD_REQUEST, "Invalid session ID").into_response();
     }
@@ -243,18 +483,49 @@ pub async fn send(
         return (StatusCode::BAD_REQUEST, "Message too long (max 32 KB)").into_response();
     }
 
-    // Verify the session exists (returns 404 if not).
-    {
+    let session = {
         let store = Arc::clone(&state.chat_store);
         let sid = session_id.clone();
         match tokio::task::spawn_blocking(move || store.get_session(&sid)).await {
-            Ok(Ok(Some(_))) => {}
+            Ok(Ok(Some(s))) => s,
             Ok(Ok(None)) => return (StatusCode::NOT_FOUND, "Session not found").into_response(),
             _ => return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response(),
         }
-    }
+    };
 
-    // Persist user message before returning the partial. Required — not best-effort.
+    // Reserve the slot BEFORE persisting so two concurrent /send requests for the same
+    // session cannot both kick off an inference or double-persist a user message.
+    let inflight = match state.inflight_chat.try_start(&session_id) {
+        Some(h) => h,
+        None => {
+            return (
+                StatusCode::CONFLICT,
+                "A reply is already being generated for this session",
+            )
+                .into_response();
+        }
+    };
+
+    // Load prior messages for LLM context (everything before the one we're about to
+    // insert). Only user/assistant roles feed the model.
+    let history: Vec<(String, String)> = {
+        let store = Arc::clone(&state.chat_store);
+        let sid = session_id.clone();
+        match tokio::task::spawn_blocking(move || store.get_messages(&sid)).await {
+            Ok(Ok(msgs)) => msgs
+                .into_iter()
+                .filter(|m| m.role == "user" || m.role == "assistant")
+                .map(|m| (m.role, m.content))
+                .collect(),
+            _ => {
+                state.inflight_chat.abandon(&session_id);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to load history")
+                    .into_response();
+            }
+        }
+    };
+
+    // Persist the user message now that the slot is reserved.
     {
         let store = Arc::clone(&state.chat_store);
         let sid = session_id.clone();
@@ -263,45 +534,83 @@ pub async fn send(
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 tracing::error!("Failed to save user message: {e}");
+                state.inflight_chat.abandon(&session_id);
                 return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save message")
                     .into_response();
             }
             Err(e) => {
                 tracing::error!("spawn_blocking panicked saving user message: {e}");
+                state.inflight_chat.abandon(&session_id);
                 return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
             }
         }
     }
 
-    // Return an HTMX partial that renders the user message and starts the SSE stream.
-    // Inference happens asynchronously in the SSE endpoint.
+    // Spawn the detached inference task. It owns `inflight` and will run to completion
+    // regardless of whether a browser is currently subscribed via /stream.
+    spawn_streaming_inference(
+        &state,
+        session_id.clone(),
+        session.agent_name.clone(),
+        history,
+        message.clone(),
+        Arc::clone(&inflight),
+    );
+
+    // Return the HTMX partial: user bubble + streaming target. The shared script at
+    // /static/js/chat-stream.js reads the data-* attributes and attaches to /stream.
+    let agent_initial = session
+        .agent_name
+        .chars()
+        .next()
+        .unwrap_or('A')
+        .to_uppercase()
+        .to_string();
+    // Each /send partial gets a unique target so multiple turns on the same page do
+    // not collide on shared element IDs. chat-stream.js uses data-role selectors to
+    // pick up targets that have not yet been attached.
     let html = format!(
         r#"<div class="chat-row chat-row-user">
-            <div class="chat-bubble chat-bubble-user">
-                <div class="chat-bubble-content">{}</div>
+    <div class="chat-bubble chat-bubble-user">
+        <div class="chat-bubble-content">{user_msg}</div>
+    </div>
+</div>
+<div data-role="chat-stream-target"
+     data-session-id="{session_id}"
+     data-agent-name="{agent_name}"
+     data-agent-initial="{agent_initial}">
+    <div class="chat-thinking" data-role="chat-thinking-indicator">
+        <div class="chat-thinking-dots"><span></span><span></span><span></span></div>
+        <span class="muted">Thinking...</span>
+    </div>
+    <div class="chat-activity-list" data-role="chat-activity-list"></div>
+    <div data-role="chat-stream-response" class="chat-row chat-row-agent" style="display:none;">
+        <div class="chat-agent-avatar" aria-hidden="true">{agent_initial}</div>
+        <div class="chat-agent-column">
+            <div class="chat-agent-name muted">{agent_name}</div>
+            <div class="chat-bubble chat-bubble-agent">
+                <div data-role="chat-stream-text" class="chat-bubble-content-agent chat-streaming chat-stream-markdown markdown-content"></div>
             </div>
         </div>
-        <div id="chat-stream-target"
-             hx-ext="sse"
-             sse-connect="/chat/{}/stream"
-             sse-swap="chat-done"
-             hx-swap="outerHTML">
-            <div class="chat-thinking">
-                <div class="chat-thinking-dots"><span></span><span></span><span></span></div>
-                <span class="muted">Thinking...</span>
-            </div>
-        </div>"#,
-        html_escape(&message),
-        session_id,
+    </div>
+</div>"#,
+        user_msg = html_escape(&message),
+        session_id = html_escape(&session_id),
+        agent_name = html_escape(&session.agent_name),
+        agent_initial = html_escape(&agent_initial),
     );
     Html(html).into_response()
 }
 
-/// GET /chat/{session_id}/stream — SSE endpoint that streams inference progress.
+/// GET /chat/{session_id}/stream — SSE endpoint that attaches to an in-flight inference.
 ///
-/// The browser connects here after `POST /send` returns the HTMX partial.
-/// Sends typed events: `chat-thinking`, `chat-tool-start`, `chat-tool-result`, `chat-done`.
-/// The `chat-done` event data is rendered HTML that HTMX swaps into the page.
+/// Does NOT run inference itself — that is owned by the task spawned from `send`. This
+/// handler looks up the session's in-flight entry, replays buffered events from cursor
+/// 0 (so a refresh sees the full stream, not just whatever comes after connection), and
+/// then blocks until the task pushes more events or marks itself done.
+///
+/// Returns 410 Gone when no entry exists — that's the signal to the client that the
+/// inference is not running and the page should show whatever is already in the DB.
 pub async fn message_stream(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -310,180 +619,58 @@ pub async fn message_stream(
         return Err((StatusCode::BAD_REQUEST, "Invalid session ID").into_response());
     }
 
-    // Load session info.
-    let session = {
-        let store = Arc::clone(&state.chat_store);
-        let sid = session_id.clone();
-        match tokio::task::spawn_blocking(move || store.get_session(&sid)).await {
-            Ok(Ok(Some(s))) => s,
-            Ok(Ok(None)) => {
-                return Err((StatusCode::NOT_FOUND, "Session not found").into_response())
-            }
-            _ => return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()),
-        }
-    };
-
-    // Load history — only user/assistant roles are fed to the LLM.
-    let all_messages: Vec<(String, String)> = {
-        let store = Arc::clone(&state.chat_store);
-        let sid = session_id.clone();
-        tokio::task::spawn_blocking(move || store.get_messages(&sid))
-            .await
-            .unwrap_or_else(|_| Ok(vec![]))
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|m| m.role == "user" || m.role == "assistant")
-            .map(|m| (m.role, m.content))
-            .collect()
-    };
-
-    // Find the index of the last user message — that's the one we're responding to.
-    let last_user_idx = match all_messages.iter().rposition(|(role, _)| role == "user") {
-        Some(idx) => idx,
+    let inflight: Arc<InFlightInference> = match state.inflight_chat.get(&session_id) {
+        Some(h) => h,
         None => {
-            return Err((StatusCode::BAD_REQUEST, "No user message to respond to").into_response())
+            return Err(
+                (StatusCode::GONE, "No in-flight inference for this session").into_response(),
+            );
         }
     };
 
-    let last_user_msg = all_messages[last_user_idx].1.clone();
+    let (tx, rx) = tokio::sync::mpsc::channel::<ChatStreamEvent>(64);
+    {
+        let inflight = Arc::clone(&inflight);
+        tokio::spawn(async move {
+            inflight.subscribe_events(tx).await;
+        });
+    }
 
-    // History fed to the LLM is everything except the last user message.
-    let history: Vec<(String, String)> = all_messages
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != last_user_idx)
-        .map(|(_, m)| m.clone())
-        .collect();
+    use agentos_types::ChatStreamFrame;
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<ChatStreamEvent>(32);
-    // Clone tx so the spawned task can emit an Error event on pre-loop failures
-    // (e.g. agent not found, no LLM adapter) that the kernel method doesn't cover.
-    let tx_err = tx.clone();
-
-    // TODO: Migrate to state.service once KernelService grows a streaming chat method
-    // that accepts a sender channel (mpsc::Sender<ChatStreamEvent>) and returns a
-    // stream of chunks. Currently chat_send() on the trait is non-streaming only.
-    let kernel = state.kernel.clone();
-    let agent_name = session.agent_name.clone();
-    let chat_store = Arc::clone(&state.chat_store);
-    let sid = session_id.clone();
-
-    tokio::spawn(async move {
-        match kernel
-            .chat_infer_streaming(&agent_name, &history, &last_user_msg, tx)
-            .await
-        {
-            Ok(result) => {
-                // Done event has already been sent; drop the backup sender so the SSE
-                // stream closes immediately rather than waiting for DB persistence.
-                drop(tx_err);
-                // Save tool calls before the assistant message.
-                if !result.tool_calls.is_empty() {
-                    let store = Arc::clone(&chat_store);
-                    let calls = result.tool_calls.clone();
-                    let s = sid.clone();
-                    match tokio::task::spawn_blocking(move || store.add_tool_calls(&s, &calls))
-                        .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => tracing::error!("Failed to save chat tool calls: {e}"),
-                        Err(e) => tracing::error!("spawn_blocking panicked saving tool calls: {e}"),
-                    }
-                }
-                // Save assistant response.
-                let store = Arc::clone(&chat_store);
-                let answer = result.answer.clone();
-                if answer.trim().is_empty() {
-                    tracing::warn!(
-                        target: "agentos::chat",
-                        session_id = %sid,
-                        "Saving empty streaming assistant response to chat store"
-                    );
-                }
-                tracing::info!(
-                    target: "agentos::chat",
-                    session_id = %sid,
-                    answer_len = answer.len(),
-                    iterations = result.iterations,
-                    tool_calls = result.tool_calls.len(),
-                    "Persisting streaming chat assistant response"
-                );
-                match tokio::task::spawn_blocking(move || {
-                    store.add_message(&sid, "assistant", &answer)
-                })
-                .await
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => tracing::error!("Failed to save assistant message: {e}"),
-                    Err(e) => tracing::error!("spawn_blocking panicked saving assistant: {e}"),
-                }
-            }
-            Err(e) => {
-                // Send the error so the client sees it rather than hanging on "Thinking..."
-                let _ = tx_err
-                    .send(ChatStreamEvent::Error { message: e.clone() })
-                    .await;
-                tracing::error!("Streaming chat inference failed: {e}");
-            }
-        }
-    });
-
-    // Convert the mpsc receiver to a futures Stream and map each event to an SSE Event.
-    let agent_name_for_stream = session.agent_name.clone();
     let stream = ReceiverStream::new(rx).map(move |event| {
-        let (event_name, data) = match &event {
-            ChatStreamEvent::Thinking { .. } => (
-                "chat-thinking",
-                serde_json::to_string(&event).unwrap_or_default(),
-            ),
-            ChatStreamEvent::ToolStart { .. } => (
-                "chat-tool-start",
-                serde_json::to_string(&event).unwrap_or_default(),
-            ),
-            ChatStreamEvent::ToolResult { .. } => (
-                "chat-tool-result",
-                serde_json::to_string(&event).unwrap_or_default(),
-            ),
-            ChatStreamEvent::Done { answer, .. } => {
-                let initial = agent_name_for_stream
-                    .chars()
-                    .next()
-                    .unwrap_or('A')
-                    .to_uppercase()
-                    .to_string();
-                let html = format!(
-                    r#"<div class="chat-row chat-row-agent">
-                        <div class="chat-agent-avatar" aria-hidden="true">{}</div>
-                        <div class="chat-agent-column">
-                            <div class="chat-agent-name muted">{}</div>
-                            <div class="chat-bubble chat-bubble-agent">
-                                <div class="chat-bubble-content-agent">{}</div>
-                            </div>
-                        </div>
-                    </div>"#,
-                    html_escape(&initial),
-                    html_escape(&agent_name_for_stream),
-                    html_escape(answer),
-                );
-                ("chat-done", html)
-            }
-            ChatStreamEvent::Error { message } => {
-                let html = format!(
-                    r#"<div class="chat-row chat-row-agent">
-                        <div class="chat-agent-column">
-                            <div class="chat-bubble chat-bubble-agent">
-                                <div class="chat-bubble-content-agent" style="color:var(--pico-color-red-500)">
-                                    Error: {}
-                                </div>
-                            </div>
-                        </div>
-                    </div>"#,
-                    html_escape(message),
-                );
-                ("chat-done", html)
-            }
+        let frame = match event {
+            ChatStreamEvent::Thinking { iteration } => ChatStreamFrame::Thinking { iteration },
+            ChatStreamEvent::TextChunk { text } => ChatStreamFrame::TextDelta { text },
+            ChatStreamEvent::ToolStart {
+                tool_name,
+                iteration,
+            } => ChatStreamFrame::ToolStart {
+                tool_name,
+                iteration,
+            },
+            ChatStreamEvent::ToolResult {
+                tool_name,
+                result_preview,
+                duration_ms,
+                success,
+            } => ChatStreamFrame::ToolResult {
+                tool_name,
+                result_preview,
+                duration_ms,
+                success,
+            },
+            ChatStreamEvent::Done {
+                answer, iterations, ..
+            } => ChatStreamFrame::Done {
+                answer,
+                iterations,
+                tokens_used: None,
+            },
+            ChatStreamEvent::Error { message } => ChatStreamFrame::Error { message },
         };
-        Ok::<_, Infallible>(Event::default().event(event_name).data(data))
+        let data = serde_json::to_string(&frame).unwrap_or_else(|_| "{}".to_string());
+        Ok::<_, Infallible>(Event::default().event("chat-stream").data(data))
     });
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
@@ -510,29 +697,85 @@ pub async fn conversation(
         }
     };
 
-    let messages: Vec<_> = {
+    use crate::chat_store::TimelineEntry;
+
+    let timeline_entries: Vec<_> = {
         let store = Arc::clone(&state.chat_store);
         let sid = session_id.clone();
-        tokio::task::spawn_blocking(move || store.get_messages(&sid))
+        tokio::task::spawn_blocking(move || store.get_timeline(&sid))
             .await
             .unwrap_or_else(|_| Ok(vec![]))
             .unwrap_or_default()
-            .into_iter()
-            .map(|m| {
-                context! {
-                    role => m.role,
-                    content => m.content,
-                    created_at => m.created_at,
-                    tool_name => m.tool_name,
-                    tool_duration_ms => m.tool_duration_ms,
-                }
-            })
-            .collect()
     };
+
+    // If the last entry is a user message (with no assistant reply yet) AND
+    // an in-flight inference exists, reconnect to the streaming endpoint.
+    let needs_stream_reconnect = timeline_entries
+        .last()
+        .map(|e| matches!(e, TimelineEntry::User { .. }))
+        .unwrap_or(false)
+        && state.inflight_chat.get(&session_id).is_some();
+
+    let messages: Vec<_> = timeline_entries
+        .into_iter()
+        .map(|e| match e {
+            TimelineEntry::User {
+                id,
+                content,
+                created_at,
+            } => context! {
+                role => "user",
+                id,
+                content,
+                created_at,
+            },
+            TimelineEntry::Assistant {
+                id,
+                content,
+                created_at,
+                tokens_used,
+                cost_usd,
+            } => context! {
+                role => "assistant",
+                id,
+                content,
+                created_at,
+                tokens_used,
+                cost_usd,
+            },
+            TimelineEntry::Tool {
+                id,
+                tool_name,
+                tool_intent_type,
+                tool_payload_json,
+                tool_result_json,
+                tool_success,
+                tool_duration_ms,
+                created_at,
+            } => context! {
+                role => "tool",
+                id,
+                tool_name,
+                tool_intent_type,
+                tool_payload_json,
+                tool_result_json,
+                tool_success,
+                tool_duration_ms,
+                created_at,
+            },
+        })
+        .collect();
 
     // session_id is a validated UUID (ASCII), so slicing at byte offset 8 is safe.
     let short_id = &session_id[..8];
     let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);
+    let agent_initial = session
+        .agent_name
+        .chars()
+        .next()
+        .unwrap_or('A')
+        .to_uppercase()
+        .to_string();
     let ctx = context! {
         page_title => format!("Chat — {}", short_id),
         breadcrumbs => vec![
@@ -541,7 +784,10 @@ pub async fn conversation(
         ],
         session_id,
         agent_name => session.agent_name,
+        session_title => session.title.clone(),
+        agent_initial,
         messages,
+        needs_stream_reconnect,
         csrf_token,
     };
     super::render(&state.templates, "chat_conversation.html", ctx)

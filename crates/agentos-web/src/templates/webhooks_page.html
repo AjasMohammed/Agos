@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block content %}
+{% set title = "Webhooks" %}
+{% set subtitle = endpoints|length ~ " inbound endpoints" %}
+{% include "partials/management_page.html" %}
+
+{% if created_secret %}
+<article class="secret-flash" role="alert" style="border-left: 4px solid var(--pico-color-amber-500);">
+    <header><strong>⚠ Copy this signing secret now — it will not be shown again</strong></header>
+    {% if rotated_from %}
+    <p><strong>Rotated from endpoint:</strong> <code>{{ rotated_from }}</code></p>
+    {% endif %}
+    <p class="muted">
+        This secret is only displayed once. Configure it in the upstream provider
+        (Stripe, GitHub, PagerDuty, etc.) so inbound webhooks can be verified. If
+        you lose it, delete this endpoint and create a new one.
+    </p>
+    <dl class="detail-list">
+        <dt>Endpoint ID</dt>
+        <dd><code>{{ created_id }}</code></dd>
+        <dt>Inbound URL</dt>
+        <dd>
+            <code class="secret-value">{{ created_inbound_url }}</code>
+            <button type="button" class="outline secondary btn-sm"
+                    onclick="navigator.clipboard.writeText('{{ created_inbound_url }}')">Copy URL</button>
+        </dd>
+        <dt>Signing Secret</dt>
+        <dd>
+            <code class="secret-value">{{ created_secret }}</code>
+            <button type="button" class="outline btn-sm"
+                    onclick="navigator.clipboard.writeText('{{ created_secret }}')">Copy Secret</button>
+        </dd>
+    </dl>
+</article>
+{% endif %}
+
+<article>
+    <header><strong>Create Endpoint</strong></header>
+    <form method="post" action="/webhooks">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <div class="form-grid-3">
+            <label>Agent
+                <select name="agent_name" required>
+                    {% for a in agents %}<option value="{{ a.name }}">{{ a.name }}</option>{% endfor %}
+                </select>
+            </label>
+            <label>Provider
+                <select name="provider" required>
+                    <option value="generic">generic</option>
+                    <option value="github">github</option>
+                    <option value="stripe">stripe</option>
+                    <option value="slack">slack</option>
+                    <option value="pagerduty">pagerduty</option>
+                </select>
+            </label>
+            <label>Debounce (s)
+                <input name="debounce_seconds" type="number" min="0" value="0">
+            </label>
+        </div>
+        <button type="submit">Create Endpoint</button>
+    </form>
+</article>
+
+{% if endpoints|length == 0 %}
+<article><p class="muted">No webhook endpoints configured.</p></article>
+{% else %}
+<table>
+    <thead><tr><th>ID</th><th>Agent</th><th>Provider</th><th>Inbound URL</th><th>Total</th><th>Last</th><th></th></tr></thead>
+    <tbody>
+    {% for w in endpoints %}
+    <tr>
+        <td><code>{{ w.id }}</code></td>
+        <td><code>{{ w.agent_id }}</code></td>
+        <td>{{ w.provider }}</td>
+        <td>
+            <code class="inbound-url">{{ w.inbound_url }}</code>
+            <button type="button" class="outline secondary btn-sm"
+                    onclick="navigator.clipboard.writeText(window.location.origin + '{{ w.inbound_url }}')">Copy</button>
+        </td>
+        <td>{{ w.total_received }}</td>
+        <td>{{ w.last_received_at or "-" }}</td>
+        <td>
+            <form method="post" action="/webhooks/{{ w.id }}/rotate" style="display:inline" onsubmit="return confirm('Rotate secret for endpoint {{ w.id }}? Endpoint ID and URL will stay the same.');">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <button class="outline btn-sm" type="submit">Rotate Secret</button>
+            </form>
+            <form method="post" action="/webhooks/{{ w.id }}/delete" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <button class="outline secondary btn-sm" type="submit">Delete</button>
+            </form>
+        </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

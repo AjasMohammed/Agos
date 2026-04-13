@@ -4,7 +4,6 @@ use crate::kernel::Kernel;
 
 struct AgentPromptInfo {
     name: String,
-    model: String,
     role: String,
     permissions: String,
 }
@@ -75,11 +74,6 @@ impl Kernel {
             .get("agent_name")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        let agent_model = event
-            .payload
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
 
         let agent_info = self.get_agent_info_for_prompt(&sub.agent_id).await;
         let os_state = self.build_os_state_snapshot().await;
@@ -87,7 +81,7 @@ impl Kernel {
 
         format!(
             r#"[SYSTEM CONTEXT]
-You are {subscriber_name}, a {subscriber_model} AI agent running inside AgentOS — an agent-native operating system designed for LLMs as primary users.
+You are {subscriber_name}, an AI agent running inside AgentOS — an agent-native operating system designed for LLMs as primary users.
 
 Your Agent ID: {subscriber_id}
 Your Role: {subscriber_role}
@@ -99,7 +93,6 @@ Your current permissions:
 A new agent has been added to this AgentOS instance.
 
 New agent name: {agent_name}
-New agent model: {agent_model}
 Event time: {timestamp}
 
 [CURRENT OS STATE]
@@ -121,12 +114,10 @@ If you are an orchestrator, consider assigning initial work to this agent.
 [RESPONSE EXPECTATION]
 This is an informational event. Respond with any coordination actions you want to take, or emit nothing if no action is needed."#,
             subscriber_name = agent_info.name,
-            subscriber_model = agent_info.model,
             subscriber_id = sub.agent_id,
             subscriber_role = agent_info.role,
             subscriber_permissions = agent_info.permissions,
             agent_name = agent_name,
-            agent_model = agent_model,
             timestamp = event.timestamp.to_rfc3339(),
             os_state = os_state,
             agent_directory = agent_directory,
@@ -857,7 +848,6 @@ Take any context management actions you deem necessary, then continue."#,
         render_direct_message_prompt(
             &recipient_info.name,
             &sender_info.name,
-            &sender_info.model,
             &sender_info.role,
             &sender_active_tasks,
             message_id,
@@ -945,7 +935,7 @@ Take any context management actions you deem necessary, then continue."#,
 
         format!(
             r#"[SYSTEM CONTEXT]
-You are {subscriber_name}, a {subscriber_model} AI agent running inside AgentOS.
+You are {subscriber_name}, an AI agent running inside AgentOS.
 
 Your Agent ID: {subscriber_id}
 Your Role: {subscriber_role}
@@ -978,7 +968,6 @@ If you are an orchestrator, you may want to track the delegated task's progress.
 [RESPONSE EXPECTATION]
 This is an informational event. Respond with coordination actions if needed, or emit nothing."#,
             subscriber_name = agent_info.name,
-            subscriber_model = agent_info.model,
             subscriber_id = subscriber_id,
             subscriber_role = agent_info.role,
             subscriber_permissions = agent_info.permissions,
@@ -1024,7 +1013,7 @@ This is an informational event. Respond with coordination actions if needed, or 
 
         format!(
             r#"[SYSTEM CONTEXT]
-You are {subscriber_name}, a {subscriber_model} AI agent running inside AgentOS.
+You are {subscriber_name}, an AI agent running inside AgentOS.
 
 Your Agent ID: {subscriber_id}
 Your Role: {subscriber_role}
@@ -1059,7 +1048,6 @@ the delegating agent.
 [RESPONSE EXPECTATION]
 Acknowledge the delegation and begin working on the task, or explain why you cannot."#,
             subscriber_name = agent_info.name,
-            subscriber_model = agent_info.model,
             subscriber_id = subscriber_id,
             subscriber_role = agent_info.role,
             subscriber_permissions = agent_info.permissions,
@@ -1133,7 +1121,6 @@ Take appropriate action, report findings, escalate if needed, or acknowledge sil
 
             AgentPromptInfo {
                 name: profile.name.clone(),
-                model: format!("{:?}/{}", profile.provider, profile.model),
                 role: if profile.description.is_empty() {
                     "general-purpose agent".to_string()
                 } else {
@@ -1148,7 +1135,6 @@ Take appropriate action, report findings, escalate if needed, or acknowledge sil
         } else {
             AgentPromptInfo {
                 name: "unknown".to_string(),
-                model: "unknown".to_string(),
                 role: "unknown".to_string(),
                 permissions: "  (agent not found)".to_string(),
             }
@@ -1221,7 +1207,6 @@ Take appropriate action, report findings, escalate if needed, or acknowledge sil
 
         AgentPromptInfo {
             name: format!("unknown (ID: {})", agent_id),
-            model: "unknown".to_string(),
             role: "unknown".to_string(),
             permissions: "  (agent not found)".to_string(),
         }
@@ -1432,7 +1417,6 @@ a systemic problem worth flagging to the operator."#,
 fn render_direct_message_prompt(
     recipient_name: &str,
     sender_name: &str,
-    sender_model: &str,
     sender_role: &str,
     sender_active_tasks: &str,
     message_id: &str,
@@ -1450,7 +1434,7 @@ You are {recipient_name} operating inside AgentOS.
 [EVENT NOTIFICATION]
 You have received a direct message from another agent.
 
-From: {sender_name} ({sender_model})
+From: {sender_name}
 Sender role: {sender_role}
 Sender active tasks: {sender_active_tasks}
 Message ID: {message_id}
@@ -1484,7 +1468,6 @@ Respond or act as appropriate. If the message requires information you
 cannot provide with your current permissions, say so clearly."#,
         recipient_name = recipient_name,
         sender_name = sender_name,
-        sender_model = sender_model,
         sender_role = sender_role,
         sender_active_tasks = sender_active_tasks,
         message_id = message_id,
@@ -1974,7 +1957,6 @@ mod tests {
         let prompt = render_direct_message_prompt(
             "recipient-agent",
             "sender-agent",
-            "OpenAI/gpt-5",
             "orchestrator",
             "2",
             "msg-123",
@@ -1986,7 +1968,7 @@ mod tests {
             "Connected agents: 4\nActive tasks: 3\nUptime: 500s",
         );
 
-        assert!(prompt.contains("From: sender-agent (OpenAI/gpt-5)"));
+        assert!(prompt.contains("From: sender-agent"));
         assert!(prompt.contains("Sender role: orchestrator"));
         assert!(prompt.contains("Your context load: 67%"));
         assert!(prompt.contains("agent-message"));

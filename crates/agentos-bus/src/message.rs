@@ -45,6 +45,10 @@ pub enum KernelCommand {
         /// When true, grants full root access to all resources.
         #[serde(default)]
         root: bool,
+        /// When true, the kernel skips the pre-flight LLM health check and
+        /// registers the agent even if the backend appears unreachable.
+        #[serde(default)]
+        skip_health_check: bool,
     },
     ListAgents,
     DisconnectAgent {
@@ -54,6 +58,18 @@ pub enum KernelCommand {
     SetAgentBaseUrl {
         name: String,
         url: String,
+    },
+    /// Probe an LLM backend's reachability without registering an agent.
+    /// Builds the adapter exactly as `ConnectAgent` would, runs `health_check`,
+    /// and returns a `LLMHealth` response.
+    PingLLM {
+        provider: LLMProvider,
+        model: String,
+        base_url: Option<String>,
+        /// Optional agent name used to look up per-agent vault keys (e.g. `alice_openai_api_key`).
+        /// When omitted, falls back to the global key name (e.g. `openai_api_key`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_name: Option<String>,
     },
 
     // Task management

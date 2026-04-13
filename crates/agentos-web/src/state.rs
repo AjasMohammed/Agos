@@ -1,3 +1,4 @@
+use crate::chat_inflight::InFlightChat;
 use crate::chat_store::ChatStore;
 use agentos_api::KernelService;
 use agentos_kernel::notification_router::NotificationSsePayload;
@@ -30,6 +31,9 @@ pub struct AppState {
     pub allowed_tool_dirs: Arc<Vec<PathBuf>>,
     /// Persistent chat session store (separate from the task scheduler).
     pub chat_store: Arc<ChatStore>,
+    /// In-memory registry of running chat inferences. Lets SSE subscribers reconnect to
+    /// an inference that the server is still streaming after a browser refresh.
+    pub inflight_chat: Arc<InFlightChat>,
     /// Broadcast channel for real-time notification push to browser SSE subscribers.
     /// The `SseDeliveryAdapter` in the kernel publishes to this sender.
     pub notification_tx: broadcast::Sender<NotificationSsePayload>,

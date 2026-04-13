@@ -140,6 +140,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         otel: Default::default(),
         context: Default::default(),
         api: Default::default(),
+        chat: Default::default(),
     }
 }
 
@@ -310,6 +311,9 @@ impl TestHarness {
                 model.to_string(),
                 None,
                 vec!["base".to_string()],
+                None,
+                None,
+                None,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to connect agent: {}", e))?;
@@ -715,6 +719,9 @@ Your agent name is: {}"#,
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
             cancellation_token: CancellationToken::new(),
         };
 

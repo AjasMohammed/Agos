@@ -1,0 +1,45 @@
+[manifest]
+name = "proc-spawn"
+version = "1.0.0"
+description = "Spawn a managed background process with resource limits and output capture"
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "exec_capable"
+
+[capabilities_required]
+permissions = ["proc.spawn:x"]
+
+[capabilities_provided]
+outputs = ["content.json"]
+
+[intent_schema]
+input = "ProcSpawnIntent"
+output = "ProcSpawnResult"
+
+[input_schema]
+required = ["binary"]
+type = "object"
+
+[input_schema.properties.binary]
+description = "Binary to execute (must be on the allowed list)"
+type = "string"
+
+[input_schema.properties.args]
+description = "Command line arguments"
+type = "array"
+items = { type = "string" }
+
+[input_schema.properties.working_dir]
+description = "Working directory (default: agent data_dir)"
+type = "string"
+
+[sandbox]
+network = false
+fs_write = true
+gpu = false
+max_memory_mb = 256
+max_cpu_ms = 30000
+syscalls = []
+
+[executor]
+type = "inline"

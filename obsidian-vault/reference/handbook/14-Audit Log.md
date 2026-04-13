@@ -22,7 +22,7 @@ The audit log is an append-only SQLite database stored at the path configured by
 Key properties:
 
 - **Append-only** — entries are never deleted by normal operation (only pruned by retention policy)
-- **85+ event types** across 18 categories, covering the full agent lifecycle
+- **110 event types** across 25 categories, covering the full agent lifecycle including channels, MCP, OAuth, containers, IoT device twins, and checkpoint recovery
 - **Merkle chain** — tamper-evident via `prev_hash` / `entry_hash` columns
 - **WAL journal mode** — concurrent reads during writes
 
@@ -52,7 +52,7 @@ Details are truncated to 30 characters in the terminal. Use `agentos audit expor
 
 ## Audit Event Types
 
-All 83 event types, grouped by category:
+All 110 event types, grouped by category. Recent additions cover MCP tool calls and injection scanning, OAuth credential lifecycle, container runtime, IoT device twins with the safety engine, task checkpoint recovery, display config rollback, and pre-flight LLM connection failures.
 
 ### Task Lifecycle
 
@@ -98,7 +98,9 @@ All 83 event types, grouped by category:
 | Event Type | When |
 |---|---|
 | `AgentConnected` | An agent connects to the kernel |
+| `AgentReconnected` | A previously disconnected agent reconnects to the kernel |
 | `AgentDisconnected` | An agent disconnects from the kernel |
+| `LLMConnectionFailed` | Pre-flight health check against an LLM backend fails at `agent connect` time and registration is aborted |
 | `LLMInferenceStarted` | An inference request is sent to the LLM backend |
 | `LLMInferenceCompleted` | An inference response is received |
 | `LLMInferenceError` | An inference request fails |
@@ -153,13 +155,21 @@ All 83 event types, grouped by category:
 | `RiskEscalation` | An action is classified as Level 3–4 risk and escalated |
 | `ActionForbidden` | An action is blocked outright by the risk classifier |
 
-### Snapshot / Checkpoint Events
+### Snapshot Events
 
 | Event Type | When |
 |---|---|
 | `SnapshotTaken` | A context snapshot is saved (before write ops or on budget exhaust) |
 | `SnapshotRestored` | A task context is rolled back to a snapshot |
 | `SnapshotExpired` | A snapshot is deleted after its 72-hour TTL |
+
+### Task Checkpoint Recovery
+
+| Event Type | When |
+|---|---|
+| `CheckpointWritten` | A persistent task checkpoint is written after a task iteration |
+| `CheckpointRestored` | A task is resumed from a previously persisted checkpoint |
+| `CheckpointPruned` | A checkpoint is swept after passing its 72-hour retention |
 
 ### Cost Attribution
 
@@ -206,6 +216,16 @@ All 83 event types, grouped by category:
 |---|---|
 | `PrintJobSubmitted` | A print job is submitted via the printer HAL driver |
 | `PrintJobCancelled` | A print job is cancelled via the printer HAL driver |
+| `DisplayConfigApplied` | A display configuration change is applied via the display driver |
+| `DisplayConfigReverted` | A display configuration change is reverted (e.g. user did not confirm) |
+
+### Device Twin & Safety Engine
+
+| Event Type | When |
+|---|---|
+| `DesiredStateSet` | An agent sets the desired state of an IoT device twin |
+| `ReportedStateUpdated` | A device's reported state is updated from a sensor reading |
+| `SafetyRuleViolation` | A safety rule blocks an IoT actuator command |
 
 ### Pubkey Events
 
@@ -268,11 +288,32 @@ All 83 event types, grouped by category:
 |---|---|
 | `EventChannelFull` | An event channel's buffer is full; events may be dropped |
 
-### Agent Lifecycle
+### MCP (Model Context Protocol)
 
 | Event Type | When |
 |---|---|
-| `AgentReconnected` | A previously disconnected agent reconnects to the kernel |
+| `McpToolCall` | An MCP tool call is executed in client mode |
+| `McpInjectionDetected` | The MCP security gate detects a potential prompt injection in tool output |
+
+### OAuth Credential Lifecycle
+
+| Event Type | When |
+|---|---|
+| `OAuthCredentialStored` | An OAuth credential is stored or updated in the vault |
+| `OAuthCredentialDeleted` | An OAuth credential is deleted from the vault |
+| `OAuthTokenRefreshed` | An OAuth access token is successfully refreshed |
+| `OAuthTokenExpired` | An OAuth token refresh fails (e.g. invalid_grant) |
+| `OAuthFlowStarted` | An OAuth authorization-code flow is initiated |
+| `OAuthFlowCompleted` | An OAuth authorization-code flow completes successfully |
+
+### Container Runtime
+
+| Event Type | When |
+|---|---|
+| `ContainerProvisioned` | A container is provisioned for an agent |
+| `ContainerExecRun` | A command is executed inside a container |
+| `ContainerDestroyed` | A container is destroyed |
+| `ContainerQuotaExceeded` | A container provision is rejected due to quota limits |
 
 ---
 
@@ -382,7 +423,7 @@ Each audit record contains the following fields:
 |---|---|---|
 | `timestamp` | `DateTime<Utc>` | RFC 3339 timestamp of the event |
 | `trace_id` | `TraceID` | UUID linking related events in a single trace |
-| `event_type` | `AuditEventType` | One of the 83 event type variants |
+| `event_type` | `AuditEventType` | One of the 110 event type variants |
 | `agent_id` | `Option<AgentID>` | The agent that triggered the event |
 | `task_id` | `Option<TaskID>` | The task context for the event |
 | `tool_id` | `Option<ToolID>` | The tool involved, if any |

@@ -185,9 +185,20 @@ impl GeminiCore {
         let mut tool_calls = Vec::new();
 
         for part in parts {
-            if let Some(t) = part.get("text").and_then(Value::as_str) {
-                text.push_str(t);
+            let is_thought = part
+                .get("thought")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+
+            // Only include text from non-thought parts — Gemini thinking
+            // models set `thought: true` on internal reasoning parts.
+            if !is_thought {
+                if let Some(t) = part.get("text").and_then(Value::as_str) {
+                    text.push_str(t);
+                }
             }
+            // Always check for functionCall, even on thought parts, so
+            // tool calls are never silently dropped.
             if let Some(fc) = part.get("functionCall").and_then(Value::as_object) {
                 let Some(tool_name) = fc
                     .get("name")
@@ -564,12 +575,21 @@ impl LLMCore for GeminiCore {
                     .unwrap_or_default();
 
                 for part in &parts {
-                    if let Some(t) = part.get("text").and_then(Value::as_str) {
-                        if !t.is_empty() {
-                            full_text.push_str(t);
-                            let _ = tx.send(InferenceEvent::Token(t.to_string())).await;
+                    let is_thought = part
+                        .get("thought")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+
+                    // Only stream text from non-thought parts.
+                    if !is_thought {
+                        if let Some(t) = part.get("text").and_then(Value::as_str) {
+                            if !t.is_empty() {
+                                full_text.push_str(t);
+                                let _ = tx.send(InferenceEvent::Token(t.to_string())).await;
+                            }
                         }
                     }
+                    // Always check for functionCall, even on thought parts.
                     // Gemini sends functionCall as complete objects, not streamed.
                     if let Some(fc) = part.get("functionCall").and_then(Value::as_object) {
                         if let Some(tool_name) = fc
@@ -830,5 +850,53 @@ mod tests {
             };
             assert_eq!(result, expected, "Failed for input: {input}");
         }
+    }
+
+    #[test]
+    fn test_parse_gemini_tool_calls_skips_thought_parts() {
+        let parts = vec![
+            json!({"text": "internal reasoning about the problem", "thought": true}),
+            json!({"text": "visible answer"}),
+        ];
+        let (text, tool_calls) = GeminiCore::parse_gemini_tool_calls(&parts, &HashMap::new());
+        assert_eq!(text, "visible answer");
+        assert!(tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_gemini_tool_calls_thought_false_not_filtered() {
+        let parts = vec![
+            json!({"text": "normal text", "thought": false}),
+            json!({"text": " more text"}),
+        ];
+        let (text, _) = GeminiCore::parse_gemini_tool_calls(&parts, &HashMap::new());
+        assert_eq!(text, "normal text more text");
+    }
+
+    #[test]
+    fn test_parse_gemini_tool_calls_mixed_thought_and_function_call() {
+        let mut intent_map = HashMap::new();
+        intent_map.insert("file-reader".to_string(), "read".to_string());
+
+        let parts = vec![
+            json!({"text": "let me think about this...", "thought": true}),
+            json!({"functionCall": {"name": "file-reader", "args": {"path": "test.txt"}}}),
+        ];
+        let (text, tool_calls) = GeminiCore::parse_gemini_tool_calls(&parts, &intent_map);
+        assert!(text.is_empty(), "Thought text should be filtered");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].tool_name, "file-reader");
+        assert_eq!(tool_calls[0].intent_type, "read");
+    }
+
+    #[test]
+    fn test_parse_gemini_all_thought_parts_results_in_empty_text() {
+        let parts = vec![
+            json!({"text": "first thought", "thought": true}),
+            json!({"text": "second thought", "thought": true}),
+        ];
+        let (text, tool_calls) = GeminiCore::parse_gemini_tool_calls(&parts, &HashMap::new());
+        assert!(text.is_empty());
+        assert!(tool_calls.is_empty());
     }
 }

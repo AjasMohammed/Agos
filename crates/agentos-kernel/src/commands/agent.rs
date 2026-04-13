@@ -1,7 +1,9 @@
 use crate::event_bus::default_subscriptions_for_role;
 use crate::kernel::Kernel;
 use agentos_bus::KernelResponse;
-use agentos_llm::{AnthropicCore, CustomCore, GeminiCore, LLMCore, OllamaCore, OpenAICore};
+use agentos_llm::{
+    AnthropicCore, CustomCore, GeminiCore, HealthStatus, LLMCore, OllamaCore, OpenAICore,
+};
 use agentos_types::*;
 use secrecy::SecretString;
 use std::sync::Arc;
@@ -19,6 +21,184 @@ fn is_valid_agent_name(name: &str) -> bool {
 }
 
 impl Kernel {
+    /// Build an `LLMCore` adapter for the given provider/model/base_url combination.
+    ///
+    /// Resolves vault-stored API keys (preferring `<agent>_<provider>_api_key` then
+    /// the global `<provider>_api_key`), honors env-var fallbacks, and applies
+    /// config defaults. Returns the adapter plus the effective base URL that
+    /// should be stored on `AgentProfile.base_url` (so `agent set-url` can mutate
+    /// it later). Shared by `cmd_connect_agent` and `cmd_ping_llm` so both
+    /// paths construct identical adapters.
+    pub(crate) async fn build_llm_adapter(
+        &self,
+        agent_name: &str,
+        provider: &LLMProvider,
+        model: &str,
+        base_url: Option<String>,
+    ) -> Result<(Arc<dyn LLMCore>, Option<String>), String> {
+        // Empty strings can sneak in from clap env-var attributes when the env var
+        // is set to "" (e.g. docker-compose `AGENTOS_LLM_URL=${AGENTOS_LLM_URL:-}`).
+        // Treat them as unset so the config fallback still applies.
+        let base_url = base_url.filter(|s| !s.trim().is_empty());
+        match provider {
+            LLMProvider::Ollama => {
+                let host = base_url
+                    .or_else(|| {
+                        std::env::var("AGENTOS_OLLAMA_HOST")
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                    })
+                    .unwrap_or_else(|| self.config.ollama.host.clone());
+                let effective = Some(host.clone());
+                Ok((
+                    Arc::new(
+                        OllamaCore::new(&host, model)
+                            .with_request_timeout(self.config.ollama.request_timeout_secs)
+                            .with_context_window(self.config.llm.ollama_context_window),
+                    ),
+                    effective,
+                ))
+            }
+            LLMProvider::OpenAI => {
+                let key_result = match self
+                    .vault
+                    .get(&format!("{}_openai_api_key", agent_name))
+                    .await
+                {
+                    ok @ Ok(_) => ok,
+                    Err(_) => self.vault.get("openai_api_key").await,
+                };
+                let entry = key_result.map_err(|_| {
+                    "Missing 'openai_api_key' in vault. Please store it first.".to_string()
+                })?;
+                let sec = SecretString::new(entry.as_str().to_string());
+                let resolved_base_url = base_url
+                    .or_else(|| {
+                        std::env::var("AGENTOS_OPENAI_BASE_URL")
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                    })
+                    .or_else(|| self.config.llm.openai_base_url.clone());
+                if let Some(url) = resolved_base_url {
+                    Ok((
+                        Arc::new(OpenAICore::with_base_url(
+                            sec,
+                            model.to_string(),
+                            url.clone(),
+                        )),
+                        Some(url),
+                    ))
+                } else {
+                    Ok((Arc::new(OpenAICore::new(sec, model.to_string())), None))
+                }
+            }
+            LLMProvider::Anthropic => {
+                let key_result = match self
+                    .vault
+                    .get(&format!("{}_anthropic_api_key", agent_name))
+                    .await
+                {
+                    ok @ Ok(_) => ok,
+                    Err(_) => self.vault.get("anthropic_api_key").await,
+                };
+                let entry = key_result.map_err(|_| {
+                    "Missing 'anthropic_api_key' in vault. Please store it first.".to_string()
+                })?;
+                let sec = SecretString::new(entry.as_str().to_string());
+                let resolved_url = base_url.or_else(|| self.config.llm.anthropic_base_url.clone());
+                let adapter = if let Some(ref url) = resolved_url {
+                    AnthropicCore::with_base_url(sec, model.to_string(), url.clone())
+                } else {
+                    AnthropicCore::new(sec, model.to_string())
+                };
+                Ok((
+                    Arc::new(adapter.with_max_tokens(self.config.llm.max_tokens)),
+                    resolved_url,
+                ))
+            }
+            LLMProvider::Gemini => {
+                let key_result = match self
+                    .vault
+                    .get(&format!("{}_gemini_api_key", agent_name))
+                    .await
+                {
+                    ok @ Ok(_) => ok,
+                    Err(_) => self.vault.get("gemini_api_key").await,
+                };
+                let entry = key_result.map_err(|_| {
+                    "Missing 'gemini_api_key' in vault. Please store it first.".to_string()
+                })?;
+                let sec = SecretString::new(entry.as_str().to_string());
+                Ok((Arc::new(GeminiCore::new(sec, model.to_string())), None))
+            }
+            LLMProvider::Custom(custom_name) => {
+                // Check the provider catalog first for known providers.
+                let catalog_entry_opt = self
+                    .provider_catalog
+                    .read()
+                    .unwrap()
+                    .lookup(custom_name)
+                    .cloned();
+                if let Some(catalog_entry) = catalog_entry_opt {
+                    // Catalog-based provider: use catalog's base_url and API key env var.
+                    let sec = if !catalog_entry.api_key_env.is_empty() {
+                        match self
+                            .vault
+                            .get(&format!("{}_{}_api_key", agent_name, custom_name))
+                            .await
+                        {
+                            Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
+                            Err(_) => std::env::var(&catalog_entry.api_key_env)
+                                .ok()
+                                .filter(|s| !s.trim().is_empty())
+                                .map(SecretString::new),
+                        }
+                    } else {
+                        None
+                    };
+                    // Allow --base-url to override catalog URL; default to catalog entry
+                    let url = base_url.unwrap_or_else(|| catalog_entry.base_url.clone());
+                    let effective_model = if model == "default" || model.is_empty() {
+                        catalog_entry.default_model.clone()
+                    } else {
+                        model.to_string()
+                    };
+                    Ok((
+                        Arc::new(CustomCore::new(sec, effective_model, url.clone())),
+                        Some(url),
+                    ))
+                } else {
+                    // Fallback: original custom provider logic
+                    let sec = match self
+                        .vault
+                        .get(&format!("{}_custom_api_key", agent_name))
+                        .await
+                    {
+                        Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
+                        Err(_) => match self.vault.get("custom_api_key").await {
+                            Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
+                            _ => None,
+                        },
+                    };
+                    let url = base_url
+                        .or_else(|| {
+                            std::env::var("AGENTOS_LLM_URL")
+                                .ok()
+                                .filter(|s| !s.trim().is_empty())
+                        })
+                        .or_else(|| self.config.llm.custom_base_url.clone())
+                        .ok_or_else(|| {
+                            "Missing custom LLM endpoint. Provide --base-url, set AGENTOS_LLM_URL, or configure llm.custom_base_url in config.".to_string()
+                        })?;
+                    Ok((
+                        Arc::new(CustomCore::new(sec, model.to_string(), url.clone())),
+                        Some(url),
+                    ))
+                }
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn cmd_connect_agent(
         &self,
@@ -27,9 +207,13 @@ impl Kernel {
         model: String,
         base_url: Option<String>,
         roles: Vec<String>,
+        description: Option<String>,
+        thinking_level: Option<ThinkingLevel>,
+        system_prompt: Option<String>,
         test_mode: bool,
         extra_permissions: Vec<String>,
         root: bool,
+        skip_health_check: bool,
     ) -> KernelResponse {
         if !is_valid_agent_name(&name) {
             return KernelResponse::Error {
@@ -41,190 +225,90 @@ impl Kernel {
         }
 
         let now = chrono::Utc::now();
-
-        // Instantiate LLMCore based on provider.
-        // Returns (core_result, effective_base_url) so the resolved URL can be stored on the
-        // AgentProfile and later mutated via `agent set-url`.
-        let (core, effective_base_url): (Result<Arc<dyn LLMCore>, String>, Option<String>) =
-            match &provider {
-                LLMProvider::Ollama => {
-                    let host = base_url
-                        .or_else(|| {
-                            std::env::var("AGENTOS_OLLAMA_HOST")
-                                .ok()
-                                .filter(|s| !s.trim().is_empty())
-                        })
-                        .unwrap_or_else(|| self.config.ollama.host.clone());
-                    let effective = Some(host.clone());
-                    (
-                        Ok(Arc::new(
-                            OllamaCore::new(&host, &model)
-                                .with_request_timeout(self.config.ollama.request_timeout_secs)
-                                .with_context_window(self.config.llm.ollama_context_window),
-                        )),
-                        effective,
-                    )
-                }
-                LLMProvider::OpenAI => {
-                    let key_result = match self.vault.get(&format!("{}_openai_api_key", name)).await
-                    {
-                        ok @ Ok(_) => ok,
-                        Err(_) => self.vault.get("openai_api_key").await,
-                    };
-                    match key_result {
-                        Ok(entry) => {
-                            let sec = SecretString::new(entry.as_str().to_string());
-                            let resolved_base_url = base_url
-                                .or_else(|| {
-                                    std::env::var("AGENTOS_OPENAI_BASE_URL")
-                                        .ok()
-                                        .filter(|s| !s.trim().is_empty())
-                                })
-                                .or_else(|| self.config.llm.openai_base_url.clone());
-                            if let Some(url) = resolved_base_url {
-                                (
-                                    Ok(Arc::new(OpenAICore::with_base_url(
-                                        sec,
-                                        model.clone(),
-                                        url.clone(),
-                                    ))),
-                                    Some(url),
-                                )
-                            } else {
-                                (Ok(Arc::new(OpenAICore::new(sec, model.clone()))), None)
-                            }
-                        }
-                        _ => (
-                            Err("Missing 'openai_api_key' in vault. Please store it first."
-                                .to_string()),
-                            None,
-                        ),
-                    }
-                }
-                LLMProvider::Anthropic => {
-                    let key_result =
-                        match self.vault.get(&format!("{}_anthropic_api_key", name)).await {
-                            ok @ Ok(_) => ok,
-                            Err(_) => self.vault.get("anthropic_api_key").await,
-                        };
-                    match key_result {
-                        Ok(entry) => {
-                            let sec = SecretString::new(entry.as_str().to_string());
-                            let resolved_url =
-                                base_url.or_else(|| self.config.llm.anthropic_base_url.clone());
-                            let adapter = if let Some(ref url) = resolved_url {
-                                AnthropicCore::with_base_url(sec, model.clone(), url.clone())
-                            } else {
-                                AnthropicCore::new(sec, model.clone())
-                            };
-                            (
-                                Ok(Arc::new(
-                                    adapter.with_max_tokens(self.config.llm.max_tokens),
-                                )),
-                                resolved_url,
-                            )
-                        }
-                        _ => (
-                            Err(
-                                "Missing 'anthropic_api_key' in vault. Please store it first."
-                                    .to_string(),
-                            ),
-                            None,
-                        ),
-                    }
-                }
-                LLMProvider::Gemini => {
-                    let key_result = match self.vault.get(&format!("{}_gemini_api_key", name)).await
-                    {
-                        ok @ Ok(_) => ok,
-                        Err(_) => self.vault.get("gemini_api_key").await,
-                    };
-                    match key_result {
-                        Ok(entry) => {
-                            let sec = SecretString::new(entry.as_str().to_string());
-                            (Ok(Arc::new(GeminiCore::new(sec, model.clone()))), None)
-                        }
-                        _ => (
-                            Err("Missing 'gemini_api_key' in vault. Please store it first."
-                                .to_string()),
-                            None,
-                        ),
-                    }
-                }
-                LLMProvider::Custom(ref custom_name) => {
-                    // Check the provider catalog first for known providers.
-                    let catalog_entry_opt = self
-                        .provider_catalog
-                        .read()
-                        .unwrap()
-                        .lookup(custom_name)
-                        .cloned();
-                    if let Some(catalog_entry) = catalog_entry_opt {
-                        // Catalog-based provider: use catalog's base_url and API key env var.
-                        let sec = if !catalog_entry.api_key_env.is_empty() {
-                            match self
-                                .vault
-                                .get(&format!("{}_{}_api_key", name, custom_name))
-                                .await
-                            {
-                                Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
-                                Err(_) => std::env::var(&catalog_entry.api_key_env)
-                                    .ok()
-                                    .filter(|s| !s.trim().is_empty())
-                                    .map(SecretString::new),
-                            }
-                        } else {
-                            None
-                        };
-                        // Allow --base-url to override catalog URL; default to catalog entry
-                        let url = base_url.unwrap_or_else(|| catalog_entry.base_url.clone());
-                        let effective_model = if model == "default" || model.is_empty() {
-                            catalog_entry.default_model.clone()
-                        } else {
-                            model.clone()
-                        };
-                        (
-                            Ok(Arc::new(CustomCore::new(sec, effective_model, url.clone()))),
-                            Some(url),
-                        )
-                    } else {
-                        // Fallback: original custom provider logic
-                        let sec = match self.vault.get(&format!("{}_custom_api_key", name)).await {
-                            Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
-                            Err(_) => match self.vault.get("custom_api_key").await {
-                                Ok(entry) => Some(SecretString::new(entry.as_str().to_string())),
-                                _ => None,
-                            },
-                        };
-                        let url = match base_url
-                            .or_else(|| {
-                                std::env::var("AGENTOS_LLM_URL")
-                                    .ok()
-                                    .filter(|s| !s.trim().is_empty())
-                            })
-                            .or_else(|| self.config.llm.custom_base_url.clone())
-                        {
-                            Some(url) => url,
-                            None => {
-                                return KernelResponse::Error {
-                                    message: "Missing custom LLM endpoint. Provide --base-url, set AGENTOS_LLM_URL, or configure llm.custom_base_url in config.".to_string(),
-                                };
-                            }
-                        };
-                        (
-                            Ok(Arc::new(CustomCore::new(sec, model.clone(), url.clone()))),
-                            Some(url),
-                        )
-                    }
-                }
+        let provided_description = description
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let provided_system_prompt = system_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if provided_system_prompt
+            .as_ref()
+            .is_some_and(|s| s.len() > 16_384)
+        {
+            return KernelResponse::Error {
+                message: "System prompt too long (max 16,384 chars)".to_string(),
             };
+        }
+        let has_thinking_override = thinking_level.is_some();
+        let has_system_prompt_override = system_prompt.is_some();
+        let provided_thinking_level = thinking_level.unwrap_or(ThinkingLevel::Off);
 
-        let llm_adapter = match core {
-            Ok(adapter) => adapter,
+        let (llm_adapter, effective_base_url) = match self
+            .build_llm_adapter(&name, &provider, &model, base_url)
+            .await
+        {
+            Ok(pair) => pair,
             Err(e) => {
                 return KernelResponse::Error { message: e };
             }
         };
+
+        // Pre-flight: probe the backend before mutating any registry / bus / cost state.
+        // Running this *before* the registry write lock means an unreachable backend
+        // produces a clean error with no half-onboarded agent to roll back.
+        // `Degraded` is intentionally non-fatal — the backend responded, just slowly,
+        // and adapters have their own retry policies for transient slowness.
+        if !skip_health_check {
+            match llm_adapter.health_check().await {
+                HealthStatus::Healthy => {}
+                HealthStatus::Degraded { reason } => {
+                    tracing::warn!(
+                        agent_name = %name,
+                        provider = ?provider,
+                        model = %model,
+                        %reason,
+                        "LLM backend degraded; proceeding with connect"
+                    );
+                }
+                HealthStatus::Unhealthy { reason } => {
+                    tracing::warn!(
+                        agent_name = %name,
+                        provider = ?provider,
+                        model = %model,
+                        %reason,
+                        "LLM backend pre-flight health check failed; aborting connect"
+                    );
+                    self.audit_log(agentos_audit::AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        trace_id: TraceID::new(),
+                        event_type: agentos_audit::AuditEventType::LLMConnectionFailed,
+                        agent_id: None,
+                        task_id: None,
+                        tool_id: None,
+                        details: serde_json::json!({
+                            "agent_name": name,
+                            "provider": format!("{:?}", provider),
+                            "model": model,
+                            "base_url": effective_base_url,
+                            "reason": reason,
+                        }),
+                        severity: agentos_audit::AuditSeverity::Warn,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
+                    return KernelResponse::Error {
+                        message: format!(
+                            "LLM backend for {:?}/{} is unreachable: {}. Agent not registered. Re-run with --no-health-check to bypass.",
+                            provider, model, reason
+                        ),
+                    };
+                }
+            }
+        }
 
         // Acquire the write lock once for the entire connect sequence: lookup, identity
         // generation, profile construction, and registration happen atomically, preventing
@@ -240,6 +324,8 @@ impl Kernel {
                 persisted_permissions,
                 persisted_roles,
                 persisted_description,
+                persisted_thinking_level,
+                persisted_system_prompt,
                 created_at,
                 is_reconnect,
             ) = match registry.get_by_name(&name) {
@@ -249,6 +335,8 @@ impl Kernel {
                     existing.permissions.clone(),
                     existing.roles.clone(),
                     existing.description.clone(),
+                    existing.default_thinking_level.clone(),
+                    existing.system_prompt.clone(),
                     existing.created_at,
                     true,
                 ),
@@ -258,6 +346,8 @@ impl Kernel {
                     default_permissions_for_agent(&name),
                     vec![],
                     String::new(),
+                    ThinkingLevel::Off,
+                    None,
                     now,
                     false,
                 ),
@@ -380,6 +470,19 @@ impl Kernel {
                 roles
             };
 
+            // Grant per-role event observe permissions so the agent can re-subscribe
+            // (via the `event-subscribe` tool) to the same categories its role is
+            // seeded with. Idempotent: grant_op is an upsert.
+            for role in &resolved_roles {
+                for resource in crate::event_bus::event_observe_permissions_for_role(role) {
+                    persisted_permissions.grant_op(
+                        resource.to_string(),
+                        PermissionOp::Observe,
+                        None,
+                    );
+                }
+            }
+
             let profile = AgentProfile {
                 id: agent_id,
                 name,
@@ -391,7 +494,31 @@ impl Kernel {
                 permissions: persisted_permissions,
                 roles: resolved_roles,
                 current_task: None,
-                description: persisted_description,
+                description: if is_reconnect {
+                    provided_description
+                        .clone()
+                        .unwrap_or(persisted_description)
+                } else {
+                    provided_description.clone().unwrap_or_default()
+                },
+                default_thinking_level: if is_reconnect {
+                    if has_thinking_override {
+                        provided_thinking_level.clone()
+                    } else {
+                        persisted_thinking_level
+                    }
+                } else {
+                    provided_thinking_level.clone()
+                },
+                system_prompt: if is_reconnect {
+                    if has_system_prompt_override {
+                        provided_system_prompt.clone()
+                    } else {
+                        persisted_system_prompt
+                    }
+                } else {
+                    provided_system_prompt.clone()
+                },
                 created_at,
                 last_active: now,
                 public_key_hex,
@@ -553,7 +680,7 @@ impl Kernel {
                 format!(
                     r#"[TEST MODE — ECOSYSTEM EVALUATION]
 
-You are {agent_name}, a {agent_model} agent that has just been connected to AgentOS in test mode.
+You are {agent_name}, an AI agent that has just been connected to AgentOS in test mode.
 Your sole purpose in this session is to evaluate the AgentOS ecosystem and provide honest, structured feedback on its usability and capabilities.
 
 Please explore the system systematically:
@@ -582,13 +709,12 @@ After your exploration, respond with structured feedback in the following format
 
 Be thorough and direct. Your feedback is the primary output of this session."#,
                     agent_name = agent_name,
-                    agent_model = agent_model,
                 )
             } else {
                 format!(
                     r#"[ONBOARDING — WELCOME TO AGENTOS]
 
-You are {agent_name}, powered by {agent_model}, and you have just been connected to AgentOS — an LLM-native operating system where AI agents are first-class citizens.
+You are {agent_name}, an AI agent that has just been connected to AgentOS — an LLM-native operating system where AI agents are first-class citizens.
 
 Take a moment to orient yourself:
 1. Discover your available tools by listing them — this is how you interact with the system.
@@ -599,7 +725,6 @@ Take a moment to orient yourself:
 
 Once you have explored, briefly summarise what you found and confirm you are ready to receive tasks."#,
                     agent_name = agent_name,
-                    agent_model = agent_model,
                 )
             };
 
@@ -681,6 +806,51 @@ Once you have explored, briefly summarise what you found and confirm you are rea
         KernelResponse::AgentList(agents)
     }
 
+    /// Build an LLM adapter and run `health_check()` without registering an agent.
+    /// Used by `agentos agent ping` to validate reachability/config before committing
+    /// to a connect. Returns a `Success` response with a JSON payload:
+    /// `{ "status": "healthy|degraded|unhealthy", "latency_ms": N, "reason": "...", "base_url": "..." }`.
+    pub(crate) async fn cmd_ping_llm(
+        &self,
+        provider: LLMProvider,
+        model: String,
+        base_url: Option<String>,
+        agent_name: Option<String>,
+    ) -> KernelResponse {
+        // Use the provided agent name for vault key lookup, or a neutral sentinel.
+        // The sentinel just means the per-agent vault lookup misses and falls back
+        // to the global key name — which is exactly what an ad-hoc ping wants.
+        let lookup_name = agent_name.as_deref().unwrap_or("__ping__");
+        let (adapter, effective_base_url) = match self
+            .build_llm_adapter(lookup_name, &provider, &model, base_url)
+            .await
+        {
+            Ok(pair) => pair,
+            Err(e) => return KernelResponse::Error { message: e },
+        };
+
+        let start = std::time::Instant::now();
+        let status = adapter.health_check().await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+
+        let (status_str, reason) = match &status {
+            HealthStatus::Healthy => ("healthy", None),
+            HealthStatus::Degraded { reason } => ("degraded", Some(reason.clone())),
+            HealthStatus::Unhealthy { reason } => ("unhealthy", Some(reason.clone())),
+        };
+
+        KernelResponse::Success {
+            data: Some(serde_json::json!({
+                "status": status_str,
+                "latency_ms": latency_ms,
+                "reason": reason,
+                "base_url": effective_base_url,
+                "provider": format!("{:?}", provider),
+                "model": model,
+            })),
+        }
+    }
+
     pub(crate) async fn cmd_disconnect_agent(&self, agent_id: AgentID) -> KernelResponse {
         let mut registry = self.agent_registry.write().await;
         let agent_name = match registry.get_by_id(&agent_id) {
@@ -754,6 +924,14 @@ Once you have explored, briefly summarise what you found and confirm you are rea
     /// immediately using the same provider/model/credentials and replaces the old one
     /// in `active_llms`, so the change takes effect on the next task without reconnecting.
     pub(crate) async fn cmd_set_agent_base_url(&self, name: String, url: String) -> KernelResponse {
+        // Reject empty/whitespace URLs. An empty string would cause reqwest to build
+        // requests against a relative URL, surfacing as "builder error" much later.
+        if url.trim().is_empty() {
+            return KernelResponse::Error {
+                message: "Base URL cannot be empty. Provide a full URL like 'http://host:port'"
+                    .to_string(),
+            };
+        }
         // Look up the agent
         let (agent_id, provider, model) = {
             let registry = self.agent_registry.read().await;
@@ -1112,8 +1290,29 @@ fn default_permissions_for_agent(name: &str) -> PermissionSet {
     // Escalation query — query (escalation-status)
     perms.grant_op("escalation.query".to_string(), PermissionOp::Query, None);
 
-    // Event stream — observe (subscribe/unsubscribe to kernel events)
+    // Event stream — observe (coarse gate for the four event-* tools).
+    // Per-category permissions below decide which event categories an agent
+    // is actually allowed to subscribe to via `event-subscribe`.
     perms.grant_op("events.stream".to_string(), PermissionOp::Observe, None);
+
+    // Event categories an agent can observe by default. Matches the universal
+    // role-seeded subscriptions (AgentAdded, DirectMessageReceived,
+    // DelegationReceived) plus task lifecycle which agents commonly need.
+    perms.grant_op(
+        "events.agent_lifecycle".to_string(),
+        PermissionOp::Observe,
+        None,
+    );
+    perms.grant_op(
+        "events.agent_communication".to_string(),
+        PermissionOp::Observe,
+        None,
+    );
+    perms.grant_op(
+        "events.task_lifecycle".to_string(),
+        PermissionOp::Observe,
+        None,
+    );
 
     // Scratchpad — read+write (scratch-read, scratch-write, scratch-list)
     perms.grant("scratchpad".to_string(), true, true, false, None);

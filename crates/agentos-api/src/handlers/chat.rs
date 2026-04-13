@@ -247,6 +247,19 @@ async fn stream_completions(
                         }]
                     })
                 }
+                agentos_kernel::ChatStreamEvent::TextChunk { text } => {
+                    serde_json::json!({
+                        "id": &id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": &model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": text},
+                            "finish_reason": serde_json::Value::Null
+                        }]
+                    })
+                }
                 agentos_kernel::ChatStreamEvent::ToolStart { tool_name, .. } => {
                     serde_json::json!({
                         "id": &id,
@@ -277,7 +290,9 @@ async fn stream_completions(
                         }]
                     })
                 }
-                agentos_kernel::ChatStreamEvent::Done { answer, .. } => {
+                agentos_kernel::ChatStreamEvent::Done { .. } => {
+                    // Text was already streamed via TextChunk events;
+                    // send a final chunk with finish_reason to close the stream.
                     serde_json::json!({
                         "id": &id,
                         "object": "chat.completion.chunk",
@@ -285,7 +300,7 @@ async fn stream_completions(
                         "model": &model,
                         "choices": [{
                             "index": 0,
-                            "delta": {"content": answer},
+                            "delta": {},
                             "finish_reason": "stop"
                         }]
                     })

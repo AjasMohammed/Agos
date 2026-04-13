@@ -16,6 +16,10 @@ use crate::datetime::DatetimeTool;
 use crate::display::DisplayConfigTool;
 use crate::episodic_list::EpisodicList;
 use crate::escalation_status::EscalationStatusTool;
+use crate::event_list_available::EventListAvailableTool;
+use crate::event_list_subscriptions::EventListSubscriptionsTool;
+use crate::event_subscribe::EventSubscribeTool;
+use crate::event_unsubscribe::EventUnsubscribeTool;
 use crate::file_delete::FileDelete;
 use crate::file_diff::FileDiff;
 use crate::file_editor::FileEditor;
@@ -218,6 +222,17 @@ impl ToolRunner {
         self.register(Box::new(PollAgentTool::new()));
         self.register(Box::new(CancelAgentTool::new()));
         self.register(Box::new(A2ADelegateTool::new()));
+        self.register(Box::new(EventSubscribeTool::new()));
+        self.register(Box::new(EventUnsubscribeTool::new()));
+        self.register(Box::new(EventListSubscriptionsTool::new()));
+        self.register(Box::new(EventListAvailableTool::new()));
+
+        // KMC bridge tools — route to kernel capability providers.
+        for name in crate::kmc_tools::KMC_TOOL_NAMES {
+            if let Some(tool) = crate::kmc_tools::build_kmc_tool(name) {
+                self.register(tool);
+            }
+        }
     }
 
     pub fn register(&mut self, tool: Box<dyn AgentTool>) {

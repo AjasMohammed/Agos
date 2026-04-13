@@ -1,10 +1,22 @@
 use crate::state::AppState;
+use agentos_types::ThinkingLevel;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum_extra::extract::CookieJar;
 use minijinja::context;
 use serde::Deserialize;
+
+fn parse_thinking_level(value: &str) -> Option<ThinkingLevel> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" => Some(ThinkingLevel::Off),
+        "low" => Some(ThinkingLevel::Low),
+        "medium" => Some(ThinkingLevel::Medium),
+        "high" => Some(ThinkingLevel::High),
+        "max" => Some(ThinkingLevel::Max),
+        _ => None,
+    }
+}
 
 /// GET /agents/{name}/detail — agent detail page with permissions, tasks, and cost.
 ///
@@ -97,6 +109,9 @@ pub async fn detail(
         status => format!("{:?}", agent.status),
         description => agent.description.clone(),
         roles => agent.roles.clone(),
+        base_url => agent.base_url.clone(),
+        default_thinking_level => format!("{:?}", agent.default_thinking_level).to_lowercase(),
+        system_prompt => agent.system_prompt.clone(),
         created_at => agent.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
         last_active => agent.last_active.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
         public_key_hex => agent.public_key_hex.clone(),
@@ -108,6 +123,86 @@ pub async fn detail(
         csrf_token,
     };
     super::render(&state.templates, "agents/detail.html", ctx)
+}
+
+#[derive(Deserialize)]
+pub struct UpdateSettingsForm {
+    pub description: Option<String>,
+    pub thinking_level: String,
+    pub system_prompt: Option<String>,
+}
+
+/// POST /agents/{name}/settings — update editable profile settings.
+pub async fn update_settings(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    axum::Form(form): axum::Form<UpdateSettingsForm>,
+) -> Response {
+    let thinking_level = match parse_thinking_level(&form.thinking_level) {
+        Some(v) => v,
+        None => return (StatusCode::BAD_REQUEST, "Invalid thinking level").into_response(),
+    };
+
+    let description = form
+        .description
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    if description.len() > 2_048 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Description too long (max 2,048 chars)",
+        )
+            .into_response();
+    }
+
+    let system_prompt = match form.system_prompt.as_deref().map(str::trim) {
+        Some("") | None => None,
+        Some(v) if v.len() > 16_384 => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "System prompt too long (max 16,384 chars)",
+            )
+                .into_response();
+        }
+        Some(v) => Some(v.to_string()),
+    };
+
+    match state
+        .service
+        .update_agent_settings(agentos_api::types::UpdateAgentSettingsRequest {
+            agent_name: name.clone(),
+            description,
+            thinking_level,
+            system_prompt,
+        })
+        .await
+    {
+        Ok(()) => {
+            let redirect_url = format!("/agents/{}/detail", name);
+            let mut response = axum::response::Redirect::to(&redirect_url).into_response();
+            response.headers_mut().insert(
+                "HX-Trigger",
+                axum::http::HeaderValue::from_static(
+                    r#"{"showToast":{"message":"Agent settings updated","type":"success"}}"#,
+                ),
+            );
+            response
+        }
+        Err(e) => {
+            tracing::error!(agent = %name, error = %e, "Failed to update agent settings");
+            let mut response =
+                (StatusCode::BAD_REQUEST, "Failed to update settings").into_response();
+            response.headers_mut().insert(
+                "HX-Trigger",
+                axum::http::HeaderValue::from_static(
+                    r#"{"showToast":{"message":"Failed to update settings","type":"error"}}"#,
+                ),
+            );
+            response
+        }
+    }
 }
 
 /// POST /agents/{name}/permissions — grant a permission to an agent.

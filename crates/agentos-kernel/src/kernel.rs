@@ -718,6 +718,8 @@ pub struct Kernel {
     pub(crate) per_agent_rate_limiter:
         Arc<tokio::sync::Mutex<crate::rate_limit::PerAgentRateLimiter>>,
     pub(crate) data_dir: PathBuf,
+    /// Canonical path to the config file used to boot this kernel instance.
+    pub(crate) config_path: PathBuf,
     /// Pre-canonicalized workspace paths from `tools.workspace.allowed_paths`.
     pub(crate) workspace_paths: Vec<PathBuf>,
     pub started_at: chrono::DateTime<chrono::Utc>,
@@ -739,6 +741,16 @@ pub struct Kernel {
     pub hook_registry: Arc<crate::hooks::HookRegistry>,
     /// Plugin registry — discovers and activates plugin manifests.
     pub plugin_registry: Arc<crate::plugin_registry::PluginRegistry>,
+    /// Kernel-Mediated Capabilities registry — managed capability providers.
+    pub capability_registry: Arc<RwLock<crate::capability_registry::CapabilityRegistry>>,
+    /// Shared storage zone table for dynamic filesystem access (KMC Phase 3).
+    pub zone_table: crate::managed_storage::ZoneTable,
+    /// Dynamic capability broker for runtime capability negotiation (KMC Phase 7).
+    pub capability_broker: Arc<crate::capability_broker::CapabilityBroker>,
+    /// Policy engine for capability request evaluation (KMC Phase 8).
+    pub policy_engine: Arc<RwLock<crate::policy_engine::PolicyEngine>>,
+    /// Capability dispatcher for routing tool calls to providers (KMC).
+    pub capability_dispatcher: Arc<crate::capability_dispatch::KernelCapabilityDispatcher>,
     /// Token used to signal graceful shutdown to all kernel loops.
     pub cancellation_token: CancellationToken,
     /// Set to `true` once the first `KernelShutdown` audit entry has been written.
@@ -775,6 +787,8 @@ pub struct ChatInferenceResult {
 pub enum ChatStreamEvent {
     /// Inference started — LLM is thinking.
     Thinking { iteration: u32 },
+    /// An incremental text chunk from the LLM (one or more tokens).
+    TextChunk { text: String },
     /// A tool call was detected; execution is starting.
     ToolStart { tool_name: String, iteration: u32 },
     /// A tool call completed.
@@ -795,6 +809,9 @@ pub enum ChatStreamEvent {
 }
 
 const CHAT_MAX_TOOL_ITERATIONS: u32 = 10;
+
+const EMPTY_LLM_ANSWER_PLACEHOLDER: &str =
+    "_(no response from model — the provider returned an empty answer; please retry)_";
 
 pub fn resolve_boot_vault_passphrase(
     config: &KernelConfig,
@@ -984,7 +1001,7 @@ impl Kernel {
         history: &[(String, String)],
         new_message: &str,
     ) -> Result<ChatInferenceResult, String> {
-        let (agent_id, agent_permissions, agent_description, agent_roles) = {
+        let (agent_id, agent_permissions, agent_description, agent_roles, agent_system_prompt) = {
             let registry = self.agent_registry.read().await;
             match registry.get_by_name(agent_name) {
                 Some(a) if a.status != AgentStatus::Offline => (
@@ -992,6 +1009,7 @@ impl Kernel {
                     a.permissions.clone(),
                     a.description.clone(),
                     a.roles.clone(),
+                    a.system_prompt.clone(),
                 ),
                 Some(_) => return Err(format!("Agent '{}' is offline", agent_name)),
                 None => return Err(format!("Agent '{}' not found", agent_name)),
@@ -1028,7 +1046,9 @@ impl Kernel {
                 agent_name: agent_name.to_string(),
                 agent_description,
                 agent_roles,
+                custom_instructions: agent_system_prompt,
                 sub_agent: None,
+                enforce_final_tag: self.config.chat.enforce_final_tag,
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
@@ -1081,16 +1101,26 @@ impl Kernel {
 
         let final_answer = loop {
             iterations += 1;
-            let result = llm
+            let mut result = llm
                 .infer_with_tools(&ctx, &llm_tool_manifests)
                 .await
                 .map_err(|e| format!("Inference failed: {}", e))?;
+
+            // Strip leaked fenced ```json tool-intent blocks from `result.text`,
+            // promote them into `result.tool_calls` when the adapter returned
+            // none, and compute the user-visible form. `result.text` keeps
+            // the model's raw reasoning (minus tool blocks) for the context
+            // window; `visible_text` is what we show the user and persist to
+            // chat history.
+            let visible_text =
+                self.sanitize_chat_inference_result(&mut result, agent_name, iterations);
 
             tracing::info!(
                 target: "agentos::chat",
                 agent = %agent_name,
                 iteration = iterations,
                 text_len = result.text.len(),
+                visible_text_len = visible_text.len(),
                 native_tool_calls = result.tool_calls.len(),
                 tokens_used = result.tokens_used.total_tokens,
                 model = %result.model,
@@ -1106,9 +1136,16 @@ impl Kernel {
             );
 
             if iterations >= CHAT_MAX_TOOL_ITERATIONS {
+                let trimmed = visible_text.trim();
+                if trimmed.is_empty() {
+                    break format!(
+                        "{}\n\n[Note: Maximum tool call limit reached.]",
+                        EMPTY_LLM_ANSWER_PLACEHOLDER
+                    );
+                }
                 break format!(
                     "{}\n\n[Note: Maximum tool call limit reached.]",
-                    result.text
+                    visible_text
                 );
             }
 
@@ -1195,6 +1232,18 @@ impl Kernel {
                         task_registry: None,
                         escalation_query: None,
                         workspace_paths: self.workspace_paths.clone(),
+                        capability_registry: {
+                            let reg = self.capability_registry.read().await;
+                            Some(
+                                Arc::new(CapabilityRegistrySnapshot::new(reg.list_capabilities()))
+                                    as Arc<dyn CapabilityRegistryQuery>,
+                            )
+                        },
+                        capability_dispatcher: Some(Arc::clone(&self.capability_dispatcher)
+                            as Arc<dyn CapabilityDispatcher>),
+                        storage_zone_query: Some(
+                            Arc::new(self.zone_table.clone()) as Arc<dyn StorageZoneQuery>
+                        ),
                         cancellation_token: self.cancellation_token.child_token(),
                     };
 
@@ -1261,22 +1310,32 @@ impl Kernel {
                 }
             } else {
                 // No tool call — this is the final answer.
-                if result.text.trim().is_empty() {
+                let answer = if visible_text.trim().is_empty() {
                     tracing::warn!(
                         target: "agentos::chat",
                         agent = %agent_name,
                         iteration = iterations,
-                        "Chat LLM returned empty final answer"
+                        model = %result.model,
+                        stop_reason = ?result.stop_reason,
+                        raw_text_len = result.text.len(),
+                        completion_tokens = result.tokens_used.completion_tokens,
+                        prompt_tokens = result.tokens_used.prompt_tokens,
+                        tool_calls_count = result.tool_calls.len(),
+                        raw_text_preview = %result.text.chars().take(200).collect::<String>(),
+                        "Chat LLM returned empty final answer; substituting placeholder"
                     );
-                }
+                    EMPTY_LLM_ANSWER_PLACEHOLDER.to_string()
+                } else {
+                    visible_text
+                };
                 tracing::info!(
                     target: "agentos::chat",
                     agent = %agent_name,
                     iteration = iterations,
-                    answer_len = result.text.len(),
+                    answer_len = answer.len(),
                     "Chat inference complete"
                 );
-                break result.text;
+                break answer;
             }
         };
 
@@ -1291,6 +1350,8 @@ impl Kernel {
     ///
     /// Same logic as `chat_infer_with_tools()` but sends `ChatStreamEvent` values
     /// through an `mpsc::Sender` so the web layer can stream progress to the browser.
+    /// Uses `infer_stream_with_tools()` internally so individual tokens are forwarded
+    /// as `TextChunk` events for real incremental rendering.
     /// Also returns the final `ChatInferenceResult` so the caller can persist it.
     pub async fn chat_infer_streaming(
         &self,
@@ -1299,7 +1360,7 @@ impl Kernel {
         new_message: &str,
         tx: tokio::sync::mpsc::Sender<ChatStreamEvent>,
     ) -> Result<ChatInferenceResult, String> {
-        let (agent_id, agent_permissions, agent_description, agent_roles) = {
+        let (agent_id, agent_permissions, agent_description, agent_roles, agent_system_prompt) = {
             let registry = self.agent_registry.read().await;
             match registry.get_by_name(agent_name) {
                 Some(a) if a.status != AgentStatus::Offline => (
@@ -1307,6 +1368,7 @@ impl Kernel {
                     a.permissions.clone(),
                     a.description.clone(),
                     a.roles.clone(),
+                    a.system_prompt.clone(),
                 ),
                 Some(_) => {
                     let msg = format!("Agent '{}' is offline", agent_name);
@@ -1361,7 +1423,9 @@ impl Kernel {
                 agent_name: agent_name.to_string(),
                 agent_description,
                 agent_roles,
+                custom_instructions: agent_system_prompt,
                 sub_agent: None,
+                enforce_final_tag: self.config.chat.enforce_final_tag,
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
@@ -1421,23 +1485,150 @@ impl Kernel {
                 })
                 .await;
 
-            let result = match llm.infer_with_tools(&ctx, &llm_tool_manifests).await {
-                Ok(r) => r,
-                Err(e) => {
+            // Use infer_stream_with_tools to get real token-level streaming.
+            // Spawn it in a separate task so we can read tokens concurrently.
+            let (inner_tx, mut inner_rx) =
+                tokio::sync::mpsc::channel::<agentos_llm::InferenceEvent>(64);
+            let llm_clone = llm.clone();
+            let ctx_clone = ctx.clone();
+            let manifests_clone = llm_tool_manifests.clone();
+            tokio::spawn(async move {
+                if let Err(e) = llm_clone
+                    .infer_stream_with_tools(&ctx_clone, &manifests_clone, inner_tx)
+                    .await
+                {
+                    tracing::error!("infer_stream_with_tools failed: {e}");
+                    // Error event is already sent through the channel by the adapter.
+                }
+            });
+
+            // Consume streamed events, forwarding text chunks to the browser.
+            // Per-iteration filter hides leaked fenced ```json tool-intent
+            // blocks from the live SSE stream and (when `enforce_final_tag`
+            // is enabled) drops any text outside `<final>...</final>` blocks
+            // plus any text inside `<think>...</think>` blocks. The post-stream
+            // extractor below promotes any matched fenced blocks into
+            // `result.tool_calls` so the leaked intents actually execute.
+            let mut sanitizer =
+                crate::output_sanitizer::ChatOutputFilter::new(self.config.chat.enforce_final_tag);
+            let mut inference_result: Option<agentos_llm::InferenceResult> = None;
+            let mut stream_error: Option<String> = None;
+            let mut stream_suppressed_count: usize = 0;
+            let mut streamed_token_events: usize = 0;
+            let mut pending_tail = String::new();
+
+            while let Some(event) = inner_rx.recv().await {
+                match event {
+                    agentos_llm::InferenceEvent::Token(chunk) => {
+                        let cleaned = sanitizer.push(&chunk);
+                        if !cleaned.is_empty() {
+                            streamed_token_events += 1;
+                            let _ = tx.send(ChatStreamEvent::TextChunk { text: cleaned }).await;
+                        }
+                    }
+                    agentos_llm::InferenceEvent::Done(result) => {
+                        pending_tail = sanitizer.flush();
+                        stream_suppressed_count = sanitizer.suppressed_block_count();
+                        inference_result = Some(result);
+                        break;
+                    }
+                    agentos_llm::InferenceEvent::Error(msg) => {
+                        stream_error = Some(msg);
+                        break;
+                    }
+                    // ToolCallStart, ToolCallDelta, ToolCallComplete, Usage — collected
+                    // implicitly via the Done event's InferenceResult which carries all
+                    // assembled tool_calls.
+                    _ => {}
+                }
+            }
+
+            if let Some(err_msg) = stream_error {
+                let _ = tx
+                    .send(ChatStreamEvent::Error {
+                        message: format!("Inference failed: {}", err_msg),
+                    })
+                    .await;
+                return Err(format!("Inference failed: {}", err_msg));
+            }
+
+            let mut result = match inference_result {
+                Some(r) => r,
+                None => {
+                    let msg = "Stream ended without a Done event".to_string();
                     let _ = tx
                         .send(ChatStreamEvent::Error {
-                            message: format!("Inference failed: {}", e),
+                            message: msg.clone(),
                         })
                         .await;
-                    return Err(format!("Inference failed: {}", e));
+                    return Err(msg);
                 }
             };
+
+            // Defense in depth: scan the complete response text for fenced
+            // ```json tool-intent blocks the adapter may have missed. When
+            // found and the adapter returned no native tool calls, promote
+            // them so the leaked intents actually execute. Always strip the
+            // matched blocks from `result.text` so the context fed into the
+            // next iteration does not re-tempt the model to repeat the leak.
+            //
+            // The streaming filter above already hid matched blocks from the
+            // SSE stream; this post-stream pass operates on `result.text`,
+            // which is the LLM adapter's complete unfiltered output.
+            // `visible_text` is the user-visible form (also filtered by
+            // `<final>` enforcement when enabled); `result.text` keeps the
+            // model's raw reasoning for the next context window entry so
+            // multi-turn tool-calling rounds do not lose chain-of-thought.
+            let visible_text =
+                self.sanitize_chat_inference_result(&mut result, agent_name, iterations);
+            if streamed_token_events == 0 {
+                // Some providers/adapters only emit a final Done payload. Simulate
+                // incremental streaming so the UI remains responsive and visibly
+                // progressive even when native token streaming is unavailable.
+                let fallback_text = if !visible_text.is_empty() {
+                    visible_text.clone()
+                } else {
+                    pending_tail.clone()
+                };
+                if !fallback_text.is_empty() {
+                    const FALLBACK_CHUNK_CHARS: usize = 80;
+                    const FALLBACK_CHUNK_DELAY_MS: u64 = 30;
+                    let chars: Vec<char> = fallback_text.chars().collect();
+                    let mut idx = 0usize;
+                    while idx < chars.len() {
+                        let end = (idx + FALLBACK_CHUNK_CHARS).min(chars.len());
+                        let chunk: String = chars[idx..end].iter().collect();
+                        let _ = tx.send(ChatStreamEvent::TextChunk { text: chunk }).await;
+                        idx = end;
+                        if idx < chars.len() {
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                FALLBACK_CHUNK_DELAY_MS,
+                            ))
+                            .await;
+                        }
+                    }
+                }
+            } else if !pending_tail.is_empty() {
+                let _ = tx
+                    .send(ChatStreamEvent::TextChunk { text: pending_tail })
+                    .await;
+            }
+            if stream_suppressed_count > 0 {
+                tracing::info!(
+                    target: "agentos::chat",
+                    agent = %agent_name,
+                    iteration = iterations,
+                    suppressed = stream_suppressed_count,
+                    "Output sanitizer hid fenced tool-intent blocks from the live stream"
+                );
+            }
 
             tracing::info!(
                 target: "agentos::chat",
                 agent = %agent_name,
                 iteration = iterations,
                 text_len = result.text.len(),
+                visible_text_len = visible_text.len(),
                 native_tool_calls = result.tool_calls.len(),
                 tokens_used = result.tokens_used.total_tokens,
                 model = %result.model,
@@ -1453,10 +1644,18 @@ impl Kernel {
             );
 
             if iterations >= CHAT_MAX_TOOL_ITERATIONS {
-                let answer = format!(
-                    "{}\n\n[Note: Maximum tool call limit reached.]",
-                    result.text
-                );
+                let visible_trimmed = visible_text.trim();
+                let answer = if visible_trimmed.is_empty() {
+                    format!(
+                        "{}\n\n[Note: Maximum tool call limit reached.]",
+                        EMPTY_LLM_ANSWER_PLACEHOLDER
+                    )
+                } else {
+                    format!(
+                        "{}\n\n[Note: Maximum tool call limit reached.]",
+                        visible_text
+                    )
+                };
                 let _ = tx
                     .send(ChatStreamEvent::Done {
                         answer: answer.clone(),
@@ -1554,6 +1753,18 @@ impl Kernel {
                         task_registry: None,
                         escalation_query: None,
                         workspace_paths: self.workspace_paths.clone(),
+                        capability_registry: {
+                            let reg = self.capability_registry.read().await;
+                            Some(
+                                Arc::new(CapabilityRegistrySnapshot::new(reg.list_capabilities()))
+                                    as Arc<dyn CapabilityRegistryQuery>,
+                            )
+                        },
+                        capability_dispatcher: Some(Arc::clone(&self.capability_dispatcher)
+                            as Arc<dyn CapabilityDispatcher>),
+                        storage_zone_query: Some(
+                            Arc::new(self.zone_table.clone()) as Arc<dyn StorageZoneQuery>
+                        ),
                         cancellation_token: self.cancellation_token.child_token(),
                     };
 
@@ -1643,29 +1854,40 @@ impl Kernel {
                     });
                 }
             } else {
-                if result.text.trim().is_empty() {
+                let answer = if visible_text.trim().is_empty() {
                     tracing::warn!(
                         target: "agentos::chat",
                         agent = %agent_name,
                         iteration = iterations,
-                        "Chat streaming LLM returned empty final answer"
+                        model = %result.model,
+                        enforce_final_tag = self.config.chat.enforce_final_tag,
+                        stop_reason = ?result.stop_reason,
+                        raw_text_len = result.text.len(),
+                        completion_tokens = result.tokens_used.completion_tokens,
+                        prompt_tokens = result.tokens_used.prompt_tokens,
+                        tool_calls_count = result.tool_calls.len(),
+                        raw_text_preview = %result.text.chars().take(200).collect::<String>(),
+                        "Chat streaming LLM returned empty final answer; substituting placeholder"
                     );
-                }
+                    EMPTY_LLM_ANSWER_PLACEHOLDER.to_string()
+                } else {
+                    visible_text
+                };
                 tracing::info!(
                     target: "agentos::chat",
                     agent = %agent_name,
                     iteration = iterations,
-                    answer_len = result.text.len(),
+                    answer_len = answer.len(),
                     "Chat streaming inference complete"
                 );
                 let _ = tx
                     .send(ChatStreamEvent::Done {
-                        answer: result.text.clone(),
+                        answer: answer.clone(),
                         tool_calls: tool_calls.clone(),
                         iterations,
                     })
                     .await;
-                break result.text;
+                break answer;
             }
         };
 
@@ -1674,6 +1896,131 @@ impl Kernel {
             tool_calls,
             iterations,
         })
+    }
+
+    /// Strip leaked fenced ```json tool-intent blocks from a chat
+    /// `InferenceResult`, promote any matched intents into `result.tool_calls`,
+    /// and (when `enforce_final_tag` is enabled in the kernel chat config)
+    /// compute the `<final>`-filtered user-visible text. Shared by both the
+    /// streaming and non-streaming chat paths so leakage protection is
+    /// uniform.
+    ///
+    /// Returns the cleaned user-visible text and leaves `result.text` with
+    /// only the fenced tool-intent blocks removed (the model's raw reasoning
+    /// prose is preserved there). The split matters: the user-facing SSE
+    /// stream, chat history store, and `ChatInferenceResult::answer` should
+    /// use the cleaned form, while the context window entry for the
+    /// assistant turn stores the less-filtered `result.text` so the model
+    /// retains its scratch reasoning across tool-calling iterations.
+    ///
+    /// Promotes extracted intents to `result.tool_calls` only when the
+    /// adapter returned none, so the kernel cannot double-execute the same
+    /// call. Always removes the matched fenced blocks from `result.text` so
+    /// persisted history never contains them.
+    fn sanitize_chat_inference_result(
+        &self,
+        result: &mut agentos_llm::InferenceResult,
+        agent_name: &str,
+        iteration: u32,
+    ) -> String {
+        use crate::output_sanitizer::{sanitize_visible_text, SanitizeProfile};
+
+        let raw_text_len = result.text.len();
+        let raw_text_empty = result.text.trim().is_empty();
+
+        // History profile: strip fenced tool blocks + XML tags so the model's
+        // next-turn context doesn't re-tempt the leaked format, but preserve
+        // reasoning prose and raw errors.
+        let history = sanitize_visible_text(&result.text, SanitizeProfile::History, false);
+
+        // Promote extracted tool intents into result.tool_calls when the
+        // adapter returned none (avoid double-execution otherwise).
+        if !history.extracted_intents.is_empty() {
+            tracing::warn!(
+                target: "agentos::chat",
+                agent = %agent_name,
+                iteration = iteration,
+                extracted = history.extracted_intents.len(),
+                adapter_native_count = result.tool_calls.len(),
+                "Promoted leaked fenced tool-intent blocks to structured tool calls"
+            );
+            self.audit_log(agentos_audit::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: agentos_audit::AuditEventType::ToolIntentLeakedFromText,
+                agent_id: None,
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({
+                    "agent_name": agent_name,
+                    "iteration": iteration,
+                    "extracted_count": history.extracted_intents.len(),
+                    "adapter_native_count": result.tool_calls.len(),
+                    "promoted": result.tool_calls.is_empty(),
+                    "tools": history
+                        .extracted_intents
+                        .iter()
+                        .map(|i| i.tool.as_str())
+                        .collect::<Vec<_>>(),
+                }),
+                severity: agentos_audit::AuditSeverity::Warn,
+                reversible: false,
+                rollback_ref: None,
+            });
+            if result.tool_calls.is_empty() {
+                for intent in history.extracted_intents {
+                    result.tool_calls.push(agentos_llm::InferenceToolCall {
+                        id: None,
+                        tool_name: intent.tool,
+                        intent_type: intent.intent_type,
+                        payload: intent.payload,
+                    });
+                }
+            }
+        }
+        // Set result.text to the History-filtered form for the context window.
+        result.text = history.text;
+
+        // Delivery profile: full filtering for the user-facing answer.
+        // Note: `delivery.extracted_intents` will always be empty here
+        // because the History pass above already removed all fenced tool
+        // blocks from `result.text`. Intent promotion uses
+        // `history.extracted_intents` above — this is by design.
+        let delivery = sanitize_visible_text(
+            &result.text,
+            SanitizeProfile::Delivery,
+            self.config.chat.enforce_final_tag,
+        );
+
+        // Diagnostic logging: track where text disappears in the pipeline.
+        if delivery.text.trim().is_empty() && !raw_text_empty {
+            tracing::warn!(
+                target: "agentos::chat",
+                agent = %agent_name,
+                iteration = iteration,
+                raw_text_len = raw_text_len,
+                history_text_len = result.text.len(),
+                delivery_text_len = delivery.text.len(),
+                enforce_final_tag = self.config.chat.enforce_final_tag,
+                stop_reason = ?result.stop_reason,
+                completion_tokens = result.tokens_used.completion_tokens,
+                raw_preview = %result.text.chars().take(300).collect::<String>(),
+                "Sanitizer reduced non-empty raw text to empty delivery — content stripped by filters"
+            );
+        } else if delivery.text.trim().is_empty() && raw_text_empty {
+            tracing::warn!(
+                target: "agentos::chat",
+                agent = %agent_name,
+                iteration = iteration,
+                stop_reason = ?result.stop_reason,
+                completion_tokens = result.tokens_used.completion_tokens,
+                prompt_tokens = result.tokens_used.prompt_tokens,
+                tool_calls = result.tool_calls.len(),
+                "LLM returned empty text — model produced no content (not a sanitizer issue)"
+            );
+        }
+
+        delivery.text
     }
 
     /// Log an audit entry, emitting a tracing error if the write fails.
@@ -2918,6 +3265,7 @@ impl Kernel {
             50,
         ));
 
+        let audit_for_dispatcher = Arc::clone(&audit);
         let kernel = Kernel {
             config,
             audit,
@@ -3002,6 +3350,7 @@ impl Kernel {
             provider_catalog,
             catalog_path: resolved_catalog_path,
             data_dir,
+            config_path: config_path.to_path_buf(),
             workspace_paths,
             started_at: chrono::Utc::now(),
             cancellation_token: kernel_cancellation_token,
@@ -3013,7 +3362,66 @@ impl Kernel {
                 Arc::clone(&hook_registry_arc),
                 Arc::clone(&tool_registry),
             ),
+            capability_registry: Arc::new(RwLock::new(
+                crate::capability_registry::CapabilityRegistry::new(),
+            )),
+            zone_table: crate::managed_storage::ZoneTable::new(),
+            capability_broker: Arc::new(crate::capability_broker::CapabilityBroker::with_defaults()),
+            policy_engine: Arc::new(RwLock::new(
+                crate::policy_engine::PolicyEngine::development_profile(),
+            )),
+            // Placeholder — wired with actual registry reference immediately below.
+            capability_dispatcher: Arc::new(
+                crate::capability_dispatch::KernelCapabilityDispatcher::new(
+                    Arc::new(RwLock::new(
+                        crate::capability_registry::CapabilityRegistry::new(),
+                    )),
+                    Arc::clone(&audit_for_dispatcher),
+                ),
+            ),
         };
+
+        // Re-wire the dispatcher to use the actual registry (the one with providers registered).
+        // This is safe because we haven't shared `kernel` yet.
+        // SAFETY: We need mut to reassign — this is the only place that modifies it.
+        // Re-create dispatcher with actual registry reference.
+        let capability_dispatcher =
+            Arc::new(crate::capability_dispatch::KernelCapabilityDispatcher::new(
+                Arc::clone(&kernel.capability_registry),
+                Arc::clone(&kernel.audit),
+            ));
+        let kernel = {
+            let mut k = kernel;
+            k.capability_dispatcher = capability_dispatcher;
+            k
+        };
+
+        // Register built-in capability providers (KMC).
+        let zone_table = kernel.zone_table.clone();
+        {
+            let env_provider = crate::managed_env::EnvProvider::with_defaults();
+            let storage_provider =
+                crate::managed_storage::StorageProvider::with_defaults(zone_table.clone());
+            let mut reg = kernel.capability_registry.write().await;
+            if let Err(e) = reg.register(Arc::new(env_provider)) {
+                tracing::warn!("Failed to register env capability provider: {e}");
+            }
+            if let Err(e) = reg.register(Arc::new(storage_provider)) {
+                tracing::warn!("Failed to register storage capability provider: {e}");
+            }
+            let process_provider = crate::managed_process::ProcessProvider::with_defaults();
+            if let Err(e) = reg.register(Arc::new(process_provider)) {
+                tracing::warn!("Failed to register proc capability provider: {e}");
+            }
+            let network_provider = crate::managed_network::NetworkProvider::with_defaults();
+            if let Err(e) = reg.register(Arc::new(network_provider)) {
+                tracing::warn!("Failed to register net capability provider: {e}");
+            }
+            let build_provider = crate::managed_build::BuildProvider::with_defaults();
+            if let Err(e) = reg.register(Arc::new(build_provider)) {
+                tracing::warn!("Failed to register build capability provider: {e}");
+            }
+        }
 
         // Register the built-in audit hook as the first hook.
         // It fires on every event and writes to the append-only AuditLog.
@@ -3178,6 +3586,7 @@ impl Kernel {
     }
 
     /// Public API: Connect a new agent through the kernel command dispatch path.
+    #[allow(clippy::too_many_arguments)]
     pub async fn api_connect_agent(
         &self,
         name: String,
@@ -3185,9 +3594,25 @@ impl Kernel {
         model: String,
         base_url: Option<String>,
         roles: Vec<String>,
+        description: Option<String>,
+        thinking_level: Option<ThinkingLevel>,
+        system_prompt: Option<String>,
     ) -> Result<(), String> {
         match self
-            .cmd_connect_agent(name, provider, model, base_url, roles, false, vec![], false)
+            .cmd_connect_agent(
+                name,
+                provider,
+                model,
+                base_url,
+                roles,
+                description,
+                thinking_level,
+                system_prompt,
+                false,
+                vec![],
+                false,
+                false,
+            )
             .await
         {
             agentos_bus::KernelResponse::Success { .. } => Ok(()),
@@ -3276,6 +3701,25 @@ impl Kernel {
             agentos_bus::KernelResponse::Error { message } => Err(message),
             _ => Err("Unexpected kernel response".to_string()),
         }
+    }
+
+    /// Public API: Update mutable agent profile settings.
+    pub async fn api_update_agent_settings(
+        &self,
+        agent_name: String,
+        description: String,
+        default_thinking_level: ThinkingLevel,
+        system_prompt: Option<String>,
+    ) -> Result<(), String> {
+        let mut registry = self.agent_registry.write().await;
+        registry
+            .update_profile_settings(
+                &agent_name,
+                description,
+                default_thinking_level,
+                system_prompt,
+            )
+            .map(|_| ())
     }
 
     /// Execute a pipeline with full security enforcement (agent resolution, permission
@@ -3520,6 +3964,7 @@ mod preflight_tests {
             skills: Default::default(),
             otel: OtelConfig::default(),
             api: Default::default(),
+            chat: Default::default(),
         }
     }
 
@@ -3694,6 +4139,7 @@ mod vault_bootstrap_tests {
             skills: Default::default(),
             otel: OtelConfig::default(),
             api: Default::default(),
+            chat: Default::default(),
         }
     }
 

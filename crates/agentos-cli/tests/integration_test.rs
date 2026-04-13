@@ -75,6 +75,8 @@ async fn register_mock_agent(kernel: &Kernel, name: &str, responses: Vec<String>
         last_active: now,
         public_key_hex: None,
         base_url: None,
+        default_thinking_level: ThinkingLevel::Off,
+        system_prompt: None,
     };
 
     {

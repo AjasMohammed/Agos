@@ -183,6 +183,88 @@ web-search           disconnected 0        MCP server 'web-search' reconnect fai
 | `TOOLS` | Number of tools registered from this server at boot |
 | `LAST ERROR` | Last connection-level error message, or `-` if none |
 
+### `mcp attach` / `mcp detach`
+
+Beyond `[[mcp.servers]]` config-driven boot, the kernel supports **runtime attach**: connect a new MCP server without restarting. Attachments are persisted to the kernel database (SQLite) and restored automatically on the next boot.
+
+```bash
+# Stdio transport — typical for npm/python MCP packages
+agentos mcp attach github \
+  --transport stdio \
+  --command "npx -y @modelcontextprotocol/server-github"
+
+# HTTP transport — for self-hosted MCP servers
+agentos mcp attach corp-tools \
+  --transport http \
+  --url https://mcp.internal.example.com \
+  --bearer "$CORP_TOOLS_TOKEN"
+
+# OAuth-protected server — token lifecycle managed by the kernel
+agentos mcp attach jira \
+  --transport http \
+  --url https://mcp.atlassian.example.com \
+  --oauth-connector jira
+
+# Remove a previously attached server
+agentos mcp detach github
+```
+
+`mcp attach` writes a `McpAttached` audit event; `mcp detach` writes `McpDetached`. The kernel reports `McpStatus` for each running server (config-driven and runtime-attached) in a single list.
+
+### `mcp tools` / `mcp call`
+
+```bash
+# List every tool currently exposed by attached servers
+agentos mcp tools
+
+# Direct invocation of a single tool — bypasses the agent loop
+agentos mcp call github list_repositories '{"owner": "example"}'
+```
+
+These are useful for smoke-testing a server immediately after attaching it.
+
+---
+
+## OAuth Credentials
+
+MCP servers behind an OAuth provider authenticate via the kernel's `OAuthTokenProvider`. The flow is:
+
+1. `mcp attach --oauth-connector <name>` triggers the authorization-code flow if no valid token is in the vault. The kernel writes `OAuthFlowStarted` and prints a browser URL.
+2. After the user consents, the kernel exchanges the code for tokens, encrypts them in the vault, and emits `OAuthCredentialStored` and `OAuthFlowCompleted`.
+3. Each subsequent MCP call passes through `OAuthTokenProvider` which transparently refreshes the access token when expired and emits `OAuthTokenRefreshed`. Persistent failures emit `OAuthTokenExpired` and surface as `ToolExecutionFailed` to the agent.
+4. `mcp detach` removes the credential and emits `OAuthCredentialDeleted`.
+
+OAuth credentials live in the encrypted vault under the `mcp.oauth.<connector>` namespace and never appear in logs or audit details. Use `agentos secret list` to confirm storage; the value is opaque to the operator.
+
+---
+
+## MCP Security Gate
+
+All output returned by external MCP tools passes through the `McpSecurityGate` before being injected into the agent context:
+
+- **Injection scanning** — output is scanned for known prompt-injection patterns. Suspicious payloads emit a `McpInjectionDetected` audit event and are flagged in the result so the agent can treat the data as untrusted.
+- **Per-server rate limiting** — a token bucket per server caps tool calls per minute to prevent runaway loops or quota exhaustion.
+- **Risk class** — every dynamically registered MCP tool carries `risk_class = ReadonlyExternal`. The `ApprovalHook` may intercept the first call to require operator approval.
+
+Treat MCP tool output the same way you treat any untrusted user data: use it as data, never as instructions to follow.
+
+---
+
+## A2A — Agent-to-Agent Protocol
+
+Beyond classic MCP tool import, AgentOS speaks an **Agent-to-Agent** protocol so one AgentOS instance can discover and delegate tasks to agents on another instance.
+
+```bash
+# Discover agents exposed by a remote AgentOS endpoint
+agentos a2a discover https://other.example.com
+
+# Delegate a task to a remote agent
+agentos a2a delegate https://other.example.com/agents/researcher \
+  --task "Find the latest CVEs for openssl 3.x"
+```
+
+The remote call is wrapped in a `task-delegate`-shaped intent and passes through the same `CapabilityToken` and `ApprovalHook` machinery as a local delegation. Failures (network, auth, capability) are returned as `ToolExecutionFailed` with the remote error embedded.
+
 ---
 
 ## Internals
@@ -192,11 +274,15 @@ web-search           disconnected 0        MCP server 'web-search' reconnect fai
 | Type | Crate | Purpose |
 |------|-------|---------|
 | `McpServerHandle` | `agentos-mcp` | Resilient connection wrapper with auto-reconnect and health state |
-| `McpClient` | `agentos-mcp` | Raw stdio connection holding a single `Mutex<McpConnection>` |
+| `McpClient` | `agentos-mcp` | Raw stdio/HTTP connection holding a single `Mutex<McpConnection>` |
+| `McpSupervisor` | `agentos-mcp` | Multi-server orchestrator that owns boot-time and runtime-attached servers in one place |
 | `McpToolAdapter` | `agentos-mcp` | `AgentTool` implementation wrapping a single MCP tool via `McpServerHandle` |
+| `McpSecurityGate` | `agentos-mcp` | Injection scanner and per-server rate limiter for MCP output |
+| `OAuthTokenProvider` | `agentos-mcp` | OAuth credential lifecycle (auth-code flow, refresh, vault storage) |
 | `McpServer` | `agentos-mcp` | Outbound server — serves `agentos mcp serve` |
+| `A2AClient` / `A2ATaskExecutor` | `agentos-mcp` | Agent-to-Agent protocol client that wraps remote delegations as local tools |
 | `McpServerConfig` | `agentos-kernel` | Config struct for `[[mcp.servers]]` entries |
-| `KernelCommand::McpStatus` | `agentos-bus` | Bus command for `agentos mcp status` |
+| `KernelCommand::McpStatus` / `McpAttach` / `McpDetach` / `McpOAuthStore` | `agentos-bus` | Bus commands for the runtime MCP CLI |
 | `McpServerStatus` | `agentos-bus` | Per-server health data (name, connected, tool_count, last_error) |
 
 ### McpServerHandle concurrency model

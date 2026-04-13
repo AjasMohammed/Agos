@@ -1,12 +1,13 @@
 use crate::state::AppState;
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Form, Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, KeepAliveStream, Sse};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::CookieJar;
 use futures::stream::{self, StreamExt};
 use minijinja::context;
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::time::Duration;
 
@@ -15,6 +16,11 @@ pub struct ListQuery {
     pub partial: Option<String>,
     pub search: Option<String>,
     pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResumeTaskForm {
+    pub confirm: String,
 }
 
 pub async fn list(
@@ -164,9 +170,23 @@ pub async fn detail(
                 .history
                 .iter()
                 .map(|msg| {
+                    let payload_str = serde_json::to_string(&msg.payload).unwrap_or_default();
+                    let preview = if payload_str.chars().count() > 80 {
+                        format!("{}…", payload_str.chars().take(80).collect::<String>())
+                    } else {
+                        payload_str
+                    };
+                    // IntentMessage carries an IntentType (Read/Write/Message/…),
+                    // not a chat-style User/Assistant/Tool role. Expose both so the
+                    // template can label and class-scope the badge correctly.
+                    let intent = format!("{:?}", msg.intent_type);
+                    let intent_slug = intent.to_lowercase();
                     context! {
-                        role => format!("{:?}", msg.intent_type),
-                        content => serde_json::to_string(&msg.payload).unwrap_or_default(),
+                        intent,
+                        intent_slug,
+                        preview,
+                        payload => msg.payload.clone(),
+                        timestamp => msg.timestamp.to_rfc3339(),
                     }
                 })
                 .collect();
@@ -317,6 +337,215 @@ pub async fn trace_json(State(state): State<AppState>, Path(id): Path<String>) -
     }
 }
 
+pub async fn snapshots(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    jar: CookieJar,
+) -> Response {
+    let task_id: agentos_types::TaskID = match id.parse() {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid task ID").into_response(),
+    };
+
+    let snapshots = state
+        .kernel
+        .checkpoint_store
+        .list_checkpoints()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| c.task_id == task_id)
+        .map(|c| {
+            context! {
+                checkpoint_id => c.checkpoint_id,
+                task_id => c.task_id.to_string(),
+                agent_id => c.agent_id.to_string(),
+                step_num => c.step_num,
+                updated_at => c.updated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                schema_version => c.schema_version,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);
+    let ctx = context! {
+        page_title => "Task Snapshots",
+        breadcrumbs => vec![
+            context! { label => "Tasks", href => "/tasks" },
+            context! { label => id.clone(), href => format!("/tasks/{}", id) },
+            context! { label => "Snapshots" },
+        ],
+        task_id => id,
+        snapshots,
+        csrf_token,
+    };
+    super::render(&state.templates, "task_snapshots.html", ctx)
+}
+
+pub async fn resume(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<ResumeTaskForm>,
+) -> Response {
+    if !form.confirm.trim().eq_ignore_ascii_case("RESUME") {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Confirmation required: type RESUME to restore from checkpoint",
+        )
+            .into_response();
+    }
+
+    let task_id: agentos_types::TaskID = match id.parse() {
+        Ok(v) => v,
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid task ID").into_response(),
+    };
+
+    let record = match state.kernel.checkpoint_store.get_latest(&task_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, "No checkpoint found for this task").into_response()
+        }
+        Err(e) => {
+            tracing::error!(task_id = %task_id, error = %e, "Failed to load checkpoint");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load checkpoint",
+            )
+                .into_response();
+        }
+    };
+
+    let payload: agentos_kernel::checkpoint_store::CheckpointPayload = match serde_json::from_slice(
+        &record.state_blob,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(task_id = %task_id, error = %e, "Failed to deserialize checkpoint payload");
+            return (StatusCode::BAD_REQUEST, "Checkpoint payload is invalid").into_response();
+        }
+    };
+
+    if let Some(existing) = state.kernel.scheduler.get_task(&task_id).await {
+        let is_terminal = matches!(
+            existing.state,
+            agentos_types::TaskState::Complete
+                | agentos_types::TaskState::Failed
+                | agentos_types::TaskState::Cancelled
+        );
+        if !is_terminal {
+            return (
+                StatusCode::CONFLICT,
+                "Task already exists in scheduler and is not terminal; refusing resume",
+            )
+                .into_response();
+        }
+    }
+
+    let agent = {
+        let registry = state.kernel.agent_registry.read().await;
+        match registry.get_by_id(&payload.task.agent_id) {
+            Some(a) if a.status != agentos_types::AgentStatus::Offline => a.clone(),
+            Some(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "Agent is offline and task cannot be resumed",
+                )
+                    .into_response()
+            }
+            None => {
+                return (StatusCode::NOT_FOUND, "Agent not found for checkpoint task")
+                    .into_response()
+            }
+        }
+    };
+
+    let effective_permissions = {
+        let registry = state.kernel.agent_registry.read().await;
+        registry.compute_effective_permissions(&agent.id)
+    };
+    let task_timeout = Duration::from_secs(state.kernel.config.kernel.default_task_timeout_secs);
+
+    let capability_token = match state.kernel.capability_engine.issue_token(
+        task_id,
+        agent.id,
+        BTreeSet::new(),
+        BTreeSet::from([
+            agentos_types::IntentTypeFlag::Read,
+            agentos_types::IntentTypeFlag::Write,
+            agentos_types::IntentTypeFlag::Execute,
+            agentos_types::IntentTypeFlag::Query,
+            agentos_types::IntentTypeFlag::Observe,
+            agentos_types::IntentTypeFlag::Message,
+            agentos_types::IntentTypeFlag::Delegate,
+            agentos_types::IntentTypeFlag::Broadcast,
+            agentos_types::IntentTypeFlag::Escalate,
+            agentos_types::IntentTypeFlag::Subscribe,
+            agentos_types::IntentTypeFlag::Unsubscribe,
+        ]),
+        effective_permissions,
+        task_timeout,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(task_id = %task_id, error = %e, "Failed to issue capability token for resumed task");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to issue capability token for resumed task",
+            )
+                .into_response();
+        }
+    };
+
+    let resumed_task = agentos_types::AgentTask {
+        id: task_id,
+        state: agentos_types::TaskState::Queued,
+        agent_id: agent.id,
+        capability_token,
+        assigned_llm: Some(agent.id),
+        priority: payload.task.priority,
+        created_at: chrono::Utc::now(),
+        started_at: None,
+        timeout: task_timeout,
+        original_prompt: payload.task.original_prompt,
+        history: Vec::new(),
+        parent_task: payload.task.parent_task,
+        reasoning_hints: payload.task.reasoning_hints,
+        max_iterations: payload.task.max_iterations,
+        trigger_source: None,
+        autonomous: payload.task.autonomous,
+        parent_task_id: payload.task.parent_task_id,
+        spawn_depth: payload.task.spawn_depth,
+        is_team_coordinator: payload.task.is_team_coordinator,
+        skip_checkpoint: payload.task.skip_checkpoint,
+        thinking_level: payload.task.thinking_level,
+    };
+
+    let _ = state
+        .kernel
+        .context_manager
+        .replace_context(&task_id, payload.context.window)
+        .await;
+    state.kernel.scheduler.enqueue(resumed_task).await;
+    let _ = state.kernel.audit.append(agentos_audit::AuditEntry {
+        timestamp: chrono::Utc::now(),
+        trace_id: agentos_types::TraceID::new(),
+        event_type: agentos_audit::AuditEventType::CheckpointRestored,
+        agent_id: Some(agent.id),
+        task_id: Some(task_id),
+        tool_id: None,
+        details: serde_json::json!({
+            "step_restored": record.step_num,
+            "checkpoint_id": record.checkpoint_id,
+            "source": "web",
+        }),
+        severity: agentos_audit::AuditSeverity::Info,
+        reversible: false,
+        rollback_ref: None,
+    });
+
+    Redirect::to(&format!("/tasks/{}", task_id)).into_response()
+}
+
 /// SSE endpoint for live task log streaming.
 /// Streams audit events related to the given task using monotonic ID-based tracking.
 ///
@@ -328,6 +557,7 @@ pub async fn trace_json(State(state): State<AppState>, Path(id): Path<String>) -
 pub async fn log_stream(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Sse<KeepAliveStream<futures::stream::BoxStream<'static, Result<Event, Infallible>>>> {
     let task_id: agentos_types::TaskID = match id.parse() {
         Ok(id) => id,
@@ -345,98 +575,181 @@ pub async fn log_stream(
     let audit = state.kernel.audit.clone();
     let scheduler = state.kernel.scheduler.clone();
 
-    // Poll audit log every second, tracking by monotonic row ID.
-    // State: Some(last_seen_id) = active; None = terminal (emit "done" then close).
-    let stream = stream::unfold(Some(0i64), move |state_opt| {
-        let audit = audit.clone();
-        let scheduler = scheduler.clone();
-        async move {
-            let last_seen_id = match state_opt {
-                Some(id) => id,
-                None => {
-                    // Previous iteration saw terminal state; send closing event.
-                    return Some((
-                        vec![Ok(Event::default().event("done").data("stream closed"))],
-                        None,
-                    ));
-                }
-            };
+    // Resume support: if the browser auto-reconnects after a transient disconnect,
+    // it sends Last-Event-ID with the most recent audit row it saw. Start polling
+    // from that cursor so we do not replay the entire task history on every reconnect.
+    let resume_from: i64 = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok())
+        .filter(|v: &i64| *v >= 0)
+        .unwrap_or(0);
 
-            tokio::time::sleep(Duration::from_secs(1)).await;
-
-            let audit_clone = audit.clone();
-            let entries = match tokio::task::spawn_blocking(move || {
-                audit_clone.query_since_for_task(&task_id, last_seen_id, 100)
-            })
-            .await
-            {
-                Ok(Ok(e)) => e,
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "SSE audit query error");
-                    vec![]
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "SSE audit query panicked");
-                    vec![]
-                }
-            };
-
-            // Check terminal state after audit query to capture final entries.
-            let is_terminal = match scheduler.get_task(&task_id).await {
-                None => true, // task not found — treat as terminal
-                Some(task) => {
-                    use agentos_types::TaskState;
-                    matches!(
-                        task.state,
-                        TaskState::Complete | TaskState::Failed | TaskState::Cancelled
-                    )
-                }
-            };
-
-            let max_id = entries.last().map(|(id, _)| *id).unwrap_or(last_seen_id);
-            let next_state = if is_terminal { None } else { Some(max_id) };
-
-            if entries.is_empty() {
-                let event = if is_terminal {
-                    Event::default().event("done").data("stream closed")
-                } else {
-                    Event::default().comment("keepalive")
+    // Poll audit log using monotonic row ID tracking.
+    // - Hard-stop stale streams after 30 minutes so abandoned browser tabs stop polling.
+    // - Back off from 1s to 10s intervals after 2 minutes of idle (no new entries).
+    // First iteration uses Duration::ZERO so the browser receives data immediately
+    // and transitions from CONNECTING to OPEN without a 1-second gap.
+    let started_at = tokio::time::Instant::now();
+    let stream = stream::unfold(
+        Some((
+            resume_from,
+            tokio::time::Instant::now(),
+            Duration::ZERO,
+        )),
+        move |state_opt| {
+            let audit = audit.clone();
+            let scheduler = scheduler.clone();
+            let started_at = started_at;
+            async move {
+                let (last_seen_id, last_activity, interval) = match state_opt {
+                    Some(s) => s,
+                    None => {
+                        // Previous iteration saw terminal state; send closing event.
+                        return Some((
+                            vec![Ok(Event::default().event("done").data("stream closed"))],
+                            None,
+                        ));
+                    }
                 };
-                return Some((vec![Ok(event)], next_state));
-            }
 
-            let mut events: Vec<Result<Event, Infallible>> = Vec::new();
-            let mut log_lines: Vec<String> = Vec::new();
+                tokio::time::sleep(interval).await;
 
-            for (_, entry) in &entries {
-                if entry.event_type == agentos_audit::AuditEventType::TestFindingCaptured {
-                    events.push(Ok(Event::default()
-                        .event("finding")
-                        .data(entry.details.to_string())));
+                let stream_timed_out =
+                    started_at.elapsed() >= Duration::from_secs(30 * 60 /* 30 minutes */);
+
+                let audit_clone = audit.clone();
+                let entries = match tokio::task::spawn_blocking(move || {
+                    audit_clone.query_since_for_task(&task_id, last_seen_id, 100)
+                })
+                .await
+                {
+                    Ok(Ok(e)) => e,
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "SSE audit query error");
+                        vec![]
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "SSE audit query panicked");
+                        vec![]
+                    }
+                };
+
+                // Check terminal state after audit query to capture final entries.
+                let is_terminal = stream_timed_out
+                    || match scheduler.get_task(&task_id).await {
+                        None => true, // task not found — treat as terminal
+                        Some(task) => {
+                            use agentos_types::TaskState;
+                            matches!(
+                                task.state,
+                                TaskState::Complete | TaskState::Failed | TaskState::Cancelled
+                            )
+                        }
+                    };
+
+                let max_id = entries.last().map(|(id, _)| *id).unwrap_or(last_seen_id);
+
+                // Idle backoff: 1s while entries are arriving, 10s after 2 min of silence.
+                let now = tokio::time::Instant::now();
+                let new_last_activity = if entries.is_empty() {
+                    last_activity
                 } else {
-                    log_lines.push(format!(
-                        "[{}] {:?} - {}",
-                        entry.timestamp.format("%H:%M:%S"),
-                        entry.event_type,
-                        entry.details
-                    ));
+                    now
+                };
+                let idle_threshold = Duration::from_secs(120);
+                let next_interval = if now.duration_since(new_last_activity) > idle_threshold {
+                    Duration::from_secs(10)
+                } else {
+                    Duration::from_secs(1)
+                };
+                let next_state = if is_terminal {
+                    None
+                } else {
+                    Some((max_id, new_last_activity, next_interval))
+                };
+
+                if entries.is_empty() {
+                    let event = if is_terminal {
+                        let reason = if stream_timed_out {
+                            "stream timeout reached"
+                        } else {
+                            "stream closed"
+                        };
+                        Event::default().event("done").data(reason)
+                    } else {
+                        Event::default().comment("keepalive")
+                    };
+                    return Some((vec![Ok(event)], next_state));
                 }
-            }
 
-            if !log_lines.is_empty() {
-                events.push(Ok(Event::default()
-                    .data(log_lines.join("\n"))
-                    .id(max_id.to_string())));
-            }
+                let mut events: Vec<Result<Event, Infallible>> = Vec::new();
+                let mut log_lines: Vec<String> = Vec::new();
 
-            if is_terminal {
-                events.push(Ok(Event::default().event("done").data("stream closed")));
-            }
+                for (row_id, entry) in &entries {
+                    if entry.event_type == agentos_audit::AuditEventType::TestFindingCaptured {
+                        events.push(Ok(Event::default()
+                            .id(row_id.to_string())
+                            .event("finding")
+                            .data(entry.details.to_string())));
+                    } else {
+                        log_lines.push(format!(
+                            "[{}] {:?} - {}",
+                            entry.timestamp.format("%H:%M:%S"),
+                            entry.event_type,
+                            entry.details
+                        ));
+                    }
+                }
 
-            Some((events, next_state))
-        }
-    })
+                if !log_lines.is_empty() {
+                    events.push(Ok(Event::default()
+                        .id(max_id.to_string())
+                        .data(log_lines.join("\n"))));
+                }
+
+                if is_terminal {
+                    events.push(Ok(Event::default().event("done").data("stream closed")));
+                }
+
+                Some((events, next_state))
+            }
+        },
+    )
     .flat_map(stream::iter);
 
     Sse::new(stream.boxed()).keep_alive(KeepAlive::default())
+}
+
+/// GET /api/tasks/{id}/context/{idx}/raw — return a single context window message
+/// payload as raw pretty-printed JSON. Linked from the task detail page so users can
+/// inspect large payloads without embedding megabytes of JSON inline in the DOM.
+pub async fn context_raw(
+    State(state): State<AppState>,
+    Path((id, idx)): Path<(String, usize)>,
+) -> Response {
+    let task_id: agentos_types::TaskID = match id.parse() {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid task ID").into_response(),
+    };
+
+    let task = match state.kernel.scheduler.get_task(&task_id).await {
+        Some(t) => t,
+        None => return (StatusCode::NOT_FOUND, "Task not found").into_response(),
+    };
+
+    let msg = match task.history.get(idx) {
+        Some(m) => m,
+        None => {
+            return (StatusCode::NOT_FOUND, "Context message index out of range").into_response()
+        }
+    };
+
+    let body = serde_json::to_string_pretty(&msg.payload).unwrap_or_default();
+    let mut resp = (StatusCode::OK, body).into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    resp
 }

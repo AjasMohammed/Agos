@@ -71,6 +71,11 @@ db_path = "/var/lib/agentos/data/context_memory.db"
 [scratchpad]
 db_path = "/var/lib/agentos/data/scratchpad.db"
 
+[api]
+enabled = true
+host = "0.0.0.0"
+port = 8080
+
 [health_monitor]
 enabled = true
 check_interval_secs = 30

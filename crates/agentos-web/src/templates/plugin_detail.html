@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Plugin {{ plugin.id }}</h1>
+        <p class="page-meta">Manifest and runtime status</p>
+    </div>
+    <div class="page-header-actions">
+        {% if plugin.status == "active" %}
+        <form method="post" action="/plugins/{{ plugin.id }}/disable" style="display:inline">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <button class="outline secondary btn-sm" type="submit">Disable</button>
+        </form>
+        {% else %}
+        <form method="post" action="/plugins/{{ plugin.id }}/enable" style="display:inline">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <button class="outline secondary btn-sm" type="submit">Enable</button>
+        </form>
+        {% endif %}
+        <a href="/plugins" class="outline btn-sm" role="button">Back</a>
+    </div>
+</div>
+
+<article>
+    <header><strong>Overview</strong></header>
+    <table>
+        <tbody>
+            <tr><th scope="row">ID</th><td><code>{{ plugin.id }}</code></td></tr>
+            <tr><th scope="row">Name</th><td>{{ plugin.display_name }}</td></tr>
+            <tr><th scope="row">Version</th><td>{{ plugin.version }}</td></tr>
+            <tr><th scope="row">Status</th><td>{{ plugin.status }}</td></tr>
+            <tr><th scope="row">Trust Tier</th><td>{{ plugin.trust_tier }}</td></tr>
+            <tr><th scope="row">Description</th><td>{{ plugin.description }}</td></tr>
+            {% if plugin.blocked_reason %}
+            <tr><th scope="row">Blocked Reason</th><td>{{ plugin.blocked_reason }}</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</article>
+
+<div class="grid">
+    <article>
+        <header><strong>Channels ({{ plugin.channels|length }})</strong></header>
+        {% if plugin.channels|length == 0 %}
+        <p class="muted">No channel hooks declared.</p>
+        {% else %}
+        <ul>
+            {% for c in plugin.channels %}
+            <li>
+                <code>{{ c.id }}</code> - {{ c.display_name }}
+                {% if c.capabilities|length > 0 %}
+                <small class="muted">({{ c.capabilities|join(", ") }})</small>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+    </article>
+
+    <article>
+        <header><strong>Tools ({{ plugin.tools|length }})</strong></header>
+        {% if plugin.tools|length == 0 %}
+        <p class="muted">No tools declared.</p>
+        {% else %}
+        <ul>
+            {% for t in plugin.tools %}
+            <li><code>{{ t }}</code></li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+    </article>
+</div>
+
+<article>
+    <header><strong>Permissions ({{ plugin.permissions|length }})</strong></header>
+    {% if plugin.permissions|length == 0 %}
+    <p class="muted">No explicit permissions declared by this plugin.</p>
+    {% else %}
+    <ul>
+        {% for p in plugin.permissions %}
+        <li><code>{{ p }}</code></li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+</article>
+{% endblock %}

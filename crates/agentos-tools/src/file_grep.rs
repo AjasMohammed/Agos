@@ -125,7 +125,13 @@ impl AgentTool for FileGrep {
             .workspace_paths
             .iter()
             .any(|wp| canonical_root.starts_with(wp));
-        if !canonical_root.starts_with(&canonical_data_dir) && !in_workspace {
+        // KMC Phase 3: check dynamic storage zones
+        let in_storage_zone = context
+            .storage_zone_query
+            .as_ref()
+            .map(|q| q.is_path_in_zone(&context.agent_id, &canonical_root))
+            .unwrap_or(false);
+        if !canonical_root.starts_with(&canonical_data_dir) && !in_workspace && !in_storage_zone {
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
                 operation: format!("Path traversal denied: {}", search_path),

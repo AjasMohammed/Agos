@@ -121,7 +121,13 @@ impl AgentTool for FileDiff {
                         .workspace_paths
                         .iter()
                         .any(|wp| canon.starts_with(wp));
-                    if !canon.starts_with(&data_dir_canon) && !in_workspace {
+                    // KMC Phase 3: check dynamic storage zones
+                    let in_storage_zone = context
+                        .storage_zone_query
+                        .as_ref()
+                        .map(|q| q.is_path_in_zone(&context.agent_id, canon))
+                        .unwrap_or(false);
+                    if !canon.starts_with(&data_dir_canon) && !in_workspace && !in_storage_zone {
                         return Err(AgentOSError::PermissionDenied {
                             resource: "fs.user_data".into(),
                             operation: format!("Path traversal denied: {}", path_str),
@@ -215,6 +221,9 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -288,6 +297,9 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         };
         let result = tool

@@ -1,4 +1,4 @@
-use agentos_types::{AgentID, CostSnapshot};
+use agentos_types::{AgentID, CostSnapshot, ThinkingLevel};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,21 @@ pub struct ConnectAgentRequest {
     pub base_url: Option<String>,
     #[serde(default)]
     pub roles: Vec<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub thinking_level: Option<ThinkingLevel>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateAgentSettingsRequest {
+    pub agent_name: String,
+    pub description: String,
+    pub thinking_level: ThinkingLevel,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

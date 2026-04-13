@@ -69,6 +69,28 @@ pub struct KernelConfig {
     /// REST API server configuration.
     #[serde(default)]
     pub api: ApiSettings,
+    /// Chat-specific kernel configuration (output filtering, enforcement modes).
+    #[serde(default)]
+    pub chat: ChatConfig,
+}
+
+/// Chat-specific kernel configuration.
+///
+/// Controls server-side filtering applied to LLM output before it reaches the
+/// chat UI. See `output_sanitizer` and the Output Sanitization plan for the
+/// full filter pipeline.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ChatConfig {
+    /// When true, the chat output filter only emits text appearing inside
+    /// `<final>...</final>` tags. The system prompt is updated to instruct
+    /// the model to wrap its visible answer in those tags. `<think>...</think>`
+    /// blocks are always suppressed regardless of this setting.
+    ///
+    /// Off by default — flipping this on is a behavioral change that requires
+    /// the connected LLM to follow the convention or the user gets an
+    /// empty-answer placeholder reply.
+    #[serde(default)]
+    pub enforce_final_tag: bool,
 }
 
 /// Configuration for the Unified Notification and Interaction System (UNIS).

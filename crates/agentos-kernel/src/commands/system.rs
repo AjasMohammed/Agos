@@ -15,7 +15,7 @@ impl Kernel {
             connected_agents,
             active_tasks,
             installed_tools,
-            total_audit_entries: 0,
+            total_audit_entries: self.audit.count().unwrap_or(0),
         })
     }
 

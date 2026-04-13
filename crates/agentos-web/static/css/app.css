@@ -114,6 +114,33 @@ html, body {
 }
 .sidebar-nav li { margin: 0; }
 
+.nav-section {
+    margin: 0;
+    border: none;
+}
+.nav-section summary {
+    padding: 0.9rem 1rem 0.35rem;
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--aos-orange-light);
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+}
+.nav-section summary::-webkit-details-marker { display: none; }
+.nav-section summary::before {
+    content: '\25B8  ';
+    font-size: 0.6rem;
+}
+.nav-section[open] summary::before {
+    content: '\25BE  ';
+}
+.nav-section .sidebar-nav {
+    padding-top: 0;
+}
+
 .sidebar-nav-group {
     padding: 0.9rem 1rem 0.35rem;
     font-size: 0.65rem;
@@ -807,7 +834,6 @@ html, body {
     height: 420px;
     overflow-y: auto;
     margin-bottom: 2rem;
-    scroll-behavior: smooth;
 }
 .log-line {
     white-space: pre-wrap;
@@ -1413,6 +1439,13 @@ html, body {
     margin-bottom: 0.35rem;
 }
 
+.chat-activity-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin: 0.5rem 0 0.75rem 2.9rem;
+}
+
 .chat-activity-icon {
     font-size: 0.85rem;
     flex-shrink: 0;
@@ -1489,6 +1522,18 @@ html, body {
 /* ── Reply area ──────────────────────────────────────────── */
 .chat-reply-area { margin-top: 1.5rem; }
 
+.chat-rename-form {
+    display: flex;
+    gap: 0.6rem;
+    align-items: flex-end;
+    margin: 0.6rem 0 1rem 0;
+}
+
+.chat-rename-form label {
+    flex: 1;
+    margin-bottom: 0;
+}
+
 /* ── Agent message bubble ────────────────────────────────── */
 .chat-bubble-agent { max-width: 80%; }
 
@@ -1504,11 +1549,148 @@ html, body {
     line-height: 1.5;
 }
 
+.chat-bubble-content-agent p {
+    margin: 0 0 0.6rem 0;
+}
+
+.chat-bubble-content-agent p:last-child {
+    margin-bottom: 0;
+}
+
+.chat-bubble-content-agent pre {
+    margin: 0.6rem 0;
+    padding: 0.65rem;
+    background: #f6f8fa;
+    border: var(--aos-border-thin);
+    overflow-x: auto;
+}
+
+.chat-bubble-content-agent pre code {
+    display: block;
+}
+
+.chat-bubble-content-agent code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.chat-bubble-content-agent ul,
+.chat-bubble-content-agent ol {
+    margin: 0.4rem 0 0.6rem 1.2rem;
+}
+
+.chat-tool-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
+}
+
+@media (max-width: 900px) {
+    .chat-tool-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Blinking block cursor shown while streaming tokens */
+.chat-streaming::after {
+    content: '\2588'; /* full block character */
+    display: inline;
+    animation: stream-cursor-blink 0.6s steps(2, start) infinite;
+    color: var(--aos-orange);
+    font-weight: 700;
+}
+
+@keyframes stream-cursor-blink {
+    0%   { opacity: 1; }
+    50%  { opacity: 0; }
+    100% { opacity: 1; }
+}
+
 .chat-bubble-meta-left {
     text-align: left;
     margin-top: 0.3rem;
     font-size: 0.72rem;
     color: var(--pico-muted-color);
+}
+
+/* ── Chat message actions ──────────────────────────────��──── */
+.chat-msg-action {
+    background: none;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: 0.25rem;
+    padding: 0.1rem 0.4rem;
+    font-size: 0.65rem;
+    cursor: pointer;
+    color: var(--pico-muted-color);
+    margin: 0;
+    line-height: 1.3;
+}
+.chat-msg-action:hover {
+    color: var(--pico-color);
+    border-color: var(--pico-color);
+}
+.chat-bubble-actions {
+    display: flex;
+    gap: 0.25rem;
+    margin-top: 0.25rem;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.chat-row:hover .chat-bubble-actions {
+    opacity: 1;
+}
+
+/* ── Suggested prompts ────────────────────────────────────── */
+.chat-suggested-prompts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    justify-content: center;
+    margin-top: 1rem;
+}
+.chat-suggested-prompt {
+    font-size: 0.82rem;
+}
+
+/* ── Thinking blocks ──────────────────────────────────────── */
+.chat-thinking-block {
+    margin-left: 2.75rem;
+    border-left: 2px solid var(--pico-muted-border-color);
+    padding: 0.25rem 0 0.25rem 0.75rem;
+    font-size: 0.9em;
+}
+.chat-thinking-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--pico-muted-color);
+    margin-right: 0.25rem;
+}
+
+/* ── Code block copy button ───────────────────────────────── */
+.markdown-content pre {
+    position: relative;
+}
+.markdown-content pre .code-copy-btn {
+    position: absolute;
+    top: 0.25rem;
+    right: 0.25rem;
+    opacity: 0;
+    transition: opacity 0.15s;
+    background: var(--pico-card-background-color);
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: 0.25rem;
+    padding: 0.15rem 0.4rem;
+    font-size: 0.65rem;
+    cursor: pointer;
+    color: var(--pico-muted-color);
+}
+.markdown-content pre:hover .code-copy-btn {
+    opacity: 1;
+}
+.markdown-content pre .code-copy-btn:hover {
+    color: var(--pico-color);
+    border-color: var(--pico-color);
 }
 
 /* ── Session list agent label ────────────────────────────── */
@@ -1518,6 +1700,31 @@ html, body {
     color: var(--aos-orange);
     margin-bottom: 0.15rem;
     text-transform: uppercase;
+}
+
+/* ── Tab navigation ───────────────────────────────────────── */
+.tab-nav {
+    display: flex;
+    gap: 0;
+    border-bottom: 2px solid var(--pico-muted-border-color);
+    margin-bottom: 1.5rem;
+}
+.tab-nav a {
+    padding: 0.5rem 1rem;
+    font-size: 0.85rem;
+    color: var(--pico-muted-color);
+    text-decoration: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: color 0.15s, border-color 0.15s;
+}
+.tab-nav a:hover {
+    color: var(--pico-color);
+}
+.tab-nav a.tab-active {
+    color: var(--pico-color);
+    font-weight: 700;
+    border-bottom-color: var(--aos-orange);
 }
 
 /* ── Audit detail page ───────────────────────────────────── */

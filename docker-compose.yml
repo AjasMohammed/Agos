@@ -8,10 +8,12 @@ services:
     tmpfs:
       - /tmp
       - /run
+      - /var/log/agentos:uid=65532,gid=65532,mode=0755
     security_opt:
       - no-new-privileges:true
     environment:
       - AGENTOS_CONFIG=/etc/agentos/config.toml
+      - AGENTOS_DATA_DIR=/var/lib/agentos/data
       - AGENTOS_AUTO_INIT_VAULT=true
       - AGENTOS_VAULT_PASSPHRASE=${AGENTOS_VAULT_PASSPHRASE:-}
       - AGENTOS_OLLAMA_HOST=${AGENTOS_OLLAMA_HOST:-}
@@ -24,6 +26,10 @@ services:
       - agentos-data:/var/lib/agentos/data
       - agentos-user-tools:/var/lib/agentos/tools/user
       - ./config/docker.toml:/etc/agentos/config.toml:ro
+      # Container runtime tools (container-create / container-exec / container-logs).
+      # Mounting the host Docker socket gives this container effective root on the
+      # host — keep commented out unless container tooling is required.
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "8080:8080"
       - "9091:9091"
@@ -36,11 +42,9 @@ services:
     command: ["web", "serve", "--host", "0.0.0.0", "--port", "8080"]
 
   jaeger:
-    image: jaegertracing/all-in-one:latest
+    image: jaegertracing/jaeger:2.4.0
     container_name: agentos-jaeger
     restart: unless-stopped
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
     ports:
       - "16686:16686"
       - "4317:4317"

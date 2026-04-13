@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Logs</h1>
+        <p class="page-meta">Audit-log search (source: <code>{{ log_path }}</code>)</p>
+    </div>
+</div>
+
+<form method="get" action="/logs">
+    <div class="form-grid-3">
+        <label>Query <input name="q" value="{{ q }}" placeholder="search text"></label>
+        <label>Severity <input name="level" value="{{ level }}" placeholder="info/warn/error"></label>
+        <label>Event Type <input name="event_type" value="{{ event_type }}" placeholder="TaskCreated"></label>
+    </div>
+    <div class="form-grid-2">
+        <label>From (RFC3339) <input name="from" value="{{ from }}" placeholder="2026-04-11T00:00:00Z"></label>
+        <label>To (RFC3339) <input name="to" value="{{ to }}" placeholder="2026-04-11T23:59:59Z"></label>
+    </div>
+    <button type="submit">Search</button>
+</form>
+
+{% if results|length == 0 %}
+<article><p class="muted">No matching log entries.</p></article>
+{% else %}
+<table>
+    <thead><tr><th>Time</th><th>Severity</th><th>Event</th><th>Entry</th></tr></thead>
+    <tbody>
+    {% for r in results %}
+    <tr>
+        <td>{{ r.timestamp }}</td>
+        <td>{{ r.severity }}</td>
+        <td>{{ r.event_type }}</td>
+        <td><code>{{ r.line|truncate(200) }}</code></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

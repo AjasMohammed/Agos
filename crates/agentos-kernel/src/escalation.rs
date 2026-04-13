@@ -300,6 +300,41 @@ impl EscalationManager {
         result
     }
 
+    /// Resolve all unresolved escalations attached to a task.
+    ///
+    /// Called when the owning task reaches a terminal state so escalations
+    /// don't outlive their task and trigger spurious sweeper actions
+    /// (auto-approve / auto-deny) after the task has already finished.
+    /// Returns the number of escalations resolved.
+    pub async fn resolve_for_task(&self, task_id: &TaskID, resolution: &str) -> usize {
+        let now = chrono::Utc::now();
+        let mut to_persist = Vec::new();
+        {
+            let mut escalations = self.escalations.write().await;
+            for esc in escalations.iter_mut() {
+                if esc.task_id == *task_id && !esc.resolved {
+                    esc.resolved = true;
+                    esc.resolution = Some(resolution.to_string());
+                    esc.resolved_at = Some(now);
+                    to_persist.push(esc.clone());
+                }
+            }
+        }
+        let count = to_persist.len();
+        for escalation in to_persist {
+            self.persist_escalation(escalation).await;
+        }
+        if count > 0 {
+            tracing::info!(
+                task_id = %task_id,
+                count,
+                resolution,
+                "Resolved pending escalations for terminal task"
+            );
+        }
+        count
+    }
+
     /// Get escalations for a specific task.
     pub async fn for_task(&self, task_id: &TaskID) -> Vec<PendingEscalation> {
         self.escalations

@@ -90,8 +90,8 @@ async fn run_checks(fix: bool) -> Vec<(String, CheckResult)> {
         check_config_parses(&config_path),
     ));
 
-    // Read vault/audit paths from the actual config if parseable.
-    let (vault_path, audit_path) = extract_db_paths(&config_path);
+    // Read vault/audit/socket paths from the actual config if parseable.
+    let (vault_path, audit_path, socket_path) = extract_db_paths(&config_path);
 
     checks.push((
         "Vault database directory".to_string(),
@@ -103,7 +103,7 @@ async fn run_checks(fix: bool) -> Vec<(String, CheckResult)> {
     ));
     checks.push((
         "IPC socket directory".to_string(),
-        check_bus_socket_dir(fix),
+        check_bus_socket_dir(&socket_path, fix),
     ));
     checks.push(("Core tool manifests".to_string(), check_tools_dir()));
 
@@ -160,17 +160,18 @@ fn check_config_parses(path: &Path) -> CheckResult {
     }
 }
 
-/// Extract vault and audit DB paths from the config file.
+/// Extract vault, audit, and bus socket paths from the config file.
 /// Falls back to defaults if config is missing or unparseable.
-fn extract_db_paths(config_path: &Path) -> (PathBuf, PathBuf) {
+fn extract_db_paths(config_path: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let default_vault = PathBuf::from("data/vault.db");
     let default_audit = PathBuf::from("data/audit.db");
+    let default_socket = PathBuf::from("/tmp/agentos/agentos.sock");
 
     let Ok(content) = std::fs::read_to_string(config_path) else {
-        return (default_vault, default_audit);
+        return (default_vault, default_audit, default_socket);
     };
     let Ok(value) = toml::from_str::<toml::Value>(&content) else {
-        return (default_vault, default_audit);
+        return (default_vault, default_audit, default_socket);
     };
 
     let vault = value
@@ -187,7 +188,14 @@ fn extract_db_paths(config_path: &Path) -> (PathBuf, PathBuf) {
         .map(PathBuf::from)
         .unwrap_or(default_audit);
 
-    (vault, audit)
+    let socket = value
+        .get("bus")
+        .and_then(|v| v.get("socket_path"))
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .unwrap_or(default_socket);
+
+    (vault, audit, socket)
 }
 
 /// Check that the parent directory of a path exists and is writable.
@@ -225,12 +233,24 @@ fn check_dir_writable(path: &Path, fix: bool) -> CheckResult {
     }
 }
 
-fn check_bus_socket_dir(fix: bool) -> CheckResult {
-    let socket_dir = PathBuf::from("/tmp/agentos");
+fn check_bus_socket_dir(socket_path: &Path, fix: bool) -> CheckResult {
+    // Check whether the socket file itself exists (kernel running) or at least
+    // its parent directory exists (ready for the kernel to create the socket).
+    if socket_path.exists() {
+        return CheckResult::Pass(format!(
+            "Socket {} exists (kernel running)",
+            socket_path.display()
+        ));
+    }
+
+    let socket_dir = socket_path.parent().unwrap_or(socket_path);
     if socket_dir.exists() {
-        CheckResult::Pass(format!("{} exists", socket_dir.display()))
+        CheckResult::Pass(format!(
+            "{} exists (socket dir ready)",
+            socket_dir.display()
+        ))
     } else if fix {
-        match std::fs::create_dir_all(&socket_dir) {
+        match std::fs::create_dir_all(socket_dir) {
             Ok(_) => CheckResult::Pass(format!("Created {}", socket_dir.display())),
             Err(e) => CheckResult::Fail {
                 message: format!("Failed to create socket dir: {}", e),
@@ -322,18 +342,20 @@ mod tests {
         let mut tmp = NamedTempFile::new().unwrap();
         writeln!(
             tmp,
-            "[vault]\ndb_path = \"/custom/vault.db\"\n[audit]\ndb_path = \"/custom/audit.db\""
+            "[vault]\ndb_path = \"/custom/vault.db\"\n[audit]\ndb_path = \"/custom/audit.db\"\n[bus]\nsocket_path = \"/custom/agentos.sock\""
         )
         .unwrap();
-        let (vault, audit) = extract_db_paths(tmp.path());
+        let (vault, audit, socket) = extract_db_paths(tmp.path());
         assert_eq!(vault, PathBuf::from("/custom/vault.db"));
         assert_eq!(audit, PathBuf::from("/custom/audit.db"));
+        assert_eq!(socket, PathBuf::from("/custom/agentos.sock"));
     }
 
     #[test]
     fn test_extract_db_paths_defaults_when_missing() {
-        let (vault, audit) = extract_db_paths(Path::new("/nonexistent"));
+        let (vault, audit, socket) = extract_db_paths(Path::new("/nonexistent"));
         assert_eq!(vault, PathBuf::from("data/vault.db"));
         assert_eq!(audit, PathBuf::from("data/audit.db"));
+        assert_eq!(socket, PathBuf::from("/tmp/agentos/agentos.sock"));
     }
 }

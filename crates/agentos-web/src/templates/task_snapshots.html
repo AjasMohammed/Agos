@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Task Snapshots</h1>
+        <p class="page-meta">Task {{ task_id }} checkpoint history</p>
+    </div>
+    <div class="page-header-actions">
+        <form method="post" action="/tasks/{{ task_id }}/resume" onsubmit="return confirm('Resume task from latest checkpoint? This recreates the task in queued state.');">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="confirm" value="RESUME">
+            <button type="submit" class="outline secondary">Resume From Latest Checkpoint</button>
+        </form>
+        <a href="/tasks/{{ task_id }}" role="button" class="outline">Back to Task</a>
+    </div>
+</div>
+
+{% if snapshots|length == 0 %}
+<article><p class="muted">No snapshots/checkpoints found for this task.</p></article>
+{% else %}
+<table>
+    <thead><tr><th>Checkpoint ID</th><th>Agent</th><th>Step</th><th>Updated</th><th>Schema</th></tr></thead>
+    <tbody>
+    {% for s in snapshots %}
+    <tr>
+        <td><code>{{ s.checkpoint_id }}</code></td>
+        <td><code>{{ s.agent_id }}</code></td>
+        <td>{{ s.step_num }}</td>
+        <td>{{ s.updated_at }}</td>
+        <td>{{ s.schema_version }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

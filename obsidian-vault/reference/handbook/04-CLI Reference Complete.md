@@ -1835,6 +1835,165 @@ The server prints `Web UI: http://<host>:<port>` on startup. Press Ctrl-C to shu
 
 ---
 
+## `team` — Run and manage agent teams
+
+### `team run`
+
+Run a coordinator + workers agent team. The coordinator orchestrates a set of worker agents and aggregates their results into a final response.
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--coordinator` | `String` | *required* | Coordinator agent name |
+| `--workers` | `Vec<String>` | *required* | Worker agent names (repeat flag) |
+| `--task` | `String` | *required* | Task description |
+
+### `team status`
+
+Show the current status of a running team — coordinator state, per-worker progress, and partial results.
+
+```bash
+agentos team run --coordinator orchestrator \
+  --workers researcher --workers coder --workers reviewer \
+  --task "Build a CSV importer"
+
+agentos team status <team-id>
+```
+
+---
+
+## `skill` — Manage autonomous skill packages
+
+A skill bundles a system prompt, a curated tool allowlist, optional event triggers, and a budget into a single installable unit. Core skills ship under `skills/core/`.
+
+| Subcommand | Description |
+|---|---|
+| `skill list` | List installed skills |
+| `skill install <path>` | Install a skill from a directory or archive |
+| `skill remove <id>` | Remove an installed skill |
+| `skill run <id> --input <prompt>` | Run a skill against an input prompt |
+| `skill status <id>` | Inspect the status of a running skill |
+
+```bash
+agentos skill list
+agentos skill run cost-optimizer --input "find expensive tasks today"
+```
+
+---
+
+## `mcp` (extended) — runtime attach, OAuth, status
+
+Beyond the offline `serve`/`list` subcommands, the `mcp` group has runtime attach/detach commands that connect to external MCP servers without restarting the kernel. Attachments persist to SQLite and are restored on next boot.
+
+| Subcommand | Description |
+|---|---|
+| `mcp status` | Show health, tool count, and last error per attached server |
+| `mcp attach <name>` | Attach a new MCP server (`--transport stdio` or `--transport http`) |
+| `mcp detach <name>` | Detach a previously attached MCP server |
+| `mcp tools` | List MCP tools currently exposed by attached servers |
+| `mcp call <name> <tool>` | Direct invocation against a specific MCP tool |
+
+OAuth servers can be attached with `--oauth-connector <connector>`; tokens are stored in the encrypted vault and refreshed automatically. See [[22-MCP Integration]].
+
+```bash
+agentos mcp attach github --transport stdio --command "npx -y @modelcontextprotocol/server-github"
+agentos mcp attach jira --transport http --url https://mcp.example.com --oauth-connector jira
+agentos mcp status
+```
+
+---
+
+## `a2a` — Agent-to-Agent protocol
+
+The A2A protocol lets one AgentOS instance discover and delegate tasks to agents on another instance. Each delegated call goes through the same capability checks as a local tool call.
+
+| Subcommand | Description |
+|---|---|
+| `a2a discover <url>` | Discover agents exposed by a remote AgentOS instance |
+| `a2a delegate <agent-url> --task <prompt>` | Delegate a task to a remote agent |
+
+---
+
+## `provider` — LLM provider catalog
+
+Lists every LLM provider known to the kernel. Built-in adapters (Ollama, OpenAI, Anthropic, Gemini) plus the OpenAI-compatible provider catalog loaded from `config/providers.toml` (Mistral, XAI, Cohere, Cerebras, Moonshot, NVIDIA, Hyperbolic, Azure, …).
+
+| Subcommand | Description |
+|---|---|
+| `provider list` | List built-in adapters and catalog entries |
+| `provider show <name>` | Show endpoint, default model, and headers for one provider |
+
+---
+
+## `plugin` — Plugin lifecycle
+
+Plugins are manifest-described bundles that contribute tools, channel adapters, or skills. Discover at boot, signature-verify for non-Core tiers, and activate explicitly.
+
+| Subcommand | Description |
+|---|---|
+| `plugin list` | List discovered plugins and their state (Discovered/Active/Disabled/Blocked) |
+| `plugin enable <id>` | Activate a discovered plugin |
+| `plugin disable <id>` | Disable an active plugin |
+| `plugin info <id>` | Show manifest details for a plugin |
+
+---
+
+## `onboard` — Interactive setup wizard
+
+Walks the operator through provider selection, API key resolution (stored as env-var references — never to disk), default agent creation, and data-directory setup. Refuses to overwrite a config file with parse errors.
+
+```bash
+agentos onboard
+```
+
+---
+
+## `doctor` — Diagnose configuration issues
+
+Runs six checks: config file existence, TOML validity, vault directory write probe, audit directory write probe, bus socket reachability, and tool registry sanity. Pass `--fix` to attempt safe auto-repair (creates missing directories, fixes permissions).
+
+```bash
+agentos doctor
+agentos doctor --fix
+```
+
+---
+
+## `config` — Read and write configuration values
+
+Edits `config/default.toml` (or the `--config` override) without editing TOML by hand. Uses `toml_edit` so comments and formatting are preserved. Supports arbitrary depth dotted keys (e.g. `kernel.autonomous_mode.iter_cap`).
+
+| Subcommand | Description |
+|---|---|
+| `config get <key>` | Read a value by dotted key |
+| `config set <key> <value>` | Write a value by dotted key |
+| `config list` | List all top-level config sections |
+
+```bash
+agentos config get llm.primary
+agentos config set kernel.task_timeout_seconds 7200
+agentos config list
+```
+
+---
+
+## `init` — Scaffold a new AgentOS project
+
+Creates a project directory with a working agent configuration, tool manifests, and an inline README explaining the security model.
+
+| Template | Description |
+|---|---|
+| `hello-world` | Minimal agent that responds to a prompt |
+| `secure-agent` | Agent with restricted CapabilityToken (recommended) |
+| `mcp-server` | Agent exposed as an MCP server |
+| `multi-agent` | Coordinator + 2 specialist agents |
+
+```bash
+agentos init my-project
+agentos init my-project --template secure-agent
+```
+
+---
+
 ## Permission Reference Table
 
 Permissions follow the format `<resource>:<flags>` where flags are `r` (read), `w` (write), and `x` (execute).
@@ -1880,12 +2039,14 @@ agentos perm grant monitor hardware.gpu:r
 
 ## Quick Reference: All Command Groups
 
+All **36** top-level command groups (an asterisk marks subcommands that work offline without a kernel connection):
+
 | Group | Description | Subcommands |
 |-------|-------------|-------------|
 | `start` | Boot the kernel | — |
 | `stop` | Shut down the kernel | — |
 | `agent` | Manage LLM agents | `connect`, `list`, `disconnect`, `message`, `messages`, `group create`, `broadcast`, `memory show`, `memory history`, `memory rollback`, `memory clear`, `memory set` |
-| `task` | Manage tasks | `run`, `list`, `logs`, `trace`, `traces`, `cancel` |
+| `task` | Manage tasks | `run`, `list`, `logs`, `trace`, `traces`, `cancel`, `resume`, `checkpoints` |
 | `tool` | Manage tools | `list`, `install`, `remove`, `keygen`*, `sign`*, `verify`* |
 | `secret` | Manage encrypted vault | `set`, `list`, `revoke`, `rotate`, `lockdown` |
 | `perm` | Manage permissions | `grant`, `revoke`, `show`, `profile create`, `profile delete`, `profile list`, `profile assign` |
@@ -1895,6 +2056,7 @@ agentos perm grant monitor hardware.gpu:r
 | `status` | Show system status | — |
 | `audit` | View audit logs | `logs`, `verify`, `snapshots`, `export`, `rollback` |
 | `pipeline` | Manage pipelines | `install`, `list`, `run`, `status`, `logs`, `remove` |
+| `team` | Coordinator + worker teams | `run`, `status` |
 | `cost` | View cost reports | `show`, `retrieval` |
 | `resource` | Manage resource locks | `list`, `release`, `contention`, `release-all` |
 | `escalation` | Human approval requests | `list`, `get`, `resolve` |
@@ -1907,7 +2069,15 @@ agentos perm grant monitor hardware.gpu:r
 | `log` | Control runtime logging | — |
 | `notifications` | User notification inbox | `list`, `read`, `respond`, `watch` |
 | `channel` | External delivery channels | `connect`, `list`, `test`, `disconnect` |
-| `mcp` | MCP integration | `serve`*, `list`*, `status` |
+| `skill` | Autonomous skill packages | `list`, `install`, `remove`, `run`, `status` |
+| `mcp` | MCP integration | `serve`*, `list`*, `status`, `attach`, `detach`, `tools`, `call` |
+| `a2a` | Agent-to-Agent protocol | `discover`, `delegate` |
+| `provider` | LLM provider catalog | `list`, `show` |
+| `plugin` | Plugin lifecycle | `list`, `enable`, `disable`, `info` |
+| `onboard` | Interactive setup wizard | — |
+| `doctor` | Diagnose / auto-repair | — (`--fix` flag) |
+| `config` | Read/write configuration | `get`, `set`, `list` |
+| `init` | Scaffold new project | — (`--template`) |
 | `web` | Web UI server | `serve` |
 
 *\* Offline commands — do not require a running kernel.*

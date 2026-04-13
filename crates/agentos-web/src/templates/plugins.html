@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+{% set title = "Plugins" %}
+{% set subtitle = plugins|length ~ " discovered" %}
+{% include "partials/management_page.html" %}
+
+<article>
+    <form method="post" action="/plugins/discover" style="margin:0">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button type="submit" class="outline">Re-scan Plugin Directories</button>
+    </form>
+</article>
+
+{% if plugins|length == 0 %}
+<article><p class="muted">No plugins discovered.</p></article>
+{% else %}
+<table>
+    <thead>
+    <tr><th>ID</th><th>Status</th><th>Version</th><th>Trust</th><th>Channels</th><th>Tools</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+    {% for p in plugins %}
+    <tr>
+        <td><code>{{ p.id }}</code></td>
+        <td>{{ p.status }}</td>
+        <td>{{ p.version }}</td>
+        <td>{{ p.trust_tier }}</td>
+        <td>{{ p.channels|length }}</td>
+        <td>{{ p.tools|length }}</td>
+        <td>
+            {% if p.status == "active" %}
+            <form method="post" action="/plugins/{{ p.id }}/disable" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <button class="outline secondary btn-sm" type="submit">Disable</button>
+            </form>
+            {% elif p.status == "discovered" or p.status == "disabled" %}
+            <form method="post" action="/plugins/{{ p.id }}/enable" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <button class="outline secondary btn-sm" type="submit">Enable</button>
+            </form>
+            {% else %}
+            <small class="muted">Blocked</small>
+            {% endif %}
+            <a href="/plugins/{{ p.id }}" role="button" class="outline btn-sm">Info</a>
+        </td>
+    </tr>
+    {% if p.blocked_reason %}
+    <tr><td colspan="7"><small class="muted">{{ p.blocked_reason }}</small></td></tr>
+    {% endif %}
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

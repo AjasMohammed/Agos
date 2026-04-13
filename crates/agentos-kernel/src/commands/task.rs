@@ -51,6 +51,13 @@ impl Kernel {
             }
         };
         let mut effective_permissions = registry.compute_effective_permissions(&agent_id);
+        // Agent-level default thinking level applies when the caller did not request a
+        // non-default value (legacy callers pass Off).
+        let effective_thinking_level = if matches!(thinking_level, ThinkingLevel::Off) {
+            agent.default_thinking_level.clone()
+        } else {
+            thinking_level
+        };
         drop(registry);
 
         // Autonomous tasks get shell execution permission — interactive tasks do not
@@ -114,7 +121,7 @@ impl Kernel {
             spawn_depth: 0,
             is_team_coordinator: false,
             skip_checkpoint: no_checkpoint,
-            thinking_level,
+            thinking_level: effective_thinking_level,
         };
 
         self.scheduler.register_external(task.clone()).await;

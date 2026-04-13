@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Agent Identity</h1>
+        <p class="page-meta">{{ name }}</p>
+    </div>
+    <div class="page-header-actions">
+        <a href="/agents/{{ name }}/detail" role="button" class="outline">Back to Agent</a>
+    </div>
+</div>
+
+<article>
+    <dl class="detail-list">
+        <dt>Agent ID</dt><dd><code>{{ agent_id }}</code></dd>
+        <dt>Status</dt><dd>{{ status }}</dd>
+        <dt>Public Key</dt><dd><code>{{ public_key }}</code></dd>
+        <dt>Fingerprint</dt><dd><code>{{ fingerprint }}</code></dd>
+        <dt>Created</dt><dd>{{ created_at }}</dd>
+        <dt>Last Active</dt><dd>{{ last_active }}</dd>
+    </dl>
+</article>
+{% endblock %}

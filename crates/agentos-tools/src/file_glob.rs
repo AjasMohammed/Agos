@@ -92,7 +92,13 @@ impl AgentTool for FileGlob {
             .workspace_paths
             .iter()
             .any(|wp| canonical_base.starts_with(wp));
-        if !canonical_base.starts_with(&canonical_data_dir) && !in_workspace {
+        // KMC Phase 3: check dynamic storage zones
+        let in_storage_zone = context
+            .storage_zone_query
+            .as_ref()
+            .map(|q| q.is_path_in_zone(&context.agent_id, &canonical_base))
+            .unwrap_or(false);
+        if !canonical_base.starts_with(&canonical_data_dir) && !in_workspace && !in_storage_zone {
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
                 operation: format!("Path traversal denied: {}", sub_path),

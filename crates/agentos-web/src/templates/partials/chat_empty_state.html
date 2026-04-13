@@ -1,0 +1,12 @@
+<div class="chat-empty" style="text-align:center; padding: 3rem 0;">
+    <h3>Start a conversation with {{ agent_name }}</h3>
+    <p class="muted">Try one of these:</p>
+    <div class="chat-suggested-prompts">
+        <button class="chat-suggested-prompt outline secondary btn-sm"
+                onclick="var ta=document.getElementById('reply-message'); if(ta){ta.value=this.textContent; ta.focus();}">What can you help me with?</button>
+        <button class="chat-suggested-prompt outline secondary btn-sm"
+                onclick="var ta=document.getElementById('reply-message'); if(ta){ta.value=this.textContent; ta.focus();}">Show me my available tools.</button>
+        <button class="chat-suggested-prompt outline secondary btn-sm"
+                onclick="var ta=document.getElementById('reply-message'); if(ta){ta.value=this.textContent; ta.focus();}">Summarise the system architecture.</button>
+    </div>
+</div>

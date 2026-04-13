@@ -121,6 +121,9 @@ impl KernelService for Kernel {
             req.model.clone(),
             req.base_url.clone(),
             req.roles.clone(),
+            req.description.clone(),
+            req.thinking_level.clone(),
+            req.system_prompt.clone(),
         )
         .await
         .map_err(ApiError::Internal)?;
@@ -184,6 +187,17 @@ impl KernelService for Kernel {
             recent_tasks,
             cost_snapshot,
         })
+    }
+
+    async fn update_agent_settings(&self, req: UpdateAgentSettingsRequest) -> Result<(), ApiError> {
+        self.api_update_agent_settings(
+            req.agent_name,
+            req.description,
+            req.thinking_level,
+            req.system_prompt,
+        )
+        .await
+        .map_err(ApiError::Internal)
     }
 
     async fn grant_permission(&self, req: PermissionRequest) -> Result<(), ApiError> {

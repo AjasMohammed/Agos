@@ -1,0 +1,41 @@
+[manifest]
+name = "proc-wait"
+version = "1.0.0"
+description = "Wait for a managed process to exit (with timeout)"
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "readonly_scoped"
+
+[capabilities_required]
+permissions = ["proc.wait:r"]
+
+[capabilities_provided]
+outputs = ["content.json"]
+
+[intent_schema]
+input = "ProcWaitIntent"
+output = "ProcWaitResult"
+
+[input_schema]
+required = ["process_id"]
+type = "object"
+
+[input_schema.properties.process_id]
+description = "ID of the process to wait for"
+type = "string"
+
+[input_schema.properties.timeout_secs]
+description = "Maximum seconds to wait (default: 30)"
+type = "integer"
+default = 30
+
+[sandbox]
+network = false
+fs_write = false
+gpu = false
+max_memory_mb = 64
+max_cpu_ms = 30000
+syscalls = []
+
+[executor]
+type = "inline"

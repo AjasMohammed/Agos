@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Resources</h1>
+        <p class="page-meta">Resource arbiter lock and contention state</p>
+    </div>
+</div>
+
+<article>
+    <header><strong>Contention Stats</strong></header>
+    <pre><code>{{ stats|pretty_json }}</code></pre>
+</article>
+
+<article>
+    <header><strong>Active Locks</strong></header>
+    {% if locks|length == 0 %}
+    <p class="muted">No active locks.</p>
+    {% else %}
+    <table>
+        <thead><tr><th>Resource</th><th>Mode</th><th>Held By</th><th>Acquired</th><th>TTL (s)</th><th>Waiters</th></tr></thead>
+        <tbody>
+        {% for l in locks %}
+        <tr>
+            <td><code>{{ l.resource_id }}</code></td>
+            <td>{{ l.lock_mode }}</td>
+            <td><code>{{ l.held_by }}</code></td>
+            <td>{{ l.acquired_at }}</td>
+            <td>{{ l.ttl_seconds }}</td>
+            <td>{{ l.waiters }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</article>
+{% endblock %}

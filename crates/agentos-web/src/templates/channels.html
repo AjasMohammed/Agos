@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+{% set title = "Channels" %}
+{% set subtitle = channels|length ~ " active channels" %}
+{% include "partials/management_page.html" %}
+
+{% if channels|length == 0 %}
+<article><p class="muted">No active channels found.</p></article>
+{% else %}
+<table>
+    <thead>
+    <tr><th>ID</th><th>Kind</th><th>Display</th><th>External</th><th>Connected</th><th>Last Active</th><th></th></tr>
+    </thead>
+    <tbody>
+    {% for c in channels %}
+    <tr>
+        <td><code>{{ c.id }}</code></td>
+        <td>{{ c.kind }}</td>
+        <td>{{ c.display_name }}</td>
+        <td><code>{{ c.external_id }}</code></td>
+        <td>{{ c.connected_at }}</td>
+        <td>{{ c.last_active }}</td>
+        <td>
+            <form method="post" action="/channels/{{ c.id }}/disconnect" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <button class="outline secondary btn-sm" type="submit">Disconnect</button>
+            </form>
+        </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+<article>
+    <header><strong>Runtime Health</strong></header>
+    {% if health|length == 0 %}
+    <p class="muted">No live channel adapters currently running.</p>
+    {% else %}
+    <table>
+        <thead><tr><th>Channel ID</th><th>Status</th></tr></thead>
+        <tbody>
+        {% for h in health %}
+        <tr><td><code>{{ h.id }}</code></td><td>{{ h.status }}</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</article>
+{% endif %}
+{% endblock %}

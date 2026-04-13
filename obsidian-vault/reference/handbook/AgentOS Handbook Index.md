@@ -20,29 +20,30 @@ status: complete
 | 01 | [[01-Introduction and Philosophy]] | What AgentOS is, core principles, the Linux analogy — LLMs as CPU, tools as programs, intent as syscall |
 | 02 | [[02-Installation and First Run]] | Prerequisites, building from source, configuration, first kernel boot |
 | 03 | [[03-Architecture Overview]] | System architecture, crate dependency graph, the intent flow from CLI to tool execution |
-| 04 | [[04-CLI Reference Complete]] | All 27 `agentos` command groups with flags, arguments, and examples — includes `stop`, `scratchpad`, `healthz`, `log`, `notifications`, `channel`, `mcp`, and `web` |
+| 04 | [[04-CLI Reference Complete]] | All 36 `agentos` command groups with flags, arguments, and examples — includes `team`, `skill`, `mcp` (attach/detach/status), `a2a`, `provider`, `plugin`, `onboard`, `doctor`, `config`, `init`, plus `start`, `stop`, `scratchpad`, `healthz`, `log`, `notifications`, `channel`, and `web` |
 | 05 | [[05-Agent Management]] | Agent lifecycle, messaging, groups, identity keys, agent registry, multi-agent coordination (sub-agents, teams) |
-| 06 | [[06-Task System]] | Task routing, lifecycle states, background tasks, scheduled tasks, sub-agent tasks (parent_task_id, spawn_depth, team coordinator) |
-| 07 | [[07-Tool System]] | Built-in tools (including coordination tools: spawn-agent, await-agents, verify-output), manifests, trust tiers, signing |
-| 08 | [[08-Security Model]] | 7 defense layers, capability tokens, permission enforcement, injection scanner, risk levels |
-| 09 | [[09-Secrets and Vault]] | AES-256-GCM encrypted vault, secret scopes, rotation, lockdown mode |
+| 06 | [[06-Task System]] | Task routing, lifecycle states, background tasks, scheduled tasks, sub-agent tasks (parent_task_id, spawn_depth, team coordinator), checkpointing & resume |
+| 07 | [[07-Tool System]] | All 61 built-in tools — file I/O, memory tiers, scratchpad knowledge graph, multi-agent coordination (spawn/await/verify/poll/cancel), web-search, HAL device tools, manifests, trust tiers, signing |
+| 08 | [[08-Security Model]] | 7 defense layers, capability tokens, permission enforcement, injection scanner, risk levels, hooks (`AuditHook`, `ApprovalHook`) |
+| 09 | [[09-Secrets and Vault]] | AES-256-GCM encrypted vault, secret scopes, rotation, lockdown mode, OAuth credential storage |
 | 10 | [[10-Memory System]] | 4 memory tiers, automatic extraction, consolidation, context budget management |
 | 11 | [[11-Pipeline and Workflows]] | Multi-step YAML pipelines, wave-based parallel execution, step dependencies, failure handling, budget enforcement, variable sanitization |
 | 12 | [[12-Event System]] | Event types, subscriptions, filter predicates, event-triggered tasks, throttle policy |
 | 13 | [[13-Cost Tracking]] | Per-agent token costs, budget enforcement, model pricing table, cost CLI |
-| 14 | [[14-Audit Log]] | 83+ event types, append-only SQLite chain, Merkle verification, export, snapshots |
-| 15 | [[15-LLM Configuration]] | 5 provider adapters (Ollama, OpenAI, Anthropic, Gemini, Mock), endpoint resolution, env vars |
+| 14 | [[14-Audit Log]] | 110 event types across 25 categories — task lifecycle, MCP, OAuth, containers, IoT device twins, checkpoint recovery, append-only SQLite chain, Merkle verification, export, snapshots |
+| 15 | [[15-LLM Configuration]] | Built-in adapters (Ollama, OpenAI, Anthropic, Gemini, Mock) plus the 20+ provider catalog (Mistral, XAI, Cohere, Cerebras, Moonshot, NVIDIA, Hyperbolic, Azure, …) |
 | 16 | [[16-Configuration Reference]] | Every config key in `config/default.toml` with type, default value, and description |
 | 17 | [[17-WASM Tools Development]] | WASM execution protocol, Rust and Python examples, `#[tool]` SDK macro |
-| 18 | [[18-Advanced Operations]] | HAL (14 drivers incl. audio, bluetooth, webcam, printer, display, raw USB), consent store, resource locks, snapshots, escalation, identity |
+| 18 | [[18-Advanced Operations]] | HAL (16 drivers incl. audio, bluetooth, webcam, printer, display, raw USB, GPU, MQTT, Home Assistant), device twins & safety engine, consent store, resource locks, snapshots, escalation, identity |
 | 19 | [[19-Troubleshooting and FAQ]] | 33+ common errors with solutions, debug logging, health checks, platform notes |
 | 20 | [[20-LLM Agent Testing]] | `agent-tester` binary — LLM-driven scenario testing, feedback protocol, report format, CI integration |
 | 21 | [[21-User Notifications and Channels]] | Agent-to-operator messaging — `notify-user`, `ask-user`, delivery channels (Telegram, ntfy, email), notification inbox CLI |
-| 22 | [[22-MCP Integration]] | Bidirectional MCP bridge — connect external MCP servers to the kernel, expose AgentOS tools to Claude Desktop/Cursor, `mcp serve/list/status` CLI, auto-reconnect |
-| 23 | [[23-REST API Reference]] | All 30+ REST endpoints under `/api/v1/*` — auth, permissions, request/response shapes, rate limiting, error codes |
-| 24 | [[24-WebSocket Guide]] | Real-time event subscriptions, chat streaming, task control — frame protocol, available channels, reconnection patterns |
-| 25 | [[25-API Authentication and Keys]] | API key lifecycle (create, scope, expire, revoke), HMAC validation internals, WebSocket auth, security best practices |
-| 26 | [[26-Channel Adapters]] | Bidirectional messaging adapters — Discord (WebSocket Gateway), Telegram (long-poll), Slack (REST polling), WhatsApp (Cloud API), Webhook (HMAC-signed), Email (SMTP via lettre) — setup, credentials, health states, retry mechanism |
+| 22 | [[22-MCP Integration]] | Bidirectional MCP bridge — boot-time servers, runtime `mcp attach`/`detach`, persisted across restarts, OAuth credential lifecycle, A2A (Agent-to-Agent) protocol, security gate (injection scanning + rate limit) |
+| 23 | [[23-REST API Reference]] | 35+ REST endpoints under `/api/v1/*` plus the OpenAI-compatible `/v1/chat/completions` SSE endpoint — auth, permissions, request/response shapes, rate limiting, error codes |
+| 24 | [[24-WebSocket Guide]] | Real-time event subscriptions, chat streaming (token-level `TextChunk` events), task control — frame protocol, available channels, reconnection patterns |
+| 25 | [[25-API Authentication and Keys]] | API key lifecycle (create, scope, expire, revoke), HMAC validation internals, WebSocket auth, CSRF middleware, security best practices |
+| 26 | [[26-Channel Adapters]] | All 10 bidirectional messaging adapters — Discord, Telegram, Slack, Matrix, Mattermost, Teams, LINE, WhatsApp, Email, Webhook — pairing manager, health monitor, retry with backoff |
+| 27 | [[27-Kernel Mediated Capabilities]] | 5 managed capability domains (env, storage, proc, net, build) with 17 bridge tools — policy engine, dynamic grants, 7-layer SSRF defense, structured output parsing, per-agent isolation |
 
 ---
 

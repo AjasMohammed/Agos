@@ -1,0 +1,38 @@
+[manifest]
+name = "env-list"
+version = "1.0.0"
+description = "List installed packages in a managed workspace"
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "readonly_scoped"
+
+[capabilities_required]
+permissions = [
+    "env.list:r",
+]
+
+[capabilities_provided]
+outputs = ["content.json"]
+
+[intent_schema]
+input = "EnvListIntent"
+output = "EnvListResult"
+
+[input_schema]
+required = ["workspace"]
+type = "object"
+
+[input_schema.properties.workspace]
+description = "Name of the workspace to list packages for"
+type = "string"
+
+[sandbox]
+network = false
+fs_write = false
+gpu = false
+max_memory_mb = 64
+max_cpu_ms = 5000
+syscalls = []
+
+[executor]
+type = "inline"

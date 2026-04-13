@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Observability</h1>
+        <p class="page-meta">CLI parity: doctor, scratchpad, snapshots, events, escalation, webhook, MCP</p>
+    </div>
+</div>
+
+<div class="grid">
+    <article>
+        <header><strong>Doctor</strong></header>
+        {% if status %}
+        <dl class="detail-list">
+            <dt>Uptime (s)</dt><dd>{{ status.uptime_secs }}</dd>
+            <dt>Connected Agents</dt><dd>{{ status.connected_agents }}</dd>
+            <dt>Active Tasks</dt><dd>{{ status.active_tasks }}</dd>
+            <dt>Installed Tools</dt><dd>{{ status.installed_tools }}</dd>
+        </dl>
+        {% else %}
+        <p class="muted">Status unavailable.</p>
+        {% endif %}
+    </article>
+
+    <article>
+        <header><strong>Escalations</strong></header>
+        {% if escalations|length == 0 %}
+        <p class="muted">No pending escalations.</p>
+        {% else %}
+        <table>
+            <thead><tr><th>ID</th><th>Task</th><th>Urgency</th><th>Expires</th></tr></thead>
+            <tbody>
+            {% for e in escalations %}
+            <tr>
+                <td>{{ e.id }}</td>
+                <td><code>{{ e.task_id }}</code></td>
+                <td>{{ e.urgency }}</td>
+                <td>{{ e.expires_at }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </article>
+</div>
+
+<article>
+    <header><strong>Scratchpad</strong></header>
+    <form method="get" action="/observability">
+        <label for="scratch_agent">Agent
+            <select id="scratch_agent" name="scratch_agent">
+                {% for name in agent_names %}
+                <option value="{{ name }}"{% if name == selected_agent %} selected{% endif %}>{{ name }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label for="scratch_q">Search query
+            <input id="scratch_q" name="scratch_q" value="{{ scratch_q }}" placeholder="optional full-text search">
+        </label>
+        <button type="submit">Refresh</button>
+    </form>
+    {% if selected_agent %}
+    <p class="muted">Showing scratchpad for <code>{{ selected_agent }}</code></p>
+    {% endif %}
+    {% if scratch_pages|length > 0 %}
+    <table>
+        <thead><tr><th>Title</th><th>Tags</th><th>Updated</th></tr></thead>
+        <tbody>
+        {% for p in scratch_pages %}
+        <tr>
+            <td>{{ p.title }}</td>
+            <td>{{ p.tags }}</td>
+            <td>{{ p.updated_at }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No scratch pages to display.</p>
+    {% endif %}
+
+    {% if scratch_results|length > 0 %}
+    <h3>Search Results</h3>
+    <table>
+        <thead><tr><th>Title</th><th>Rank</th><th>Snippet</th></tr></thead>
+        <tbody>
+        {% for r in scratch_results %}
+        <tr>
+            <td>{{ r.title }}</td>
+            <td>{{ r.rank }}</td>
+            <td>{{ r.snippet }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</article>
+
+<div class="grid">
+    <article>
+        <header><strong>MCP Servers</strong></header>
+        {% if mcp_servers|length == 0 %}
+        <p class="muted">No MCP servers connected.</p>
+        {% else %}
+        <table>
+            <thead><tr><th>Name</th><th>State</th><th>Tools</th><th>Total Calls</th><th>Failures</th><th>Avg Latency (ms)</th></tr></thead>
+            <tbody>
+            {% for s in mcp_servers %}
+            <tr>
+                <td>{{ s.name }}</td>
+                <td>{{ s.state }}</td>
+                <td>{{ s.tool_count }}</td>
+                <td>{{ s.total_calls }}</td>
+                <td>{{ s.failure_count }}</td>
+                <td>{{ s.avg_latency_ms }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </article>
+
+    <article>
+        <header><strong>MCP Attachments</strong></header>
+        {% if mcp_attachments|length == 0 %}
+        <p class="muted">No persisted MCP attachments.</p>
+        {% else %}
+        <table>
+            <thead><tr><th>Name</th><th>Command</th><th>URL</th><th>Timeout</th></tr></thead>
+            <tbody>
+            {% for a in mcp_attachments %}
+            <tr>
+                <td>{{ a.name }}</td>
+                <td><code>{{ a.command }}</code></td>
+                <td><code>{{ a.url }}</code></td>
+                <td>{{ a.timeout_secs }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </article>
+</div>
+
+<div class="grid">
+    <article>
+        <header><strong>Webhooks</strong></header>
+        {% if webhooks|length == 0 %}
+        <p class="muted">No webhook endpoints registered.</p>
+        {% else %}
+        <table>
+            <thead><tr><th>ID</th><th>Provider</th><th>Agent</th><th>Total</th></tr></thead>
+            <tbody>
+            {% for w in webhooks %}
+            <tr>
+                <td><code>{{ w.id }}</code></td>
+                <td>{{ w.provider }}</td>
+                <td><code>{{ w.agent_id }}</code></td>
+                <td>{{ w.total_received }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </article>
+
+    <article>
+        <header><strong>Snapshots / Checkpoints</strong></header>
+        {% if checkpoints|length == 0 %}
+        <p class="muted">No checkpoints found.</p>
+        {% else %}
+        <table>
+            <thead><tr><th>Checkpoint</th><th>Task</th><th>Agent</th><th>Updated</th></tr></thead>
+            <tbody>
+            {% for c in checkpoints %}
+            <tr>
+                <td><code>{{ c.checkpoint_id }}</code></td>
+                <td><code>{{ c.task_id }}</code></td>
+                <td><code>{{ c.agent_id }}</code></td>
+                <td>{{ c.updated_at }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </article>
+</div>
+
+<article>
+    <header><strong>Recent Events (Audit)</strong></header>
+    {% if recent_audit|length == 0 %}
+    <p class="muted">No recent audit events.</p>
+    {% else %}
+    <table>
+        <thead><tr><th>Time</th><th>Event</th><th>Severity</th><th>Details</th></tr></thead>
+        <tbody>
+        {% for e in recent_audit %}
+        <tr>
+            <td>{{ e.timestamp }}</td>
+            <td>{{ e.event_type }}</td>
+            <td>{{ e.severity }}</td>
+            <td><code>{{ e.details|pretty_json }}</code></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</article>
+{% endblock %}

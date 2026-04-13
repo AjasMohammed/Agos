@@ -1,0 +1,40 @@
+[manifest]
+name = "build-run"
+version = "1.0.0"
+description = "Execute a build command with structured output parsing"
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "exec_capable"
+
+[capabilities_required]
+permissions = ["build.run:x"]
+
+[capabilities_provided]
+outputs = ["content.json"]
+
+[intent_schema]
+input = "BuildRunIntent"
+output = "BuildRunResult"
+
+[input_schema]
+required = ["command"]
+type = "object"
+
+[input_schema.properties.command]
+description = "Build command to execute (e.g., 'cargo test', 'npm run build')"
+type = "string"
+
+[input_schema.properties.working_dir]
+description = "Working directory for the build (default: agent data_dir)"
+type = "string"
+
+[sandbox]
+network = false
+fs_write = true
+gpu = false
+max_memory_mb = 512
+max_cpu_ms = 120000
+syscalls = []
+
+[executor]
+type = "inline"

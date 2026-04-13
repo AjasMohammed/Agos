@@ -3,7 +3,7 @@
     <td><span class="{% if entry.chain_status == 'valid' %}chain-valid{% else %}chain-broken{% endif %}">{{ entry.chain_status }}</span></td>
     <td><code class="id-short">{{ entry.row_id }}</code></td>
     <td><code class="ts">{{ entry.timestamp }}</code></td>
-    <td><a class="id-link" href="/audit/{{ entry.trace_id }}"><code class="event-type">{{ entry.event_type }}</code></a></td>
+    <td><a class="id-link" href="/audit/{{ entry.trace_id }}"><code class="event-type">{{ entry.event_type|humanize_event_type }}</code></a></td>
     <td><span class="badge badge-{{ entry.severity|lower }}">{{ entry.severity }}</span></td>
     <td>{% if entry.agent_id %}<code class="id-short">{{ entry.agent_id[:8] }}</code>{% else %}<span class="muted">--</span>{% endif %}</td>
     <td>{% if entry.task_id %}<code class="id-short">{{ entry.task_id[:8] }}</code>{% else %}<span class="muted">--</span>{% endif %}</td>
@@ -11,7 +11,7 @@
     <td class="details-cell">
         <details>
             <summary><span class="details-preview">Show details</span></summary>
-            <pre class="details-full">{{ entry.details }}</pre>
+            <pre class="details-full">{{ entry.details|pretty_json }}</pre>
             {% if entry.rollback_ref %}
             <div class="muted">Rollback ref: {{ entry.rollback_ref }}</div>
             {% endif %}

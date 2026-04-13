@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Scratchpad</h1>
+        <p class="page-meta">Per-agent page browser and search</p>
+    </div>
+</div>
+
+<form method="get" action="/scratchpad">
+    <div class="form-grid-3">
+        <label>Agent
+            <select name="agent">
+                {% for name in agents %}
+                <option value="{{ name }}"{% if name == selected_agent %} selected{% endif %}>{{ name }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>Search
+            <input name="q" value="{{ search_q }}" placeholder="full-text search">
+        </label>
+        <label>Page Title
+            <input name="title" value="{{ selected_title }}" placeholder="open page by title">
+        </label>
+    </div>
+    <button type="submit">Refresh</button>
+</form>
+
+<div class="grid">
+    <article>
+        <header><strong>Pages</strong></header>
+        {% if pages|length == 0 %}
+        <p class="muted">No pages for selected agent.</p>
+        {% else %}
+        <table>
+            <thead><tr><th>Title</th><th>Tags</th><th>Updated</th><th></th></tr></thead>
+            <tbody>
+            {% for p in pages %}
+            <tr>
+                <td>{{ p.title }}</td>
+                <td>{{ p.tags }}</td>
+                <td>{{ p.updated_at }}</td>
+                <td><a href="/scratchpad?agent={{ selected_agent }}&title={{ p.title }}" role="button" class="outline btn-sm">Open</a></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+
+        {% if results|length > 0 %}
+        <h3>Search Results</h3>
+        <table>
+            <thead><tr><th>Title</th><th>Rank</th><th>Snippet</th></tr></thead>
+            <tbody>
+            {% for r in results %}
+            <tr>
+                <td>{{ r.title }}</td>
+                <td>{{ r.rank }}</td>
+                <td>{{ r.snippet|safe }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </article>
+
+    <article>
+        <header><strong>Page View</strong></header>
+        {% if page_view %}
+        <p class="muted">{{ page_view.updated_at }} · tags: {{ page_view.tags }}</p>
+        <h3>{{ page_view.title }}</h3>
+        <pre><code>{{ page_view.content }}</code></pre>
+        {% if page_view.backlinks|length > 0 %}
+        <h4>Backlinks</h4>
+        <ul>
+            {% for b in page_view.backlinks %}
+            <li>{{ b.title }} <small class="muted">({{ b.updated_at }})</small></li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+        {% else %}
+        <p class="muted">Select a page to inspect content.</p>
+        {% endif %}
+    </article>
+</div>
+{% endblock %}

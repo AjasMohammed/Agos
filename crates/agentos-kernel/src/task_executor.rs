@@ -502,7 +502,12 @@ impl Kernel {
                     )
                     .await
                 {
-                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                    let err_str = e.to_string();
+                    if err_str.contains("Task not found") {
+                        tracing::warn!(error = %e, task_id = %task.id, "Task cancelled — skipping tool result push");
+                    } else {
+                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                    }
                     consecutive_push_failures += 1;
                     if consecutive_push_failures >= 3 {
                         anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
@@ -684,7 +689,12 @@ impl Kernel {
                             )
                             .await
                         {
-                            tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                            let err_str = e.to_string();
+                            if err_str.contains("Task not found") {
+                                tracing::warn!(error = %e, task_id = %task.id, "Task cancelled — skipping tool result push");
+                            } else {
+                                tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                            }
                             consecutive_push_failures += 1;
                             if consecutive_push_failures >= 3 {
                                 anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
@@ -1219,9 +1229,15 @@ impl Kernel {
                 .collect();
             EscalationSnapshot::new(summaries)
         };
+        let capability_snapshot = {
+            let reg = self.capability_registry.read().await;
+            CapabilityRegistrySnapshot::new(reg.list_capabilities())
+        };
         let agent_snapshot_ref: Arc<dyn AgentRegistryQuery> = Arc::new(agent_snapshot);
         let task_snapshot_ref: Arc<dyn TaskQuery> = Arc::new(task_snapshot);
         let escalation_snapshot_ref: Arc<dyn EscalationQuery> = Arc::new(escalation_snapshot);
+        let capability_snapshot_ref: Arc<dyn CapabilityRegistryQuery> =
+            Arc::new(capability_snapshot);
 
         let fallback_timeout_secs = if task.autonomous {
             self.config.kernel.autonomous_mode.tool_timeout_seconds
@@ -1247,6 +1263,10 @@ impl Kernel {
             let agent_registry = agent_snapshot_ref.clone();
             let task_registry = task_snapshot_ref.clone();
             let escalation_query = escalation_snapshot_ref.clone();
+            let cap_registry = capability_snapshot_ref.clone();
+            let cap_dispatcher: Arc<dyn CapabilityDispatcher> =
+                Arc::clone(&self.capability_dispatcher) as Arc<dyn CapabilityDispatcher>;
+            let zone_query: Arc<dyn StorageZoneQuery> = Arc::new(self.zone_table.clone());
             let order = call.order;
             let snapshot_ref = call.snapshot_ref;
             let tool_payload_preview = call.tool_payload_preview;
@@ -1311,6 +1331,9 @@ impl Kernel {
                         task_registry: Some(task_registry),
                         escalation_query: Some(escalation_query),
                         workspace_paths,
+                        capability_registry: Some(cap_registry),
+                        capability_dispatcher: Some(cap_dispatcher),
+                        storage_zone_query: Some(zone_query),
                         cancellation_token: tool_cancellation,
                     };
 
@@ -1890,12 +1913,22 @@ impl Kernel {
             let raw_context = match self.context_manager.get_context(&task.id).await {
                 Ok(ctx) => ctx,
                 Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        task_id = %task.id,
-                        iteration = iteration,
-                        "Context manager failed to fetch context — aborting task"
-                    );
+                    let err_str = e.to_string();
+                    if err_str.contains("Task not found") {
+                        tracing::warn!(
+                            error = %e,
+                            task_id = %task.id,
+                            iteration = iteration,
+                            "Task cancelled — context no longer available"
+                        );
+                    } else {
+                        tracing::error!(
+                            error = %e,
+                            task_id = %task.id,
+                            iteration = iteration,
+                            "Context manager failed to fetch context — aborting task"
+                        );
+                    }
                     anyhow::bail!(
                         "Task aborted at iteration {}: context manager error: {}",
                         iteration,
@@ -1996,7 +2029,7 @@ impl Kernel {
                     {
                         Ok(Some(content)) => {
                             knowledge_blocks.insert(0, format!(
-                                "<agent-context-memory>\nThis is your self-curated context memory. Update it with the context-memory-update tool.\n\n{}\n</agent-context-memory>",
+                                "<agent-context-memory>\nYour self-curated context memory. Update via context-memory-update tool. Write compressed: key:value pairs, short phrases, no prose. Every token here costs context budget.\n\n{}\n</agent-context-memory>",
                                 content
                             ));
                             tracing::debug!(
@@ -2007,7 +2040,7 @@ impl Kernel {
                         Ok(None) => {
                             // First task or empty memory: inject bootstrapping hint
                             knowledge_blocks.insert(0,
-                                "<agent-context-memory>\nYou have an empty context memory. As you work, use the context-memory-update tool to save important patterns, preferences, and knowledge you want to remember for future tasks. Write in markdown. Be concise.\n</agent-context-memory>".to_string()
+                                "<agent-context-memory>\nEmpty context memory. Use context-memory-update to save reusable knowledge for future tasks. Write compressed: key:value, short phrases, no prose. Budget is limited — every token counts.\n</agent-context-memory>".to_string()
                             );
                         }
                         Err(e) => {
@@ -3519,9 +3552,9 @@ impl Kernel {
                                 reversible: false,
                                 rollback_ref: None,
                             });
-                            // Create a non-blocking escalation for visibility
+                            // Create a non-blocking soft-approval (30s review window).
                             self.escalation_manager
-                                .create_escalation(
+                                .create_soft_approval(
                                     task.id,
                                     task.agent_id,
                                     crate::kernel_action::EscalationReason::AuthorizationRequired,
@@ -3534,10 +3567,7 @@ impl Kernel {
                                         tool_call.tool_name
                                     ),
                                     vec!["Acknowledge".to_string(), "Cancel".to_string()],
-                                    "normal".to_string(),
-                                    false, // non-blocking
                                     trace_id,
-                                    Some(crate::escalation::AutoAction::Approve), // soft-approval
                                 )
                                 .await;
                         }
@@ -3677,6 +3707,18 @@ impl Kernel {
                             Arc::new(escalation_snapshot) as Arc<dyn EscalationQuery>
                         ),
                         workspace_paths: self.workspace_paths.clone(),
+                        capability_registry: {
+                            let reg = self.capability_registry.read().await;
+                            Some(
+                                Arc::new(CapabilityRegistrySnapshot::new(reg.list_capabilities()))
+                                    as Arc<dyn CapabilityRegistryQuery>,
+                            )
+                        },
+                        capability_dispatcher: Some(Arc::clone(&self.capability_dispatcher)
+                            as Arc<dyn CapabilityDispatcher>),
+                        storage_zone_query: Some(
+                            Arc::new(self.zone_table.clone()) as Arc<dyn StorageZoneQuery>
+                        ),
                         cancellation_token: self.cancellation_token.child_token(),
                     };
                     let tool_payload_preview = Self::truncate_for_prompt_payload(
@@ -4571,7 +4613,7 @@ impl Kernel {
 
     /// Build the agent directory block for inclusion in compiled context.
     /// Lists all registered agents except `exclude_agent_id` with their
-    /// status, model, provider, and permissions.
+    /// status and permissions.
     pub(crate) async fn build_agent_directory(&self, exclude_agent_id: &AgentID) -> String {
         let mut directory = String::from(
             "\n\n[AGENT_DIRECTORY]\nYou are operating inside AgentOS. \
@@ -4611,16 +4653,9 @@ impl Kernel {
             } else {
                 perm_strs.join(", ")
             };
-            let provider_str = match agent.provider {
-                agentos_types::LLMProvider::Anthropic => "anthropic",
-                agentos_types::LLMProvider::OpenAI => "openai",
-                agentos_types::LLMProvider::Ollama => "ollama",
-                agentos_types::LLMProvider::Gemini => "gemini",
-                agentos_types::LLMProvider::Custom(_) => "custom",
-            };
             directory.push_str(&format!(
-                "\n- {} ({}/{}) — Status: {}\n  Permissions: {}",
-                agent.name, provider_str, agent.model, status, perm_str
+                "\n- {} — Status: {}\n  Permissions: {}",
+                agent.name, status, perm_str
             ));
         }
 

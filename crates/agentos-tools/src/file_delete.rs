@@ -69,12 +69,31 @@ impl AgentTool for FileDelete {
             .workspace_paths
             .iter()
             .any(|wp| canonical.starts_with(wp));
-        if !canonical.starts_with(&canonical_data_dir) && !in_workspace {
+        // KMC Phase 3: check dynamic storage zones
+        let in_storage_zone = context
+            .storage_zone_query
+            .as_ref()
+            .map(|q| q.is_path_in_zone(&context.agent_id, &canonical))
+            .unwrap_or(false);
+        if !canonical.starts_with(&canonical_data_dir) && !in_workspace && !in_storage_zone {
             tracing::warn!(path = path_str, "file-delete: path traversal blocked");
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
                 operation: format!("Path traversal denied: {}", path_str),
             });
+        }
+        // KMC: enforce read-only zones — deny writes to ReadOnly storage zones.
+        if in_storage_zone {
+            let access = context
+                .storage_zone_query
+                .as_ref()
+                .and_then(|q| q.zone_access(&context.agent_id, &canonical));
+            if access == Some(agentos_types::ZoneAccessLevel::ReadOnly) {
+                return Err(AgentOSError::PermissionDenied {
+                    resource: "fs.user_data".into(),
+                    operation: format!("Write denied: storage zone is read-only for {}", path_str),
+                });
+            }
         }
         if in_workspace
             && !context

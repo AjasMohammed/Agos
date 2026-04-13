@@ -57,6 +57,17 @@ pub struct ToolExecutionContext {
     /// Populated from `tools.workspace.allowed_paths` in the kernel config.
     /// Paths are pre-canonicalized at kernel startup.
     pub workspace_paths: Vec<PathBuf>,
+    /// Capability registry query interface for managed capabilities (KMC).
+    /// Used by capability tools to discover available providers.
+    pub capability_registry: Option<std::sync::Arc<dyn CapabilityRegistryQuery>>,
+    /// Capability dispatcher for executing managed capability actions (KMC).
+    /// Used by KMC bridge tools (env-install, proc-spawn, etc.) to route
+    /// actions to the kernel's capability providers.
+    pub capability_dispatcher: Option<std::sync::Arc<dyn CapabilityDispatcher>>,
+    /// Storage zone query for dynamic filesystem access expansion (KMC Phase 3).
+    /// File tools check this to determine whether a path is within an active
+    /// storage zone for the requesting agent.
+    pub storage_zone_query: Option<std::sync::Arc<dyn StorageZoneQuery>>,
     /// Cancellation token for this tool invocation. Tools that perform
     /// long-running I/O (HTTP, shell exec) should check this token periodically
     /// and return early with a `ToolExecutionFailed` error if it is cancelled.

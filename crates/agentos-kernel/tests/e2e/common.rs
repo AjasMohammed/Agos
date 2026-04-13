@@ -103,6 +103,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         skills: Default::default(),
         otel: OtelConfig::default(),
         api: Default::default(),
+        chat: Default::default(),
     }
 }
 
@@ -179,6 +180,8 @@ pub async fn register_mock_agent(kernel: &Kernel, name: &str, responses: Vec<Str
         last_active: now,
         public_key_hex: None,
         base_url: None,
+        default_thinking_level: ThinkingLevel::Off,
+        system_prompt: None,
     };
 
     kernel.agent_registry.write().await.register(profile);
@@ -214,6 +217,8 @@ pub async fn register_mock_agent_with_responses(
         last_active: now,
         public_key_hex: None,
         base_url: None,
+        default_thinking_level: ThinkingLevel::Off,
+        system_prompt: None,
     };
 
     kernel.agent_registry.write().await.register(profile);

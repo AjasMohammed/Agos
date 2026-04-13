@@ -1,0 +1,32 @@
+[manifest]
+name        = "event-unsubscribe"
+version     = "1.0.0"
+description = "Cancel one of your own event subscriptions by ID. Use event-list-subscriptions to find the ID."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["events.stream:o"]
+
+[capabilities_provided]
+outputs = ["status"]
+
+[intent_schema]
+input  = "EventUnsubscribeIntent"
+output = "EventUnsubscribeResult"
+
+[input_schema]
+type     = "object"
+required = ["subscription_id"]
+
+[input_schema.properties.subscription_id]
+type        = "string"
+description = "Subscription UUID returned by event-subscribe or listed by event-list-subscriptions."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 500
+syscalls      = []

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Doctor</h1>
+        <p class="page-meta">System health checks and runtime summary</p>
+    </div>
+</div>
+
+<article>
+    <header><strong>Runtime Summary</strong></header>
+    {% if status %}
+    <dl class="detail-list">
+        <dt>Uptime (s)</dt><dd>{{ status.uptime_secs }}</dd>
+        <dt>Connected Agents</dt><dd>{{ status.connected_agents }}</dd>
+        <dt>Active Tasks</dt><dd>{{ status.active_tasks }}</dd>
+        <dt>Installed Tools</dt><dd>{{ status.installed_tools }}</dd>
+    </dl>
+    {% else %}
+    <p class="muted">Status unavailable.</p>
+    {% endif %}
+</article>
+
+<article>
+    <header><strong>Checks</strong></header>
+    <table>
+        <thead><tr><th>Check</th><th>Status</th><th>Details</th></tr></thead>
+        <tbody>
+        {% for c in checks %}
+        <tr>
+            <td>{{ c.name }}</td>
+            <td>{{ c.status }}</td>
+            <td><code>{{ c.details }}</code></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</article>
+{% endblock %}

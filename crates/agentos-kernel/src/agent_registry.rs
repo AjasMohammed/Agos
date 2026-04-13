@@ -167,6 +167,30 @@ impl AgentRegistry {
         }
     }
 
+    /// Update editable profile settings by agent name.
+    /// Returns the updated agent ID on success.
+    pub fn update_profile_settings(
+        &mut self,
+        name: &str,
+        description: String,
+        default_thinking_level: ThinkingLevel,
+        system_prompt: Option<String>,
+    ) -> Result<AgentID, String> {
+        let id = *self
+            .name_index
+            .get(name)
+            .ok_or_else(|| format!("Agent '{}' not found", name))?;
+        if let Some(agent) = self.agents.get_mut(&id) {
+            agent.description = description;
+            agent.default_thinking_level = default_thinking_level;
+            agent.system_prompt = system_prompt;
+            self.save_to_disk();
+            Ok(id)
+        } else {
+            Err(format!("Agent '{}' not found", name))
+        }
+    }
+
     pub fn remove(&mut self, id: &AgentID) {
         if let Some(agent) = self.agents.remove(id) {
             self.name_index.remove(&agent.name);
@@ -598,6 +622,8 @@ mod tests {
             last_active: chrono::Utc::now(),
             public_key_hex: None,
             base_url: None,
+            default_thinking_level: ThinkingLevel::Off,
+            system_prompt: None,
         }
     }
 

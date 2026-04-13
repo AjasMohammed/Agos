@@ -73,7 +73,16 @@ impl AgentTool for FileMove {
             .workspace_paths
             .iter()
             .any(|wp| canonical_from.starts_with(wp));
-        if !canonical_from.starts_with(&canonical_data_dir) && !from_in_workspace {
+        // KMC Phase 3: check dynamic storage zones
+        let from_in_storage_zone = context
+            .storage_zone_query
+            .as_ref()
+            .map(|q| q.is_path_in_zone(&context.agent_id, &canonical_from))
+            .unwrap_or(false);
+        if !canonical_from.starts_with(&canonical_data_dir)
+            && !from_in_workspace
+            && !from_in_storage_zone
+        {
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
                 operation: format!("Path traversal denied (from): {}", from_str),
@@ -100,11 +109,33 @@ impl AgentTool for FileMove {
             .workspace_paths
             .iter()
             .any(|wp| normalized_to.starts_with(wp));
-        if !normalized_to.starts_with(&canonical_data_dir) && !to_in_workspace {
+        // KMC Phase 3: check dynamic storage zones
+        let to_in_storage_zone = context
+            .storage_zone_query
+            .as_ref()
+            .map(|q| q.is_path_in_zone(&context.agent_id, &normalized_to))
+            .unwrap_or(false);
+        if !normalized_to.starts_with(&canonical_data_dir)
+            && !to_in_workspace
+            && !to_in_storage_zone
+        {
             return Err(AgentOSError::PermissionDenied {
                 resource: "fs.user_data".into(),
                 operation: format!("Path traversal denied (to): {}", to_str),
             });
+        }
+        // KMC: enforce read-only zones — deny writes to ReadOnly storage zones.
+        if to_in_storage_zone {
+            let access = context
+                .storage_zone_query
+                .as_ref()
+                .and_then(|q| q.zone_access(&context.agent_id, &normalized_to));
+            if access == Some(agentos_types::ZoneAccessLevel::ReadOnly) {
+                return Err(AgentOSError::PermissionDenied {
+                    resource: "fs.user_data".into(),
+                    operation: format!("Write denied: storage zone is read-only for {}", to_str),
+                });
+            }
         }
         if to_in_workspace
             && !context
@@ -172,11 +203,36 @@ impl AgentTool for FileMove {
                 .workspace_paths
                 .iter()
                 .any(|wp| canonical_parent.starts_with(wp));
-            if !canonical_parent.starts_with(&canonical_data_dir) && !parent_in_workspace {
+            // KMC Phase 3: check dynamic storage zones
+            let parent_in_storage_zone = context
+                .storage_zone_query
+                .as_ref()
+                .map(|q| q.is_path_in_zone(&context.agent_id, &canonical_parent))
+                .unwrap_or(false);
+            if !canonical_parent.starts_with(&canonical_data_dir)
+                && !parent_in_workspace
+                && !parent_in_storage_zone
+            {
                 return Err(AgentOSError::PermissionDenied {
                     resource: "fs.user_data".into(),
                     operation: format!("Path traversal denied (to): {}", to_str),
                 });
+            }
+            // KMC: enforce read-only zones — deny writes to ReadOnly storage zones.
+            if parent_in_storage_zone {
+                let access = context
+                    .storage_zone_query
+                    .as_ref()
+                    .and_then(|q| q.zone_access(&context.agent_id, &canonical_parent));
+                if access == Some(agentos_types::ZoneAccessLevel::ReadOnly) {
+                    return Err(AgentOSError::PermissionDenied {
+                        resource: "fs.user_data".into(),
+                        operation: format!(
+                            "Write denied: storage zone is read-only for {}",
+                            to_str
+                        ),
+                    });
+                }
             }
             canonical_parent.join(normalized_to.file_name().ok_or_else(|| {
                 AgentOSError::SchemaValidation("Destination path has no filename".into())

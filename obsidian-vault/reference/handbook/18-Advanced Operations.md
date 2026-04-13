@@ -76,7 +76,7 @@ Device lifecycle changes are recorded in the audit log:
 
 ### HAL Drivers
 
-The HAL includes a suite of hardware drivers, some always available and others feature-gated at compile time:
+The HAL ships **16 drivers** — some always available, others feature-gated at compile time. IoT drivers (`mqtt`, `homeassistant`) integrate with the HAL device-twin model: an agent sets a desired state, the safety engine validates the request, and an actuator update is dispatched.
 
 | Driver | Feature Gate | Description |
 |--------|-------------|-------------|
@@ -94,6 +94,18 @@ The HAL includes a suite of hardware drivers, some always available and others f
 | `raw_usb` | `raw-usb` | Direct USB device access (bulk/interrupt/control transfers) |
 | `usb_storage` | `usb-storage` | USB mass storage mount/unmount/eject via UDisks2 |
 | `webcam` | `webcam` | Webcam image and burst capture via Video4Linux |
+| `mqtt` | `mqtt` | MQTT broker bridge — publish, subscribe, and back IoT device twins |
+| `homeassistant` | `homeassistant` | Home Assistant integration — enumerate entities, set states, observe events |
+
+### Device Twins & Safety Engine
+
+IoT drivers represent each addressable entity as a **device twin** with a desired state and a reported state.
+
+- **DesiredStateSet** — an agent updates the desired state of a twin via the corresponding HAL action. The safety engine evaluates the requested value against per-device rules (range checks, rate limits, allowlists) before forwarding it to the device.
+- **SafetyRuleViolation** — emitted when the safety engine refuses a desired-state change. The actuator command is not sent.
+- **ReportedStateUpdated** — emitted when the device reports a new measured value (sensor reading, switch state). Twins remember the last reported state so agents can read it without re-querying the device.
+
+Use `hal register --twin <id>` to register a twin (also done automatically by the `mqtt` and `homeassistant` drivers when they discover a new entity).
 
 Feature-gated drivers are compiled only when their feature flag is enabled:
 

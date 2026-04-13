@@ -9,6 +9,7 @@
         <span class="badge badge-{{ state|lower }} badge-lg">{{ state }}</span>
         {% if state == "Complete" or state == "Failed" %}
         <a href="/tasks/{{ task_id }}/trace" class="outline secondary btn-sm" role="button">View Trace</a>
+        <a href="/tasks/{{ task_id }}/snapshots" class="outline secondary btn-sm" role="button">View Snapshots</a>
         {% endif %}
         {% if state == "Running" or state == "Queued" or state == "Waiting" %}
         <button class="outline secondary btn-sm"
@@ -40,15 +41,24 @@
 </div>
 
 {% if history %}
-<h2>Context Window <small class="muted">({{ history|length }} messages)</small></h2>
+<h2>Context Window <small class="muted">({{ history|length }} intents)</small></h2>
+{% if history|length > 50 %}
+<div class="context-pagination muted">
+    Showing the most recent 50 of {{ history|length }} messages.
+</div>
+{% endif %}
 <div class="context-window">
-    {% for msg in history %}
+    {% for msg in history[-50:] %}
     <details class="context-entry">
         <summary class="context-summary">
-            <span class="role-badge role-{{ msg.role|lower }}">{{ msg.role }}</span>
-            <span class="muted context-preview">{{ msg.content[:80] }}{% if msg.content|length > 80 %}…{% endif %}</span>
+            <span class="intent-badge intent-{{ msg.intent_slug }}">{{ msg.intent|human_intent }}</span>
+            <span class="muted context-preview">{{ msg.preview }}</span>
+            <span class="muted">{{ msg.timestamp|relative_time }}</span>
         </summary>
-        <pre class="context-content">{{ msg.content }}</pre>
+        <pre class="context-content"><code class="language-json">{{ msg.payload|pretty_json }}</code></pre>
+        <div class="context-footer">
+            <a href="/api/tasks/{{ task_id }}/context/{{ loop.index0 }}/raw" target="_blank" class="muted">View raw payload →</a>
+        </div>
     </details>
     {% endfor %}
 </div>
@@ -62,6 +72,7 @@
                 <label class="autoscroll-label">
                     <input type="checkbox" id="autoscroll" checked> Auto-scroll
                 </label>
+                <button class="outline secondary btn-sm" id="pause-stream">Pause Stream</button>
                 <button class="outline secondary btn-sm" onclick="clearLogs()">Clear</button>
             </div>
         </div>
@@ -88,8 +99,15 @@
     var findingsCount = document.getElementById('findings-count');
     var findingsEmpty = document.getElementById('findings-empty');
     var count = 0;
+    var MAX_LOG_LINES = 5000;
+    var droppedLogLines = 0;
+    var droppedIndicator = null;
 
-    window.clearLogs = function () { terminal.innerHTML = ''; };
+    window.clearLogs = function () {
+        terminal.innerHTML = '';
+        droppedLogLines = 0;
+        droppedIndicator = null;
+    };
     window.clearFindings = function () {
         findingsList.innerHTML = '';
         count = 0;
@@ -102,30 +120,72 @@
         findingsEmpty = empty;
     };
 
-    function scrollToBottom() {
-        if (autoscrollCheck.checked) {
-            terminal.scrollTop = terminal.scrollHeight;
-        }
+    var scrollRafId = null;
+    function scheduleScroll() {
+        if (scrollRafId) return;
+        scrollRafId = requestAnimationFrame(function () {
+            scrollRafId = null;
+            if (autoscrollCheck.checked) {
+                terminal.scrollTop = terminal.scrollHeight;
+            }
+        });
     }
 
+    var reError = /error|failed|critical|panic/i;
+    var reWarn = /warn/i;
+    var reSuccess = /complete|success|\bok\b/i;
+    var reTool = /toolcall|tool/i;
+
     function classifyLine(text) {
-        var t = text.toLowerCase();
-        if (t.indexOf('error') !== -1 || t.indexOf('failed') !== -1 || t.indexOf('critical') !== -1 || t.indexOf('panic') !== -1) return 'log-error';
-        if (t.indexOf('warn') !== -1) return 'log-warn';
-        if (t.indexOf('complete') !== -1 || t.indexOf('success') !== -1 || t.indexOf('ok') !== -1) return 'log-success';
-        if (t.indexOf('toolcall') !== -1 || t.indexOf('tool') !== -1) return 'log-tool';
+        if (reError.test(text)) return 'log-error';
+        if (reWarn.test(text)) return 'log-warn';
+        if (reSuccess.test(text)) return 'log-success';
+        if (reTool.test(text)) return 'log-tool';
         return '';
     }
 
+    // Batch-append lines into a DocumentFragment, then trim excess in one pass.
+    function appendLines(texts) {
+        var frag = document.createDocumentFragment();
+        var added = 0;
+        for (var i = 0; i < texts.length; i++) {
+            var text = texts[i];
+            if (!text.trim()) continue;
+            if (text.length > 4000) {
+                text = text.slice(0, 4000) + '… [truncated]';
+            }
+            var line = document.createElement('div');
+            line.className = 'log-line';
+            var cls = classifyLine(text);
+            if (cls) line.classList.add(cls);
+            line.textContent = text;
+            frag.appendChild(line);
+            added++;
+        }
+        if (added === 0) return;
+        terminal.appendChild(frag);
+
+        // Trim excess in one batch instead of one-by-one
+        var excess = terminal.childElementCount - MAX_LOG_LINES;
+        if (excess > 0) {
+            for (var j = 0; j < excess; j++) {
+                terminal.removeChild(terminal.firstElementChild);
+            }
+            droppedLogLines += excess;
+            // Re-create indicator if it was removed by the trim loop above
+            if (!droppedIndicator || !droppedIndicator.parentNode) {
+                droppedIndicator = document.createElement('div');
+                droppedIndicator.className = 'log-divider';
+                terminal.insertBefore(droppedIndicator, terminal.firstChild);
+            }
+            droppedIndicator.textContent = '─── older lines hidden: ' + droppedLogLines + ' ───';
+        }
+        scheduleScroll();
+    }
+
+    // Single-line append kept for dividers
     function appendLine(text) {
-        if (!text.trim()) return;
-        var line = document.createElement('div');
-        line.className = 'log-line';
-        var cls = classifyLine(text);
-        if (cls) line.classList.add(cls);
-        line.textContent = text;
-        terminal.appendChild(line);
-        scrollToBottom();
+        appendLines([text]);
     }
 
     function appendDivider(text) {
@@ -133,7 +193,7 @@
         line.className = 'log-divider';
         line.textContent = text;
         terminal.appendChild(line);
-        scrollToBottom();
+        scheduleScroll();
     }
 
     function setStatus(label, badgeClass) {
@@ -195,40 +255,92 @@
         findingsList.prepend(card);
     }
 
-    var src = new EventSource('/tasks/{{ task_id }}/logs/stream');
+    var src = null;
+    var paused = false;
+    var finished = false;   // true once stream sends "done" — never reconnect
+    var errorRetries = 0;
+    var maxErrorRetries = 5;
+    var retryTimer = null;
+    var pauseBtn = document.getElementById('pause-stream');
 
-    src.onopen = function () {
-        setStatus('streaming', 'badge-running');
-    };
+    function connect() {
+        if (finished) return;
+        if (src) { src.close(); src = null; }
+        src = new EventSource('/tasks/{{ task_id }}/logs/stream');
 
-    src.onmessage = function (event) {
-        var lines = event.data.split('\n');
-        for (var i = 0; i < lines.length; i++) {
-            appendLine(lines[i]);
-        }
-    };
+        src.onopen = function () {
+            errorRetries = 0;
+            setStatus('streaming', 'badge-running');
+        };
 
-    src.addEventListener('finding', function (event) {
-        try {
-            var f = JSON.parse(event.data);
-            addFinding(f);
-        } catch (e) {
-            appendLine('[finding parse error] ' + event.data);
+        src.onmessage = function (event) {
+            appendLines(event.data.split('\n'));
+        };
+
+        src.addEventListener('finding', function (event) {
+            try {
+                var f = JSON.parse(event.data);
+                addFinding(f);
+            } catch (e) {
+                appendLine('[finding parse error] ' + event.data);
+            }
+        });
+
+        src.addEventListener('done', function () {
+            finished = true;
+            setStatus('complete', 'badge-complete');
+            appendDivider('─── stream closed ───');
+            src.close();
+            src = null;
+        });
+
+        src.onerror = function () {
+            // Close immediately to stop browser auto-reconnect from saturating connections.
+            if (src) { src.close(); src = null; }
+            setStatus('disconnected', 'badge-error');
+            if (errorRetries < maxErrorRetries) {
+                errorRetries++;
+                var delay = Math.min(1000 * Math.pow(2, errorRetries), 30000);
+                retryTimer = setTimeout(function () {
+                    retryTimer = null;
+                    appendDivider('─── reconnecting (' + errorRetries + '/' + maxErrorRetries + ') ───');
+                    connect();
+                }, delay);
+            } else {
+                appendDivider('─── connection lost — click Pause/Resume to retry ───');
+            }
+        };
+    }
+
+    connect();
+
+    if (pauseBtn) {
+        pauseBtn.addEventListener('click', function () {
+            paused = !paused;
+            this.textContent = paused ? 'Resume Stream' : 'Pause Stream';
+            if (paused && src) {
+                src.close();
+                src = null;
+                if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+                setStatus('paused', 'badge-warning');
+            } else if (!paused && !finished) {
+                errorRetries = 0;
+                connect();
+            }
+        });
+    }
+
+    document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible' && !paused && !finished && !src) {
+            errorRetries = 0;
+            connect();
         }
     });
 
-    src.addEventListener('done', function () {
-        setStatus('complete', 'badge-complete');
-        appendDivider('─── stream closed ───');
-        src.close();
+    window.addEventListener('beforeunload', function () {
+        if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+        if (src) { src.close(); }
     });
-
-    src.onerror = function () {
-        if (src.readyState === EventSource.CLOSED) return;
-        setStatus('disconnected', 'badge-error');
-        appendDivider('─── connection lost ───');
-        src.close();
-    };
 }());
 </script>
 {% endblock %}

@@ -328,6 +328,7 @@ impl OpenAICore {
                 other => (other, None),
             };
 
+            let payload = tool_helpers::validate_payload_object(tool_name, "openai", Some(payload));
             if !tool_helpers::check_payload_size(tool_name, &payload) {
                 continue;
             }
@@ -366,8 +367,27 @@ impl OpenAICore {
                 reason: "Missing choices[0].message in OpenAI response".to_string(),
             })?;
 
-        let text = Self::parse_message_content(message);
+        let mut text = Self::parse_message_content(message);
         let tool_calls = Self::parse_openai_tool_calls(message, intent_by_tool);
+
+        // Fallback to reasoning_content for OpenAI reasoning models (o1/o3/o4)
+        // when content is empty and no tool calls were made. Reasoning content
+        // is internal chain-of-thought and not ideal as user-facing text, but
+        // it's better than an empty response.
+        if text.trim().is_empty() && tool_calls.is_empty() {
+            if let Some(reasoning) = message
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                tracing::info!(
+                    model = %self.model,
+                    reasoning_len = reasoning.len(),
+                    "OpenAI content empty, using reasoning_content as fallback"
+                );
+                text = reasoning.to_string();
+            }
+        }
 
         // Extract stop/finish reason from OpenAI response
         let finish_reason = json_resp["choices"][0]["finish_reason"]
@@ -621,6 +641,7 @@ impl LLMCore for OpenAICore {
 
         // State for accumulating the streamed response.
         let mut full_text = String::new();
+        let mut reasoning_text = String::new();
         let mut partial_tool_calls: Vec<PartialToolCall> = Vec::new();
         let mut usage = TokenUsage {
             prompt_tokens: 0,
@@ -687,6 +708,17 @@ impl LLMCore for OpenAICore {
                     if !content.is_empty() {
                         full_text.push_str(content);
                         let _ = tx.send(InferenceEvent::Token(content.to_string())).await;
+                    }
+                }
+
+                // Reasoning content from OpenAI reasoning models (o1, o3, o4).
+                // Not streamed to the user directly, but used as fallback text
+                // if `content` is empty.
+                if let Some(reasoning) =
+                    chunk_json["choices"][0]["delta"]["reasoning_content"].as_str()
+                {
+                    if !reasoning.is_empty() {
+                        reasoning_text.push_str(reasoning);
                     }
                 }
 
@@ -766,18 +798,33 @@ impl LLMCore for OpenAICore {
                 .cloned()
                 .unwrap_or_else(|| "query".to_string());
 
+            let payload =
+                tool_helpers::validate_payload_object(&partial.name, "openai", Some(payload));
+            if !tool_helpers::check_payload_size(&partial.name, &payload) {
+                continue;
+            }
+
             let tc = InferenceToolCall {
                 id: partial.id.clone(),
                 tool_name: partial.name.clone(),
                 intent_type,
-                payload: tool_helpers::validate_payload_object(
-                    &partial.name,
-                    "openai",
-                    Some(payload),
-                ),
+                payload,
             };
             let _ = tx.send(InferenceEvent::ToolCallComplete(tc.clone())).await;
             tool_calls.push(tc);
+        }
+
+        // When content is empty but reasoning_content has text (OpenAI
+        // reasoning models o1/o3/o4), use reasoning as fallback so the
+        // caller gets a non-empty response.
+        if full_text.trim().is_empty() && !reasoning_text.trim().is_empty() && tool_calls.is_empty()
+        {
+            tracing::info!(
+                model = %self.model,
+                reasoning_len = reasoning_text.len(),
+                "OpenAI content empty but reasoning_content present — using as fallback"
+            );
+            full_text = reasoning_text;
         }
 
         let duration_ms = start_time.elapsed().as_millis() as u64;
@@ -1313,5 +1360,92 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");
         assert_eq!(messages[0]["content"], "Tool Result:\nstatus: ok");
+    }
+
+    #[test]
+    fn test_parse_message_content_no_reasoning_fallback() {
+        // parse_message_content should NOT fall back to reasoning_content —
+        // that logic lives in parse_response_json where tool_calls are available.
+        let message = json!({
+            "content": "",
+            "reasoning_content": "The user wants X because Y"
+        });
+        let text = OpenAICore::parse_message_content(&message);
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn test_parse_response_reasoning_fallback_when_no_tool_calls() {
+        let adapter = OpenAICore::new(SecretString::new("fake".into()), "o3".into());
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "reasoning_content": "The user wants X because Y"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 20,
+                "total_tokens": 30
+            }
+        });
+        let result = adapter
+            .parse_response_json(&response, &HashMap::new(), 100)
+            .unwrap();
+        assert_eq!(result.text, "The user wants X because Y");
+    }
+
+    #[test]
+    fn test_parse_response_reasoning_not_used_when_tool_calls_present() {
+        let adapter = OpenAICore::new(SecretString::new("fake".into()), "o3".into());
+        let mut intent_map = HashMap::new();
+        intent_map.insert("file-reader".to_string(), "read".to_string());
+
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "reasoning_content": "internal reasoning",
+                    "tool_calls": [{
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {
+                            "name": "file-reader",
+                            "arguments": "{\"path\":\"test.txt\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {}
+        });
+        let result = adapter
+            .parse_response_json(&response, &intent_map, 100)
+            .unwrap();
+        // Content should remain empty — reasoning should NOT be used as
+        // fallback when tool_calls are present.
+        assert!(result.text.is_empty());
+        assert_eq!(result.tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_response_content_preferred_over_reasoning() {
+        let adapter = OpenAICore::new(SecretString::new("fake".into()), "o3".into());
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "content": "visible answer",
+                    "reasoning_content": "internal reasoning"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {}
+        });
+        let result = adapter
+            .parse_response_json(&response, &HashMap::new(), 100)
+            .unwrap();
+        assert_eq!(result.text, "visible answer");
     }
 }

@@ -82,6 +82,28 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "poll-agent",
     "cancel-agent",
     "a2a-delegate",
+    "event-subscribe",
+    "event-unsubscribe",
+    "event-list-subscriptions",
+    "event-list-available",
+    // KMC bridge tools — run in-process, dispatch to capability providers.
+    "env-create",
+    "env-install",
+    "env-list",
+    "env-destroy",
+    "storage-zone-create",
+    "storage-zone-list",
+    "storage-zone-revoke",
+    "proc-spawn",
+    "proc-signal",
+    "proc-output",
+    "proc-list",
+    "proc-wait",
+    "net-http",
+    "net-dns",
+    "build-run",
+    "build-test",
+    "build-lint",
 ];
 
 const SPECIAL_CONTEXT_TOOL_NAMES: &[&str] = &["agent-manual", "agent-self"];

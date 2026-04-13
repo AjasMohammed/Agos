@@ -1,0 +1,163 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Management</h1>
+        <p class="page-meta">CLI parity: plugins, channels, schedules, roles, config</p>
+    </div>
+</div>
+
+<div class="grid">
+    <article>
+        <header><strong>Plugins</strong></header>
+        {% if plugins|length == 0 %}
+        <p class="muted">No plugins discovered.</p>
+        {% else %}
+        <table>
+            <thead>
+            <tr><th>ID</th><th>Status</th><th>Version</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+            {% for p in plugins %}
+            <tr>
+                <td><code>{{ p.id }}</code></td>
+                <td>{{ p.status }}</td>
+                <td>{{ p.version }}</td>
+                <td>
+                    {% if p.status == "active" %}
+                    <form method="post" action="/management/plugins/{{ p.id }}/disable" style="display:inline">
+                        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                        <button class="outline secondary btn-sm" type="submit">Disable</button>
+                    </form>
+                    {% elif p.status == "discovered" or p.status == "disabled" %}
+                    <form method="post" action="/management/plugins/{{ p.id }}/enable" style="display:inline">
+                        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                        <button class="outline secondary btn-sm" type="submit">Enable</button>
+                    </form>
+                    {% else %}
+                    <small class="muted">Blocked</small>
+                    {% endif %}
+                </td>
+            </tr>
+            {% if p.blocked_reason %}
+            <tr><td colspan="4"><small class="muted">{{ p.blocked_reason }}</small></td></tr>
+            {% endif %}
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </article>
+
+    <article>
+        <header><strong>Channels</strong></header>
+        {% if channels|length == 0 %}
+        <p class="muted">No active channels.</p>
+        {% else %}
+        <table>
+            <thead>
+            <tr><th>Kind</th><th>Display</th><th>External ID</th><th>Last Active</th></tr>
+            </thead>
+            <tbody>
+            {% for c in channels %}
+            <tr>
+                <td>{{ c.kind }}</td>
+                <td>{{ c.display_name }}</td>
+                <td><code>{{ c.external_id }}</code></td>
+                <td>{{ c.last_active }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </article>
+</div>
+
+<article>
+    <header><strong>Schedules</strong></header>
+    {% if schedules|length == 0 %}
+    <p class="muted">No schedules created.</p>
+    {% else %}
+    <table>
+        <thead>
+        <tr><th>Name</th><th>Cron</th><th>State</th><th>Agent</th><th>Runs</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+        {% for s in schedules %}
+        <tr>
+            <td>{{ s.name }}</td>
+            <td><code>{{ s.cron_expression }}</code></td>
+            <td>{{ s.state }}</td>
+            <td>{{ s.agent_name }}</td>
+            <td>{{ s.run_count }}</td>
+            <td>
+                {% if s.state == "Active" %}
+                <form method="post" action="/management/schedules/{{ s.id }}/pause" style="display:inline">
+                    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                    <button class="outline secondary btn-sm" type="submit">Pause</button>
+                </form>
+                {% else %}
+                <form method="post" action="/management/schedules/{{ s.id }}/resume" style="display:inline">
+                    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                    <button class="outline secondary btn-sm" type="submit">Resume</button>
+                </form>
+                {% endif %}
+                <form method="post" action="/management/schedules/{{ s.id }}/delete" style="display:inline">
+                    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                    <button class="outline secondary btn-sm" type="submit">Delete</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</article>
+
+<div class="grid">
+    <article>
+        <header><strong>Roles</strong></header>
+        {% if roles|length == 0 %}
+        <p class="muted">No custom roles found.</p>
+        {% else %}
+        <table>
+            <thead><tr><th>Name</th><th>Description</th><th>Created</th></tr></thead>
+            <tbody>
+            {% for r in roles %}
+            <tr>
+                <td><code>{{ r.name }}</code></td>
+                <td>{{ r.description }}</td>
+                <td>{{ r.created_at }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </article>
+
+    <article>
+        <header><strong>Agent Roles</strong></header>
+        {% if connected_agents|length == 0 %}
+        <p class="muted">No connected agents.</p>
+        {% else %}
+        <table>
+            <thead><tr><th>Agent</th><th>Provider</th><th>Model</th><th>Roles</th></tr></thead>
+            <tbody>
+            {% for a in connected_agents %}
+            <tr>
+                <td>{{ a.name }}</td>
+                <td>{{ a.provider }}</td>
+                <td>{{ a.model }}</td>
+                <td>{{ a.roles }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </article>
+</div>
+
+<article>
+    <header><strong>Kernel Config</strong></header>
+    <pre><code>{{ config|pretty_json }}</code></pre>
+</article>
+{% endblock %}
