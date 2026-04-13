@@ -6,6 +6,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use axum::Router;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
+use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
@@ -13,8 +14,11 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::AuthToken;
 use crate::handlers::{
-    agent_detail, agents, audit, chat, connectors, costs, dashboard, events, marketplace,
-    notifications, oauth, pipeline_ui, pipelines, secrets, tasks, tools, webhooks,
+    a2a, agent_detail, agents, audit, channels, chat, config_page, connectors, costs, dashboard,
+    doctor, escalations, events, events_log, hal_page, identity_page, logs, management,
+    marketplace, mcp_page, notifications, oauth, observability, pipeline_ui, pipelines, plugins,
+    resources_page, roles, schedules, scratchpad, secrets, tasks, teams, tools, webhooks,
+    webhooks_page,
 };
 use crate::state::AppState;
 
@@ -119,6 +123,10 @@ pub fn build_router(
             axum::routing::get(agent_detail::detail),
         )
         .route(
+            "/agents/{name}/identity",
+            axum::routing::get(identity_page::page),
+        )
+        .route(
             "/agents/{name}/permissions",
             axum::routing::post(agent_detail::grant_permission),
         )
@@ -126,11 +134,20 @@ pub fn build_router(
             "/agents/{name}/permissions/revoke",
             axum::routing::post(agent_detail::revoke_permission),
         )
+        .route(
+            "/agents/{name}/settings",
+            axum::routing::post(agent_detail::update_settings),
+        )
         // Tasks
         .route("/tasks", axum::routing::get(tasks::list))
         .route("/tasks/{id}", axum::routing::get(tasks::detail))
         .route("/tasks/{id}/cancel", axum::routing::post(tasks::cancel))
+        .route("/tasks/{id}/resume", axum::routing::post(tasks::resume))
         .route("/tasks/{id}/trace", axum::routing::get(tasks::trace_page))
+        .route(
+            "/tasks/{id}/snapshots",
+            axum::routing::get(tasks::snapshots),
+        )
         .route(
             "/tasks/{id}/logs/stream",
             axum::routing::get(tasks::log_stream),
@@ -138,6 +155,10 @@ pub fn build_router(
         .route(
             "/api/tasks/{id}/trace",
             axum::routing::get(tasks::trace_json),
+        )
+        .route(
+            "/api/tasks/{id}/context/{idx}/raw",
+            axum::routing::get(tasks::context_raw),
         )
         // Tools
         .route(
@@ -242,6 +263,22 @@ pub fn build_router(
         .route("/chat", axum::routing::get(chat::list))
         .route("/chat/new", axum::routing::post(chat::new_session))
         .route("/chat/{session_id}", axum::routing::get(chat::conversation))
+        .route(
+            "/chat/{session_id}/rename",
+            axum::routing::post(chat::rename_session),
+        )
+        .route(
+            "/chat/{session_id}/delete",
+            axum::routing::post(chat::delete_session),
+        )
+        .route(
+            "/chat/{session_id}/fork",
+            axum::routing::post(chat::fork_session),
+        )
+        .route(
+            "/chat/{session_id}/export",
+            axum::routing::get(chat::export_session),
+        )
         .route("/chat/{session_id}/send", axum::routing::post(chat::send))
         .route(
             "/chat/{session_id}/stream",
@@ -274,6 +311,103 @@ pub fn build_router(
         // Audit
         .route("/audit", axum::routing::get(audit::list))
         .route("/audit/{trace_id}", axum::routing::get(audit::detail))
+        // Dedicated management parity pages
+        .route("/plugins", axum::routing::get(plugins::list))
+        .route("/plugins/discover", axum::routing::post(plugins::discover))
+        .route("/plugins/{id}", axum::routing::get(plugins::detail))
+        .route("/plugins/{id}/enable", axum::routing::post(plugins::enable))
+        .route(
+            "/plugins/{id}/disable",
+            axum::routing::post(plugins::disable),
+        )
+        .route("/channels", axum::routing::get(channels::list))
+        .route(
+            "/channels/{id}/disconnect",
+            axum::routing::post(channels::disconnect),
+        )
+        .route(
+            "/schedules",
+            axum::routing::get(schedules::list).post(schedules::create),
+        )
+        .route(
+            "/api/schedules/preview",
+            axum::routing::post(schedules::preview),
+        )
+        .route(
+            "/schedules/{id}/pause",
+            axum::routing::post(schedules::pause),
+        )
+        .route(
+            "/schedules/{id}/resume",
+            axum::routing::post(schedules::resume),
+        )
+        .route(
+            "/schedules/{id}/delete",
+            axum::routing::post(schedules::delete),
+        )
+        .route(
+            "/roles",
+            axum::routing::get(roles::list).post(roles::create),
+        )
+        .route("/roles/{name}", axum::routing::get(roles::detail))
+        .route("/roles/{name}/delete", axum::routing::post(roles::delete))
+        .route("/config", axum::routing::get(config_page::page))
+        .route("/escalations", axum::routing::get(escalations::list))
+        .route(
+            "/escalations/{id}/resolve",
+            axum::routing::post(escalations::resolve),
+        )
+        .route("/mcp", axum::routing::get(mcp_page::list))
+        .route("/mcp/{name}/detach", axum::routing::post(mcp_page::detach))
+        .route(
+            "/webhooks",
+            axum::routing::get(webhooks_page::list).post(webhooks_page::create),
+        )
+        .route(
+            "/webhooks/{id}/delete",
+            axum::routing::post(webhooks_page::delete),
+        )
+        .route(
+            "/webhooks/{id}/rotate",
+            axum::routing::post(webhooks_page::rotate),
+        )
+        .route("/doctor", axum::routing::get(doctor::page))
+        .route("/scratchpad", axum::routing::get(scratchpad::page))
+        .route(
+            "/agents/{name}/scratchpad",
+            axum::routing::get(scratchpad::agent_page),
+        )
+        .route("/resources", axum::routing::get(resources_page::page))
+        .route("/events", axum::routing::get(events_log::page))
+        .route("/events-log", axum::routing::get(events_log::page))
+        .route("/logs", axum::routing::get(logs::page))
+        .route("/hal", axum::routing::get(hal_page::page))
+        .route("/teams", axum::routing::get(teams::page))
+        .route("/teams/{id}", axum::routing::get(teams::detail))
+        .route("/a2a", axum::routing::get(a2a::page))
+        // Management + observability parity pages
+        .route("/management", axum::routing::get(management::page))
+        .route(
+            "/management/plugins/{id}/enable",
+            axum::routing::post(management::plugin_enable),
+        )
+        .route(
+            "/management/plugins/{id}/disable",
+            axum::routing::post(management::plugin_disable),
+        )
+        .route(
+            "/management/schedules/{id}/pause",
+            axum::routing::post(management::schedule_pause),
+        )
+        .route(
+            "/management/schedules/{id}/resume",
+            axum::routing::post(management::schedule_resume),
+        )
+        .route(
+            "/management/schedules/{id}/delete",
+            axum::routing::post(management::schedule_delete),
+        )
+        .route("/observability", axum::routing::get(observability::page))
         // SSE event streams
         .route(
             "/events/dashboard",
@@ -311,7 +445,10 @@ pub fn build_router(
         .merge(webhook_routes)
         // Security headers on all responses.
         .layer(axum::middleware::from_fn(add_security_headers))
-        .layer(CompressionLayer::new())
+        .layer(CompressionLayer::new().compress_when(
+            DefaultPredicate::new()
+                .and(NotForContentType::new("text/event-stream")),
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         // Rate limiting outermost — applied first on every incoming request.

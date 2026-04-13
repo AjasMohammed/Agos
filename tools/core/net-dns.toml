@@ -1,0 +1,36 @@
+[manifest]
+name = "net-dns"
+version = "1.0.0"
+description = "Resolve DNS hostnames with rebinding defense"
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "readonly_external"
+
+[capabilities_required]
+permissions = ["net.dns:r"]
+
+[capabilities_provided]
+outputs = ["content.json"]
+
+[intent_schema]
+input = "NetDnsIntent"
+output = "NetDnsResult"
+
+[input_schema]
+required = ["hostname"]
+type = "object"
+
+[input_schema.properties.hostname]
+description = "Hostname to resolve"
+type = "string"
+
+[sandbox]
+network = true
+fs_write = false
+gpu = false
+max_memory_mb = 64
+max_cpu_ms = 10000
+syscalls = []
+
+[executor]
+type = "inline"

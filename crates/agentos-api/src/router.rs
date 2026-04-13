@@ -87,6 +87,10 @@ pub fn build_router(
             post(agents::grant_permission),
         )
         .route(
+            "/api/v1/agents/{name}/settings",
+            post(agents::update_settings),
+        )
+        .route(
             "/api/v1/agents/{name}/permissions/revoke",
             post(agents::revoke_permission),
         )

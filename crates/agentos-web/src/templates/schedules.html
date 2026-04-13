@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block content %}
+{% set title = "Schedules" %}
+{% set subtitle = schedules|length ~ " configured schedules" %}
+{% include "partials/management_page.html" %}
+
+<article>
+    <header><strong>Create Schedule</strong></header>
+    <form method="post" action="/schedules" id="create-schedule-form">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <div class="form-grid-2">
+            <label>Name <input name="name" required></label>
+            <label>Agent
+                <select name="agent_name" required>
+                    {% for a in agents %}<option value="{{ a.name }}">{{ a.name }}</option>{% endfor %}
+                </select>
+            </label>
+        </div>
+        <label>Cron Expression
+            <input id="schedule-cron-input" name="cron" placeholder="0 9 * * *" required>
+            <small id="cron-preview" class="muted">Next run: —</small>
+        </label>
+        <label>Prompt <textarea name="prompt" rows="4" required></textarea></label>
+        <button type="submit">Create Schedule</button>
+    </form>
+</article>
+
+{% if schedules|length == 0 %}
+<article><p class="muted">No schedules found.</p></article>
+{% else %}
+<table>
+    <thead><tr><th>Name</th><th>Cron</th><th>State</th><th>Agent</th><th>Runs</th><th>Last</th><th>Next</th><th>Actions</th></tr></thead>
+    <tbody>
+    {% for s in schedules %}
+    <tr>
+        <td>{{ s.name }}</td>
+        <td><code>{{ s.cron_expression }}</code></td>
+        <td>{{ s.state }}</td>
+        <td>{{ s.agent_name }}</td>
+        <td>{{ s.run_count }}</td>
+        <td>{{ s.last_run_at or "-" }}</td>
+        <td>{{ s.next_run_at or "-" }}</td>
+        <td>
+            {% if s.state == "Active" %}
+            <form method="post" action="/schedules/{{ s.id }}/pause" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <button class="outline secondary btn-sm" type="submit">Pause</button>
+            </form>
+            {% else %}
+            <form method="post" action="/schedules/{{ s.id }}/resume" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <button class="outline secondary btn-sm" type="submit">Resume</button>
+            </form>
+            {% endif %}
+            <form method="post" action="/schedules/{{ s.id }}/delete" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <button class="outline secondary btn-sm" type="submit">Delete</button>
+            </form>
+        </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+<script src="/static/js/schedule-preview.js" defer></script>
+{% endblock %}

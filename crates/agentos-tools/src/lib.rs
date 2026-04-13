@@ -18,6 +18,10 @@ pub mod datetime;
 pub mod display;
 pub mod episodic_list;
 pub mod escalation_status;
+pub mod event_list_available;
+pub mod event_list_subscriptions;
+pub mod event_subscribe;
+pub mod event_unsubscribe;
 pub mod factory;
 pub mod file_delete;
 pub mod file_diff;
@@ -30,6 +34,7 @@ pub mod file_reader;
 pub mod file_writer;
 pub mod hardware_info;
 pub mod http_client;
+pub mod kmc_tools;
 pub mod loader;
 pub mod log_reader;
 pub mod memory_block_delete;
@@ -174,6 +179,9 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         };
 
@@ -211,6 +219,9 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         };
 
@@ -251,6 +262,9 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -274,6 +288,9 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -2051,7 +2068,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["section"], "events");
+        // 10 EventCategory variants — see agentos_types::event::EventCategory.
         assert_eq!(result["categories"].as_array().unwrap().len(), 10);
+        assert_eq!(result["self_subscription"]["enabled"], true);
     }
 
     #[tokio::test]

@@ -21,18 +21,20 @@ impl Kernel {
 
         // Build system prompt from the canonical builder — same prompt structure
         // for every context window (task execution, web UI chat, sub-agents).
-        let (agent_name, agent_description, agent_roles) = {
+        let (agent_name, agent_description, agent_roles, custom_instructions) = {
             let registry = self.agent_registry.read().await;
             match registry.get_by_id(&task.agent_id) {
                 Some(profile) => (
                     profile.name.clone(),
                     profile.description.clone(),
                     profile.roles.clone(),
+                    profile.system_prompt.clone(),
                 ),
                 None => (
                     format!("agent-{}", &task.agent_id.to_string()[..8]),
                     String::new(),
                     vec![],
+                    None,
                 ),
             }
         };
@@ -46,7 +48,11 @@ impl Kernel {
             agent_name,
             agent_description,
             agent_roles,
+            custom_instructions,
             sub_agent,
+            // Task execution does not stream through the chat output filter,
+            // so the `<final>` enforcement convention does not apply.
+            enforce_final_tag: false,
         });
 
         // We initialize context with empty string; Compiler injects the true system prompt

@@ -727,15 +727,23 @@ impl LLMCore for AnthropicCore {
                                 .cloned()
                                 .unwrap_or_else(|| "query".to_string());
 
+                            let payload = tool_helpers::validate_payload_object(
+                                &tool_name,
+                                "anthropic",
+                                Some(payload),
+                            );
+                            if !tool_helpers::check_payload_size(&tool_name, &payload) {
+                                tool_block_index += 1;
+                                current_tool_args_buffer.clear();
+                                current_block_type = None;
+                                continue;
+                            }
+
                             let tc = InferenceToolCall {
                                 id: current_tool_id.take(),
                                 tool_name: tool_name.clone(),
                                 intent_type,
-                                payload: tool_helpers::validate_payload_object(
-                                    &tool_name,
-                                    "anthropic",
-                                    Some(payload),
-                                ),
+                                payload,
                             };
                             let _ = tx.send(InferenceEvent::ToolCallComplete(tc.clone())).await;
                             tool_calls.push(tc);

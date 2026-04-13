@@ -453,6 +453,9 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         };
         let result = tool.execute(serde_json::json!({}), ctx).await;

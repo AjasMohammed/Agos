@@ -31,19 +31,16 @@ async fn healthz(State(kernel): State<Arc<Kernel>>) -> Json<HealthResponse> {
 
 async fn readyz(State(kernel): State<Arc<Kernel>>) -> (StatusCode, Json<ReadyResponse>) {
     let agents = kernel.agent_registry.read().await.list_online().len();
-    let tasks = kernel.scheduler.list_tasks().await.len();
+    let tasks = kernel.scheduler.running_count().await;
 
-    if agents == 0 {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ReadyResponse {
-                status: "not ready",
-                connected_agents: agents,
-                active_tasks: tasks,
-                reason: Some("no agents connected".to_string()),
-            }),
-        );
-    }
+    // The kernel is ready if the bus, scheduler, and subsystems are initialized.
+    // Agent presence is informational — a kernel with zero agents can still
+    // accept connections and is ready from an infrastructure standpoint.
+    let reason = if agents == 0 {
+        Some("no agents connected (kernel accepting connections)".to_string())
+    } else {
+        None
+    };
 
     (
         StatusCode::OK,
@@ -51,7 +48,7 @@ async fn readyz(State(kernel): State<Arc<Kernel>>) -> (StatusCode, Json<ReadyRes
             status: "ready",
             connected_agents: agents,
             active_tasks: tasks,
-            reason: None,
+            reason,
         }),
     )
 }

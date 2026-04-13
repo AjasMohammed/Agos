@@ -18,10 +18,10 @@ impl Kernel {
         tracing::info!("Task {} complete: {}", task.id, result.answer);
         crate::metrics::record_task_completed(duration_ms, true);
 
-        // Record enriched task success to episodic memory
+        // Record compact task success to episodic memory (token-efficient format)
         let summary_preview = format!(
-            "Task: {}\nOutcome: Success\nTool calls: {}\nIterations: {}\nDuration: {}ms\nFinal answer preview: {}",
-            task.original_prompt,
+            "task:{}\nresult:success|tools:{}|iters:{}|{}ms\nanswer:{}",
+            Self::truncate_for_prompt_payload(&task.original_prompt, 200),
             result.tool_call_count,
             result.iterations,
             duration_ms,
@@ -248,6 +248,12 @@ impl Kernel {
                 }
             }
         }
+
+        // Resolve any escalations still pending for this task so the sweeper
+        // doesn't auto-approve/deny them after the task has already finished.
+        self.escalation_manager
+            .resolve_for_task(&task.id, "Task completed successfully")
+            .await;
 
         self.cleanup_task_subscriptions(&task.id).await;
     }
@@ -537,8 +543,10 @@ impl Kernel {
         }
 
         let failure_summary = format!(
-            "Task failed: {}\nError: {}",
-            task.original_prompt, error_message
+            "task:{}\nresult:failed|{}ms\nerror:{}",
+            Self::truncate_for_prompt_payload(&task.original_prompt, 200),
+            duration_ms,
+            Self::truncate_for_prompt_payload(&error_message, 300)
         );
         match self
             .episodic_memory
@@ -629,6 +637,12 @@ impl Kernel {
             )
             .await;
         }
+
+        // Resolve any escalations still pending for this task so the sweeper
+        // doesn't auto-approve/deny them after the task has already failed.
+        self.escalation_manager
+            .resolve_for_task(&task.id, "Task failed")
+            .await;
 
         self.cleanup_task_subscriptions(&task.id).await;
     }

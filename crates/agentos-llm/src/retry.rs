@@ -204,13 +204,39 @@ pub async fn send_with_retry(
             Err(e) => {
                 // Network / connection error — retryable.
                 breaker.record_failure();
-                last_error = Some(format!("Network error: {}", e));
+                // Chain error sources so we see the root cause (e.g., serde_json
+                // errors hidden behind reqwest "builder error").
+                let mut full_reason = format!("Network error: {}", e);
+                let mut src = std::error::Error::source(&e);
+                while let Some(s) = src {
+                    full_reason += &format!(" -> {}", s);
+                    src = std::error::Error::source(s);
+                }
+                // Also classify the reqwest error kind for easier diagnosis.
+                let kind = if e.is_builder() {
+                    "builder"
+                } else if e.is_connect() {
+                    "connect"
+                } else if e.is_timeout() {
+                    "timeout"
+                } else if e.is_request() {
+                    "request"
+                } else if e.is_body() {
+                    "body"
+                } else if e.is_decode() {
+                    "decode"
+                } else {
+                    "other"
+                };
+                full_reason += &format!(" [kind={}]", kind);
+                last_error = Some(full_reason);
 
                 if attempt < policy.max_retries {
                     let delay = policy.delay_for_attempt(attempt, None);
-                    debug!(
+                    warn!(
                         provider,
                         attempt,
+                        kind,
                         error = %e,
                         delay_ms = delay.as_millis() as u64,
                         "Network error, retrying"
@@ -219,6 +245,8 @@ pub async fn send_with_retry(
                 } else {
                     warn!(
                         provider,
+                        kind,
+                        error = %e,
                         "All retries exhausted after {} attempts (network errors)",
                         policy.max_retries + 1
                     );

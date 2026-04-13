@@ -2,6 +2,7 @@ pub mod agent;
 pub mod agent_self;
 pub mod capability;
 pub mod channel;
+pub mod chat;
 pub mod context;
 pub mod error;
 pub mod event;
@@ -53,8 +54,10 @@ pub use notification::{
 };
 pub use plugin::{ChannelDeclaration, PluginManifest};
 pub use registry_query::{
-    AgentRegistryQuery, AgentRegistrySnapshot, AgentSummary, EscalationQuery, EscalationSnapshot,
-    EscalationSummary, TaskIntrospectionSummary, TaskQuery, TaskSnapshot,
+    AgentRegistryQuery, AgentRegistrySnapshot, AgentSummary, CapabilityDescriptorSummary,
+    CapabilityDispatchRequest, CapabilityDispatcher, CapabilityRegistryQuery,
+    CapabilityRegistrySnapshot, EscalationQuery, EscalationSnapshot, EscalationSummary,
+    StorageZoneQuery, TaskIntrospectionSummary, TaskQuery, TaskSnapshot, ZoneAccessLevel,
 };
 pub use role::Role;
 pub use secret::{SecretEntry, SecretMetadata, SecretOwner, SecretScope};
@@ -75,6 +78,7 @@ pub use task_trace::{
 pub mod team;
 pub use team::{TeamConfig, TeamMember, TeamRole};
 pub mod webhook;
+pub use chat::ChatStreamFrame;
 pub use webhook::{
     SignatureAlgorithm, WebhookEndpoint, WebhookEndpointMeta, WebhookEvent, WebhookProvider,
 };

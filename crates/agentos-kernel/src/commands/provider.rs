@@ -71,6 +71,14 @@ impl Kernel {
     /// Update the base URL for a named catalog provider, persisting the change
     /// back to `providers.toml`.
     pub(crate) async fn cmd_set_provider_url(&self, name: String, url: String) -> KernelResponse {
+        // Reject empty/whitespace URLs — an empty catalog entry would cause every
+        // agent that resolves to this provider to fail with a reqwest builder error.
+        if url.trim().is_empty() {
+            return KernelResponse::Error {
+                message: "Provider URL cannot be empty. Provide a full URL like 'http://host:port'"
+                    .to_string(),
+            };
+        }
         // Update in-memory catalog
         let updated = self
             .provider_catalog

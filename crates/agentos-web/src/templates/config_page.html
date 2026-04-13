@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+{% set title = "Config" %}
+{% set subtitle = "Kernel configuration browser (read-only)" %}
+{% include "partials/management_page.html" %}
+
+<div class="grid">
+    <article>
+        <header><strong>Sections</strong></header>
+        <ul>
+            {% for section in sections %}
+            <li><a href="/config?section={{ section }}">{{ section }}</a></li>
+            {% endfor %}
+        </ul>
+    </article>
+
+    <article>
+        <header><strong>{{ selected or "Section" }}</strong></header>
+        <pre><code>{{ section_value|pretty_json }}</code></pre>
+    </article>
+</div>
+{% endblock %}

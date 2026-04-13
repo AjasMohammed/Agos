@@ -45,6 +45,9 @@ pub enum AuditEventType {
     AgentConnected,
     AgentReconnected,
     AgentDisconnected,
+    /// Emitted when the pre-flight health check against an LLM backend fails at
+    /// `agent connect` time and the agent registration is aborted.
+    LLMConnectionFailed,
     LLMInferenceStarted,
     LLMInferenceCompleted,
     LLMInferenceError,
@@ -144,6 +147,15 @@ pub enum AuditEventType {
     /// indicating possible tampering with historical audit entries.
     AuditChainTampered,
 
+    // Output sanitization
+    /// Emitted when the chat output sanitizer detected a fenced ```json
+    /// tool-intent block in an LLM's visible text and stripped it. When the
+    /// adapter returned no native tool calls, the extracted intents are
+    /// promoted into `result.tool_calls` so they actually execute. Useful as
+    /// a signal of either a misbehaving adapter or a prompt-injection attempt
+    /// that bypassed the structured tool-use channel.
+    ToolIntentLeakedFromText,
+
     // User notification system (UNIS Phase 1)
     /// Emitted when a UserMessage is created and stored in the inbox.
     NotificationSent,
@@ -205,6 +217,56 @@ pub enum AuditEventType {
     SafetyRuleViolation,
     /// Emitted when a device's reported state is updated from a sensor.
     ReportedStateUpdated,
+
+    // Kernel-Mediated Capabilities (KMC)
+    /// Emitted when an agent requests a managed capability.
+    CapabilityRequested,
+    /// Emitted when a managed capability is granted (either by policy or approval).
+    CapabilityGranted,
+    /// Emitted when a managed capability request is denied by policy.
+    CapabilityDenied,
+    /// Emitted when a managed capability action executes successfully.
+    CapabilityExecuted,
+    /// Emitted when a managed capability action fails during execution.
+    CapabilityFailed,
+
+    // KMC — Managed Environments (env.*)
+    /// Emitted when an agent workspace is created.
+    EnvironmentCreated,
+    /// Emitted when a package is installed into an agent workspace.
+    PackageInstalled,
+    /// Emitted when a package is removed from an agent workspace.
+    PackageRemoved,
+    /// Emitted when an agent workspace is destroyed.
+    EnvironmentDestroyed,
+
+    // KMC — Managed Processes (proc.*)
+    // Prefixed with "Managed" to distinguish from host-process lifecycle events
+    // that may be emitted by the HAL process driver or sandbox executor.
+    /// Emitted when a managed process is spawned by an agent.
+    ManagedProcessSpawned,
+    /// Emitted when a signal is sent to a managed process.
+    ManagedProcessSignaled,
+    /// Emitted when a managed process terminates (normally or by signal).
+    ManagedProcessTerminated,
+
+    // KMC — Managed Networking (net.*)
+    /// Emitted when a network request is executed through the kernel proxy.
+    NetworkRequestExecuted,
+    /// Emitted when a network destination is blocked by policy.
+    NetworkDestinationBlocked,
+
+    // KMC — Managed Storage (storage.*)
+    /// Emitted when a storage zone is created for an agent.
+    StorageZoneCreated,
+    /// Emitted when a storage zone grant is revoked.
+    StorageZoneRevoked,
+
+    // KMC — Managed Builds (build.*)
+    /// Emitted when a build command is executed in a managed workspace.
+    BuildExecuted,
+    /// Emitted when a build command fails.
+    BuildFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

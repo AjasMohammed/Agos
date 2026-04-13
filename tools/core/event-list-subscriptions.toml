@@ -1,0 +1,27 @@
+[manifest]
+name        = "event-list-subscriptions"
+version     = "1.0.0"
+description = "List all event subscriptions belonging to the calling agent (your own subscriptions only)."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["events.stream:o"]
+
+[capabilities_provided]
+outputs = ["subscriptions"]
+
+[intent_schema]
+input  = "EventListSubscriptionsIntent"
+output = "EventListSubscriptionsResult"
+
+[input_schema]
+type = "object"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 500
+syscalls      = []

@@ -795,10 +795,10 @@ impl Kernel {
             Self::spawn_tracked_task(&mut join_set, &mut task_id_map, *kind, self.clone());
         }
 
-        // Start config file watcher — sends on reload_rx when config/default.toml changes.
+        // Start config file watcher — sends on reload_rx when the loaded config file changes.
         // The watcher is kept alive by holding it in a local variable.
         let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(4);
-        let config_path = std::path::PathBuf::from("config/default.toml");
+        let config_path = self.config_path.clone();
         let _config_watcher =
             match crate::config_watcher::ConfigWatcher::start(config_path, reload_tx) {
                 Ok(w) => {
@@ -1346,6 +1346,7 @@ impl Kernel {
                 test_mode,
                 extra_permissions,
                 root,
+                skip_health_check,
             } => {
                 // Intentionally calls cmd_connect_agent directly (not api_connect_agent):
                 // the bus command carries test_mode and extra_permissions which are
@@ -1356,15 +1357,28 @@ impl Kernel {
                     model,
                     base_url,
                     roles,
+                    None,
+                    None,
+                    None,
                     test_mode,
                     extra_permissions,
                     root,
+                    skip_health_check,
                 )
                 .await
             }
             KernelCommand::ListAgents => self.cmd_list_agents().await,
             KernelCommand::SetAgentBaseUrl { name, url } => {
                 self.cmd_set_agent_base_url(name, url).await
+            }
+            KernelCommand::PingLLM {
+                provider,
+                model,
+                base_url,
+                agent_name,
+            } => {
+                self.cmd_ping_llm(provider, model, base_url, agent_name)
+                    .await
             }
             KernelCommand::DisconnectAgent { agent_id } => {
                 // Route through api_* so any future shared logic (validation, audit hooks)

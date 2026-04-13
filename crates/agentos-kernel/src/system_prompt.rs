@@ -14,8 +14,14 @@ pub struct SystemPromptContext {
     pub agent_description: String,
     /// Role names assigned to this agent (from `AgentProfile.roles`).
     pub agent_roles: Vec<String>,
+    /// Optional custom instructions configured for this agent at connect time.
+    pub custom_instructions: Option<String>,
     /// Present only when the agent is executing as a spawned sub-agent.
     pub sub_agent: Option<SubAgentContext>,
+    /// When true, the kernel's chat output filter is in `<final>` enforcement
+    /// mode — only text inside `<final>...</final>` tags reaches the user.
+    /// The system prompt instructs the model to follow the convention.
+    pub enforce_final_tag: bool,
 }
 
 /// Additional context injected when the executing task is a sub-agent.
@@ -48,6 +54,14 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
     if !ctx.agent_description.is_empty() {
         write!(prompt, "\n{}", ctx.agent_description).ok();
     }
+    if let Some(extra) = ctx
+        .custom_instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        write!(prompt, "\n\n## Agent Custom Instructions\n{}", extra).ok();
+    }
 
     // ── Sub-agent awareness ──────────────────────────────────────
     if let Some(ref sa) = ctx.sub_agent {
@@ -58,8 +72,8 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
              You were spawned as a sub-agent (depth {depth}/{max}). \
              Parent task: {parent}. \
              {spawn_note}\
-             Your results are automatically delivered to the parent when you finish — \
-             produce a clear, self-contained answer.",
+             Output goes to parent agent, not human. Be terse: lead with answer, \
+             use key:value pairs, no filler/preamble. Omit reasoning unless requested.",
             depth = sa.spawn_depth,
             max = MAX_SPAWN_DEPTH,
             parent = sa.parent_task_id,
@@ -70,6 +84,23 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
             },
         )
         .ok();
+    }
+
+    // ── Output format (only when final-tag enforcement is on) ────
+    if ctx.enforce_final_tag {
+        prompt.push_str(
+            "\n\n## Output Format\n\
+             Wrap your final user-facing answer in `<final>...</final>` tags. \
+             Anything outside `<final>` blocks is hidden from the user \u{2014} including \
+             reasoning, status updates, and tool-call scaffolding. Use \
+             `<think>...</think>` for internal reasoning that should not be shown. \
+             Tool calls go in their own ```json blocks (see ## Tools) and run \
+             before the `<final>` block.\n\
+             \n\
+             Example (single turn):\n\
+             <think>I should check the weather first before answering.</think>\n\
+             <final>The weather in Tokyo is 18\u{00b0}C and clear.</final>",
+        );
     }
 
     // ── Tool calling ─────────────────────────────────────────────
@@ -95,8 +126,9 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
     // ── Self-discovery ───────────────────────────────────────────
     prompt.push_str(
         "\n\n## Self-Discovery\n\
-         - `agent-self` \u{2014} your permissions, active tasks, capabilities, and remaining budget.\n\
-         - `agent-manual` \u{2014} full OS docs. Sections: index, tools, tool-detail, permissions, memory, events, commands, errors, agents, tasks, coordination, escalation.\n\
+         - `agent-self` \u{2014} your permissions, active tasks, capabilities, budget.\n\
+         - `agent-manual` \u{2014} 25 documentation sections. Use {\"section\": \"index\"} for the full directory. \
+         Key: tools, capabilities, permissions, memory, coordination, events, commands, errors.\n\
          - `agent-list` \u{2014} peer agents and their status.",
     );
 
@@ -116,6 +148,14 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
          - `task-delegate` / `agent-message` \u{2014} delegate work or message peers.\n\
          - Child results are auto-injected into your context on completion.\n\
          - Max spawn depth: 5. Plan agent hierarchies accordingly.",
+    );
+
+    // ── Capabilities (KMC) ──────────────────────────────────────
+    prompt.push_str(
+        "\n\n## Capabilities\n\
+         You have kernel-mediated tools for: environments (env-*), processes (proc-*), \
+         networking (net-*), builds (build-*), and storage zones (storage-zone-*). \
+         All policy-checked and audited. See `agent-manual` section \"capabilities\".",
     );
 
     // ── Security ─────────────────────────────────────────────────
@@ -146,7 +186,9 @@ mod tests {
             agent_name: "analyst".into(),
             agent_description: String::new(),
             agent_roles: vec![],
+            custom_instructions: None,
             sub_agent: None,
+            enforce_final_tag: false,
         });
         assert!(prompt.contains("You are analyst, an AI agent in AgentOS"));
         assert!(!prompt.contains("Sub-Agent Context"));
@@ -158,10 +200,26 @@ mod tests {
             agent_name: "monitor".into(),
             agent_description: "Watches for security anomalies.".into(),
             agent_roles: vec!["security".into(), "auditor".into()],
+            custom_instructions: None,
             sub_agent: None,
+            enforce_final_tag: false,
         });
         assert!(prompt.contains("Roles: security, auditor."));
         assert!(prompt.contains("Watches for security anomalies."));
+    }
+
+    #[test]
+    fn test_prompt_includes_custom_instructions_section() {
+        let prompt = build_system_prompt(&SystemPromptContext {
+            agent_name: "custom".into(),
+            agent_description: String::new(),
+            agent_roles: vec![],
+            custom_instructions: Some("Always answer with a brief checklist.".into()),
+            sub_agent: None,
+            enforce_final_tag: false,
+        });
+        assert!(prompt.contains("## Agent Custom Instructions"));
+        assert!(prompt.contains("Always answer with a brief checklist."));
     }
 
     #[test]
@@ -170,7 +228,9 @@ mod tests {
             agent_name: "test-agent".into(),
             agent_description: String::new(),
             agent_roles: vec![],
+            custom_instructions: None,
             sub_agent: None,
+            enforce_final_tag: false,
         });
         // Must not leak model details
         assert!(!prompt.contains("llama"));
@@ -185,6 +245,8 @@ mod tests {
             agent_name: "worker".into(),
             agent_description: String::new(),
             agent_roles: vec![],
+            custom_instructions: None,
+            enforce_final_tag: false,
             sub_agent: Some(SubAgentContext {
                 parent_task_id: "abc-123".into(),
                 spawn_depth: 2,
@@ -202,6 +264,8 @@ mod tests {
             agent_name: "leaf".into(),
             agent_description: String::new(),
             agent_roles: vec![],
+            custom_instructions: None,
+            enforce_final_tag: false,
             sub_agent: Some(SubAgentContext {
                 parent_task_id: "xyz".into(),
                 spawn_depth: MAX_SPAWN_DEPTH,
@@ -216,7 +280,9 @@ mod tests {
             agent_name: "test".into(),
             agent_description: String::new(),
             agent_roles: vec![],
+            custom_instructions: None,
             sub_agent: None,
+            enforce_final_tag: false,
         });
         for section in &[
             "## Tools",
@@ -224,6 +290,7 @@ mod tests {
             "## Self-Discovery",
             "## Memory",
             "## Coordination",
+            "## Capabilities",
             "## Security",
             "## Escalation & Errors",
         ] {
@@ -232,11 +299,45 @@ mod tests {
     }
 
     #[test]
+    fn test_final_tag_section_omitted_by_default() {
+        let prompt = build_system_prompt(&SystemPromptContext {
+            agent_name: "default".into(),
+            agent_description: String::new(),
+            agent_roles: vec![],
+            custom_instructions: None,
+            sub_agent: None,
+            enforce_final_tag: false,
+        });
+        assert!(!prompt.contains("## Output Format"));
+        assert!(!prompt.contains("<final>"));
+        assert!(!prompt.contains("<think>"));
+    }
+
+    #[test]
+    fn test_final_tag_section_present_when_enforced() {
+        let prompt = build_system_prompt(&SystemPromptContext {
+            agent_name: "strict".into(),
+            agent_description: String::new(),
+            agent_roles: vec![],
+            custom_instructions: None,
+            sub_agent: None,
+            enforce_final_tag: true,
+        });
+        assert!(prompt.contains("## Output Format"));
+        assert!(prompt.contains("<final>"));
+        assert!(prompt.contains("</final>"));
+        assert!(prompt.contains("<think>"));
+        assert!(prompt.contains("hidden from the user"));
+    }
+
+    #[test]
     fn test_prompt_is_compact() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "test".into(),
             agent_description: "A test agent for unit testing.".into(),
             agent_roles: vec!["tester".into()],
+            custom_instructions: None,
+            enforce_final_tag: false,
             sub_agent: Some(SubAgentContext {
                 parent_task_id: "parent-id".into(),
                 spawn_depth: 1,

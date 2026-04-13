@@ -168,6 +168,8 @@ mod tests {
             last_active: chrono::Utc::now(),
             public_key_hex: None,
             base_url: None,
+            default_thinking_level: agentos_types::ThinkingLevel::Off,
+            system_prompt: None,
         }
     }
 

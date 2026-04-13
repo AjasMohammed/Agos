@@ -177,3 +177,122 @@ impl EscalationQuery for EscalationSnapshot {
         self.escalations.iter().find(|e| e.id == id).cloned()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Kernel-Mediated Capabilities (KMC) query traits
+// ---------------------------------------------------------------------------
+
+/// Descriptor for a registered capability provider.
+///
+/// Used by tool discovery and agent manual generation to describe available
+/// managed capability domains.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityDescriptorSummary {
+    /// Domain name (e.g., `"env"`, `"proc"`, `"net"`).
+    pub domain: String,
+    /// List of supported actions within the domain.
+    pub actions: Vec<String>,
+    /// Human-readable description.
+    pub description: String,
+}
+
+/// Thin query interface for the capability registry.
+///
+/// Defined in `agentos-types` so `agentos-tools` can reference it without
+/// creating a circular dependency on `agentos-kernel`.
+pub trait CapabilityRegistryQuery: Send + Sync {
+    /// Check whether a capability domain is registered.
+    fn has_domain(&self, domain: &str) -> bool;
+
+    /// List all registered capability descriptors.
+    fn list_capabilities(&self) -> Vec<CapabilityDescriptorSummary>;
+}
+
+/// Snapshot implementation of `CapabilityRegistryQuery`.
+/// Built once at ToolExecutionContext creation time; immutable thereafter.
+#[derive(Clone)]
+pub struct CapabilityRegistrySnapshot {
+    capabilities: Vec<CapabilityDescriptorSummary>,
+}
+
+impl CapabilityRegistrySnapshot {
+    pub fn new(capabilities: Vec<CapabilityDescriptorSummary>) -> Self {
+        Self { capabilities }
+    }
+}
+
+impl CapabilityRegistryQuery for CapabilityRegistrySnapshot {
+    fn has_domain(&self, domain: &str) -> bool {
+        self.capabilities.iter().any(|c| c.domain == domain)
+    }
+
+    fn list_capabilities(&self) -> Vec<CapabilityDescriptorSummary> {
+        self.capabilities.clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KMC — Storage Zone query trait (Phase 3)
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// KMC — Capability Dispatcher trait
+// ---------------------------------------------------------------------------
+
+/// Dispatch interface for executing managed capability actions.
+///
+/// Defined in `agentos-types` so tools in `agentos-tools` can invoke capability
+/// providers without depending on `agentos-kernel`. The kernel implements this
+/// by looking up the provider in the `CapabilityRegistry` and calling `execute`.
+/// Request parameters for a capability dispatch.
+pub struct CapabilityDispatchRequest {
+    pub domain: String,
+    pub action: String,
+    pub params: serde_json::Value,
+    pub agent_id: AgentID,
+    pub task_id: crate::ids::TaskID,
+    pub trace_id: crate::ids::TraceID,
+    pub data_dir: std::path::PathBuf,
+    pub permissions: crate::capability::PermissionSet,
+    pub workspace_paths: Vec<std::path::PathBuf>,
+}
+
+#[async_trait::async_trait]
+pub trait CapabilityDispatcher: Send + Sync {
+    /// Execute a managed capability action.
+    ///
+    /// The dispatcher looks up the provider for `domain`, validates permissions,
+    /// checks policy, and calls the provider's `execute` method.
+    ///
+    /// Returns the structured JSON output on success, or an error on failure.
+    async fn dispatch(
+        &self,
+        request: CapabilityDispatchRequest,
+    ) -> Result<serde_json::Value, crate::error::AgentOSError>;
+}
+
+// ---------------------------------------------------------------------------
+// KMC — Storage Zone query trait (Phase 3)
+// ---------------------------------------------------------------------------
+
+/// Thin query interface for checking storage zone access.
+///
+/// Defined in `agentos-types` so file tools in `agentos-tools` can check
+/// whether a path falls within an active storage zone without depending on
+/// `agentos-kernel`. Implemented by the kernel's `ZoneTable` wrapper.
+/// Access level for a storage zone (mirrors `managed_storage::ZoneAccess`).
+/// Defined here to avoid cross-crate dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoneAccessLevel {
+    ReadOnly,
+    ReadWrite,
+}
+
+pub trait StorageZoneQuery: Send + Sync {
+    /// Check whether a path is within an active (non-expired) storage zone
+    /// for this agent.
+    fn is_path_in_zone(&self, agent_id: &AgentID, path: &std::path::Path) -> bool;
+
+    /// Return the access level for a path within a zone, or None if not in any zone.
+    fn zone_access(&self, agent_id: &AgentID, path: &std::path::Path) -> Option<ZoneAccessLevel>;
+}

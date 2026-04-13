@@ -37,6 +37,32 @@ pub enum AgentCommands {
         /// Grant full root access to the ecosystem (all permissions)
         #[arg(long, default_value_t = false)]
         root: bool,
+        /// Skip the pre-flight LLM health check. By default the kernel probes the
+        /// provider's backend before registering the agent and refuses to register
+        /// if the backend is unreachable. Use this flag to register anyway (e.g.
+        /// if the backend is slow to start).
+        #[arg(long = "no-health-check", default_value_t = false)]
+        no_health_check: bool,
+    },
+    /// Probe an LLM backend's reachability without registering an agent.
+    ///
+    /// Builds the same adapter `agent connect` would, runs `health_check()`, and
+    /// prints the status. Useful for validating `--base-url`, API key setup, and
+    /// model availability before committing to a connect.
+    Ping {
+        /// LLM provider (ollama, openai, anthropic, gemini, or a catalog name)
+        #[arg(long)]
+        provider: String,
+        /// Model name
+        #[arg(long)]
+        model: String,
+        /// Optional base URL override (defaults to provider catalog / env / config)
+        #[arg(long, env = "AGENTOS_LLM_URL")]
+        base_url: Option<String>,
+        /// Optional agent name used to look up per-agent vault keys
+        /// (e.g. `<name>_openai_api_key`). Falls back to the global key if omitted.
+        #[arg(long)]
+        name: Option<String>,
     },
     /// List connected agents
     List,
@@ -152,6 +178,7 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
             test,
             grants,
             root,
+            no_health_check,
         } => {
             let provider = parse_provider(&provider)?;
             let response = client
@@ -164,6 +191,7 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                     test_mode: test,
                     extra_permissions: grants,
                     root,
+                    skip_health_check: no_health_check,
                 })
                 .await?;
 
@@ -188,6 +216,57 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                     }
                 }
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
+                _ => eprintln!("❌ Unexpected response"),
+            }
+        }
+        AgentCommands::Ping {
+            provider,
+            model,
+            base_url,
+            name,
+        } => {
+            let provider_parsed = parse_provider(&provider)?;
+            let response = client
+                .send_command(KernelCommand::PingLLM {
+                    provider: provider_parsed,
+                    model: model.clone(),
+                    base_url,
+                    agent_name: name,
+                })
+                .await?;
+            match response {
+                KernelResponse::Success { data } => {
+                    let data = data.unwrap_or(serde_json::Value::Null);
+                    let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                    let latency = data.get("latency_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let reason = data.get("reason").and_then(|v| v.as_str());
+                    let url = data.get("base_url").and_then(|v| v.as_str());
+                    let marker = match status {
+                        "healthy" => "✅",
+                        "degraded" => "⚠️ ",
+                        "unhealthy" => "❌",
+                        _ => "?",
+                    };
+                    println!(
+                        "{} {} {} ({}) — {} in {}ms",
+                        marker,
+                        provider,
+                        model,
+                        status,
+                        url.unwrap_or("<default>"),
+                        latency
+                    );
+                    if let Some(r) = reason {
+                        println!("   reason: {}", r);
+                    }
+                    if status == "unhealthy" {
+                        std::process::exit(1);
+                    }
+                }
+                KernelResponse::Error { message } => {
+                    eprintln!("❌ Error: {}", message);
+                    std::process::exit(1);
+                }
                 _ => eprintln!("❌ Unexpected response"),
             }
         }

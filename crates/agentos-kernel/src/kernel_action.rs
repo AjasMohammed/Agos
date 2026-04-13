@@ -105,6 +105,23 @@ pub(crate) enum KernelAction {
         token: Option<String>,
         wait_for_result: bool,
     },
+    /// Subscribe the calling agent to events matching a filter.
+    /// Permission-gated per `EventCategory` via `event_permissions`.
+    EventSubscribeAction {
+        event_filter: String,
+        payload_filter: Option<String>,
+        throttle: Option<String>,
+        priority: Option<String>,
+    },
+    /// Cancel one of the calling agent's own subscriptions by ID.
+    EventUnsubscribeAction {
+        subscription_id: String,
+    },
+    /// Return all subscriptions belonging to the calling agent.
+    EventListSubscriptionsAction,
+    /// Enumerate all event categories and types, marking which ones the
+    /// calling agent currently has permission to subscribe to.
+    EventListAvailableAction,
 }
 
 /// Why an agent is requesting human escalation.
@@ -377,6 +394,33 @@ impl KernelAction {
                     wait_for_result,
                 })
             }
+            "event_subscribe" => {
+                let event_filter = value.get("event_filter")?.as_str()?.to_string();
+                let payload_filter = value
+                    .get("payload_filter")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let throttle = value
+                    .get("throttle")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let priority = value
+                    .get("priority")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                Some(Self::EventSubscribeAction {
+                    event_filter,
+                    payload_filter,
+                    throttle,
+                    priority,
+                })
+            }
+            "event_unsubscribe" => {
+                let subscription_id = value.get("subscription_id")?.as_str()?.to_string();
+                Some(Self::EventUnsubscribeAction { subscription_id })
+            }
+            "event_list_subscriptions" => Some(Self::EventListSubscriptionsAction),
+            "event_list_available" => Some(Self::EventListAvailableAction),
             other => {
                 tracing::warn!(action = %other, "Unknown _kernel_action, ignoring");
                 None
@@ -416,6 +460,10 @@ impl Kernel {
             KernelAction::PollAgents { .. } => "poll_agents",
             KernelAction::CancelAgent { .. } => "cancel_agent",
             KernelAction::A2ADelegate { .. } => "a2a_delegate",
+            KernelAction::EventSubscribeAction { .. } => "event_subscribe",
+            KernelAction::EventUnsubscribeAction { .. } => "event_unsubscribe",
+            KernelAction::EventListSubscriptionsAction => "event_list_subscriptions",
+            KernelAction::EventListAvailableAction => "event_list_available",
         };
 
         self.audit_log(agentos_audit::AuditEntry {
@@ -955,6 +1003,30 @@ impl Kernel {
                     },
                 }
             }
+            KernelAction::EventSubscribeAction {
+                event_filter,
+                payload_filter,
+                throttle,
+                priority,
+            } => {
+                self.execute_event_subscribe(
+                    task,
+                    event_filter,
+                    payload_filter,
+                    throttle,
+                    priority,
+                    trace_id,
+                )
+                .await
+            }
+            KernelAction::EventUnsubscribeAction { subscription_id } => {
+                self.execute_event_unsubscribe(task, subscription_id, trace_id)
+                    .await
+            }
+            KernelAction::EventListSubscriptionsAction => {
+                self.execute_event_list_subscriptions(task).await
+            }
+            KernelAction::EventListAvailableAction => self.execute_event_list_available(task).await,
         };
 
         let severity = if result.success {
@@ -1031,12 +1103,28 @@ impl Kernel {
         let to_agent = match registry.get_by_name(to) {
             Some(a) => a.clone(),
             None => {
-                return KernelActionResult {
-                    success: false,
-                    result: serde_json::json!({
-                        "error": format!("Target agent '{}' not found", to)
-                    }),
-                };
+                // Fallback: try parsing as UUID for agents that use IDs instead of names
+                match to.parse::<AgentID>() {
+                    Ok(id) => match registry.get_by_id(&id) {
+                        Some(a) => a.clone(),
+                        None => {
+                            return KernelActionResult {
+                                success: false,
+                                result: serde_json::json!({
+                                    "error": format!("Target agent '{}' not found", to)
+                                }),
+                            };
+                        }
+                    },
+                    Err(_) => {
+                        return KernelActionResult {
+                            success: false,
+                            result: serde_json::json!({
+                                "error": format!("Target agent '{}' not found", to)
+                            }),
+                        };
+                    }
+                }
             }
         };
         drop(registry);
@@ -1895,6 +1983,503 @@ impl Kernel {
             }
         }
     }
+
+    // ─── Event self-subscription handlers ────────────────────────────
+    //
+    // These power the four `event-*` agent tools. Each handler runs with
+    // `task.agent_id` as the calling identity and never accepts a
+    // `target_agent` argument — agents can only manage their own
+    // subscriptions. Per-category permission gating happens in
+    // `event_permissions::check_subscribe_permission`.
+
+    async fn execute_event_subscribe(
+        &self,
+        task: &AgentTask,
+        event_filter: String,
+        payload_filter: Option<String>,
+        throttle: Option<String>,
+        priority: Option<String>,
+        trace_id: TraceID,
+    ) -> KernelActionResult {
+        let parsed_filter = match crate::event_bus::parse_event_type_filter(&event_filter) {
+            Some(f) => f,
+            None => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!(
+                            "Invalid event filter '{}'. Use 'all', 'category:<Name>', or an exact event type like 'AgentAdded'.",
+                            event_filter
+                        ),
+                    }),
+                };
+            }
+        };
+
+        // Permission check — gated per category. Uses the capability token
+        // permissions, which already include any role-derived observe grants.
+        if let Err(e) = crate::event_permissions::check_subscribe_permission(
+            &task.capability_token.permissions,
+            &parsed_filter,
+        ) {
+            self.audit_log(AuditEntry {
+                timestamp: Utc::now(),
+                trace_id,
+                event_type: AuditEventType::PermissionDenied,
+                agent_id: Some(task.agent_id),
+                task_id: Some(task.id),
+                tool_id: None,
+                details: serde_json::json!({
+                    "tool": "event-subscribe",
+                    "event_filter": event_filter,
+                    "reason": e.to_string(),
+                }),
+                severity: AuditSeverity::Warn,
+                reversible: false,
+                rollback_ref: None,
+            });
+            return KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": e.to_string(),
+                    "hint": "Ask an operator to grant the required `events.<category>:observe` permission, then retry.",
+                }),
+            };
+        }
+
+        let throttle_policy = match throttle.as_deref() {
+            None | Some("") | Some("none") => ThrottlePolicy::None,
+            Some(s) => match parse_throttle_str(s) {
+                Some(p) => p,
+                None => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!(
+                                "Invalid throttle '{}'. Use 'none', 'once_per:<duration>' (e.g. 'once_per:30s'), or 'max:<count>/<duration>' (e.g. 'max:5/60s').",
+                                s
+                            ),
+                        }),
+                    };
+                }
+            },
+        };
+
+        let sub_priority = match crate::event_bus::parse_subscription_priority(priority.as_deref())
+        {
+            Some(p) => p,
+            None => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!(
+                            "Invalid priority '{}'. Use 'critical', 'high', 'normal', or 'low'.",
+                            priority.as_deref().unwrap_or_default()
+                        ),
+                    }),
+                };
+            }
+        };
+
+        let payload_filter = payload_filter.and_then(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+
+        let sub = EventSubscription {
+            id: SubscriptionID::new(),
+            agent_id: task.agent_id,
+            event_type_filter: parsed_filter,
+            filter: payload_filter.clone(),
+            priority: sub_priority,
+            throttle: throttle_policy,
+            enabled: true,
+            created_at: Utc::now(),
+        };
+
+        let sub_id = self.event_bus.subscribe(sub).await;
+
+        self.audit_log(AuditEntry {
+            timestamp: Utc::now(),
+            trace_id,
+            event_type: AuditEventType::EventSubscriptionCreated,
+            agent_id: Some(task.agent_id),
+            task_id: Some(task.id),
+            tool_id: None,
+            details: serde_json::json!({
+                "subscription_id": sub_id.to_string(),
+                "event_filter": event_filter,
+                "payload_filter": payload_filter,
+                "self_subscribed": true,
+            }),
+            severity: AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
+
+        KernelActionResult {
+            success: true,
+            result: serde_json::json!({
+                "subscription_id": sub_id.to_string(),
+                "event_filter": event_filter,
+                "status": "subscribed",
+                "message": "Subscription created. The kernel will dispatch matching events as new tasks for this agent.",
+            }),
+        }
+    }
+
+    async fn execute_event_unsubscribe(
+        &self,
+        task: &AgentTask,
+        subscription_id: String,
+        trace_id: TraceID,
+    ) -> KernelActionResult {
+        let id = match subscription_id.parse::<SubscriptionID>() {
+            Ok(id) => id,
+            Err(_) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Invalid subscription ID: {}", subscription_id),
+                    }),
+                };
+            }
+        };
+
+        // Verify the subscription belongs to the calling agent — agents must
+        // not be able to cancel subscriptions owned by other agents.
+        match self.event_bus.get_subscription(&id).await {
+            Some(sub) if sub.agent_id == task.agent_id => {}
+            Some(_) => {
+                self.audit_log(AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id,
+                    event_type: AuditEventType::PermissionDenied,
+                    agent_id: Some(task.agent_id),
+                    task_id: Some(task.id),
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "tool": "event-unsubscribe",
+                        "subscription_id": subscription_id,
+                        "reason": "subscription belongs to a different agent",
+                    }),
+                    severity: AuditSeverity::Warn,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": "Subscription belongs to a different agent",
+                    }),
+                };
+            }
+            None => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Subscription '{}' not found", subscription_id),
+                    }),
+                };
+            }
+        }
+
+        if self.event_bus.unsubscribe(&id).await {
+            self.audit_log(AuditEntry {
+                timestamp: Utc::now(),
+                trace_id,
+                event_type: AuditEventType::EventSubscriptionRemoved,
+                agent_id: Some(task.agent_id),
+                task_id: Some(task.id),
+                tool_id: None,
+                details: serde_json::json!({
+                    "subscription_id": subscription_id,
+                    "self_unsubscribed": true,
+                }),
+                severity: AuditSeverity::Info,
+                reversible: false,
+                rollback_ref: None,
+            });
+            KernelActionResult {
+                success: true,
+                result: serde_json::json!({
+                    "subscription_id": subscription_id,
+                    "status": "unsubscribed",
+                }),
+            }
+        } else {
+            KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": format!("Subscription '{}' not found", subscription_id),
+                }),
+            }
+        }
+    }
+
+    async fn execute_event_list_subscriptions(&self, task: &AgentTask) -> KernelActionResult {
+        let subs = self
+            .event_bus
+            .list_subscriptions_for_agent(&task.agent_id)
+            .await;
+        let values: Vec<serde_json::Value> = subs
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id.to_string(),
+                    "event_type_filter": format!("{:?}", s.event_type_filter),
+                    "payload_filter": s.filter,
+                    "priority": format!("{:?}", s.priority),
+                    "throttle": format!("{:?}", s.throttle),
+                    "enabled": s.enabled,
+                    "created_at": s.created_at.to_rfc3339(),
+                })
+            })
+            .collect();
+        KernelActionResult {
+            success: true,
+            result: serde_json::json!({
+                "count": values.len(),
+                "subscriptions": values,
+            }),
+        }
+    }
+
+    async fn execute_event_list_available(&self, task: &AgentTask) -> KernelActionResult {
+        // Static category → event-types catalog. Mirrors EventType::category()
+        // and stays in sync because the kernel test suite asserts coverage.
+        let category_events: &[(&str, &str, &[&str])] = &[
+            (
+                "AgentLifecycle",
+                "events.agent_lifecycle",
+                &[
+                    "AgentAdded",
+                    "AgentRemoved",
+                    "AgentPermissionGranted",
+                    "AgentPermissionRevoked",
+                ],
+            ),
+            (
+                "TaskLifecycle",
+                "events.task_lifecycle",
+                &[
+                    "TaskStarted",
+                    "TaskCompleted",
+                    "TaskFailed",
+                    "TaskTimedOut",
+                    "TaskSuspended",
+                    "TaskDelegated",
+                    "TaskRetrying",
+                    "TaskDeadlockDetected",
+                    "TaskPreempted",
+                ],
+            ),
+            (
+                "SecurityEvents",
+                "events.security",
+                &[
+                    "PromptInjectionAttempt",
+                    "CapabilityViolation",
+                    "UnauthorizedToolAccess",
+                    "SecretsAccessAttempt",
+                    "SandboxEscapeAttempt",
+                    "AuditLogTamperAttempt",
+                    "AgentImpersonationAttempt",
+                    "UnverifiedToolInstalled",
+                ],
+            ),
+            (
+                "MemoryEvents",
+                "events.memory",
+                &[
+                    "ContextWindowNearLimit",
+                    "ContextWindowExhausted",
+                    "EpisodicMemoryWritten",
+                    "SemanticMemoryConflict",
+                    "MemorySearchFailed",
+                    "WorkingMemoryEviction",
+                ],
+            ),
+            (
+                "SystemHealth",
+                "events.system_health",
+                &[
+                    "CPUSpikeDetected",
+                    "MemoryPressure",
+                    "DiskSpaceLow",
+                    "DiskSpaceCritical",
+                    "ProcessCrashed",
+                    "NetworkInterfaceDown",
+                    "ContainerResourceQuotaExceeded",
+                    "KernelSubsystemError",
+                    "BudgetWarning",
+                    "BudgetExhausted",
+                ],
+            ),
+            (
+                "HardwareEvents",
+                "events.hardware",
+                &[
+                    "GPUAvailable",
+                    "GPUMemoryPressure",
+                    "SensorReadingThresholdExceeded",
+                    "DeviceConnected",
+                    "DeviceDisconnected",
+                    "HardwareAccessGranted",
+                    "DeviceMounted",
+                    "DeviceUnmounted",
+                    "DeviceEjected",
+                    "PrintJobSubmitted",
+                    "PrintJobCancelled",
+                    "AudioCaptureStarted",
+                    "AudioCaptureStopped",
+                    "AudioPlaybackStarted",
+                    "WebcamCaptureStarted",
+                    "WebcamCaptureStopped",
+                    "BluetoothScanStarted",
+                    "BluetoothPairRequested",
+                    "BluetoothConnected",
+                    "DisplayConfigApplied",
+                    "DisplayConfigReverted",
+                    "RawUsbDeviceOpened",
+                    "RawUsbTransferCompleted",
+                ],
+            ),
+            (
+                "ToolEvents",
+                "events.tool",
+                &[
+                    "ToolInstalled",
+                    "ToolRemoved",
+                    "ToolExecutionFailed",
+                    "ToolSandboxViolation",
+                    "ToolResourceQuotaExceeded",
+                    "ToolChecksumMismatch",
+                    "ToolRegistryUpdated",
+                    "ToolCallStarted",
+                    "ToolCallCompleted",
+                    "ToolFallbackAttempted",
+                    "ToolFallbackSucceeded",
+                    "ToolFallbackExhausted",
+                ],
+            ),
+            (
+                "AgentCommunication",
+                "events.agent_communication",
+                &[
+                    "DirectMessageReceived",
+                    "BroadcastReceived",
+                    "DelegationReceived",
+                    "DelegationResponseReceived",
+                    "MessageDeliveryFailed",
+                    "AgentUnreachable",
+                    "AgentRpcCallStarted",
+                    "AgentRpcCallCompleted",
+                    "AgentRpcCallTimedOut",
+                    "SubAgentProgress",
+                    "SubAgentCompleted",
+                    "SubAgentFailed",
+                ],
+            ),
+            (
+                "ScheduleEvents",
+                "events.schedule",
+                &[
+                    "CronJobFired",
+                    "ScheduledTaskMissed",
+                    "ScheduledTaskCompleted",
+                    "ScheduledTaskFailed",
+                ],
+            ),
+            (
+                "ExternalEvents",
+                "events.external",
+                &[
+                    "WebhookReceived",
+                    "ExternalFileChanged",
+                    "ExternalAPIEvent",
+                    "ExternalAlertReceived",
+                ],
+            ),
+        ];
+
+        let perms = &task.capability_token.permissions;
+        let categories: Vec<serde_json::Value> = category_events
+            .iter()
+            .map(|(cat_name, perm_resource, events)| {
+                let allowed = perms.check(perm_resource, agentos_types::PermissionOp::Observe);
+                serde_json::json!({
+                    "category": cat_name,
+                    "permission": format!("{}:observe", perm_resource),
+                    "subscribable": allowed,
+                    "events": events,
+                })
+            })
+            .collect();
+
+        KernelActionResult {
+            success: true,
+            result: serde_json::json!({
+                "categories": categories,
+                "filter_syntax": {
+                    "all": "Subscribe to every event (requires observe on every category — usually root-only).",
+                    "category": "category:<CategoryName> — e.g. 'category:HardwareEvents'",
+                    "exact": "<EventType> — e.g. 'DeviceConnected', or fully qualified 'HardwareEvents.DeviceConnected'",
+                },
+                "throttle_syntax": {
+                    "none": "No throttle (default).",
+                    "once_per": "once_per:<duration>  e.g. once_per:30s, once_per:5m",
+                    "max": "max:<count>/<duration>  e.g. max:5/60s",
+                },
+                "priority_values": ["critical", "high", "normal", "low"],
+                "tip": "Subscribable=false means you don't have observe permission for that category — ask an operator to grant `events.<category>:observe`.",
+            }),
+        }
+    }
+}
+
+/// Parse a throttle string like "once_per:30s" or "max:5/60s".
+/// Mirrors the parser in `commands/event.rs` so the agent-tool path does
+/// not depend on a private CLI helper.
+fn parse_throttle_str(s: &str) -> Option<ThrottlePolicy> {
+    if let Some(dur_str) = s.strip_prefix("once_per:") {
+        let duration = parse_duration_str(dur_str)?;
+        return Some(ThrottlePolicy::MaxOncePerDuration(duration));
+    }
+    if let Some(rest) = s.strip_prefix("max:") {
+        let parts: Vec<&str> = rest.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let count: u32 = parts[0].parse().ok()?;
+        let duration = parse_duration_str(parts[1])?;
+        return Some(ThrottlePolicy::MaxCountPerDuration(count, duration));
+    }
+    None
+}
+
+fn parse_duration_str(s: &str) -> Option<std::time::Duration> {
+    let s = s.trim();
+    if let Some(secs) = s.strip_suffix('s') {
+        return secs.parse::<u64>().ok().map(std::time::Duration::from_secs);
+    }
+    if let Some(mins) = s.strip_suffix('m') {
+        return mins
+            .parse::<u64>()
+            .ok()
+            .map(|n| std::time::Duration::from_secs(n * 60));
+    }
+    if let Some(hours) = s.strip_suffix('h') {
+        return hours
+            .parse::<u64>()
+            .ok()
+            .map(|n| std::time::Duration::from_secs(n * 3600));
+    }
+    s.parse::<u64>().ok().map(std::time::Duration::from_secs)
 }
 
 /// SSRF protection for outbound A2A delegation requests.

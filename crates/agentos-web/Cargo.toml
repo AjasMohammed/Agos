@@ -16,7 +16,7 @@ axum-extra = { version = "0.12", features = ["cookie"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs", "compression-gzip"] }
 tower_governor = "0.8"
-minijinja = { version = "2", features = ["loader"] }
+minijinja = { version = "2", features = ["loader", "json"] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tokio-stream = "0.1"
@@ -41,6 +41,8 @@ ureq = "2"
 reqwest = { workspace = true }
 base64 = "0.22"
 urlencoding = "2"
+cron = { workspace = true }
+pulldown-cmark = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

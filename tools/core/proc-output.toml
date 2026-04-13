@@ -1,0 +1,41 @@
+[manifest]
+name = "proc-output"
+version = "1.0.0"
+description = "Read recent stdout/stderr output from a managed process"
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "readonly_scoped"
+
+[capabilities_required]
+permissions = ["proc.output:r"]
+
+[capabilities_provided]
+outputs = ["content.json"]
+
+[intent_schema]
+input = "ProcOutputIntent"
+output = "ProcOutputResult"
+
+[input_schema]
+required = ["process_id"]
+type = "object"
+
+[input_schema.properties.process_id]
+description = "ID of the process to read output from"
+type = "string"
+
+[input_schema.properties.lines]
+description = "Number of recent lines to return (default: 50)"
+type = "integer"
+default = 50
+
+[sandbox]
+network = false
+fs_write = false
+gpu = false
+max_memory_mb = 64
+max_cpu_ms = 5000
+syscalls = []
+
+[executor]
+type = "inline"

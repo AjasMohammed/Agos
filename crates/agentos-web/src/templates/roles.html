@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+{% set title = "Roles" %}
+{% set subtitle = roles|length ~ " permission roles" %}
+{% include "partials/management_page.html" %}
+
+<article>
+    <header><strong>Create Role</strong></header>
+    <form method="post" action="/roles">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <label>Name <input name="name" required></label>
+        <label>Description <input name="description"></label>
+        <label>Permissions (one per line, format <code>resource:flags</code>)
+            <textarea name="permissions" rows="6" placeholder="fs:/tmp:rwx\nnet:http://example.com:rq"></textarea>
+        </label>
+        <button type="submit">Create Role</button>
+    </form>
+</article>
+
+{% if roles|length == 0 %}
+<article><p class="muted">No roles found.</p></article>
+{% else %}
+<table>
+    <thead><tr><th>Name</th><th>Description</th><th>Permissions</th><th>Created</th><th></th></tr></thead>
+    <tbody>
+    {% for r in roles %}
+    <tr>
+        <td><a href="/roles/{{ r.name }}"><code>{{ r.name }}</code></a></td>
+        <td>{{ r.description }}</td>
+        <td>{{ r.permission_count }}</td>
+        <td>{{ r.created_at }}</td>
+        <td>
+            <form method="post" action="/roles/{{ r.name }}/delete" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <button class="outline secondary btn-sm" type="submit">Delete</button>
+            </form>
+        </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

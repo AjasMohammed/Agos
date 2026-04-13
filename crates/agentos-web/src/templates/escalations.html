@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+{% set title = "Escalations" %}
+{% set subtitle = escalations|length ~ " entries" %}
+{% include "partials/management_page.html" %}
+
+<p>
+    <a href="/escalations" role="button" class="{% if not include_resolved %}contrast{% else %}outline{% endif %}">Pending</a>
+    <a href="/escalations?include_resolved=true" role="button" class="{% if include_resolved %}contrast{% else %}outline{% endif %}">All</a>
+</p>
+
+{% if escalations|length == 0 %}
+<article><p class="muted">No escalations to show.</p></article>
+{% else %}
+{% for e in escalations %}
+<article>
+    <header>
+        <strong>Escalation #{{ e.id }}</strong>
+        <small class="muted">task {{ e.task_id }} · urgency {{ e.urgency }} · {% if e.resolved %}resolved{% else %}pending{% endif %}</small>
+    </header>
+    <p><strong>Reason:</strong> {{ e.reason }}</p>
+    <p><strong>Decision Point:</strong> {{ e.decision_point }}</p>
+    <p>{{ e.context_summary }}</p>
+    <details>
+        <summary>Metadata</summary>
+        <pre><code>{{ e.metadata|pretty_json }}</code></pre>
+    </details>
+    {% if not e.resolved %}
+    <form method="post" action="/escalations/{{ e.id }}/resolve" class="grid">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <label>Decision
+            <select name="decision">
+                {% for opt in e.options %}<option value="{{ opt }}">{{ opt }}</option>{% endfor %}
+                <option value="deny">deny</option>
+            </select>
+        </label>
+        <button type="submit">Resolve</button>
+    </form>
+    {% else %}
+    <p class="muted">Resolution: {{ e.resolution }}</p>
+    {% endif %}
+</article>
+{% endfor %}
+{% endif %}
+{% endblock %}

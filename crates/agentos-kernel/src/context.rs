@@ -165,16 +165,10 @@ impl ContextManager {
         parent_task_id: TaskID,
         result: &agentos_types::SubAgentResult,
     ) -> Result<(), AgentOSError> {
+        let status = if result.success { "ok" } else { "fail" };
         let content = format!(
-            "[sub-agent '{}' ({}) {}]\n{}",
-            result.agent_name,
-            result.child_task_id,
-            if result.success {
-                "succeeded"
-            } else {
-                "failed"
-            },
-            result.output,
+            "[sub-agent:{}|{}|{}]\n{}",
+            result.agent_name, status, result.child_task_id, result.output,
         );
         let entry = ContextEntry {
             role: ContextRole::ToolResult,

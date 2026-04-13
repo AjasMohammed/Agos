@@ -1,0 +1,13 @@
+<div class="chat-row chat-row-user" data-msg-id="{{ msg.id|default('') }}">
+    <div class="chat-bubble chat-bubble-user">
+        <div class="chat-bubble-content">{{ msg.content }}</div>
+        <div class="chat-bubble-actions">
+            <button class="chat-msg-action" title="Copy" onclick="navigator.clipboard.writeText(this.closest('.chat-bubble').querySelector('.chat-bubble-content').innerText)">Copy</button>
+            {% if session_id %}
+            <button class="chat-msg-action" title="Edit and resend"
+                    onclick="var ta=document.getElementById('reply-message'); if(ta){ta.value=this.closest('.chat-bubble').querySelector('.chat-bubble-content').innerText; ta.focus();}">Edit</button>
+            {% endif %}
+        </div>
+        <div class="chat-bubble-meta">You &middot; {{ msg.created_at|relative_time }}</div>
+    </div>
+</div>

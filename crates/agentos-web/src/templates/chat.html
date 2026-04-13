@@ -22,12 +22,15 @@
         <nav class="chat-thread-list">
             {% for s in sessions %}
             <a href="/chat/{{ s.id }}" class="chat-thread-item">
-                <div class="chat-thread-agent">{{ s.agent_name }}</div>
+                <div class="chat-thread-agent">{{ s.title|default(s.agent_name) }}</div>
+                <div class="chat-thread-meta">
+                    <small class="muted">{{ s.agent_name }}</small>
+                </div>
                 {% if s.preview %}
                 <div class="chat-thread-preview muted">{{ s.preview }}</div>
                 {% endif %}
                 <div class="chat-thread-meta">
-                    <small class="muted">{{ s.updated_at }}</small>
+                    <small class="muted">{{ s.updated_at|relative_time }}</small>
                 </div>
             </a>
             {% endfor %}

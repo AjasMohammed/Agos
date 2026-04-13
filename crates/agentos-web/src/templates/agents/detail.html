@@ -2,7 +2,7 @@
 {% block content %}
 <div class="page-header">
     <div>
-        <h1>{{ name }}</h1>
+        <h1>{{ name }} <small class="muted">{{ provider }} · {{ model }}</small></h1>
         <small class="muted" title="{{ agent_id }}">{{ short_id }}</small>
     </div>
     <div class="page-header-actions">
@@ -14,6 +14,13 @@
     </div>
 </div>
 
+<nav class="tab-nav" role="tablist">
+    <a href="/agents/{{ name }}/detail" role="tab" class="tab-active">Overview</a>
+    <a href="/agents/{{ name }}/detail#permissions" role="tab" onclick="document.getElementById('tab-permissions').open=true">Permissions</a>
+    <a href="/agents/{{ name }}/scratchpad" role="tab">Scratchpad</a>
+    <a href="/agents/{{ name }}/identity" role="tab">Identity</a>
+</nav>
+
 <div class="grid">
     <article>
         <header>Profile</header>
@@ -22,6 +29,12 @@
             <dd>{{ provider }}</dd>
             <dt>Model</dt>
             <dd><code>{{ model }}</code></dd>
+            {% if base_url %}
+            <dt>Base URL</dt>
+            <dd><code class="id-long">{{ base_url }}</code></dd>
+            {% endif %}
+            <dt>Default Thinking</dt>
+            <dd><code>{{ default_thinking_level }}</code></dd>
             <dt>Created</dt>
             <dd>{{ created_at }}</dd>
             <dt>Last Active</dt>
@@ -38,7 +51,41 @@
             <dt>Public Key</dt>
             <dd><code class="id-long" title="{{ public_key_hex }}">{{ public_key_hex[:16] }}...</code></dd>
             {% endif %}
+            {% if system_prompt %}
+            <dt>System Prompt</dt>
+            <dd>
+                <details>
+                    <summary>Custom instructions configured</summary>
+                    <pre class="prompt-pre">{{ system_prompt }}</pre>
+                </details>
+            </dd>
+            {% endif %}
         </dl>
+    </article>
+    <article>
+        <header>Edit Settings</header>
+        <form method="post" action="/agents/{{ name }}/settings"
+              hx-post="/agents/{{ name }}/settings" hx-swap="none">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <label for="agent-description">Description
+                <input id="agent-description" type="text" name="description"
+                       value="{{ description }}" placeholder="Optional description">
+            </label>
+            <label for="agent-thinking-level">Default Thinking Level
+                <select id="agent-thinking-level" name="thinking_level" required>
+                    <option value="off" {% if default_thinking_level == "off" %}selected{% endif %}>Off</option>
+                    <option value="low" {% if default_thinking_level == "low" %}selected{% endif %}>Low</option>
+                    <option value="medium" {% if default_thinking_level == "medium" %}selected{% endif %}>Medium</option>
+                    <option value="high" {% if default_thinking_level == "high" %}selected{% endif %}>High</option>
+                    <option value="max" {% if default_thinking_level == "max" %}selected{% endif %}>Max</option>
+                </select>
+            </label>
+            <label for="agent-system-prompt">System Prompt
+                <textarea id="agent-system-prompt" name="system_prompt" rows="5"
+                          placeholder="Optional custom instructions appended to the base system prompt">{{ system_prompt|default("") }}</textarea>
+            </label>
+            <button type="submit">Save Settings</button>
+        </form>
     </article>
     <article>
         <header>Cost Summary</header>

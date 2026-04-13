@@ -268,6 +268,38 @@ impl WebhookRegistry {
         Ok(())
     }
 
+    /// Rotate the signing secret for an existing endpoint in place.
+    /// Returns the new plaintext secret (shown once to the operator).
+    pub async fn rotate_secret(&self, id: &WebhookEndpointID) -> Result<String, AgentOSError> {
+        let new_secret = generate_secret();
+        {
+            let conn = self.conn.lock().await;
+            let updated = conn
+                .execute(
+                    "UPDATE webhook_endpoints SET secret = ?1 WHERE id = ?2",
+                    params![new_secret, id.to_string()],
+                )
+                .map_err(|e| {
+                    AgentOSError::StorageError(format!("Failed to rotate endpoint secret: {e}"))
+                })?;
+            if updated == 0 {
+                return Err(AgentOSError::StorageError(format!(
+                    "Webhook endpoint not found: {id}"
+                )));
+            }
+        }
+
+        let mut cache = self.endpoints.write().await;
+        let Some(entry) = cache.get_mut(id) else {
+            return Err(AgentOSError::StorageError(format!(
+                "Webhook endpoint not found in cache: {id}"
+            )));
+        };
+        entry.secret = new_secret.clone();
+        tracing::info!(endpoint_id = %id, "Rotated webhook endpoint secret");
+        Ok(new_secret)
+    }
+
     /// Record a webhook receipt — update last_received_at and increment total_received.
     pub async fn record_receipt(&self, id: &WebhookEndpointID) -> Result<(), AgentOSError> {
         let now = Utc::now();
@@ -428,5 +460,25 @@ mod tests {
         let updated = registry.get_endpoint(&meta.id).await.unwrap();
         assert_eq!(updated.total_received, 2);
         assert!(updated.last_received_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_rotate_secret_in_place() {
+        let (registry, _tmp) = setup().await;
+        let agent_id = AgentID::new();
+
+        let (meta, old_secret) = registry
+            .create_endpoint(agent_id, WebhookProvider::Generic, 0)
+            .await
+            .unwrap();
+
+        let new_secret = registry.rotate_secret(&meta.id).await.unwrap();
+        assert_ne!(new_secret, old_secret);
+
+        let fetched = registry.get_endpoint(&meta.id).await.unwrap();
+        assert_eq!(fetched.id, meta.id);
+
+        let cached = registry.get_secret(&meta.id).await.unwrap();
+        assert_eq!(cached, new_secret);
     }
 }

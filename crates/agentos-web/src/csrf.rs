@@ -55,7 +55,10 @@ pub fn csrf_token_for_session(state: &AppState, jar: &CookieJar) -> String {
 ///   using constant-time comparison to prevent timing-based oracle attacks.
 /// - Requests without a session cookie (bearer-token API clients) skip CSRF entirely.
 /// - `/static/*` is always bypassed.
-/// - `GET /login` is bypassed; `POST /login` is **not** bypassed (login CSRF protection).
+/// - `/login` (both GET and POST) is bypassed — the login endpoint protects itself
+///   via the bearer-token comparison. Enforcing CSRF here would break legitimate
+///   logins after a container restart (when the browser still has a stale session
+///   cookie but the server's in-memory CSRF map has been cleared).
 pub async fn csrf_middleware(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -67,6 +70,14 @@ pub async fn csrf_middleware(
 
     // Static files never need CSRF protection.
     if path == "/static" || path.starts_with("/static/") {
+        return next.run(request).await;
+    }
+
+    // The login endpoint authenticates via a pre-shared bearer token; CSRF protection
+    // would only serve to block legitimate logins when the server's CSRF map has been
+    // cleared (e.g. after a container restart) while the browser still sends a stale
+    // `agentos_session` cookie.
+    if path == "/login" {
         return next.run(request).await;
     }
 

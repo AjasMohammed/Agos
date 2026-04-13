@@ -9,7 +9,7 @@ use super::require_permission;
 use crate::auth::AuthenticatedKey;
 use crate::error::ApiError;
 use crate::service::KernelService;
-use crate::types::{ConnectAgentRequest, PermissionRequest};
+use crate::types::{ConnectAgentRequest, PermissionRequest, UpdateAgentSettingsRequest};
 
 /// `GET /api/v1/agents` — List all connected agents.
 pub async fn list(
@@ -41,6 +41,19 @@ pub async fn detail(
     require_permission(&key, "agents:r")?;
     let detail = svc.get_agent_detail(&name).await?;
     Ok(Json(serde_json::json!({ "data": detail })))
+}
+
+/// `POST /api/v1/agents/{name}/settings` — Update editable settings for an agent.
+pub async fn update_settings(
+    State(svc): State<Arc<dyn KernelService>>,
+    Extension(key): Extension<AuthenticatedKey>,
+    Path(name): Path<String>,
+    Json(mut req): Json<UpdateAgentSettingsRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_permission(&key, "agents:w")?;
+    req.agent_name = name;
+    svc.update_agent_settings(req).await?;
+    Ok(Json(serde_json::json!({ "data": { "ok": true } })))
 }
 
 /// `DELETE /api/v1/agents/{name}` — Disconnect an agent by name.

@@ -1,0 +1,16 @@
+# Curated Rust package allowlist for managed environments.
+# Packages not on this list require operator approval via escalation.
+# Policy: set `rust_policy = "open"` in config to allow any package.
+
+packages = [
+    # CLI tools
+    "cargo-watch", "cargo-edit", "cargo-expand",
+    # Formatting / linting (typically used via `cargo fmt` / `cargo clippy`)
+    "rustfmt", "clippy",
+    # Testing
+    "cargo-nextest",
+    # Build utilities
+    "cargo-make", "just",
+    # Common binaries
+    "ripgrep", "fd-find", "bat", "tokei", "hyperfine",
+]

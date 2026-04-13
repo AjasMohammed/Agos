@@ -1,0 +1,43 @@
+[manifest]
+name = "env-create"
+version = "1.0.0"
+description = "Create an isolated workspace for package management (Python, Node.js, Rust, or generic)"
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "write_scoped"
+
+[capabilities_required]
+permissions = [
+    "env.create:x",
+]
+
+[capabilities_provided]
+outputs = ["content.json"]
+
+[intent_schema]
+input = "EnvCreateIntent"
+output = "EnvCreateResult"
+
+[input_schema]
+required = ["name"]
+type = "object"
+
+[input_schema.properties.name]
+description = "Workspace name (alphanumeric + hyphens/underscores, max 64 chars)"
+type = "string"
+
+[input_schema.properties.ecosystem]
+description = "Package ecosystem: python, nodejs, rust, or generic (default: generic)"
+type = "string"
+default = "generic"
+
+[sandbox]
+network = false
+fs_write = true
+gpu = false
+max_memory_mb = 128
+max_cpu_ms = 30000
+syscalls = []
+
+[executor]
+type = "inline"

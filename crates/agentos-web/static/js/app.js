@@ -161,3 +161,8 @@ function toastStore() {
 document.body.addEventListener('showToast', function(event) {
     window.dispatchEvent(new CustomEvent('show-toast', { detail: event.detail }));
 });
+
+// Bridge HTMX HX-Trigger "closeAgentModal" to Alpine's custom event for the dialog
+document.body.addEventListener('closeAgentModal', function() {
+    window.dispatchEvent(new CustomEvent('close-agent-modal'));
+});

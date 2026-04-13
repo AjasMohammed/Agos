@@ -47,6 +47,7 @@ impl WebServer {
             csrf_tokens: Arc::new(dashmap::DashMap::<String, (String, std::time::Instant)>::new()),
             allowed_tool_dirs,
             chat_store,
+            inflight_chat: Arc::new(crate::chat_inflight::InFlightChat::new()),
             notification_tx,
             secure_cookies: !bind_addr.ip().is_loopback(),
         };

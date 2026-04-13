@@ -119,3 +119,20 @@ pub fn event_metrics_snapshot() -> (u64, u64, u64) {
         EVENTS_PROCESSED_TOTAL.load(Ordering::Relaxed),
     )
 }
+
+// ── KMC (Kernel Mediated Capabilities) metrics ────────────────────────────
+
+/// Record a capability request dispatched to a provider.
+pub fn record_capability_request(domain: &str, action: &str) {
+    counter!("agentos_capability_requests_total", "domain" => domain.to_string(), "action" => action.to_string()).increment(1);
+}
+
+/// Record a capability execution that succeeded.
+pub fn record_capability_success(domain: &str, action: &str) {
+    counter!("agentos_capability_successes_total", "domain" => domain.to_string(), "action" => action.to_string()).increment(1);
+}
+
+/// Record a capability execution that failed.
+pub fn record_capability_failure(domain: &str, action: &str) {
+    counter!("agentos_capability_failures_total", "domain" => domain.to_string(), "action" => action.to_string()).increment(1);
+}

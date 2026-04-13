@@ -1,0 +1,41 @@
+[manifest]
+name = "proc-signal"
+version = "1.0.0"
+description = "Send a signal to a managed process (SIGTERM, SIGKILL, etc.)"
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "exec_capable"
+
+[capabilities_required]
+permissions = ["proc.signal:x"]
+
+[capabilities_provided]
+outputs = ["content.json"]
+
+[intent_schema]
+input = "ProcSignalIntent"
+output = "ProcSignalResult"
+
+[input_schema]
+required = ["process_id"]
+type = "object"
+
+[input_schema.properties.process_id]
+description = "ID of the process to signal (from proc-spawn)"
+type = "string"
+
+[input_schema.properties.signal]
+description = "Signal name: SIGTERM (default), SIGKILL, SIGHUP, SIGINT"
+type = "string"
+default = "SIGTERM"
+
+[sandbox]
+network = false
+fs_write = false
+gpu = false
+max_memory_mb = 64
+max_cpu_ms = 5000
+syscalls = []
+
+[executor]
+type = "inline"

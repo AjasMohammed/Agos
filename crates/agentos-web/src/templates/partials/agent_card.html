@@ -13,14 +13,20 @@
         {% if agent.current_task %}
         <p style="margin:0.25rem 0"><small>Working on <a href="/tasks/{{ agent.current_task }}" class="id-link"><code>{{ agent.current_task[:8] }}</code></a></small></p>
         {% endif %}
+        {% if agent.busy_with is defined and agent.busy_with > 0 %}
+        <p style="margin:0.25rem 0"><small class="muted">Busy with {{ agent.busy_with }} task{% if agent.busy_with != 1 %}s{% endif %}</small></p>
+        {% endif %}
         {% if agent.roles %}<p style="margin:0.25rem 0"><small class="muted">Roles: {{ agent.roles|join(", ") }}</small></p>{% endif %}
         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.5rem; padding-top:0.5rem; border-top:1px solid var(--pico-muted-border-color)">
-            <small class="muted">Since {{ agent.created_at }}</small>
-            <button class="outline secondary btn-sm"
-                    hx-delete="/agents/{{ agent.name }}"
-                    hx-confirm="Disconnect {{ agent.name }}?"
-                    hx-target="closest article"
-                    hx-swap="outerHTML">Disconnect</button>
+            <small class="muted">{% if agent.last_active %}Last seen {{ agent.last_active|relative_time }}{% else %}Since {{ agent.created_at }}{% endif %}</small>
+            <span>
+                <a href="/agents/{{ agent.name }}/detail" class="outline btn-sm" role="button">Details</a>
+                <button class="outline secondary btn-sm"
+                        hx-delete="/agents/{{ agent.name }}"
+                        hx-confirm="Disconnect {{ agent.name }}?"
+                        hx-target="closest article"
+                        hx-swap="outerHTML">Disconnect</button>
+            </span>
         </div>
     </div>
 </article>

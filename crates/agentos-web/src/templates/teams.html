@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Teams</h1>
+        <p class="page-meta">Coordinator tasks for multi-agent teams</p>
+    </div>
+</div>
+
+{% if team_tasks|length == 0 %}
+<article><p class="muted">No active or historical team coordinator tasks found.</p></article>
+{% else %}
+<table>
+    <thead><tr><th>Task</th><th>Status</th><th>Coordinator Agent</th><th>Prompt</th><th>Created</th><th>Children</th><th>Tool Calls</th><th>Tokens</th></tr></thead>
+    <tbody>
+    {% for t in team_tasks %}
+    <tr>
+        <td>
+            <a href="/teams/{{ t.id }}"><code>{{ t.id }}</code></a>
+            <small class="muted">(<a href="/tasks/{{ t.id }}">task</a>)</small>
+        </td>
+        <td>{{ t.state }}</td>
+        <td><code>{{ t.agent_id }}</code></td>
+        <td>{{ t.prompt_preview }}</td>
+        <td>{{ t.created_at }}</td>
+        <td>{{ t.child_count }}</td>
+        <td>{{ t.tool_calls }}</td>
+        <td>{{ t.tokens_used }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

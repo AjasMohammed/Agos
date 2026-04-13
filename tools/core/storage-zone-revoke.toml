@@ -1,0 +1,38 @@
+[manifest]
+name = "storage-zone-revoke"
+version = "1.0.0"
+description = "Revoke a storage zone, removing filesystem access"
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "write_scoped"
+
+[capabilities_required]
+permissions = [
+    "storage.zone.revoke:x",
+]
+
+[capabilities_provided]
+outputs = ["content.json"]
+
+[intent_schema]
+input = "StorageZoneRevokeIntent"
+output = "StorageZoneRevokeResult"
+
+[input_schema]
+required = ["zone_id"]
+type = "object"
+
+[input_schema.properties.zone_id]
+description = "ID of the zone to revoke (from zone.create or zone.list)"
+type = "string"
+
+[sandbox]
+network = false
+fs_write = true
+gpu = false
+max_memory_mb = 64
+max_cpu_ms = 5000
+syscalls = []
+
+[executor]
+type = "inline"

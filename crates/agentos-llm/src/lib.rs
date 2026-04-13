@@ -7,6 +7,7 @@ pub mod mock;
 pub mod ollama;
 pub mod openai;
 pub mod retry;
+pub mod streaming_helpers;
 pub mod tool_helpers;
 pub mod traits;
 pub mod types;

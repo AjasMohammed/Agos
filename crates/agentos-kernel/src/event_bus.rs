@@ -345,6 +345,31 @@ pub fn parse_subscription_priority(priority: Option<&str>) -> Option<Subscriptio
     }
 }
 
+/// Per-category observe permissions an agent needs in order to *re-subscribe*
+/// (via `event-subscribe`) to the same event categories its role is seeded
+/// with by [`default_subscriptions_for_role`].
+///
+/// The kernel-seeded role defaults bypass permission checks (the kernel is
+/// trusted), but if an agent later wants to add or refine its own
+/// subscription, it must hold the matching `events.<category>:observe`
+/// permission. This helper returns the resource strings to grant.
+pub fn event_observe_permissions_for_role(role: &str) -> Vec<&'static str> {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "orchestrator" => vec![
+            "events.agent_lifecycle",
+            "events.task_lifecycle",
+            "events.agent_communication",
+        ],
+        "security-monitor" => vec!["events.security", "events.tool"],
+        "sysops" => vec!["events.system_health", "events.hardware", "events.schedule"],
+        "memory-manager" => vec!["events.memory"],
+        "tool-manager" => vec!["events.tool"],
+        // Default: matches the universal AgentAdded / DirectMessageReceived /
+        // DelegationReceived seeds.
+        _ => vec!["events.agent_lifecycle", "events.agent_communication"],
+    }
+}
+
 /// Default event subscriptions for a role.
 pub fn default_subscriptions_for_role(role: &str) -> Vec<(EventTypeFilter, SubscriptionPriority)> {
     match role.trim().to_ascii_lowercase().as_str() {

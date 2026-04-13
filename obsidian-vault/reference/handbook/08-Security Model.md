@@ -543,8 +543,29 @@ No manual configuration is required — the flag is derived from whether the ser
 
 ---
 
+## Kernel-Mediated Capabilities Security
+
+KMC adds a ninth defense layer: **capability mediation**. Instead of giving agents raw system access, every system interaction (package install, process spawn, HTTP request, file access, build execution) flows through the kernel's capability providers with:
+
+| Control | Description |
+|---------|-------------|
+| **Provider policy** | Per-domain allowlists/denylists (packages, binaries, destinations, paths) |
+| **Input validation** | Character-level allowlists for all user-supplied strings |
+| **Deny > Allow** | Deny rules checked before allow rules in every provider |
+| **Per-agent isolation** | All resources keyed by agent_id |
+| **SSRF defense** | 7-layer protection: deny patterns, IP parsing (IPv4+IPv6+mapped), DNS rebinding, redirect blocking, rate limiting |
+| **No shell injection** | `Command::new().args()` everywhere, never `sh -c` |
+| **Structured audit** | Per-resource audit events (PackageInstalled, ProcessSpawned, NetworkRequestExecuted, etc.) |
+| **Dynamic grants** | Capability broker mints scoped, time-limited ephemeral grants |
+| **Policy engine** | Priority-ordered rules with development/production/restricted profiles |
+
+See [[27-Kernel Mediated Capabilities]] for the full KMC reference.
+
+---
+
 ## Related
 
+- [[27-Kernel Mediated Capabilities]] — Full KMC reference (tools, policy, config)
 - [[09-Secrets and Vault]] — Vault architecture, secret scopes, lockdown
 - [[03-Architecture Overview]] — System architecture and kernel design
 - [[04-CLI Reference Complete]] — Full CLI command reference

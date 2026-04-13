@@ -574,6 +574,29 @@ fn init_logging(cfg: &agentos_kernel::config::LoggingSettings) {
         return;
     }
 
+    // Probe write access — create_dir_all succeeds even on read-only fs if the
+    // directory already exists (e.g. baked into a distroless image). Without
+    // this check the rolling appender panics on its first file creation.
+    let probe_path = std::path::Path::new(&cfg.log_dir).join(".write_probe");
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&probe_path)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe_path);
+        }
+        Err(e) => {
+            eprintln!(
+                "Warning: log directory '{}' is not writable ({}), falling back to stderr",
+                cfg.log_dir, e
+            );
+            init_logging_stderr_only(filter_reload_layer, use_json);
+            return;
+        }
+    }
+
     let file_appender = tracing_appender::rolling::daily(&cfg.log_dir, "agentos.log");
     // non_blocking returns a guard — must be kept alive for the process lifetime.
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
@@ -748,6 +771,9 @@ async fn run_sandbox_exec(request_path: &str) -> anyhow::Result<()> {
         task_registry: None,
         escalation_query: None,
         workspace_paths: workspace_paths.unwrap_or_default(),
+        capability_registry: None,
+        capability_dispatcher: None,
+        storage_zone_query: None,
         cancellation_token: tokio_util::sync::CancellationToken::new(),
     };
 

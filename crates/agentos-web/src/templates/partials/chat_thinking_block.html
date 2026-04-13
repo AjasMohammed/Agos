@@ -1,0 +1,9 @@
+<details class="chat-thinking-block">
+    <summary class="muted">
+        <span class="chat-thinking-dot"></span>
+        Thinking · iteration {{ msg.iteration|default(1) }}{% if msg.duration_ms %} · {{ msg.duration_ms }}ms{% endif %}
+    </summary>
+    {% if msg.content %}
+    <div class="chat-thinking-body markdown-content">{{ msg.content|markdown }}</div>
+    {% endif %}
+</details>

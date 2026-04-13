@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>HAL</h1>
+        <p class="page-meta">Hardware registry and approval state</p>
+    </div>
+</div>
+
+{% if devices|length == 0 %}
+<article><p class="muted">No registered devices.</p></article>
+{% else %}
+<table>
+    <thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Granted</th><th>Denied</th><th>First Seen</th><th>Status Changed</th></tr></thead>
+    <tbody>
+    {% for d in devices %}
+    <tr>
+        <td><code>{{ d.id }}</code></td>
+        <td>{{ d.device_type }}</td>
+        <td>{{ d.status }}</td>
+        <td><code>{{ d.granted_to }}</code></td>
+        <td><code>{{ d.denied_to }}</code></td>
+        <td>{{ d.first_seen }}</td>
+        <td>{{ d.status_changed_at }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

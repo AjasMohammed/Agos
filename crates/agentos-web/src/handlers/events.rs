@@ -21,8 +21,11 @@ pub async fn dashboard_stream(
         let kernel = kernel.clone();
         let templates = templates.clone();
         async move {
-            // 1s interval means each of the 3 rotating events updates every 3s (not 9s).
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            // Skip sleep on first iteration so the browser gets data immediately
+            // and transitions from CONNECTING → OPEN without delay.
+            if tick > 0 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
 
             let event = match tick % 3 {
                 0 => {
@@ -114,11 +117,13 @@ pub async fn agents_stream(
     let kernel = state.kernel.clone();
     let templates = state.templates.clone();
 
-    let stream = stream::unfold((), move |()| {
+    let stream = stream::unfold(true, move |first| {
         let kernel = kernel.clone();
         let templates = templates.clone();
         async move {
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            if !first {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
 
             let registry = kernel.agent_registry.read().await;
             let agents: Vec<_> = registry
@@ -144,7 +149,7 @@ pub async fn agents_stream(
             let ctx = context! { agents };
             let html = render_partial(&templates, "partials/agent_card.html", ctx);
 
-            Some((Ok(Event::default().event("agent-update").data(html)), ()))
+            Some((Ok(Event::default().event("agent-update").data(html)), false))
         }
     });
 
@@ -159,11 +164,13 @@ pub async fn tasks_stream(
     let kernel = state.kernel.clone();
     let templates = state.templates.clone();
 
-    let stream = stream::unfold((), move |()| {
+    let stream = stream::unfold(true, move |first| {
         let kernel = kernel.clone();
         let templates = templates.clone();
         async move {
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            if !first {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
 
             let tasks = kernel.scheduler.list_tasks().await;
             let task_rows: Vec<_> = tasks
@@ -185,7 +192,7 @@ pub async fn tasks_stream(
             let ctx = context! { tasks => task_rows };
             let html = render_partial(&templates, "partials/task_row.html", ctx);
 
-            Some((Ok(Event::default().event("task-update").data(html)), ()))
+            Some((Ok(Event::default().event("task-update").data(html)), false))
         }
     });
 
@@ -200,10 +207,12 @@ pub async fn costs_stream(
 ) -> Sse<KeepAliveStream<futures::stream::BoxStream<'static, Result<Event, Infallible>>>> {
     let kernel = state.kernel.clone();
 
-    let stream = stream::unfold((), move |()| {
+    let stream = stream::unfold(true, move |first| {
         let kernel = kernel.clone();
         async move {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            if !first {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
 
             let snapshots = kernel.cost_tracker.get_all_snapshots().await;
             let total_cost_usd: f64 = snapshots.iter().map(|s| s.cost_usd).sum();
@@ -235,7 +244,7 @@ pub async fn costs_stream(
                 .event("cost-update")
                 .data(payload.to_string());
 
-            Some((Ok(event), ()))
+            Some((Ok(event), false))
         }
     });
 

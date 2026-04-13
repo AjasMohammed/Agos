@@ -407,6 +407,11 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
             task_registry: None,
             escalation_query: None,
             workspace_paths: self.kernel.workspace_paths.clone(),
+            // Pipeline execution is synchronous — cannot await RwLock.
+            // Capability providers are accessed via the task executor path instead.
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
             cancellation_token: self.kernel.cancellation_token.child_token(),
         };
 
@@ -772,6 +777,11 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
             task_registry: None,
             escalation_query: None,
             workspace_paths: self.workspace_paths.clone(),
+            // Pipeline execution is synchronous — cannot await RwLock.
+            // Capability providers are accessed via the task executor path instead.
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
             cancellation_token: self.cancellation_token.child_token(),
         };
 

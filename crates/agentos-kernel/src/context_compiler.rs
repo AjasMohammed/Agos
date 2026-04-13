@@ -519,7 +519,7 @@ mod tests {
     fn test_compile_agent_directory_merged_into_tools() {
         let compiler = ContextCompiler::new(TokenBudget::default());
         let window = compiler.compile(CompilationInputs {
-            agent_directory: "[AGENT_DIRECTORY]\n- agent-1 (ollama/llama3)\n[/AGENT_DIRECTORY]"
+            agent_directory: "[AGENT_DIRECTORY]\n- agent-1 — Status: Idle\n[/AGENT_DIRECTORY]"
                 .into(),
             ..default_inputs()
         });

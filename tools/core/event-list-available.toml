@@ -1,0 +1,27 @@
+[manifest]
+name        = "event-list-available"
+version     = "1.0.0"
+description = "Discover all kernel event categories and types, with a per-category 'subscribable' flag based on your current observe permissions. Call this before event-subscribe."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["events.stream:o"]
+
+[capabilities_provided]
+outputs = ["categories", "filter_syntax", "throttle_syntax"]
+
+[intent_schema]
+input  = "EventListAvailableIntent"
+output = "EventListAvailableResult"
+
+[input_schema]
+type = "object"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 500
+syscalls      = []

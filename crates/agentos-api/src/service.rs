@@ -22,6 +22,8 @@ pub trait KernelService: Send + Sync {
 
     async fn get_agent_detail(&self, name: &str) -> Result<ApiAgentDetail, ApiError>;
 
+    async fn update_agent_settings(&self, req: UpdateAgentSettingsRequest) -> Result<(), ApiError>;
+
     async fn grant_permission(&self, req: PermissionRequest) -> Result<(), ApiError>;
 
     async fn revoke_permission(&self, req: PermissionRequest) -> Result<(), ApiError>;

@@ -26,7 +26,7 @@
         <!-- Left column: metadata card -->
         <article>
             <header>
-                <code class="audit-event-type-heading">{{ entry.event_type }}</code>
+                <code class="audit-event-type-heading">{{ entry.event_type|humanize_event_type }}</code>
             </header>
 
             <dl class="detail-list">
@@ -91,7 +91,7 @@
             {% if entry.details == "null" or entry.details == "{}" %}
             <p class="muted" style="font-size: 0.85rem; margin: 0;">No details recorded for this event.</p>
             {% else %}
-            <pre class="audit-detail-json" id="details-{{ loop.index }}">{{ entry.details }}</pre>
+            <pre class="audit-detail-json" id="details-{{ loop.index }}">{{ entry.details|pretty_json }}</pre>
             {% endif %}
         </article>
 

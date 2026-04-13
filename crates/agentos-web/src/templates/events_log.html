@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Events</h1>
+        <p class="page-meta">Event subscriptions and category permissions</p>
+    </div>
+</div>
+
+<article>
+    <header><strong>Search Event Log</strong></header>
+    <form method="get" action="/events">
+        <div class="form-grid-4">
+            <label>Text
+                <input name="q" value="{{ q }}" placeholder="search event payload">
+            </label>
+            <label>Event Type
+                <input name="event_type" value="{{ event_type_filter }}" placeholder="e.g. TaskCompleted">
+            </label>
+            <label>Agent ID
+                <input name="agent_id" value="{{ agent_id_filter }}" placeholder="agent id fragment">
+            </label>
+            <label>Limit
+                <input name="limit" type="number" min="1" max="1000" value="{{ limit }}">
+            </label>
+        </div>
+        <button type="submit">Search</button>
+    </form>
+</article>
+
+<article>
+    <header><strong>Recent Emitted Events</strong></header>
+    {% if event_rows|length == 0 %}
+    <p class="muted">No matching events in the audit stream.</p>
+    {% else %}
+    <table>
+        <thead><tr><th>Time</th><th>Event</th><th>Agent</th><th>Task</th><th>Source</th><th>Trace</th><th>Details</th></tr></thead>
+        <tbody>
+        {% for e in event_rows %}
+        <tr>
+            <td>{{ e.timestamp }}</td>
+            <td><code>{{ e.event_type }}</code></td>
+            <td><code>{{ e.agent_id or "-" }}</code></td>
+            <td><code>{{ e.task_id or "-" }}</code></td>
+            <td>{{ e.event_source or "-" }}</td>
+            <td><code>{{ e.trace_id }}</code></td>
+            <td><pre><code>{{ e.details|pretty_json }}</code></pre></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</article>
+
+<div class="grid">
+    <article>
+        <header><strong>Categories</strong></header>
+        <table>
+            <thead><tr><th>Category</th><th>Permission</th></tr></thead>
+            <tbody>
+            {% for c in categories %}
+            <tr>
+                <td>{{ c.name }}</td>
+                <td><code>{{ c.permission }}:observe</code></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </article>
+
+    <article>
+        <header><strong>Subscriptions</strong></header>
+        {% if subscriptions|length == 0 %}
+        <p class="muted">No active subscriptions.</p>
+        {% else %}
+        <table>
+            <thead><tr><th>ID</th><th>Agent</th><th>Event Filter</th><th>Payload Filter</th><th>Enabled</th><th>Priority</th><th>Created</th></tr></thead>
+            <tbody>
+            {% for s in subscriptions %}
+            <tr>
+                <td><code>{{ s.id }}</code></td>
+                <td><code>{{ s.agent_id }}</code></td>
+                <td><code>{{ s.event_type_filter }}</code></td>
+                <td><code>{{ s.filter }}</code></td>
+                <td>{{ s.enabled }}</td>
+                <td>{{ s.priority }}</td>
+                <td>{{ s.created_at }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </article>
+</div>
+{% endblock %}

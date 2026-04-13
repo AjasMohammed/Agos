@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block content %}
+{% set title = "MCP" %}
+{% set subtitle = "Server status and persisted attachments" %}
+{% include "partials/management_page.html" %}
+
+<div class="grid">
+    <article>
+        <header><strong>Connected Servers</strong></header>
+        {% if servers|length == 0 %}
+        <p class="muted">No MCP servers connected.</p>
+        {% else %}
+        <table>
+            <thead><tr><th>Name</th><th>State</th><th>Tools</th><th>Calls</th><th>Failures</th><th>Latency</th><th></th></tr></thead>
+            <tbody>
+            {% for s in servers %}
+            <tr>
+                <td><code>{{ s.name }}</code></td>
+                <td>{{ s.state }}</td>
+                <td>{{ s.tool_count }}</td>
+                <td>{{ s.total_calls }}</td>
+                <td>{{ s.failure_count }}</td>
+                <td>{{ s.avg_latency_ms }} ms</td>
+                <td>
+                    <form method="post" action="/mcp/{{ s.name }}/detach" style="display:inline">
+                        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                        <button class="outline secondary btn-sm" type="submit">Detach</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </article>
+
+    <article>
+        <header><strong>Persisted Attachments</strong></header>
+        {% if attachments|length == 0 %}
+        <p class="muted">No persisted attachments.</p>
+        {% else %}
+        <table>
+            <thead><tr><th>Name</th><th>Command</th><th>Args</th><th>URL</th><th>Timeout</th></tr></thead>
+            <tbody>
+            {% for a in attachments %}
+            <tr>
+                <td><code>{{ a.name }}</code></td>
+                <td><code>{{ a.command }}</code></td>
+                <td><code>{{ a.args }}</code></td>
+                <td><code>{{ a.url }}</code></td>
+                <td>{{ a.timeout_secs }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </article>
+</div>
+{% endblock %}

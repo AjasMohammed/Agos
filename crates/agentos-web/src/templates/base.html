@@ -31,24 +31,58 @@
         <nav>
             <ul class="sidebar-nav">
                 <li><a href="/" data-nav="/">Dashboard</a></li>
-
-                <li class="sidebar-nav-group">Operations</li>
-                <li><a href="/agents" data-nav="/agents">Agents</a></li>
-                <li><a href="/tasks" data-nav="/tasks">Tasks</a></li>
-                <li><a href="/chat" data-nav="/chat">Chat</a></li>
-                <li><a href="/pipelines" data-nav="/pipelines">Pipelines</a></li>
-
-                <li class="sidebar-nav-group">Resources</li>
-                <li><a href="/tools" data-nav="/tools">Tools</a></li>
-                <li><a href="/marketplace" data-nav="/marketplace">Marketplace</a></li>
-
-                <li class="sidebar-nav-group">System</li>
-                <li><a href="/connectors" data-nav="/connectors">Connectors</a></li>
-                <li><a href="/notifications" data-nav="/notifications">Notifications</a></li>
-                <li><a href="/secrets" data-nav="/secrets">Secrets</a></li>
-                <li><a href="/costs" data-nav="/costs">Costs</a></li>
-                <li><a href="/audit" data-nav="/audit">Audit</a></li>
             </ul>
+
+            <details class="nav-section" open>
+                <summary>Operations</summary>
+                <ul class="sidebar-nav">
+                    <li><a href="/agents" data-nav="/agents">Agents</a></li>
+                    <li><a href="/tasks" data-nav="/tasks">Tasks</a></li>
+                    <li><a href="/chat" data-nav="/chat">Chat</a></li>
+                    <li><a href="/pipelines" data-nav="/pipelines">Pipelines</a></li>
+                    <li><a href="/escalations" data-nav="/escalations">Escalations</a></li>
+                </ul>
+            </details>
+
+            <details class="nav-section">
+                <summary>Capabilities</summary>
+                <ul class="sidebar-nav">
+                    <li><a href="/tools" data-nav="/tools">Tools</a></li>
+                    <li><a href="/marketplace" data-nav="/marketplace">Marketplace</a></li>
+                    <li><a href="/schedules" data-nav="/schedules">Schedules</a></li>
+                    <li><a href="/roles" data-nav="/roles">Roles</a></li>
+                    <li><a href="/teams" data-nav="/teams">Teams</a></li>
+                    <li><a href="/scratchpad" data-nav="/scratchpad">Scratchpad</a></li>
+                </ul>
+            </details>
+
+            <details class="nav-section">
+                <summary>Integrations</summary>
+                <ul class="sidebar-nav">
+                    <li><a href="/plugins" data-nav="/plugins">Plugins</a></li>
+                    <li><a href="/channels" data-nav="/channels">Channels</a></li>
+                    <li><a href="/mcp" data-nav="/mcp">MCP Servers</a></li>
+                    <li><a href="/webhooks" data-nav="/webhooks">Webhooks</a></li>
+                    <li><a href="/connectors" data-nav="/connectors">Connectors</a></li>
+                    <li><a href="/a2a" data-nav="/a2a">A2A</a></li>
+                </ul>
+            </details>
+
+            <details class="nav-section">
+                <summary>System</summary>
+                <ul class="sidebar-nav">
+                    <li><a href="/audit" data-nav="/audit">Audit Log</a></li>
+                    <li><a href="/costs" data-nav="/costs">Costs</a></li>
+                    <li><a href="/secrets" data-nav="/secrets">Secrets</a></li>
+                    <li><a href="/config" data-nav="/config">Config</a></li>
+                    <li><a href="/notifications" data-nav="/notifications">Notifications</a></li>
+                    <li><a href="/doctor" data-nav="/doctor">Doctor</a></li>
+                    <li><a href="/events" data-nav="/events">Events</a></li>
+                    <li><a href="/logs" data-nav="/logs">Logs</a></li>
+                    <li><a href="/resources" data-nav="/resources">Resources</a></li>
+                    <li><a href="/hal" data-nav="/hal">HAL</a></li>
+                </ul>
+            </details>
         </nav>
         <div class="sidebar-footer">
             <small>AgentOS v3</small>
@@ -84,13 +118,13 @@
             </div>
             <div class="topbar-right">
                 <!-- SSE connection status indicator -->
-                <span class="connection-indicator" x-data="sseStatus()" x-init="init()">
+                <span class="connection-indicator" x-data="sseStatus()" x-init="init()" @destroy="destroy()">
                     <span class="connection-dot" :class="state" :title="label" x-text=""></span>
                     <span x-text="label" style="user-select:none"></span>
                 </span>
 
                 <!-- Notification bell: live-updated via SSE -->
-                <span x-data="notificationBell()" x-init="init()" style="margin-right:0.5rem">
+                <span x-data="notificationBell()" x-init="init()" @destroy="destroy()" style="margin-right:0.5rem">
                     <a href="/notifications" role="button" class="outline topbar-btn"
                        aria-label="Notifications" title="Notifications"
                        style="position:relative;padding-right:0.25rem">
@@ -130,6 +164,9 @@
             if (active) {
                 a.classList.add('nav-active');
                 a.setAttribute('aria-current', 'page');
+                // Auto-open the collapsible section containing the active link.
+                var section = a.closest('details.nav-section');
+                if (section) section.setAttribute('open', '');
             }
         });
     }());
@@ -139,6 +176,9 @@
         return {
             unreadCount: 0,
             evtSource: null,
+            _retries: 0,
+            _maxRetries: 5,
+            _retryTimer: null,
             init() {
                 var self = this;
                 // Fetch current unread count immediately so the bell is accurate on load.
@@ -146,13 +186,19 @@
                     .then(function (r) { return r.ok ? r.json() : null; })
                     .then(function (data) { if (data) { self.unreadCount = data.count; } })
                     .catch(function () {});
-                // Open SSE stream for real-time notification pushes.
+                self._connect();
+            },
+            _connect() {
+                var self = this;
+                if (self.evtSource) {
+                    self.evtSource.close();
+                    self.evtSource = null;
+                }
                 self.evtSource = new EventSource('/notifications/stream');
                 self.evtSource.addEventListener('notification-new', function (e) {
                     self.unreadCount += 1;
                     try {
                         var data = JSON.parse(e.data);
-                        // Dispatch a toast event if the toast system is present.
                         window.dispatchEvent(new CustomEvent('showToast', {
                             detail: {
                                 message: data.subject || 'New notification',
@@ -164,12 +210,40 @@
                     } catch (_) {}
                 });
                 self.evtSource.addEventListener('notification-reload', function () {
-                    // Too many messages were missed — re-fetch the current count.
                     fetch('/notifications/unread-count')
                         .then(function (r) { return r.ok ? r.json() : null; })
                         .then(function (data) { if (data) { self.unreadCount = data.count; } })
                         .catch(function () {});
                 });
+                self.evtSource.onopen = function () {
+                    self._retries = 0;
+                };
+                self.evtSource.onerror = function () {
+                    // Close immediately to stop the browser's built-in auto-reconnect
+                    // which can saturate connection limits and freeze the page.
+                    if (self.evtSource) {
+                        self.evtSource.close();
+                        self.evtSource = null;
+                    }
+                    if (self._retries < self._maxRetries) {
+                        self._retries++;
+                        var delay = Math.min(1000 * Math.pow(2, self._retries), 30000);
+                        self._retryTimer = setTimeout(function () {
+                            self._retryTimer = null;
+                            self._connect();
+                        }, delay);
+                    }
+                };
+            },
+            destroy() {
+                if (this._retryTimer) {
+                    clearTimeout(this._retryTimer);
+                    this._retryTimer = null;
+                }
+                if (this.evtSource) {
+                    this.evtSource.close();
+                    this.evtSource = null;
+                }
             }
         };
     }

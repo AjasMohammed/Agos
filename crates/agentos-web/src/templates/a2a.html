@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>A2A Messages</h1>
+        <p class="page-meta">Recent inter-agent message history</p>
+    </div>
+</div>
+
+{% if messages|length == 0 %}
+<article><p class="muted">No recent A2A messages available.</p></article>
+{% else %}
+<table>
+    <thead><tr><th>Time</th><th>From</th><th>To</th><th>Preview</th><th>Trace</th></tr></thead>
+    <tbody>
+    {% for m in messages %}
+    <tr>
+        <td>{{ m.timestamp }}</td>
+        <td><code>{{ m.from }}</code></td>
+        <td><code>{{ m.to }}</code></td>
+        <td>{{ m.preview }}</td>
+        <td><code>{{ m.trace_id }}</code></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

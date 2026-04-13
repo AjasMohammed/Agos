@@ -1,0 +1,38 @@
+[manifest]
+name = "env-destroy"
+version = "1.0.0"
+description = "Destroy a managed workspace and all its installed packages"
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "write_scoped"
+
+[capabilities_required]
+permissions = [
+    "env.destroy:x",
+]
+
+[capabilities_provided]
+outputs = ["content.json"]
+
+[intent_schema]
+input = "EnvDestroyIntent"
+output = "EnvDestroyResult"
+
+[input_schema]
+required = ["name"]
+type = "object"
+
+[input_schema.properties.name]
+description = "Name of the workspace to destroy"
+type = "string"
+
+[sandbox]
+network = false
+fs_write = true
+gpu = false
+max_memory_mb = 128
+max_cpu_ms = 30000
+syscalls = []
+
+[executor]
+type = "inline"

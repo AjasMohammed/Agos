@@ -5,7 +5,7 @@
     <td><span class="badge badge-{{ task.state|lower }}">{{ task.state }}</span></td>
     <td>{{ task.priority }}</td>
     <td class="prompt-cell" title="{{ task.prompt_preview }}">{{ task.prompt_preview[:60] }}{% if task.prompt_preview|length > 60 %}...{% endif %}</td>
-    <td><code class="ts">{{ task.created_at }}</code></td>
+    <td><code class="ts" title="{{ task.created_at }}">{{ task.created_at|relative_time }}</code></td>
     <td>{{ task.tool_calls }}</td>
     <td>{{ task.tokens_used }}</td>
     <td>

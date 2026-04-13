@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>Role {{ role.name }}</h1>
+        <p class="page-meta">Permission profile details</p>
+    </div>
+    <div class="page-header-actions">
+        <a href="/roles" class="outline btn-sm" role="button">Back</a>
+        <form method="post" action="/roles/{{ role.name }}/delete" style="display:inline" onsubmit="return confirm('Delete role {{ role.name }}?');">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <button class="outline secondary btn-sm" type="submit">Delete</button>
+        </form>
+    </div>
+</div>
+
+<article>
+    <header><strong>Overview</strong></header>
+    <table>
+        <tbody>
+            <tr><th scope="row">Name</th><td><code>{{ role.name }}</code></td></tr>
+            <tr><th scope="row">Description</th><td>{{ role.description or "-" }}</td></tr>
+            <tr><th scope="row">Created</th><td>{{ role.created_at }}</td></tr>
+            <tr><th scope="row">Permission Entries</th><td>{{ entries|length }}</td></tr>
+            <tr><th scope="row">Deny Entries</th><td>{{ role.deny_entries|length }}</td></tr>
+        </tbody>
+    </table>
+</article>
+
+<article>
+    <header><strong>Permission Entries</strong></header>
+    {% if entries|length == 0 %}
+    <p class="muted">No resource entries defined for this role.</p>
+    {% else %}
+    <table>
+        <thead><tr><th>Resource</th><th>R</th><th>W</th><th>X</th><th>Q</th><th>O</th><th>Expires</th></tr></thead>
+        <tbody>
+        {% for e in entries %}
+        <tr>
+            <td><code>{{ e.resource }}</code></td>
+            <td>{{ e.read }}</td>
+            <td>{{ e.write }}</td>
+            <td>{{ e.execute }}</td>
+            <td>{{ e.query }}</td>
+            <td>{{ e.observe }}</td>
+            <td>{{ e.expires_at or "-" }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</article>
+
+<article>
+    <header><strong>Deny Entries</strong></header>
+    {% if role.deny_entries|length == 0 %}
+    <p class="muted">No deny entries configured.</p>
+    {% else %}
+    <ul>
+        {% for deny in role.deny_entries %}
+        <li><code>{{ deny }}</code></li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+</article>
+{% endblock %}

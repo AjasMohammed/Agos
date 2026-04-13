@@ -1,0 +1,35 @@
+[manifest]
+name = "build-lint"
+version = "1.0.0"
+description = "Run linter with auto-detected ecosystem (clippy/eslint/flake8)"
+author = "agentos-core"
+trust_tier = "core"
+risk_class = "exec_capable"
+
+[capabilities_required]
+permissions = ["build.lint:x"]
+
+[capabilities_provided]
+outputs = ["content.json"]
+
+[intent_schema]
+input = "BuildLintIntent"
+output = "BuildLintResult"
+
+[input_schema]
+type = "object"
+
+[input_schema.properties.working_dir]
+description = "Project directory (auto-detects linter from Cargo.toml, package.json, etc.)"
+type = "string"
+
+[sandbox]
+network = false
+fs_write = false
+gpu = false
+max_memory_mb = 512
+max_cpu_ms = 60000
+syscalls = []
+
+[executor]
+type = "inline"

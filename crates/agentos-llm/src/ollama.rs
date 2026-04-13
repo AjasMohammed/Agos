@@ -1,3 +1,4 @@
+use crate::tool_helpers;
 use crate::traits::LLMCore;
 use crate::types::{
     calculate_inference_cost, default_pricing_table, InferenceEvent, InferenceOptions,
@@ -148,6 +149,7 @@ impl OllamaCore {
                         OllamaChatMessage {
                             role: "assistant".to_string(),
                             content: entry.content.clone(),
+                            thinking: None,
                             tool_calls: Vec::new(),
                             request_tool_calls,
                         }
@@ -170,6 +172,7 @@ impl OllamaCore {
                         OllamaChatMessage {
                             role,
                             content,
+                            thinking: None,
                             tool_calls: Vec::new(),
                             request_tool_calls: None,
                         }
@@ -177,12 +180,14 @@ impl OllamaCore {
                     ContextRole::System => OllamaChatMessage {
                         role: "system".to_string(),
                         content: entry.content.clone(),
+                        thinking: None,
                         tool_calls: Vec::new(),
                         request_tool_calls: None,
                     },
                     ContextRole::User => OllamaChatMessage {
                         role: "user".to_string(),
                         content: entry.content.clone(),
+                        thinking: None,
                         tool_calls: Vec::new(),
                         request_tool_calls: None,
                     },
@@ -222,11 +227,21 @@ impl OllamaCore {
             .message
             .tool_calls
             .into_iter()
-            .map(|tc| InferenceToolCall {
-                id: None,
-                tool_name: tc.function.name,
-                intent_type: "execute".to_string(),
-                payload: tc.function.arguments,
+            .filter_map(|tc| {
+                let payload = tool_helpers::validate_payload_object(
+                    &tc.function.name,
+                    "ollama",
+                    Some(tc.function.arguments),
+                );
+                if !tool_helpers::check_payload_size(&tc.function.name, &payload) {
+                    return None;
+                }
+                Some(InferenceToolCall {
+                    id: None,
+                    tool_name: tc.function.name,
+                    intent_type: "execute".to_string(),
+                    payload,
+                })
             })
             .collect();
 
@@ -248,8 +263,58 @@ impl OllamaCore {
         };
         let cost = calculate_inference_cost(&tokens_used, &self.pricing);
 
+        // When content is empty but thinking has content, use thinking as
+        // fallback text. This prevents empty responses from thinking models
+        // (Kimi, Gemma4, DeepSeek) that put their entire reply in the
+        // thinking field for simple follow-up questions.
+        let has_thinking = ollama_response
+            .message
+            .thinking
+            .as_deref()
+            .is_some_and(|t| !t.trim().is_empty());
+        let text = if ollama_response.message.content.trim().is_empty()
+            && has_thinking
+            && tool_calls.is_empty()
+        {
+            let thinking = ollama_response.message.thinking.as_deref().unwrap_or("");
+            tracing::info!(
+                model = %self.model,
+                thinking_len = thinking.len(),
+                tool_calls_count = tool_calls.len(),
+                "Ollama content empty but thinking present — using thinking as fallback text"
+            );
+            thinking.to_string()
+        } else {
+            ollama_response.message.content.clone()
+        };
+
+        // Log when the model returns empty content — helps diagnose empty-response issues.
+        if text.trim().is_empty() {
+            tracing::warn!(
+                model = %self.model,
+                done = ollama_response.done,
+                done_reason = ?ollama_response.done_reason,
+                prompt_eval_count = ?ollama_response.prompt_eval_count,
+                eval_count = ?ollama_response.eval_count,
+                tool_calls_count = tool_calls.len(),
+                stop_reason = ?stop_reason,
+                has_thinking = has_thinking,
+                "Ollama returned empty message content"
+            );
+        } else {
+            tracing::debug!(
+                model = %self.model,
+                content_len = text.len(),
+                done_reason = ?ollama_response.done_reason,
+                eval_count = ?ollama_response.eval_count,
+                tool_calls_count = tool_calls.len(),
+                has_thinking = has_thinking,
+                "Ollama response received"
+            );
+        }
+
         InferenceResult {
-            text: ollama_response.message.content,
+            text,
             tokens_used,
             model: self.model.clone(),
             duration_ms,
@@ -318,13 +383,28 @@ struct OllamaChatRequest {
 struct OllamaChatMessage {
     role: String,
     content: String,
+    /// Thinking/reasoning content from models that support chain-of-thought
+    /// (e.g. Kimi, Gemma4, DeepSeek). Ollama streams this in a separate field
+    /// from `content`. Captured so it can be used as fallback text when
+    /// `content` is empty, and for diagnostic logging.
+    #[serde(default, skip_serializing)]
+    thinking: Option<String>,
     /// Inbound tool calls deserialized from model responses. Never serialized
     /// outbound (use `request_tool_calls` for that instead).
+    ///
+    /// SAFETY: Both this field and `request_tool_calls` map to the JSON key
+    /// `"tool_calls"`. This works because the two fields have complementary
+    /// skip annotations: this field has `skip_serializing` (deserialize-only)
+    /// and `request_tool_calls` has `skip_deserializing` (serialize-only).
+    /// Serde resolves the name collision because at most one field participates
+    /// in each direction. If serde's derive behavior changes, split into
+    /// separate request/response structs.
     #[serde(default, skip_serializing)]
     tool_calls: Vec<OllamaResponseToolCall>,
     /// Outbound tool calls for prior assistant messages in multi-turn context.
     /// Serialized as `"tool_calls"` (Ollama/OpenAI-compatible format); skipped
     /// when None so non-tool-call messages stay minimal.
+    /// See safety note on `tool_calls` above.
     #[serde(
         rename = "tool_calls",
         skip_serializing_if = "Option::is_none",
@@ -516,11 +596,13 @@ impl LLMCore for OllamaCore {
         }
 
         let mut full_text = String::new();
+        let mut full_thinking = String::new();
         let mut prompt_tokens = 0u64;
         let mut completion_tokens = 0u64;
         let mut done_reason: Option<String> = None;
         let mut tool_calls: Vec<InferenceToolCall> = Vec::new();
 
+        const MAX_LINE_BUFFER_BYTES: usize = 1_048_576; // 1 MB
         let mut line_buf: Vec<u8> = Vec::new();
         let mut stream = response.bytes_stream();
         use futures::StreamExt;
@@ -531,6 +613,15 @@ impl LLMCore for OllamaCore {
             })?;
             line_buf.extend_from_slice(&chunk);
 
+            if line_buf.len() > MAX_LINE_BUFFER_BYTES {
+                let err = AgentOSError::LLMError {
+                    provider: "ollama".to_string(),
+                    reason: "NDJSON line buffer exceeded 1 MB".to_string(),
+                };
+                let _ = tx.send(InferenceEvent::Error(err.to_string())).await;
+                return Err(err);
+            }
+
             // Process complete NDJSON lines from the buffer.
             while let Some(newline_pos) = line_buf.iter().position(|&b| b == b'\n') {
                 let line = &line_buf[..newline_pos];
@@ -540,27 +631,57 @@ impl LLMCore for OllamaCore {
                             full_text.push_str(&resp.message.content);
                             let _ = tx.send(InferenceEvent::Token(resp.message.content)).await;
                         }
-                        if resp.done {
-                            prompt_tokens = resp.prompt_eval_count.unwrap_or(0);
-                            completion_tokens = resp.eval_count.unwrap_or(0);
-                            done_reason = resp.done_reason;
-
+                        // Accumulate thinking content from thinking models.
+                        if let Some(ref thinking) = resp.message.thinking {
+                            if !thinking.is_empty() {
+                                full_thinking.push_str(thinking);
+                            }
+                        }
+                        // Collect tool calls from ANY chunk — Ollama sends them
+                        // in a separate done:false chunk before the final done:true.
+                        // Guard: only collect once to prevent duplication.
+                        if !resp.message.tool_calls.is_empty() && tool_calls.is_empty() {
                             for tc in &resp.message.tool_calls {
+                                let payload = tool_helpers::validate_payload_object(
+                                    &tc.function.name,
+                                    "ollama",
+                                    Some(tc.function.arguments.clone()),
+                                );
+                                if !tool_helpers::check_payload_size(&tc.function.name, &payload) {
+                                    continue;
+                                }
                                 let itc = InferenceToolCall {
                                     id: None,
                                     tool_name: tc.function.name.clone(),
                                     intent_type: "execute".to_string(),
-                                    payload: tc.function.arguments.clone(),
+                                    payload,
                                 };
                                 let _ =
                                     tx.send(InferenceEvent::ToolCallComplete(itc.clone())).await;
                                 tool_calls.push(itc);
                             }
                         }
+                        if resp.done {
+                            prompt_tokens = resp.prompt_eval_count.unwrap_or(0);
+                            completion_tokens = resp.eval_count.unwrap_or(0);
+                            done_reason = resp.done_reason;
+                        }
                     }
                 }
-                line_buf = line_buf[newline_pos + 1..].to_vec();
+                line_buf.drain(..newline_pos + 1);
             }
+        }
+
+        // When content is empty but thinking has content and no tool calls,
+        // use thinking as fallback (consistent with OpenAI/Custom adapters).
+        if full_text.trim().is_empty() && !full_thinking.trim().is_empty() && tool_calls.is_empty()
+        {
+            tracing::info!(
+                model = %self.model,
+                thinking_len = full_thinking.len(),
+                "Ollama stream content empty but thinking present — using thinking as fallback"
+            );
+            full_text = full_thinking;
         }
 
         let stop_reason = if !tool_calls.is_empty() {
@@ -660,11 +781,13 @@ impl LLMCore for OllamaCore {
         }
 
         let mut full_text = String::new();
+        let mut full_thinking = String::new();
         let mut prompt_tokens = 0u64;
         let mut completion_tokens = 0u64;
         let mut done_reason: Option<String> = None;
         let mut tool_calls: Vec<InferenceToolCall> = Vec::new();
 
+        const MAX_LINE_BUFFER_BYTES: usize = 1_048_576; // 1 MB
         let mut line_buf: Vec<u8> = Vec::new();
         let mut stream = response.bytes_stream();
         use futures::StreamExt;
@@ -675,6 +798,15 @@ impl LLMCore for OllamaCore {
             })?;
             line_buf.extend_from_slice(&chunk);
 
+            if line_buf.len() > MAX_LINE_BUFFER_BYTES {
+                let err = AgentOSError::LLMError {
+                    provider: "ollama".to_string(),
+                    reason: "NDJSON line buffer exceeded 1 MB".to_string(),
+                };
+                let _ = tx.send(InferenceEvent::Error(err.to_string())).await;
+                return Err(err);
+            }
+
             while let Some(newline_pos) = line_buf.iter().position(|&b| b == b'\n') {
                 let line = &line_buf[..newline_pos];
                 if !line.is_empty() {
@@ -683,27 +815,60 @@ impl LLMCore for OllamaCore {
                             full_text.push_str(&resp.message.content);
                             let _ = tx.send(InferenceEvent::Token(resp.message.content)).await;
                         }
-                        if resp.done {
-                            prompt_tokens = resp.prompt_eval_count.unwrap_or(0);
-                            completion_tokens = resp.eval_count.unwrap_or(0);
-                            done_reason = resp.done_reason;
-
+                        // Accumulate thinking content from thinking models.
+                        if let Some(ref thinking) = resp.message.thinking {
+                            if !thinking.is_empty() {
+                                full_thinking.push_str(thinking);
+                            }
+                        }
+                        // Collect tool calls from ANY chunk — Ollama sends them
+                        // in a separate done:false chunk before the final done:true.
+                        // Guard: only collect once to prevent duplication if a
+                        // future Ollama version repeats them in the done:true chunk.
+                        if !resp.message.tool_calls.is_empty() && tool_calls.is_empty() {
                             for tc in &resp.message.tool_calls {
+                                let payload = tool_helpers::validate_payload_object(
+                                    &tc.function.name,
+                                    "ollama",
+                                    Some(tc.function.arguments.clone()),
+                                );
+                                if !tool_helpers::check_payload_size(&tc.function.name, &payload) {
+                                    continue;
+                                }
                                 let itc = InferenceToolCall {
                                     id: None,
                                     tool_name: tc.function.name.clone(),
                                     intent_type: "execute".to_string(),
-                                    payload: tc.function.arguments.clone(),
+                                    payload,
                                 };
                                 let _ =
                                     tx.send(InferenceEvent::ToolCallComplete(itc.clone())).await;
                                 tool_calls.push(itc);
                             }
                         }
+                        if resp.done {
+                            prompt_tokens = resp.prompt_eval_count.unwrap_or(0);
+                            completion_tokens = resp.eval_count.unwrap_or(0);
+                            done_reason = resp.done_reason;
+                        }
                     }
                 }
-                line_buf = line_buf[newline_pos + 1..].to_vec();
+                line_buf.drain(..newline_pos + 1);
             }
+        }
+
+        // When content is empty but thinking has content and no tool calls
+        // were made, use thinking as fallback text. Skipped when tool_calls
+        // are present so internal reasoning doesn't leak alongside tool
+        // execution (consistent with OpenAI/Custom adapters).
+        if full_text.trim().is_empty() && !full_thinking.trim().is_empty() && tool_calls.is_empty()
+        {
+            tracing::info!(
+                model = %self.model,
+                thinking_len = full_thinking.len(),
+                "Ollama stream content empty but thinking present — using thinking as fallback"
+            );
+            full_text = full_thinking;
         }
 
         let stop_reason = if !tool_calls.is_empty() {
@@ -896,5 +1061,116 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[0].content, "Tool Result:\ntool output");
+    }
+
+    #[test]
+    fn test_ollama_message_deserializes_thinking_field() {
+        let json = r#"{
+            "model": "kimi-k2.5",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "thinking": "chain of thought here"
+            },
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 10,
+            "eval_count": 30
+        }"#;
+        let resp: OllamaChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            resp.message.thinking.as_deref(),
+            Some("chain of thought here")
+        );
+        assert!(resp.message.content.is_empty());
+    }
+
+    #[test]
+    fn test_ollama_message_without_thinking_field() {
+        let json = r#"{
+            "model": "llama3.2",
+            "message": {
+                "role": "assistant",
+                "content": "Hello!"
+            },
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 5,
+            "eval_count": 10
+        }"#;
+        let resp: OllamaChatResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.message.thinking.is_none());
+        assert_eq!(resp.message.content, "Hello!");
+    }
+
+    #[test]
+    fn test_ollama_thinking_fallback_when_content_empty() {
+        let adapter = OllamaCore::new("http://localhost:11434", "kimi-k2.5");
+        let json = r#"{
+            "model": "kimi-k2.5",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "thinking": "The user asked a question and I should respond."
+            },
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 10,
+            "eval_count": 30
+        }"#;
+        let resp: OllamaChatResponse = serde_json::from_str(json).unwrap();
+        let result = adapter.response_to_inference_result(resp, 100);
+        assert_eq!(
+            result.text,
+            "The user asked a question and I should respond."
+        );
+    }
+
+    #[test]
+    fn test_ollama_content_preferred_over_thinking() {
+        let adapter = OllamaCore::new("http://localhost:11434", "kimi-k2.5");
+        let json = r#"{
+            "model": "kimi-k2.5",
+            "message": {
+                "role": "assistant",
+                "content": "visible answer",
+                "thinking": "internal reasoning"
+            },
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 10,
+            "eval_count": 30
+        }"#;
+        let resp: OllamaChatResponse = serde_json::from_str(json).unwrap();
+        let result = adapter.response_to_inference_result(resp, 100);
+        assert_eq!(result.text, "visible answer");
+    }
+
+    #[test]
+    fn test_ollama_tool_calls_deserialized_from_response() {
+        let adapter = OllamaCore::new("http://localhost:11434", "kimi-k2.5");
+        let json = r#"{
+            "model": "kimi-k2.5",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "thinking": "I need to call file-writer",
+                "tool_calls": [{
+                    "function": {
+                        "name": "file-writer",
+                        "arguments": {"path": "test.txt", "content": "hello"}
+                    }
+                }]
+            },
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 10,
+            "eval_count": 50
+        }"#;
+        let resp: OllamaChatResponse = serde_json::from_str(json).unwrap();
+        let result = adapter.response_to_inference_result(resp, 100);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "file-writer");
+        assert_eq!(result.stop_reason, StopReason::ToolUse);
     }
 }
