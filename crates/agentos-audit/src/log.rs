@@ -72,6 +72,12 @@ pub enum AuditEventType {
     ScheduledJobResumed,
     ScheduledJobDeleted,
 
+    // agentd - Timers
+    TimerCreated,
+    TimerFired,
+    TimerCancelled,
+    TimerActionFailed,
+
     // agentd - Background Tasks
     BackgroundTaskStarted,
     BackgroundTaskCompleted,

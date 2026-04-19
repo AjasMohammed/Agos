@@ -664,6 +664,13 @@ pub struct Kernel {
     pub channel_listener_registry: Arc<crate::user_channel_registry::ChannelListenerRegistry>,
     /// Sender for inbound messages from channel listeners to InboundRouter (Phase 6).
     pub inbound_tx: tokio::sync::mpsc::Sender<crate::notification_router::InboundMessage>,
+    /// Resolves channel inbound chat to `chat_infer_with_tools` after `wire_inbound_chat_bridge`.
+    pub inbound_chat_bridge: Arc<crate::channel_chat_bridge::KernelChatBridge>,
+    /// Pending receiver consumed once by `wire_inbound_chat_bridge` to spawn the InboundRouter.
+    /// Stored here so the router is guaranteed to start after the bridge is wired.
+    pub(crate) pending_inbound_rx: std::sync::Mutex<
+        Option<tokio::sync::mpsc::Receiver<crate::notification_router::InboundMessage>>,
+    >,
     /// Webhook secret tokens keyed by channel instance ID.
     /// Used by the API webhook handler to verify `X-Telegram-Bot-Api-Secret-Token`.
     pub webhook_secrets: Arc<RwLock<HashMap<ChannelInstanceID, String>>>,
@@ -3177,17 +3184,11 @@ impl Kernel {
         };
         let channel_listener_registry =
             Arc::new(crate::user_channel_registry::ChannelListenerRegistry::new());
+        let inbound_chat_bridge = Arc::new(crate::channel_chat_bridge::KernelChatBridge::new());
         let (inbound_tx, inbound_rx) =
             tokio::sync::mpsc::channel::<crate::notification_router::InboundMessage>(512);
-        tokio::spawn(
-            crate::inbound_router::InboundRouter::new(
-                notification_router.clone(),
-                channel_registry.clone(),
-                scheduler.clone(),
-                inbound_rx,
-            )
-            .run(),
-        );
+        // InboundRouter is spawned in `wire_inbound_chat_bridge` (after Arc::new(kernel))
+        // so the bridge is guaranteed to be wired before the first inbound message is processed.
 
         // Build skill registry, loading from configured skill directories.
         let skill_registry = {
@@ -3322,6 +3323,8 @@ impl Kernel {
             channel_registry,
             channel_listener_registry,
             inbound_tx,
+            inbound_chat_bridge,
+            pending_inbound_rx: std::sync::Mutex::new(Some(inbound_rx)),
             webhook_secrets: Arc::new(RwLock::new(HashMap::new())),
             connector_registry,
             compute_runtime,
@@ -3495,6 +3498,13 @@ impl Kernel {
         // Arc, via `start_webhook_wakeup()`. This is because the wake-up service
         // needs Arc<Kernel> to create tasks.
 
+        // Auto-reactivate agents that were Online before this kernel session ended.
+        // Runs after pubkey pre-registration (above) so signing is immediately available.
+        let (reactivated, skipped) = kernel.auto_reactivate_agents().await;
+        if reactivated > 0 || skipped > 0 {
+            tracing::info!(reactivated, skipped, "Agent auto-reactivation complete");
+        }
+
         // Emit KernelStarted audit event
         kernel.audit_log(agentos_audit::AuditEntry {
             timestamp: kernel.started_at,
@@ -3518,6 +3528,29 @@ impl Kernel {
     /// Start the webhook wake-up loop. Must be called after the kernel is
     /// wrapped in `Arc`, since the wake-up service needs `Arc<Kernel>` to
     /// create tasks via the scheduler.
+    /// Wire the kernel into the inbound chat bridge and spawn the InboundRouter.
+    /// Must be called once after `Arc::new(kernel)`.
+    pub fn wire_inbound_chat_bridge(self: &Arc<Self>) {
+        self.inbound_chat_bridge.set_kernel(Arc::downgrade(self));
+        let rx = self
+            .pending_inbound_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(rx) = rx {
+            tokio::spawn(
+                crate::inbound_router::InboundRouter::new(
+                    self.notification_router.clone(),
+                    self.channel_registry.clone(),
+                    self.scheduler.clone(),
+                    self.inbound_chat_bridge.clone(),
+                    rx,
+                )
+                .run(),
+            );
+        }
+    }
+
     pub async fn start_webhook_wakeup(self: &Arc<Self>) {
         let rx = self.webhook_batch_rx.lock().await.take();
         if let Some(rx) = rx {

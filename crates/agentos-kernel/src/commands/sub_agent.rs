@@ -45,6 +45,7 @@ mod tests {
             is_team_coordinator: false,
             skip_checkpoint: false,
             thinking_level: Default::default(),
+            spawner_agent_id: None,
         }
     }
 
@@ -300,6 +301,7 @@ impl Kernel {
             is_team_coordinator: false,
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
+            spawner_agent_id: None,
         };
 
         self.scheduler.enqueue(child_task).await;

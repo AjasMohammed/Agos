@@ -51,10 +51,13 @@ use crate::procedure_list::ProcedureList;
 use crate::procedure_search::ProcedureSearch;
 use crate::process_manager::ProcessManagerTool;
 use crate::raw_usb::RawUsbTool;
+use crate::schedule_once::{CancelOnceJobTool, ListOnceJobsTool, ScheduleOnceTool};
+use crate::set_timer::{CancelTimerTool, ListTimersTool, SetTimerTool};
 use crate::shell_exec::ShellExec;
 use crate::sys_monitor::SysMonitorTool;
 use crate::task_delegate::TaskDelegate;
 use crate::task_list::TaskListTool;
+use crate::task_spawn_async::TaskSpawnAsyncTool;
 use crate::task_status::TaskStatusTool;
 use crate::think::ThinkTool;
 use crate::traits::{AgentTool, ToolExecutionContext};
@@ -185,6 +188,7 @@ impl ToolRunner {
         self.register(Box::new(ShellExec::new()));
         self.register(Box::new(AgentMessageTool::new()));
         self.register(Box::new(TaskDelegate::new()));
+        self.register(Box::new(TaskSpawnAsyncTool::new()));
         match HttpClientTool::new() {
             Ok(tool) => self.register(Box::new(tool)),
             Err(e) => tracing::error!("Failed to initialize http-client tool: {}", e),
@@ -226,6 +230,14 @@ impl ToolRunner {
         self.register(Box::new(EventUnsubscribeTool::new()));
         self.register(Box::new(EventListSubscriptionsTool::new()));
         self.register(Box::new(EventListAvailableTool::new()));
+
+        // Scheduling tools — emit _kernel_action, dispatched by kernel.
+        self.register(Box::new(SetTimerTool::new()));
+        self.register(Box::new(CancelTimerTool::new()));
+        self.register(Box::new(ListTimersTool::new()));
+        self.register(Box::new(ScheduleOnceTool::new()));
+        self.register(Box::new(CancelOnceJobTool::new()));
+        self.register(Box::new(ListOnceJobsTool::new()));
 
         // KMC bridge tools — route to kernel capability providers.
         for name in crate::kmc_tools::KMC_TOOL_NAMES {

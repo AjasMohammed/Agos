@@ -523,6 +523,7 @@ impl Kernel {
                 last_active: now,
                 public_key_hex,
                 base_url: effective_base_url,
+                manually_offline: false,
             };
 
             // Remove stale Offline entry with same name when a new agent connects with a
@@ -615,6 +616,15 @@ impl Kernel {
             .register_agent(agent_id, agent_name.clone(), AgentBudget::default())
             .await;
 
+        // On reconnect, clear any subscriptions from a prior session or auto-reactivation
+        // so that we don't accumulate duplicates (EventBus::subscribe is pure-append).
+        if is_reconnect {
+            let existing = self.event_bus.list_subscriptions_for_agent(&agent_id).await;
+            for sub in &existing {
+                self.event_bus.unsubscribe(&sub.id).await;
+            }
+        }
+
         // Apply role-based default event subscriptions before AgentAdded is emitted.
         let mut default_specs: Vec<(EventTypeFilter, SubscriptionPriority)> = Vec::new();
         for role in &profile.roles {
@@ -657,19 +667,25 @@ impl Kernel {
             rollback_ref: None,
         });
 
-        // Emit AgentAdded event
-        self.emit_event(
-            EventType::AgentAdded,
-            EventSource::AgentLifecycle,
-            EventSeverity::Info,
-            serde_json::json!({
-                "agent_id": agent_id.to_string(),
-                "agent_name": agent_name,
-                "model": agent_model,
-            }),
-            0,
-        )
-        .await;
+        // Only emit AgentAdded for genuinely new agents, not reconnects.
+        // Reconnect restores an existing profile; every subscribed peer receiving a
+        // "new agent" prompt for someone they already knew causes spurious tasks
+        // (same N×(N-1) storm as auto-reactivation). The audit entry above is the
+        // sole signal for reconnect; AgentAdded drives the "introduce yourself" flow.
+        if !is_reconnect {
+            self.emit_event(
+                EventType::AgentAdded,
+                EventSource::AgentLifecycle,
+                EventSeverity::Info,
+                serde_json::json!({
+                    "agent_id": agent_id.to_string(),
+                    "agent_name": agent_name,
+                    "model": agent_model,
+                }),
+                0,
+            )
+            .await;
+        }
 
         // Queue an onboarding or test-evaluation task for the agent.
         // New agents always get an onboarding prompt so they orient themselves in the
@@ -779,6 +795,7 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         is_team_coordinator: false,
                         skip_checkpoint: false,
                         thinking_level: ThinkingLevel::Off,
+                        spawner_agent_id: None,
                     };
                     self.scheduler.enqueue(onboarding_task).await;
                     onboarding_task_id_opt = Some(onboarding_task_id);
@@ -868,7 +885,9 @@ Once you have explored, briefly summarise what you found and confirm you are rea
         };
         // Mark as Offline rather than removing. The persisted profile is needed so
         // that reconnect with the same name + provider + model can reuse the UUID.
-        registry.update_status(&agent_id, AgentStatus::Offline);
+        // `manually_offline = true` tells auto-reactivation to skip this agent on restart.
+        // Combined call: one disk write instead of two.
+        registry.set_offline(&agent_id, true);
         drop(registry);
 
         // Evict the LLM adapter so the connection to the provider is released.
@@ -1231,6 +1250,227 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                 message: e.to_string(),
             },
         }
+    }
+
+    /// Called once during `boot()` after all subsystems are ready. For each agent
+    /// that was not explicitly disconnected by the user (`manually_offline = false`),
+    /// this rebuilds the LLM adapter from stored credentials and brings the agent
+    /// back Online without running the onboarding flow again.
+    ///
+    /// Agents whose vault key is missing are left Offline with an audit event.
+    ///
+    /// Unlike interactive `connect` which aborts on Unhealthy backends, boot-time
+    /// reactivation tolerates them — the operator may start the kernel before LLM
+    /// backends are reachable, and aborting here would strand all persisted agents.
+    /// The first task will surface any backend errors naturally.
+    ///
+    /// Ed25519 pubkeys are already pre-registered with the message bus earlier in
+    /// `boot()` (`register_pubkey_internal` loop), so signing is available immediately.
+    ///
+    /// Returns `(reactivated, skipped)` counts for logging.
+    pub(crate) async fn auto_reactivate_agents(&self) -> (usize, usize) {
+        let candidates: Vec<AgentProfile> = {
+            let registry = self.agent_registry.read().await;
+            registry
+                .list_all()
+                .into_iter()
+                // `load_from_disk` forces all agents to Offline; the status check
+                // pins that invariant so a future change can't double-reactivate.
+                .filter(|a| !a.manually_offline && a.status == AgentStatus::Offline)
+                .cloned()
+                .collect()
+        };
+
+        if candidates.is_empty() {
+            return (0, 0);
+        }
+
+        tracing::info!(
+            count = candidates.len(),
+            "Auto-reactivating persisted agents from previous kernel session"
+        );
+
+        let mut reactivated = 0usize;
+        let mut skipped = 0usize;
+
+        for agent in candidates {
+            let agent_id = agent.id;
+            let agent_name = agent.name.clone();
+            let agent_model = agent.model.clone();
+
+            let (llm_adapter, _) = match self
+                .build_llm_adapter(
+                    &agent_name,
+                    &agent.provider,
+                    &agent_model,
+                    agent.base_url.clone(),
+                )
+                .await
+            {
+                Ok(pair) => pair,
+                Err(e) => {
+                    tracing::warn!(
+                        agent_name = %agent_name,
+                        error = %e,
+                        "Auto-reactivation skipped: failed to build LLM adapter"
+                    );
+                    self.audit_log(agentos_audit::AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        trace_id: TraceID::new(),
+                        event_type: agentos_audit::AuditEventType::LLMConnectionFailed,
+                        agent_id: Some(agent_id),
+                        task_id: None,
+                        tool_id: None,
+                        details: serde_json::json!({
+                            "name": agent_name,
+                            "reason": e.to_string(),
+                            "auto_reactivated": false,
+                        }),
+                        severity: agentos_audit::AuditSeverity::Warn,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
+                    skipped += 1;
+                    continue;
+                }
+            };
+
+            // Recover missing Ed25519 identity — edge case where key gen failed at first
+            // connect. The boot pre-population loop skips agents without a pubkey, so
+            // the bus won't have this agent's key unless we generate and register it now.
+            if agent.public_key_hex.is_none() {
+                match self.identity_manager.generate_identity(&agent_id).await {
+                    Ok(pk) => {
+                        if let Err(e) = self
+                            .message_bus
+                            .register_pubkey_internal(agent_id, pk.clone())
+                            .await
+                        {
+                            tracing::warn!(
+                                agent_name = %agent_name,
+                                error = %e,
+                                "Auto-reactivation: failed to register recovered pubkey"
+                            );
+                        }
+                        self.agent_registry
+                            .write()
+                            .await
+                            .update_public_key(&agent_id, pk);
+                        tracing::info!(
+                            agent_name = %agent_name,
+                            "Auto-reactivation: recovered missing Ed25519 identity"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            agent_name = %agent_name,
+                            error = %e,
+                            "Auto-reactivation skipped: failed to generate Ed25519 identity"
+                        );
+                        skipped += 1;
+                        continue;
+                    }
+                }
+            }
+
+            match llm_adapter.health_check().await {
+                agentos_llm::HealthStatus::Healthy => {}
+                agentos_llm::HealthStatus::Degraded { reason }
+                | agentos_llm::HealthStatus::Unhealthy { reason } => {
+                    tracing::warn!(
+                        agent_name = %agent_name,
+                        %reason,
+                        "Auto-reactivation: LLM backend not fully healthy at boot — proceeding; first task will surface errors"
+                    );
+                }
+            }
+
+            // Persist Online status before inserting the adapter so no window exists
+            // where the agent appears Online but has no adapter in `active_llms`.
+            // If the agent was removed between snapshot and now, skip all further setup.
+            let reactivated_ok = self.agent_registry.write().await.reactivate(&agent_id);
+            if !reactivated_ok {
+                tracing::warn!(
+                    agent_name = %agent_name,
+                    "Auto-reactivation: agent removed from registry between snapshot and reactivation — skipping"
+                );
+                skipped += 1;
+                continue;
+            }
+
+            self.active_llms.write().await.insert(agent_id, llm_adapter);
+
+            let agent_home = self.data_dir.join("agents").join(&agent_name);
+            if let Err(e) = tokio::fs::create_dir_all(&agent_home).await {
+                tracing::warn!(
+                    agent_name = %agent_name,
+                    error = %e,
+                    "Failed to create agent home directory during auto-reactivation"
+                );
+            }
+
+            self.cost_tracker
+                .register_agent(agent_id, agent_name.clone(), AgentBudget::default())
+                .await;
+
+            let mut default_specs: Vec<(EventTypeFilter, SubscriptionPriority)> = Vec::new();
+            for role in &agent.roles {
+                for spec in crate::event_bus::default_subscriptions_for_role(role) {
+                    if !default_specs.contains(&spec) {
+                        default_specs.push(spec);
+                    }
+                }
+            }
+            for (event_type_filter, priority) in default_specs {
+                self.event_bus
+                    .subscribe(EventSubscription {
+                        id: SubscriptionID::new(),
+                        agent_id,
+                        event_type_filter,
+                        filter: None,
+                        priority,
+                        throttle: ThrottlePolicy::None,
+                        enabled: true,
+                        created_at: chrono::Utc::now(),
+                    })
+                    .await;
+            }
+
+            self.audit_log(agentos_audit::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: agentos_audit::AuditEventType::AgentReconnected,
+                agent_id: Some(agent_id),
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({
+                    "name": agent_name,
+                    "model": agent_model,
+                    "auto_reactivated": true,
+                }),
+                severity: agentos_audit::AuditSeverity::Info,
+                reversible: false,
+                rollback_ref: None,
+            });
+
+            // Do NOT emit AgentAdded here — reactivated agents are being restored to a
+            // prior session state, not added anew. Emitting AgentAdded would trigger
+            // event-subscribed agents to queue response tasks for every peer restored
+            // on restart, causing N×(N-1) spurious tasks. The self-exclusion filter in
+            // event_dispatch only prevents the added agent from seeing its own event;
+            // every other reactivated peer would still receive one per agent restored.
+            // The audit entry above is the sole notification; genuine new-agent events
+            // come from cmd_connect_agent (only when !is_reconnect).
+            tracing::info!(
+                agent_name = %agent_name,
+                agent_id = %agent_id,
+                "Agent auto-reactivated on kernel restart"
+            );
+
+            reactivated += 1;
+        }
+
+        (reactivated, skipped)
     }
 }
 

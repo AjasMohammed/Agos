@@ -97,6 +97,14 @@ pub(crate) enum KernelAction {
         task_id: String,
         reason: String,
     },
+    /// Fire-and-forget async spawn. Creates a child task but does NOT add a
+    /// scheduler dependency, so the parent continues immediately. On completion
+    /// the child's result is injected into the spawner's context window.
+    SpawnAsync {
+        target_agent: String,
+        prompt: String,
+        priority: u8,
+    },
     /// Delegate a task to an external A2A-compliant agent via HTTP.
     A2ADelegate {
         agent_url: String,
@@ -122,6 +130,32 @@ pub(crate) enum KernelAction {
     /// Enumerate all event categories and types, marking which ones the
     /// calling agent currently has permission to subscribe to.
     EventListAvailableAction,
+    /// Create an in-memory one-shot timer that fires after `delay_secs`.
+    SetTimer {
+        name: String,
+        delay_secs: u64,
+        agent_name: String,
+        action: TimerAction,
+    },
+    /// Cancel a pending in-memory timer by name.
+    CancelTimer {
+        name: String,
+    },
+    /// List all pending in-memory timers.
+    ListTimers,
+    /// Schedule a one-shot task at an absolute datetime (or a relative delay).
+    ScheduleOnce {
+        name: String,
+        task_prompt: String,
+        agent_name: String,
+        fire_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// Cancel a pending once-job by name.
+    CancelOnceJob {
+        name: String,
+    },
+    /// List all pending once-jobs.
+    ListOnceJobs,
 }
 
 /// Why an agent is requesting human escalation.
@@ -374,6 +408,16 @@ impl KernelAction {
                     .to_string();
                 Some(Self::CancelAgent { task_id, reason })
             }
+            "spawn_async" => {
+                let target_agent = value.get("target_agent")?.as_str()?.to_string();
+                let prompt = value.get("task")?.as_str()?.to_string();
+                let priority = value.get("priority").and_then(|v| v.as_u64()).unwrap_or(5) as u8;
+                Some(Self::SpawnAsync {
+                    target_agent,
+                    prompt,
+                    priority,
+                })
+            }
             "a2a_delegate" => {
                 let agent_url = value.get("agent_url")?.as_str()?.to_string();
                 let capability = value.get("capability")?.as_str()?.to_string();
@@ -421,6 +465,62 @@ impl KernelAction {
             }
             "event_list_subscriptions" => Some(Self::EventListSubscriptionsAction),
             "event_list_available" => Some(Self::EventListAvailableAction),
+            "set_timer" => {
+                let name = value.get("name")?.as_str()?.to_string();
+                let delay_secs = value.get("delay_secs")?.as_u64()?;
+                let agent_name = value
+                    .get("agent_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let action: TimerAction =
+                    match serde_json::from_value(value.get("action")?.clone()) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "set_timer: failed to deserialize TimerAction");
+                            return None;
+                        }
+                    };
+                Some(Self::SetTimer {
+                    name,
+                    delay_secs,
+                    agent_name,
+                    action,
+                })
+            }
+            "cancel_timer" => {
+                let name = value.get("name")?.as_str()?.to_string();
+                Some(Self::CancelTimer { name })
+            }
+            "list_timers" => Some(Self::ListTimers),
+            "schedule_once" => {
+                let name = value.get("name")?.as_str()?.to_string();
+                let task_prompt = value.get("task_prompt")?.as_str()?.to_string();
+                let agent_name = value
+                    .get("agent_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let fire_at: chrono::DateTime<chrono::Utc> =
+                    match serde_json::from_value(value.get("fire_at")?.clone()) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "schedule_once: failed to deserialize fire_at");
+                            return None;
+                        }
+                    };
+                Some(Self::ScheduleOnce {
+                    name,
+                    task_prompt,
+                    agent_name,
+                    fire_at,
+                })
+            }
+            "cancel_once_job" => {
+                let name = value.get("name")?.as_str()?.to_string();
+                Some(Self::CancelOnceJob { name })
+            }
+            "list_once_jobs" => Some(Self::ListOnceJobs),
             other => {
                 tracing::warn!(action = %other, "Unknown _kernel_action, ignoring");
                 None
@@ -459,11 +559,18 @@ impl Kernel {
             KernelAction::AwaitAgents { .. } => "await_agents",
             KernelAction::PollAgents { .. } => "poll_agents",
             KernelAction::CancelAgent { .. } => "cancel_agent",
+            KernelAction::SpawnAsync { .. } => "spawn_async",
             KernelAction::A2ADelegate { .. } => "a2a_delegate",
             KernelAction::EventSubscribeAction { .. } => "event_subscribe",
             KernelAction::EventUnsubscribeAction { .. } => "event_unsubscribe",
             KernelAction::EventListSubscriptionsAction => "event_list_subscriptions",
             KernelAction::EventListAvailableAction => "event_list_available",
+            KernelAction::SetTimer { .. } => "set_timer",
+            KernelAction::CancelTimer { .. } => "cancel_timer",
+            KernelAction::ListTimers => "list_timers",
+            KernelAction::ScheduleOnce { .. } => "schedule_once",
+            KernelAction::CancelOnceJob { .. } => "cancel_once_job",
+            KernelAction::ListOnceJobs => "list_once_jobs",
         };
 
         self.audit_log(agentos_audit::AuditEntry {
@@ -913,6 +1020,14 @@ impl Kernel {
                     },
                 }
             }
+            KernelAction::SpawnAsync {
+                target_agent,
+                prompt,
+                priority,
+            } => {
+                self.execute_spawn_async(task, &target_agent, &prompt, priority)
+                    .await
+            }
             KernelAction::A2ADelegate {
                 agent_url,
                 capability,
@@ -1027,6 +1142,28 @@ impl Kernel {
                 self.execute_event_list_subscriptions(task).await
             }
             KernelAction::EventListAvailableAction => self.execute_event_list_available(task).await,
+            KernelAction::SetTimer {
+                name,
+                delay_secs,
+                agent_name,
+                action,
+            } => {
+                self.execute_set_timer(task, name, delay_secs, agent_name, action)
+                    .await
+            }
+            KernelAction::CancelTimer { name } => self.execute_cancel_timer(task, name).await,
+            KernelAction::ListTimers => self.execute_list_timers(task).await,
+            KernelAction::ScheduleOnce {
+                name,
+                task_prompt,
+                agent_name,
+                fire_at,
+            } => {
+                self.execute_schedule_once(task, name, task_prompt, agent_name, fire_at)
+                    .await
+            }
+            KernelAction::CancelOnceJob { name } => self.execute_cancel_once_job(task, name).await,
+            KernelAction::ListOnceJobs => self.execute_list_once_jobs(task).await,
         };
 
         let severity = if result.success {
@@ -1052,6 +1189,29 @@ impl Kernel {
         });
 
         result
+    }
+
+    async fn execute_spawn_async(
+        &self,
+        task: &AgentTask,
+        target_agent: &str,
+        prompt: &str,
+        priority: u8,
+    ) -> KernelActionResult {
+        let timeout_secs = self.config.kernel.default_task_timeout_secs;
+        match self
+            .handle_spawn_async(task, target_agent, prompt, priority, timeout_secs)
+            .await
+        {
+            Ok(value) => KernelActionResult {
+                success: true,
+                result: value,
+            },
+            Err(e) => KernelActionResult {
+                success: false,
+                result: serde_json::json!({ "error": e.to_string() }),
+            },
+        }
     }
 
     async fn execute_delegate_task(
@@ -1403,6 +1563,15 @@ impl Kernel {
 
         let priority_parsed = parse_priority(&priority);
 
+        let agent_name = {
+            let reg = self.agent_registry.read().await;
+            reg.get_by_id(&task.agent_id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| task.agent_id.to_string())
+        };
+        let subject_prefixed = format!("[{agent_name}] {}", subject.as_str());
+        let subject_line: String = subject_prefixed.chars().take(80).collect();
+
         let msg = UserMessage {
             id: NotificationID::new(),
             from: NotificationSource::Agent(task.agent_id),
@@ -1410,7 +1579,7 @@ impl Kernel {
             trace_id,
             kind: UserMessageKind::Notification,
             priority: priority_parsed,
-            subject: subject.chars().take(80).collect(),
+            subject: subject_line,
             body,
             interaction: None,
             delivery_status: HashMap::new(),
@@ -1498,6 +1667,16 @@ impl Kernel {
         let timeout_secs = timeout_secs.clamp(10, 86_400);
         let expires_at = Utc::now() + chrono::Duration::seconds(timeout_secs as i64);
 
+        let agent_name = {
+            let reg = self.agent_registry.read().await;
+            reg.get_by_id(&task.agent_id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| task.agent_id.to_string())
+        };
+        let subject_prefixed = format!("[{agent_name}] {}", question.as_str());
+        let subject_line: String = subject_prefixed.chars().take(80).collect();
+        let body_prefixed = format!("{agent_name} asks:\n\n{question}");
+
         let msg = UserMessage {
             id: NotificationID::new(),
             from: NotificationSource::Agent(task.agent_id),
@@ -1509,8 +1688,8 @@ impl Kernel {
                 free_text_allowed: true,
             },
             priority: priority_parsed,
-            subject: question.chars().take(80).collect(),
-            body: question.clone(),
+            subject: subject_line,
+            body: body_prefixed,
             interaction: Some(InteractionRequest {
                 blocking: true,
                 timeout_secs,
@@ -1793,6 +1972,7 @@ impl Kernel {
             is_team_coordinator: false,
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
+            spawner_agent_id: None,
         };
 
         self.scheduler.register_external(child_task.clone()).await;
@@ -2573,5 +2753,240 @@ fn parse_priority(s: &str) -> NotificationPriority {
         "urgent" => NotificationPriority::Urgent,
         "critical" => NotificationPriority::Critical,
         _ => NotificationPriority::Info,
+    }
+}
+
+impl Kernel {
+    async fn execute_set_timer(
+        &self,
+        task: &AgentTask,
+        name: String,
+        delay_secs: u64,
+        agent_name: String,
+        action: TimerAction,
+    ) -> KernelActionResult {
+        // Resolve agent_name: if it looks like an AgentID, map to the display name.
+        let resolved = if let Ok(aid) = agent_name.parse::<AgentID>() {
+            let registry = self.agent_registry.read().await;
+            registry
+                .get_by_id(&aid)
+                .map(|a| a.name.clone())
+                .unwrap_or(agent_name)
+        } else if agent_name.is_empty() {
+            // Default to the calling agent's name.
+            let registry = self.agent_registry.read().await;
+            registry
+                .get_by_id(&task.agent_id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| task.agent_id.to_string())
+        } else {
+            agent_name
+        };
+
+        match self
+            .schedule_manager
+            .create_timer(name.clone(), delay_secs, resolved, action, None)
+            .await
+        {
+            Ok(id) => {
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::TimerCreated,
+                    agent_id: Some(task.agent_id),
+                    task_id: Some(task.id),
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "timer_name": name,
+                        "timer_id": id.to_string(),
+                        "delay_secs": delay_secs,
+                        "source": "agent_tool",
+                    }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                let fire_at = Utc::now() + Duration::from_secs(delay_secs);
+                KernelActionResult {
+                    success: true,
+                    result: serde_json::json!({
+                        "timer_id": id.to_string(),
+                        "timer_name": name,
+                        "fires_at": fire_at.to_rfc3339(),
+                        "delay_secs": delay_secs,
+                        "message": format!("Timer '{}' set — fires in {}s", name, delay_secs),
+                    }),
+                }
+            }
+            Err(e) => KernelActionResult {
+                success: false,
+                result: serde_json::json!({ "error": e.to_string() }),
+            },
+        }
+    }
+
+    async fn execute_cancel_timer(&self, task: &AgentTask, name: String) -> KernelActionResult {
+        match self.schedule_manager.cancel_timer_by_name(&name).await {
+            Ok(timer) => {
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::TimerCancelled,
+                    agent_id: Some(task.agent_id),
+                    task_id: Some(task.id),
+                    tool_id: None,
+                    details: serde_json::json!({ "timer_name": timer.name, "timer_id": timer.id.to_string() }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                KernelActionResult {
+                    success: true,
+                    result: serde_json::json!({
+                        "cancelled": true,
+                        "timer_name": timer.name,
+                        "timer_id": timer.id.to_string(),
+                    }),
+                }
+            }
+            Err(e) => KernelActionResult {
+                success: false,
+                result: serde_json::json!({ "error": e.to_string() }),
+            },
+        }
+    }
+
+    async fn execute_list_timers(&self, _task: &AgentTask) -> KernelActionResult {
+        let timers = self.schedule_manager.list_timers().await;
+        let list: Vec<serde_json::Value> = timers
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "id": t.id.to_string(),
+                    "name": t.name,
+                    "agent_name": t.agent_name,
+                    "fires_at": t.fire_at.to_rfc3339(),
+                })
+            })
+            .collect();
+        KernelActionResult {
+            success: true,
+            result: serde_json::json!({ "timers": list, "count": list.len() }),
+        }
+    }
+
+    async fn execute_schedule_once(
+        &self,
+        task: &AgentTask,
+        name: String,
+        task_prompt: String,
+        agent_name: String,
+        fire_at: chrono::DateTime<chrono::Utc>,
+    ) -> KernelActionResult {
+        let resolved = if let Ok(aid) = agent_name.parse::<AgentID>() {
+            let registry = self.agent_registry.read().await;
+            registry
+                .get_by_id(&aid)
+                .map(|a| a.name.clone())
+                .unwrap_or(agent_name)
+        } else if agent_name.is_empty() {
+            let registry = self.agent_registry.read().await;
+            registry
+                .get_by_id(&task.agent_id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| task.agent_id.to_string())
+        } else {
+            agent_name
+        };
+
+        match self
+            .schedule_manager
+            .create_once_job(name.clone(), fire_at, resolved, task_prompt)
+            .await
+        {
+            Ok(id) => {
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::ScheduledJobCreated,
+                    agent_id: Some(task.agent_id),
+                    task_id: Some(task.id),
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "job_name": name,
+                        "schedule_id": id.to_string(),
+                        "fire_at": fire_at.to_rfc3339(),
+                        "once": true,
+                        "source": "agent_tool",
+                    }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                KernelActionResult {
+                    success: true,
+                    result: serde_json::json!({
+                        "job_id": id.to_string(),
+                        "job_name": name,
+                        "fires_at": fire_at.to_rfc3339(),
+                        "message": format!("Once-job '{}' scheduled for {}", name, fire_at.to_rfc3339()),
+                    }),
+                }
+            }
+            Err(e) => KernelActionResult {
+                success: false,
+                result: serde_json::json!({ "error": e.to_string() }),
+            },
+        }
+    }
+
+    async fn execute_cancel_once_job(&self, task: &AgentTask, name: String) -> KernelActionResult {
+        match self.schedule_manager.cancel_once_job_by_name(&name).await {
+            Ok(job) => {
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::ScheduledJobDeleted,
+                    agent_id: Some(task.agent_id),
+                    task_id: Some(task.id),
+                    tool_id: None,
+                    details: serde_json::json!({ "job_name": job.name, "job_id": job.id.to_string(), "once": true }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                KernelActionResult {
+                    success: true,
+                    result: serde_json::json!({
+                        "cancelled": true,
+                        "job_name": job.name,
+                        "job_id": job.id.to_string(),
+                    }),
+                }
+            }
+            Err(e) => KernelActionResult {
+                success: false,
+                result: serde_json::json!({ "error": e.to_string() }),
+            },
+        }
+    }
+
+    async fn execute_list_once_jobs(&self, _task: &AgentTask) -> KernelActionResult {
+        let jobs = self.schedule_manager.list_once_jobs().await;
+        let list: Vec<serde_json::Value> = jobs
+            .iter()
+            .map(|j| {
+                serde_json::json!({
+                    "id": j.id.to_string(),
+                    "name": j.name,
+                    "agent_name": j.agent_name,
+                    "fires_at": j.fire_at.to_rfc3339(),
+                })
+            })
+            .collect();
+        KernelActionResult {
+            success: true,
+            result: serde_json::json!({ "jobs": list, "count": list.len() }),
+        }
     }
 }

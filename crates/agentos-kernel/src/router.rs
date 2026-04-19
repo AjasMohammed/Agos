@@ -170,6 +170,7 @@ mod tests {
             base_url: None,
             default_thinking_level: agentos_types::ThinkingLevel::Off,
             system_prompt: None,
+            manually_offline: false,
         }
     }
 

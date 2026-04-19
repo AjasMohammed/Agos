@@ -32,8 +32,13 @@ pub struct MatrixAdapter {
 }
 
 impl MatrixAdapter {
-    pub fn new(homeserver: String, access_token: String, rooms: Vec<String>) -> Self {
-        Self {
+    pub fn new(
+        homeserver: String,
+        access_token: String,
+        rooms: Vec<String>,
+    ) -> Result<Self, agentos_types::AgentOSError> {
+        crate::webhook::validate_server_base_url(&homeserver, "matrix")?;
+        Ok(Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(35))
                 .build()
@@ -43,7 +48,7 @@ impl MatrixAdapter {
             rooms,
             name: "matrix".to_string(),
             since: Arc::new(Mutex::new(None)),
-        }
+        })
     }
 
     fn cs_url(&self, path: &str) -> String {

@@ -1,5 +1,8 @@
 use crate::chat_inflight::InFlightChat;
 use crate::chat_store::ChatStore;
+use crate::convo_inflight::InFlightConvos;
+use crate::convo_store::ConvoStore;
+use crate::file_store::FileStore;
 use agentos_api::KernelService;
 use agentos_kernel::notification_router::NotificationSsePayload;
 use agentos_kernel::Kernel;
@@ -26,6 +29,10 @@ pub struct AppState {
     /// - Value is (64-char hex CSRF token, Instant it was issued).
     /// - Tokens are regenerated after 8 h (matching the session cookie max-age).
     pub csrf_tokens: Arc<DashMap<String, (String, Instant)>>,
+    /// Browser UI sessions after login: SHA-256(opaque_session_cookie) -> issued_at.
+    /// The cookie value is random per login (not the shared auth token) so file ownership
+    /// can distinguish concurrent users who share one deployment token.
+    pub browser_sessions: Arc<DashMap<String, Instant>>,
     /// Pre-canonicalized directories from which tool manifest files may be loaded.
     /// Paths are resolved at startup so handler comparisons are O(1) in-memory.
     pub allowed_tool_dirs: Arc<Vec<PathBuf>>,
@@ -34,6 +41,12 @@ pub struct AppState {
     /// In-memory registry of running chat inferences. Lets SSE subscribers reconnect to
     /// an inference that the server is still streaming after a browser refresh.
     pub inflight_chat: Arc<InFlightChat>,
+    /// Persistent multi-agent conversation store.
+    pub convo_store: Arc<ConvoStore>,
+    /// In-memory registry of running multi-agent conversation orchestrators.
+    pub inflight_convos: Arc<InFlightConvos>,
+    /// Persistent file upload store.
+    pub file_store: Arc<FileStore>,
     /// Broadcast channel for real-time notification push to browser SSE subscribers.
     /// The `SseDeliveryAdapter` in the kernel publishes to this sender.
     pub notification_tx: broadcast::Sender<NotificationSsePayload>,

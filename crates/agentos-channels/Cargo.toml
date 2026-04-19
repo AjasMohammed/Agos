@@ -23,5 +23,6 @@ rand = { workspace = true }
 zeroize = { workspace = true }
 futures-util = "0.3"
 urlencoding = "2"
+url = { workspace = true }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 lettre = { workspace = true }

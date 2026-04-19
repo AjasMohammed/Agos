@@ -156,6 +156,50 @@ impl AgentRegistry {
         }
     }
 
+    /// Mark an agent as intentionally offline so auto-reactivation skips it on restart.
+    pub fn set_manually_offline(&mut self, id: &AgentID, value: bool) {
+        if let Some(agent) = self.agents.get_mut(id) {
+            agent.manually_offline = value;
+            self.save_to_disk();
+        }
+    }
+
+    /// Set an agent Offline in one atomic write. Combines `update_status(Offline)` and
+    /// `set_manually_offline` so only one disk flush is needed.
+    pub fn set_offline(&mut self, id: &AgentID, manually_offline: bool) {
+        if let Some(agent) = self.agents.get_mut(id) {
+            agent.status = AgentStatus::Offline;
+            agent.manually_offline = manually_offline;
+            self.save_to_disk();
+        }
+    }
+
+    /// Bring a persisted agent back Online after a kernel restart. Atomically sets
+    /// status to `Online`, clears `current_task` (stale from the prior session),
+    /// clears `manually_offline`, and refreshes `last_active`. One disk write.
+    /// Returns `false` if the ID is not found (caller should skip further setup).
+    pub fn reactivate(&mut self, id: &AgentID) -> bool {
+        if let Some(agent) = self.agents.get_mut(id) {
+            agent.status = AgentStatus::Online;
+            agent.current_task = None;
+            agent.manually_offline = false;
+            agent.last_active = chrono::Utc::now();
+            self.save_to_disk();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Update the stored Ed25519 public key (hex) for an agent.
+    /// Used during auto-reactivation to persist a newly generated identity.
+    pub fn update_public_key(&mut self, id: &AgentID, pubkey_hex: String) {
+        if let Some(agent) = self.agents.get_mut(id) {
+            agent.public_key_hex = Some(pubkey_hex);
+            self.save_to_disk();
+        }
+    }
+
     /// Update the stored base URL for an agent. Returns `false` if the ID is unknown.
     pub fn update_base_url(&mut self, id: &AgentID, url: String) -> bool {
         if let Some(agent) = self.agents.get_mut(id) {
@@ -405,10 +449,10 @@ impl AgentRegistry {
             &mut self.corruption_events,
         );
         for mut agent in agents_list {
-            // All loaded agents are Offline until they explicitly reconnect.
-            // This prevents ghost-Online entries from appearing after a
-            // kernel crash or unclean shutdown.
+            // All loaded agents are Offline with no in-flight task until they reconnect.
+            // Prevents ghost-Online entries and stale task IDs after a crash or restart.
             agent.status = AgentStatus::Offline;
+            agent.current_task = None;
             let id = agent.id;
             self.name_index.insert(agent.name.clone(), id);
             self.agents.insert(id, agent);
@@ -624,6 +668,7 @@ mod tests {
             base_url: None,
             default_thinking_level: ThinkingLevel::Off,
             system_prompt: None,
+            manually_offline: false,
         }
     }
 

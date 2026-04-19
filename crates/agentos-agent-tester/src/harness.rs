@@ -286,6 +286,7 @@ impl TestHarness {
         ));
 
         let kernel = Arc::new(Kernel::boot(&config_path, &passphrase).await?);
+        kernel.wire_inbound_chat_bridge();
 
         // All remaining operations are fallible. The run-loop is spawned only after
         // they all succeed so that a failed boot never leaks a background task.

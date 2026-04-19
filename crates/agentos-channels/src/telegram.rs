@@ -2,30 +2,49 @@ use crate::types::*;
 use crate::{ChannelAdapter, ChannelCapabilities, ChannelHealth};
 use agentos_types::AgentOSError;
 use async_trait::async_trait;
+use rand::Rng;
 use serde::Deserialize;
+use serde_json::{json, Value};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use zeroize::Zeroizing;
 
+const TELEGRAM_MAX_TEXT: usize = 4096;
+const TELEGRAM_POST_ATTEMPTS: u32 = 4;
+
 #[derive(Debug, Deserialize)]
 struct TelegramUpdate {
     update_id: i64,
+    #[serde(default)]
+    message: Option<TelegramMessage>,
+    #[serde(default)]
+    callback_query: Option<TelegramCallbackQuery>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramCallbackQuery {
+    #[allow(dead_code)]
+    id: String,
+    #[serde(default)]
+    data: Option<String>,
+    #[serde(default)]
     message: Option<TelegramMessage>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TelegramMessage {
     message_id: i64,
-    #[allow(dead_code)]
     chat: TelegramChat,
+    #[serde(default)]
     from: Option<TelegramUser>,
+    #[serde(default)]
     text: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TelegramChat {
-    #[allow(dead_code)]
     id: i64,
 }
 
@@ -48,7 +67,11 @@ impl TelegramAdapter {
             bot_token: Zeroizing::new(bot_token),
             chat_id,
             instance_id,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(15))
+                .timeout(Duration::from_secs(120))
+                .build()
+                .expect("Telegram HTTP client init failed"),
         }
     }
 
@@ -59,6 +82,105 @@ impl TelegramAdapter {
             method
         )
     }
+
+    /// POST JSON and verify `{"ok":true}`; retries on HTTP 429 / flood `error_code` 429.
+    async fn post_telegram(&self, method: &str, body: &Value) -> Result<Value, AgentOSError> {
+        let url = self.api_url(method);
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let resp = self
+                .client
+                .post(&url)
+                .json(body)
+                .send()
+                .await
+                .map_err(|e| AgentOSError::ToolExecutionFailed {
+                    tool_name: "telegram".to_string(),
+                    reason: e.to_string(),
+                })?;
+
+            let status = resp.status();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let wait = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(1)
+                    .min(3600);
+                if attempt >= TELEGRAM_POST_ATTEMPTS {
+                    return Err(AgentOSError::ToolExecutionFailed {
+                        tool_name: "telegram".to_string(),
+                        reason: "Telegram rate limit (HTTP 429), giving up".into(),
+                    });
+                }
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                continue;
+            }
+
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| AgentOSError::ToolExecutionFailed {
+                    tool_name: "telegram".to_string(),
+                    reason: e.to_string(),
+                })?;
+            let v: Value = serde_json::from_slice(&bytes).unwrap_or(json!({"ok": false}));
+
+            if v.get("error_code").and_then(|c| c.as_i64()) == Some(429) {
+                let wait = v
+                    .get("parameters")
+                    .and_then(|p| p.get("retry_after"))
+                    .and_then(|x| x.as_u64())
+                    .or_else(|| {
+                        v.get("parameters")
+                            .and_then(|p| p.get("retry_after"))
+                            .and_then(|x| x.as_i64())
+                            .map(|i| i.max(0) as u64)
+                    })
+                    .unwrap_or(1)
+                    .min(3600);
+                if attempt >= TELEGRAM_POST_ATTEMPTS {
+                    return Err(AgentOSError::ToolExecutionFailed {
+                        tool_name: "telegram".to_string(),
+                        reason: format!("Telegram flood control: {}", telegram_err_summary(&v)),
+                    });
+                }
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                continue;
+            }
+
+            if !status.is_success() {
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name: "telegram".to_string(),
+                    reason: format!(
+                        "Telegram HTTP {}: {}",
+                        status.as_u16(),
+                        telegram_err_summary(&v)
+                    ),
+                });
+            }
+
+            if v.get("ok").and_then(|o| o.as_bool()) != Some(true) {
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name: "telegram".to_string(),
+                    reason: telegram_err_summary(&v),
+                });
+            }
+
+            return Ok(v);
+        }
+    }
+}
+
+fn telegram_err_summary(v: &Value) -> String {
+    let desc = v
+        .get("description")
+        .and_then(|x| x.as_str())
+        .unwrap_or("unknown error");
+    let code = v.get("error_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    format!("Telegram API error {code}: {desc}")
 }
 
 #[async_trait]
@@ -73,41 +195,37 @@ impl ChannelAdapter for TelegramAdapter {
             reactions: true,
             media: true,
             rich_formatting: true,
-            max_message_length: 4096,
+            max_message_length: TELEGRAM_MAX_TEXT,
         }
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
         let text = msg.content.as_text();
-        let url = self.api_url("sendMessage");
-        let client = &self.client;
-        let chat_id = &self.chat_id;
+        let text: String = text.chars().take(TELEGRAM_MAX_TEXT).collect();
+        let chat_id = self.chat_id.clone();
         let policy = crate::retry::RetryPolicy::default();
 
         crate::retry::with_retry(&policy, "telegram", || async {
-            let resp = client
-                .post(&url)
-                .json(&serde_json::json!({
-                    "chat_id": chat_id,
-                    "text": &text,
-                    "parse_mode": "Markdown"
-                }))
-                .send()
-                .await
-                .map_err(|e| AgentOSError::ToolExecutionFailed {
-                    tool_name: "telegram".to_string(),
-                    reason: e.to_string(),
-                })?;
+            let v = self
+                .post_telegram(
+                    "sendMessage",
+                    &json!({
+                        "chat_id": chat_id,
+                        "text": text,
+                        "disable_web_page_preview": true,
+                    }),
+                )
+                .await?;
 
-            if !resp.status().is_success() {
-                return Err(AgentOSError::ToolExecutionFailed {
-                    tool_name: "telegram".to_string(),
-                    reason: format!("Telegram API error: {}", resp.status()),
-                });
-            }
+            let ext_id = v
+                .get("result")
+                .and_then(|r| r.get("message_id"))
+                .and_then(|m| m.as_i64())
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
             Ok(DeliveryReceipt {
-                message_id: uuid::Uuid::new_v4().to_string(),
+                message_id: ext_id,
                 delivered_at: chrono::Utc::now(),
             })
         })
@@ -123,6 +241,9 @@ impl ChannelAdapter for TelegramAdapter {
         let client = self.client.clone();
         let url = self.api_url("getUpdates");
         let instance_id = self.instance_id.clone();
+        let expected_chat = self.chat_id.clone();
+        let mut backoff = Duration::from_secs(5);
+        let max_backoff = Duration::from_secs(120);
 
         loop {
             if cancel.is_cancelled() {
@@ -136,44 +257,126 @@ impl ChannelAdapter for TelegramAdapter {
                 ])
                 .send()
                 .await;
+
             match resp {
                 Ok(r) => {
-                    if let Ok(body) = r.json::<serde_json::Value>().await {
-                        if let Some(updates) = body["result"].as_array() {
-                            for update in updates {
-                                if let Ok(u) =
-                                    serde_json::from_value::<TelegramUpdate>(update.clone())
-                                {
-                                    offset = u.update_id + 1;
-                                    if let Some(tg_msg) = u.message {
-                                        if let Some(text) = tg_msg.text {
-                                            let inbound = InboundMessage {
-                                                id: tg_msg.message_id.to_string(),
-                                                channel_type: "telegram".to_string(),
-                                                channel_instance_id: instance_id.clone(),
-                                                sender: ChannelIdentity {
-                                                    platform_id: tg_msg
-                                                        .from
-                                                        .as_ref()
-                                                        .map(|f| f.id.to_string())
-                                                        .unwrap_or_default(),
-                                                    display_name: tg_msg.from.map(|f| f.first_name),
-                                                },
-                                                content: MessageContent::Text(text),
-                                                thread_id: None,
-                                                timestamp: chrono::Utc::now(),
-                                                raw: update.clone(),
-                                            };
-                                            let _ = tx.send(inbound).await;
-                                        }
-                                    }
-                                }
+                    if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        let wait = r
+                            .headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|h| h.to_str().ok())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(5)
+                            .min(300);
+                        tokio::select! {
+                            _ = cancel.cancelled() => break,
+                            _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
+                        }
+                        continue;
+                    }
+
+                    backoff = Duration::from_secs(5);
+                    let body: Value = match r.json().await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!(error = %e, "Telegram getUpdates JSON parse error; retrying");
+                            continue;
+                        }
+                    };
+
+                    if body.get("ok").and_then(|o| o.as_bool()) != Some(true) {
+                        if body.get("error_code").and_then(|c| c.as_i64()) == Some(429) {
+                            let wait = body
+                                .get("parameters")
+                                .and_then(|p| p.get("retry_after"))
+                                .and_then(|x| x.as_u64())
+                                .unwrap_or(5)
+                                .min(300);
+                            tokio::select! {
+                                _ = cancel.cancelled() => break,
+                                _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
                             }
+                            continue;
+                        }
+                        let jitter_ms = rand::thread_rng().gen_range(0u64..=1000);
+                        tokio::select! {
+                            _ = cancel.cancelled() => break,
+                            _ = tokio::time::sleep(backoff + Duration::from_millis(jitter_ms)) => {}
+                        }
+                        backoff = backoff.saturating_mul(2).min(max_backoff);
+                        continue;
+                    }
+
+                    let Some(updates) = body["result"].as_array() else {
+                        continue;
+                    };
+
+                    for update in updates {
+                        let Ok(u) = serde_json::from_value::<TelegramUpdate>(update.clone()) else {
+                            continue;
+                        };
+                        offset = u.update_id + 1;
+
+                        if let Some(tg_msg) = u.message {
+                            if tg_msg.chat.id.to_string() != expected_chat {
+                                continue;
+                            }
+                            if let Some(text) = tg_msg.text {
+                                let inbound = InboundMessage {
+                                    id: tg_msg.message_id.to_string(),
+                                    channel_type: "telegram".to_string(),
+                                    channel_instance_id: instance_id.clone(),
+                                    sender: ChannelIdentity {
+                                        platform_id: tg_msg
+                                            .from
+                                            .as_ref()
+                                            .map(|f| f.id.to_string())
+                                            .unwrap_or_default(),
+                                        display_name: tg_msg.from.map(|f| f.first_name),
+                                    },
+                                    content: MessageContent::Text(text),
+                                    thread_id: None,
+                                    timestamp: chrono::Utc::now(),
+                                    raw: update.clone(),
+                                };
+                                let _ = tx.send(inbound).await;
+                            }
+                            continue;
+                        }
+
+                        if let Some(cq) = u.callback_query {
+                            let Some(m) = cq.message else {
+                                continue;
+                            };
+                            if m.chat.id.to_string() != expected_chat {
+                                continue;
+                            }
+                            let data = cq.data.clone().unwrap_or_default();
+                            if data.is_empty() {
+                                continue;
+                            }
+                            let inbound = InboundMessage {
+                                id: m.message_id.to_string(),
+                                channel_type: "telegram".to_string(),
+                                channel_instance_id: instance_id.clone(),
+                                sender: ChannelIdentity {
+                                    platform_id: m
+                                        .from
+                                        .as_ref()
+                                        .map(|f| f.id.to_string())
+                                        .unwrap_or_default(),
+                                    display_name: m.from.map(|f| f.first_name),
+                                },
+                                content: MessageContent::Text(data),
+                                thread_id: None,
+                                timestamp: chrono::Utc::now(),
+                                raw: update.clone(),
+                            };
+                            let _ = tx.send(inbound).await;
                         }
                     }
                 }
                 Err(e) => {
-                    // Intentionally omit the error URL to avoid logging the bot token.
                     let kind = if e.is_timeout() {
                         "timeout"
                     } else if e.is_connect() {
@@ -181,8 +384,17 @@ impl ChannelAdapter for TelegramAdapter {
                     } else {
                         "network error"
                     };
-                    warn!("Telegram poll error ({})", kind);
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    let jitter_ms = rand::thread_rng().gen_range(0u64..=1000);
+                    warn!(
+                        error = kind,
+                        backoff_ms = backoff.as_millis() as u64 + jitter_ms,
+                        "Telegram poll error, backing off"
+                    );
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(backoff + Duration::from_millis(jitter_ms)) => {}
+                    }
+                    backoff = backoff.saturating_mul(2).min(max_backoff);
                 }
             }
         }
@@ -190,17 +402,9 @@ impl ChannelAdapter for TelegramAdapter {
     }
 
     async fn health_check(&self) -> ChannelHealth {
-        match self.client.get(self.api_url("getMe")).send().await {
-            Ok(r) if r.status().is_success() => ChannelHealth::Connected,
-            Ok(r) => ChannelHealth::Degraded(format!("status {}", r.status())),
-            // Intentionally omit e.to_string() to avoid logging the bot token via reqwest URL.
-            Err(e) => ChannelHealth::Disconnected(if e.is_timeout() {
-                "timeout".to_string()
-            } else if e.is_connect() {
-                "connection refused".to_string()
-            } else {
-                "network error".to_string()
-            }),
+        match self.post_telegram("getMe", &json!({})).await {
+            Ok(_) => ChannelHealth::Connected,
+            Err(e) => ChannelHealth::Disconnected(format!("{e}")),
         }
     }
 }

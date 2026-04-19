@@ -57,6 +57,7 @@ pub async fn handle_serve(config_path: &Path, host: &str, port: u16) -> anyhow::
     );
 
     let kernel = Arc::new(Kernel::boot(config_path, &passphrase).await?);
+    kernel.wire_inbound_chat_bridge();
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
 

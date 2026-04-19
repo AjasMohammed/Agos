@@ -5,13 +5,14 @@
 <script id="pipeline-builder-tools" type="application/json">{{ tool_names_json|safe }}</script>
 
 <div x-data="pipelineBuilder()" x-init="init()" class="pipeline-builder-shell">
-    <div class="page-header">
+    <div class="page-header pipeline-hero">
         <div>
-            <h1>Visual Pipeline Builder</h1>
-            <p class="page-meta">AgentOS currently maps the visual builder to the existing YAML pipeline engine, so agent and tool nodes are fully executable today.</p>
+            <p class="eyebrow">Workflow Builder</p>
+            <h1>Build Automations Visually</h1>
+            <p class="page-meta">Drag steps onto the canvas, click to place them, or use the quick actions to grow a workflow from left to right like n8n. Agent and tool nodes map directly to the executable pipeline engine.</p>
         </div>
         <div class="pipeline-toolbar">
-            <a href="/pipelines" role="button" class="secondary">Back to Pipelines</a>
+            <a href="/pipelines" role="button" class="secondary">Back</a>
             <button type="button" class="outline" @click="openYamlPanel('import')">Import YAML</button>
             <button type="button" class="outline" @click="exportYaml()">Export YAML</button>
             <button type="button" @click="savePipeline()">Save Pipeline</button>
@@ -38,26 +39,55 @@
 
     <div class="pipeline-builder-grid">
         <aside class="pipeline-sidebar">
-            <article class="pipeline-panel">
-                <header>
-                    <strong>Node Palette</strong>
+            <article class="pipeline-panel pipeline-panel-palette">
+                <header class="pipeline-panel-header">
+                    <div>
+                        <strong>Step Library</strong>
+                        <p class="muted">Drag into the canvas or click a card to place the next step.</p>
+                    </div>
                 </header>
-                <div class="node-palette">
-                    <button type="button" class="node-template node-template-agent" draggable="true" @dragstart="startTemplateDrag($event, 'agent')">Agent</button>
-                    <button type="button" class="node-template node-template-tool" draggable="true" @dragstart="startTemplateDrag($event, 'tool')">Tool</button>
+                <div class="node-palette node-palette-rich">
+                    <button type="button" class="node-template-card node-template-agent"
+                            draggable="true"
+                            @dragstart="startTemplateDrag($event, 'agent')"
+                            @click="armTemplatePlacement('agent')">
+                        <span class="node-template-title">Agent</span>
+                        <span class="node-template-copy">Prompt an agent to analyze, write, review, or plan.</span>
+                    </button>
+                    <button type="button" class="node-template-card node-template-tool"
+                            draggable="true"
+                            @dragstart="startTemplateDrag($event, 'tool')"
+                            @click="armTemplatePlacement('tool')">
+                        <span class="node-template-title">Tool</span>
+                        <span class="node-template-copy">Call an installed tool with structured JSON input.</span>
+                    </button>
                 </div>
-                <p class="muted">Drag a node onto the canvas, then click an output port followed by an input port to connect steps.</p>
+                <div class="pipeline-quick-actions">
+                    <button type="button" class="secondary" @click="addNodeFromPalette('agent')">Add Agent To Flow</button>
+                    <button type="button" class="secondary" @click="addNodeFromPalette('tool')">Add Tool To Flow</button>
+                    <button type="button" class="secondary" @click="insertStarterFlow()">Starter Flow</button>
+                    <button type="button" class="secondary" @click="autoLayout()">Auto Layout</button>
+                </div>
+                <div class="pipeline-guidance">
+                    <span class="badge badge-info" x-show="pendingTemplateType" x-cloak>
+                        Click the canvas to place a <span x-text="templateLabel(pendingTemplateType)"></span> step
+                    </span>
+                    <p class="muted">Tip: selecting a node and using “Add” inserts the new step after that node and reconnects the workflow automatically.</p>
+                </div>
             </article>
 
             <article class="pipeline-panel">
-                <header>
-                    <strong>Run Pipeline</strong>
+                <header class="pipeline-panel-header">
+                    <div>
+                        <strong>Run Pipeline</strong>
+                        <p class="muted">Save, then stream each step as it executes.</p>
+                    </div>
                 </header>
                 <label>Agent Name
                     <input type="text" x-model="runForm.agent_name" list="builder-agent-list" placeholder="Connected agent name">
                 </label>
                 <label>Input
-                    <textarea rows="3" x-model="runForm.input" placeholder="Input passed to {{input}}"></textarea>
+                    <textarea rows="3" x-model="runForm.input" placeholder="Input passed to {% raw %}{{input}}{% endraw %}"></textarea>
                 </label>
                 <button type="button" @click="runPipeline()">Run Now</button>
                 <template x-if="runState.status">
@@ -68,9 +98,12 @@
                 </template>
             </article>
 
-            <article class="pipeline-panel" x-show="selectedNode()" x-cloak>
+            <article class="pipeline-panel pipeline-inspector" x-show="selectedNode()" x-cloak>
                 <header class="pipeline-panel-header">
-                    <strong x-text="selectedNode() ? selectedNode().label : 'Node Properties'"></strong>
+                    <div>
+                        <strong x-text="selectedNode() ? selectedNode().label : 'Step Inspector'"></strong>
+                        <p class="muted" x-text="selectedNode() ? inspectorSubtitle(selectedNode()) : ''"></p>
+                    </div>
                     <button type="button" class="secondary" x-show="canDeleteSelected()" @click="deleteSelectedNode()">Delete</button>
                 </header>
                 <template x-if="selectedNode()">
@@ -85,7 +118,7 @@
                                     <input type="text" x-model="selectedNode().config.agent_name" list="builder-agent-list" placeholder="researcher">
                                 </label>
                                 <label>Task Prompt
-                                    <textarea rows="6" x-model="selectedNode().config.task" placeholder="Analyze {{input}} and summarize the findings"></textarea>
+                                    <textarea rows="6" x-model="selectedNode().config.task" placeholder="Analyze {% raw %}{{input}}{% endraw %} and summarize the findings"></textarea>
                                 </label>
                             </div>
                         </template>
@@ -96,7 +129,7 @@
                                     <input type="text" x-model="selectedNode().config.tool_name" list="builder-tool-list" placeholder="notify_user">
                                 </label>
                                 <label>Tool Input JSON
-                                    <textarea rows="6" x-model="selectedNode().config.tool_input_json" placeholder='{"message":"{{report_output}}"}'></textarea>
+                                    <textarea rows="6" x-model="selectedNode().config.tool_input_json" placeholder='{"message":"{% raw %}{{report_output}}{% endraw %}"}'></textarea>
                                 </label>
                             </div>
                         </template>
@@ -132,8 +165,49 @@
                         </template>
 
                         <template x-if="selectedNode().node_type === 'start' || selectedNode().node_type === 'end'">
-                            <p class="muted">This node is structural only. The Start node fans workflow input into root steps, and the End node selects the pipeline output.</p>
+                            <p class="muted">This step is structural only. Start fans workflow input into the first executable steps, and End chooses the final pipeline output.</p>
                         </template>
+
+                        <div class="pipeline-connection-groups">
+                            <div>
+                                <strong>Incoming</strong>
+                                <div class="pipeline-connection-list" x-show="incomingEdgesForSelected().length">
+                                    <template x-for="edge in incomingEdgesForSelected()" :key="edge.id">
+                                        <button type="button" class="pipeline-connection-chip" @click="selectEdge(edge.id)">
+                                            <span x-text="edgeLabel(edge.source)"></span>
+                                        </button>
+                                    </template>
+                                </div>
+                                <p class="muted" x-show="!incomingEdgesForSelected().length">No incoming connections</p>
+                            </div>
+                            <div>
+                                <strong>Outgoing</strong>
+                                <div class="pipeline-connection-list" x-show="outgoingEdgesForSelected().length">
+                                    <template x-for="edge in outgoingEdgesForSelected()" :key="edge.id">
+                                        <button type="button" class="pipeline-connection-chip" @click="selectEdge(edge.id)">
+                                            <span x-text="edgeLabel(edge.target)"></span>
+                                        </button>
+                                    </template>
+                                </div>
+                                <p class="muted" x-show="!outgoingEdgesForSelected().length">No outgoing connections</p>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+            </article>
+
+            <article class="pipeline-panel pipeline-inspector" x-show="selectedEdge()" x-cloak>
+                <header class="pipeline-panel-header">
+                    <div>
+                        <strong>Connection</strong>
+                        <p class="muted">Selected path between two steps</p>
+                    </div>
+                    <button type="button" class="secondary" @click="deleteSelectedEdge()">Delete</button>
+                </header>
+                <template x-if="selectedEdge()">
+                    <div class="pipeline-properties">
+                        <p><strong x-text="edgeLabel(selectedEdge().source)"></strong> <span class="muted">feeds</span> <strong x-text="edgeLabel(selectedEdge().target)"></strong></p>
+                        <p class="muted">Tip: drag from any output port into an input port to create a new connection. Clicking a connection highlights it for removal.</p>
                     </div>
                 </template>
             </article>
@@ -141,68 +215,112 @@
 
         <section class="pipeline-canvas-panel">
             <article class="pipeline-panel pipeline-canvas-card">
-                <header class="pipeline-panel-header">
-                    <strong>Canvas</strong>
+                <header class="pipeline-panel-header pipeline-canvas-header">
+                    <div>
+                        <strong>Canvas</strong>
+                        <p class="muted">Build left-to-right. Drag nodes to reposition, drag from a port to wire steps, and use auto-layout when the graph gets busy.</p>
+                    </div>
                     <div class="pipeline-status-inline">
+                        <span class="pipeline-stat"><strong x-text="executableNodeCount()"></strong> steps</span>
+                        <span class="pipeline-stat"><strong x-text="graph.edges.length"></strong> links</span>
                         <template x-if="pendingConnection">
-                            <span class="badge badge-info">Connecting from <span x-text="pendingConnection"></span></span>
+                            <span class="badge badge-info">Connecting from <span x-text="edgeLabel(pendingConnection)"></span></span>
                         </template>
                         <small class="muted" x-text="statusMessage"></small>
                     </div>
                 </header>
 
-                <div class="pipeline-canvas"
-                     x-ref="canvas"
-                     @dragover.prevent
-                     @drop.prevent="dropTemplate($event)"
-                     @click.self="clearSelection()">
-                    <svg class="pipeline-edge-layer" aria-hidden="true">
-                        <defs>
-                            <marker id="pipeline-arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
-                                <path d="M0,0 L0,6 L9,3 z" fill="currentColor"></path>
-                            </marker>
-                        </defs>
-                        <template x-for="edge in graph.edges" :key="edge.id">
-                            <path class="pipeline-edge"
-                                  :class="{ 'pipeline-edge-active': edge.source === pendingConnection }"
-                                  :d="edgePath(edge)"
-                                  marker-end="url(#pipeline-arrow)"></path>
-                        </template>
-                    </svg>
+                <div class="pipeline-canvas-shell">
+                    <div class="pipeline-canvas-toolbar">
+                        <button type="button" class="secondary" @click="zoomOut()">-</button>
+                        <span class="pipeline-zoom-label" x-text="Math.round(canvasZoom * 100) + '%'">100%</span>
+                        <button type="button" class="secondary" @click="zoomIn()">+</button>
+                        <button type="button" class="secondary" @click="resetCanvasView()">Reset View</button>
+                        <button type="button" class="secondary" @click="clearRunState()">Clear Run State</button>
+                    </div>
 
-                    <template x-for="node in graph.nodes" :key="node.id">
-                        <div class="pipeline-node"
-                             :class="nodeClasses(node)"
-                             :style="`left:${node.x}px; top:${node.y}px;`"
-                             @mousedown="beginNodeDrag($event, node)"
-                             @click.stop="selectNode(node.id)">
-                            <div class="pipeline-node-header">
-                                <span x-text="node.label"></span>
-                                <small x-text="node.node_type"></small>
-                            </div>
-                            <div class="pipeline-node-body">
-                                <template x-if="node.node_type === 'agent'">
-                                    <small x-text="node.config.agent_name || 'Choose an agent'"></small>
-                                </template>
-                                <template x-if="node.node_type === 'tool'">
-                                    <small x-text="node.config.tool_name || 'Choose a tool'"></small>
-                                </template>
-                                <template x-if="node.runStatus">
-                                    <span class="pipeline-node-status" x-text="node.runStatus"></span>
-                                </template>
-                            </div>
-                            <button type="button" class="pipeline-port pipeline-port-input"
-                                    @mousedown.stop
-                                    @click.stop="handlePortClick(node, 'input')"
-                                    :disabled="node.node_type === 'start'"
-                                    title="Connect input"></button>
-                            <button type="button" class="pipeline-port pipeline-port-output"
-                                    @mousedown.stop
-                                    @click.stop="handlePortClick(node, 'output')"
-                                    :disabled="node.node_type === 'end'"
-                                    title="Connect output"></button>
+                    <div class="pipeline-canvas"
+                         x-ref="canvas"
+                         @dragover.prevent="updateDropPreview($event)"
+                         @dragleave="clearDropPreview()"
+                         @drop.prevent="dropTemplate($event)"
+                         @click.self="handleCanvasClick($event)">
+                        <div class="pipeline-empty-state" x-show="executableNodeCount() === 0" x-cloak>
+                            <strong>Start with an agent or tool step</strong>
+                            <p>Drag a step in, click a library card and then click the canvas, or use the quick actions to scaffold the first flow automatically.</p>
                         </div>
-                    </template>
+
+                        <div class="pipeline-drop-preview" x-show="canvasDropPreview" x-cloak
+                             :style="canvasDropPreviewStyle()"></div>
+
+                        <div class="pipeline-canvas-stage" :style="canvasStageStyle()">
+                            <svg class="pipeline-edge-layer" aria-hidden="true">
+                                <defs>
+                                    <marker id="pipeline-arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                                        <path d="M0,0 L0,6 L9,3 z" fill="currentColor"></path>
+                                    </marker>
+                                </defs>
+                                <template x-for="edge in graph.edges" :key="edge.id">
+                                    <g>
+                                        <path class="pipeline-edge-hitbox"
+                                              :d="edgePath(edge)"
+                                              @click.stop="selectEdge(edge.id)"></path>
+                                        <path class="pipeline-edge"
+                                              :class="edgeClasses(edge)"
+                                              :d="edgePath(edge)"
+                                              marker-end="url(#pipeline-arrow)"
+                                              @click.stop="selectEdge(edge.id)"></path>
+                                    </g>
+                                </template>
+                                <template x-if="connectionPreviewPath()">
+                                    <path class="pipeline-edge pipeline-edge-preview"
+                                          :d="connectionPreviewPath()"
+                                          marker-end="url(#pipeline-arrow)"></path>
+                                </template>
+                            </svg>
+
+                            <template x-for="node in graph.nodes" :key="node.id">
+                                <div class="pipeline-node"
+                                     :class="nodeClasses(node)"
+                                     :style="nodeStyle(node)"
+                                     @mousedown="beginNodeDrag($event, node)"
+                                     @click.stop="selectNode(node.id)">
+                                    <div class="pipeline-node-header">
+                                        <span x-text="node.label"></span>
+                                        <small x-text="nodeTypeLabel(node.node_type)"></small>
+                                    </div>
+                                    <div class="pipeline-node-body">
+                                        <template x-if="node.node_type === 'agent'">
+                                            <small x-text="node.config.agent_name || 'Choose an agent'"></small>
+                                        </template>
+                                        <template x-if="node.node_type === 'tool'">
+                                            <small x-text="node.config.tool_name || 'Choose a tool'"></small>
+                                        </template>
+                                        <template x-if="node.node_type === 'start'">
+                                            <small>Workflow input enters here</small>
+                                        </template>
+                                        <template x-if="node.node_type === 'end'">
+                                            <small>Workflow result exits here</small>
+                                        </template>
+                                        <template x-if="node.runStatus">
+                                            <span class="pipeline-node-status" x-text="node.runStatus"></span>
+                                        </template>
+                                    </div>
+                                    <button type="button" class="pipeline-port pipeline-port-input"
+                                            @mousedown.stop
+                                            @mouseup.stop="finishConnectionDrag(node)"
+                                            @click.stop="handlePortClick(node, 'input')"
+                                            :disabled="node.node_type === 'start'"
+                                            title="Connect input"></button>
+                                    <button type="button" class="pipeline-port pipeline-port-output"
+                                            @mousedown.stop.prevent="beginConnectionDrag($event, node)"
+                                            @click.stop="handlePortClick(node, 'output')"
+                                            :disabled="node.node_type === 'end'"
+                                            title="Connect output"></button>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
                 </div>
             </article>
         </section>
@@ -241,402 +359,5 @@
     </datalist>
 </div>
 
-<script>
-function pipelineBuilder() {
-    return {
-        graph: { name: '', version: '1.0.0', description: '', max_cost_usd: null, max_wall_time_minutes: null, nodes: [], edges: [] },
-        agentNames: [],
-        toolNames: [],
-        selectedNodeId: null,
-        pendingConnection: '',
-        dragState: null,
-        statusMessage: 'Drag agent or tool nodes onto the canvas to build your workflow.',
-        yamlPanel: { open: false, mode: 'import', text: '' },
-        runForm: { agent_name: '', input: '' },
-        runState: { status: '', message: '' },
-        currentRunStream: null,
-
-        init() {
-            this.graph = this.parseJsonScript('pipeline-builder-graph');
-            this.agentNames = this.parseJsonScript('pipeline-builder-agents');
-            this.toolNames = this.parseJsonScript('pipeline-builder-tools');
-            this.normalizeGraph();
-            var self = this;
-            window.addEventListener('mousemove', function (event) {
-                if (!self.dragState) return;
-                var rect = self.$refs.canvas.getBoundingClientRect();
-                var node = self.findNode(self.dragState.nodeId);
-                if (!node) return;
-                node.x = Math.max(0, Math.round(event.clientX - rect.left - self.dragState.offsetX));
-                node.y = Math.max(0, Math.round(event.clientY - rect.top - self.dragState.offsetY));
-            });
-            window.addEventListener('mouseup', function () {
-                self.dragState = null;
-            });
-        },
-
-        parseJsonScript(id) {
-            var el = document.getElementById(id);
-            if (!el) return [];
-            try {
-                return JSON.parse(el.textContent);
-            } catch (_) {
-                return [];
-            }
-        },
-
-        normalizeGraph() {
-            this.graph.nodes = (this.graph.nodes || []).map(function (node) {
-                node.config = node.config || {};
-                node.runStatus = node.runStatus || '';
-                return node;
-            });
-            this.graph.edges = this.graph.edges || [];
-            if (!this.graph.nodes.find(function (node) { return node.id === '__start__'; })) {
-                this.graph.nodes.unshift(this.makeNode('start', 40, 220));
-            }
-            if (!this.graph.nodes.find(function (node) { return node.id === '__end__'; })) {
-                this.graph.nodes.push(this.makeNode('end', 820, 220));
-            }
-        },
-
-        makeNode(type, x, y) {
-            if (type === 'start') {
-                return { id: '__start__', node_type: 'start', label: 'Start', x: x, y: y, config: {}, runStatus: '' };
-            }
-            if (type === 'end') {
-                return { id: '__end__', node_type: 'end', label: 'End', x: x, y: y, config: {}, runStatus: '' };
-            }
-            var id = type + '-' + Math.random().toString(36).slice(2, 9);
-            return {
-                id: id,
-                node_type: type,
-                label: type === 'agent' ? 'Agent Step' : 'Tool Step',
-                x: x,
-                y: y,
-                config: {
-                    agent_name: '',
-                    task: '',
-                    tool_name: '',
-                    tool_input_json: type === 'tool' ? '{}' : '',
-                    output_var: '',
-                    timeout_minutes: null,
-                    retry_on_failure: null,
-                    retry_backoff_ms: null,
-                    retry_max_delay_ms: null,
-                    on_failure: 'fail',
-                    default_value: ''
-                },
-                runStatus: ''
-            };
-        },
-
-        startTemplateDrag(event, type) {
-            event.dataTransfer.setData('nodeType', type);
-        },
-
-        dropTemplate(event) {
-            var type = event.dataTransfer.getData('nodeType');
-            if (!type) return;
-            var rect = this.$refs.canvas.getBoundingClientRect();
-            var node = this.makeNode(type, Math.round(event.clientX - rect.left - 80), Math.round(event.clientY - rect.top - 50));
-            this.graph.nodes.push(node);
-            this.selectedNodeId = node.id;
-            this.statusMessage = 'Added a new ' + type + ' node.';
-        },
-
-        selectedNode() {
-            return this.findNode(this.selectedNodeId);
-        },
-
-        findNode(id) {
-            return this.graph.nodes.find(function (node) { return node.id === id; });
-        },
-
-        selectNode(id) {
-            this.selectedNodeId = id;
-        },
-
-        clearSelection() {
-            this.selectedNodeId = null;
-        },
-
-        canDeleteSelected() {
-            var node = this.selectedNode();
-            return !!node && node.id !== '__start__' && node.id !== '__end__';
-        },
-
-        deleteSelectedNode() {
-            var node = this.selectedNode();
-            if (!node || !this.canDeleteSelected()) return;
-            this.graph.nodes = this.graph.nodes.filter(function (candidate) { return candidate.id !== node.id; });
-            this.graph.edges = this.graph.edges.filter(function (edge) { return edge.source !== node.id && edge.target !== node.id; });
-            this.selectedNodeId = null;
-            this.statusMessage = 'Removed node ' + node.label + '.';
-        },
-
-        beginNodeDrag(event, node) {
-            if (event.target.classList.contains('pipeline-port')) return;
-            var rect = event.currentTarget.getBoundingClientRect();
-            this.dragState = {
-                nodeId: node.id,
-                offsetX: event.clientX - rect.left,
-                offsetY: event.clientY - rect.top
-            };
-            this.selectedNodeId = node.id;
-        },
-
-        handlePortClick(node, direction) {
-            if (direction === 'output') {
-                if (node.node_type === 'end') return;
-                this.pendingConnection = node.id;
-                this.statusMessage = 'Choose a target node to finish the connection.';
-                return;
-            }
-
-            if (!this.pendingConnection) {
-                this.statusMessage = 'Choose an output port first.';
-                return;
-            }
-            if (node.node_type === 'start') {
-                this.statusMessage = 'The Start node cannot receive incoming edges.';
-                return;
-            }
-            if (node.id === this.pendingConnection) {
-                this.statusMessage = 'A node cannot connect to itself.';
-                this.pendingConnection = '';
-                return;
-            }
-            var exists = this.graph.edges.some(function (edge) {
-                return edge.source === this.pendingConnection && edge.target === node.id;
-            }, this);
-            if (!exists) {
-                this.graph.edges.push({
-                    id: 'edge-' + this.pendingConnection + '-' + node.id,
-                    source: this.pendingConnection,
-                    target: node.id
-                });
-                this.statusMessage = 'Connected ' + this.pendingConnection + ' to ' + node.id + '.';
-            }
-            this.pendingConnection = '';
-        },
-
-        nodeClasses(node) {
-            return {
-                'pipeline-node-start': node.node_type === 'start',
-                'pipeline-node-agent': node.node_type === 'agent',
-                'pipeline-node-tool': node.node_type === 'tool',
-                'pipeline-node-end': node.node_type === 'end',
-                'pipeline-node-selected': this.selectedNodeId === node.id,
-                'pipeline-node-running': node.runStatus === 'running',
-                'pipeline-node-complete': node.runStatus === 'complete',
-                'pipeline-node-failed': node.runStatus === 'failed',
-                'pipeline-node-skipped': node.runStatus === 'skipped'
-            };
-        },
-
-        edgePath(edge) {
-            var source = this.findNode(edge.source);
-            var target = this.findNode(edge.target);
-            if (!source || !target) return '';
-            var sx = source.x + 170;
-            var sy = source.y + 46;
-            var tx = target.x;
-            var ty = target.y + 46;
-            return 'M ' + sx + ' ' + sy + ' C ' + (sx + 70) + ' ' + sy + ', ' + (tx - 70) + ' ' + ty + ', ' + tx + ' ' + ty;
-        },
-
-        csrfToken() {
-            var meta = document.querySelector('meta[name="csrf-token"]');
-            return meta ? meta.content : '';
-        },
-
-        graphPayload() {
-            var normalizedNodes = this.graph.nodes.map(function (node) {
-                return {
-                    id: node.id,
-                    node_type: node.node_type,
-                    label: node.label,
-                    x: Math.round(node.x),
-                    y: Math.round(node.y),
-                    config: {
-                        agent_name: node.config.agent_name || '',
-                        task: node.config.task || '',
-                        tool_name: node.config.tool_name || '',
-                        tool_input_json: node.config.tool_input_json || '',
-                        output_var: node.config.output_var || '',
-                        timeout_minutes: this.normalizeNullableNumber(node.config.timeout_minutes),
-                        retry_on_failure: this.normalizeNullableNumber(node.config.retry_on_failure),
-                        retry_backoff_ms: this.normalizeNullableNumber(node.config.retry_backoff_ms),
-                        retry_max_delay_ms: this.normalizeNullableNumber(node.config.retry_max_delay_ms),
-                        on_failure: node.config.on_failure || 'fail',
-                        default_value: node.config.default_value || ''
-                    }
-                };
-            }, this);
-            return {
-                graph: {
-                    name: this.graph.name,
-                    version: this.graph.version,
-                    description: this.graph.description,
-                    output: this.graph.output || null,
-                    max_cost_usd: this.normalizeNullableNumber(this.graph.max_cost_usd),
-                    max_wall_time_minutes: this.normalizeNullableNumber(this.graph.max_wall_time_minutes),
-                    nodes: normalizedNodes,
-                    edges: this.graph.edges
-                }
-            };
-        },
-
-        normalizeNullableNumber(value) {
-            if (value === '' || value === null || typeof value === 'undefined') return null;
-            var parsed = Number(value);
-            return Number.isFinite(parsed) ? parsed : null;
-        },
-
-        async savePipeline() {
-            this.statusMessage = 'Saving pipeline...';
-            var response = await fetch('/api/pipelines', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRF-Token': this.csrfToken()
-                },
-                body: JSON.stringify(this.graphPayload())
-            });
-            if (!response.ok) {
-                this.statusMessage = await response.text();
-                window.dispatchEvent(new CustomEvent('show-toast', { detail: { message: this.statusMessage, type: 'error' } }));
-                return;
-            }
-            var payload = await response.json();
-            this.statusMessage = 'Saved ' + payload.name + ' (' + payload.step_count + ' steps).';
-            window.dispatchEvent(new CustomEvent('show-toast', { detail: { message: 'Pipeline saved successfully', type: 'success' } }));
-        },
-
-        openYamlPanel(mode) {
-            this.yamlPanel.mode = mode;
-            this.yamlPanel.text = '';
-            this.yamlPanel.open = true;
-        },
-
-        closeYamlPanel() {
-            this.yamlPanel.open = false;
-        },
-
-        async importYaml() {
-            var response = await fetch('/api/pipelines/import', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRF-Token': this.csrfToken()
-                },
-                body: JSON.stringify({ yaml: this.yamlPanel.text })
-            });
-            if (!response.ok) {
-                this.statusMessage = await response.text();
-                window.dispatchEvent(new CustomEvent('show-toast', { detail: { message: this.statusMessage, type: 'error' } }));
-                return;
-            }
-            this.graph = await response.json();
-            this.normalizeGraph();
-            this.closeYamlPanel();
-            this.statusMessage = 'Imported pipeline YAML into the canvas.';
-        },
-
-        async exportYaml() {
-            var response = await fetch('/api/pipelines/export', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRF-Token': this.csrfToken()
-                },
-                body: JSON.stringify(this.graphPayload())
-            });
-            if (!response.ok) {
-                this.statusMessage = await response.text();
-                window.dispatchEvent(new CustomEvent('show-toast', { detail: { message: this.statusMessage, type: 'error' } }));
-                return;
-            }
-            var payload = await response.json();
-            this.yamlPanel.mode = 'export';
-            this.yamlPanel.text = payload.yaml;
-            this.yamlPanel.open = true;
-            this.statusMessage = 'Exported the current pipeline YAML.';
-        },
-
-        downloadYaml() {
-            var blob = new Blob([this.yamlPanel.text], { type: 'application/yaml;charset=utf-8' });
-            var url = URL.createObjectURL(blob);
-            var link = document.createElement('a');
-            link.href = url;
-            link.download = (this.graph.name || 'pipeline') + '.yaml';
-            link.click();
-            URL.revokeObjectURL(url);
-        },
-
-        async runPipeline() {
-            if (!this.runForm.agent_name) {
-                this.statusMessage = 'Agent name is required to run a pipeline.';
-                return;
-            }
-            await this.savePipeline();
-            if (this.statusMessage.indexOf('Saved ') !== 0) return;
-            this.graph.nodes.forEach(function (node) { node.runStatus = ''; });
-            var response = await fetch('/api/pipelines/run', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRF-Token': this.csrfToken()
-                },
-                body: JSON.stringify({
-                    pipeline_name: this.graph.name,
-                    input: this.runForm.input || '',
-                    agent_name: this.runForm.agent_name
-                })
-            });
-            if (!response.ok) {
-                this.runState = { status: 'failed', message: await response.text() };
-                return;
-            }
-            var payload = await response.json();
-            this.runState = { status: payload.status, message: 'Streaming live step updates...' };
-            this.connectRunStream(payload.run_id);
-        },
-
-        connectRunStream(runId) {
-            if (this.currentRunStream) {
-                this.currentRunStream.close();
-            }
-            var self = this;
-            this.currentRunStream = new EventSource('/api/pipelines/runs/' + encodeURIComponent(runId) + '/events');
-            this.currentRunStream.addEventListener('step-status', function (event) {
-                try {
-                    var payload = JSON.parse(event.data);
-                    var node = self.findNode(payload.step_id);
-                    if (node) {
-                        node.runStatus = payload.status;
-                    }
-                } catch (_) {}
-            });
-            this.currentRunStream.addEventListener('run-status', function (event) {
-                try {
-                    var payload = JSON.parse(event.data);
-                    self.runState = {
-                        status: payload.status,
-                        message: payload.error || payload.output || 'Pipeline run updated.'
-                    };
-                    if (payload.status !== 'running') {
-                        self.currentRunStream.close();
-                    }
-                } catch (_) {}
-            });
-            this.currentRunStream.addEventListener('pipeline-error', function (event) {
-                self.runState = { status: 'failed', message: event.data };
-                self.currentRunStream.close();
-            });
-        }
-    };
-}
-</script>
+<script src="/static/js/pipeline-builder.js?v=2"></script>
 {% endblock %}

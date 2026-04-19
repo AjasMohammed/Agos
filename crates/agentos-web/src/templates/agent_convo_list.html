@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="page-header">
+    <div>
+        <h1>Agent Chat</h1>
+        <p class="page-meta">Start and observe conversations between agents in real time</p>
+    </div>
+</div>
+
+<div class="two-col-layout">
+    <!-- Left: New conversation form -->
+    <aside class="sidebar-panel">
+        <h2>New Conversation</h2>
+        <form method="post" action="/agent-chat/new">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <label for="convo-topic">Topic
+                <input id="convo-topic" name="topic" type="text" required maxlength="500"
+                       placeholder="e.g. Debate: is AI consciousness possible?">
+            </label>
+
+            <label>Participants
+                <div class="participant-selector" id="participant-selector">
+                    {% for agent in agents %}
+                    <label class="participant-chip" title="{{ agent.status }}">
+                        <input type="checkbox" name="participant_check" value="{{ agent.name }}"
+                               {% if agent.status == "offline" %}disabled{% endif %}>
+                        <span class="chip-label">{{ agent.name }}</span>
+                        {% if agent.status == "offline" %}<span class="muted"> (offline)</span>{% endif %}
+                    </label>
+                    {% endfor %}
+                    {% if not agents %}
+                    <p class="muted">No agents connected. <a href="/agents">Connect an agent first.</a></p>
+                    {% endif %}
+                </div>
+                <input type="hidden" id="participants-hidden" name="participants" value="">
+            </label>
+
+            <label for="convo-max-turns">Max turns per agent pair
+                <input id="convo-max-turns" name="max_turns" type="number"
+                       min="2" max="50" value="8">
+            </label>
+
+            <button type="submit" id="start-convo-btn" disabled>Start Conversation →</button>
+        </form>
+
+        <script>
+        (function () {
+            var checks = document.querySelectorAll('input[name="participant_check"]');
+            var hidden = document.getElementById('participants-hidden');
+            var btn = document.getElementById('start-convo-btn');
+            function update() {
+                var selected = [];
+                checks.forEach(function (c) { if (c.checked) selected.push(c.value); });
+                hidden.value = selected.join(',');
+                btn.disabled = selected.length < 2;
+            }
+            checks.forEach(function (c) { c.addEventListener('change', update); });
+            update();
+        })();
+        </script>
+    </aside>
+
+    <!-- Right: Conversation list -->
+    <main>
+        {% if convos|length == 0 %}
+        <div class="empty-state">
+            <p>No conversations yet. Start one on the left.</p>
+        </div>
+        {% else %}
+        <div class="convo-cards">
+            {% for c in convos %}
+            <a class="convo-card {{ c.status }}" href="/agent-chat/{{ c.id }}">
+                <div class="convo-card-participants">
+                    {% for p in c.participants %}
+                    <span class="mini-avatar" style="background:{{ p.color }}" title="{{ p.name }}">
+                        {{ p.initial }}
+                    </span>
+                    {% endfor %}
+                </div>
+                <div class="convo-card-body">
+                    <div class="convo-card-topic">{{ c.topic | truncate(80) }}</div>
+                    <div class="convo-card-meta muted">
+                        <span class="status-badge status-{{ c.status }}">{{ c.status }}</span>
+                        &nbsp;·&nbsp;{{ c.updated_at | relative_time }}
+                        &nbsp;·&nbsp;{{ c.participants | length }} agents
+                    </div>
+                </div>
+                <div class="convo-card-id muted">{{ c.short_id }}</div>
+            </a>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </main>
+</div>
+
+<style>
+.two-col-layout { display: grid; grid-template-columns: 320px 1fr; gap: 2rem; align-items: start; }
+.sidebar-panel { background: var(--card-background-color); border: 1px solid var(--card-border-color); border-radius: var(--border-radius); padding: 1.5rem; }
+.sidebar-panel h2 { font-size: 1rem; margin-bottom: 1rem; }
+.participant-selector { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.5rem; }
+.participant-chip { display: flex; align-items: center; gap: 0.25rem; background: var(--secondary-background); border: 1px solid var(--card-border-color); border-radius: 999px; padding: 0.2rem 0.75rem; cursor: pointer; font-size: 0.875rem; }
+.participant-chip input { display: none; }
+.participant-chip:has(input:checked) { background: var(--primary); color: #fff; border-color: var(--primary); }
+.convo-cards { display: flex; flex-direction: column; gap: 0.75rem; }
+.convo-card { display: grid; grid-template-columns: auto 1fr auto; gap: 1rem; align-items: center; padding: 1rem 1.25rem; background: var(--card-background-color); border: 1px solid var(--card-border-color); border-radius: var(--border-radius); text-decoration: none; color: inherit; transition: border-color 0.15s; }
+.convo-card:hover { border-color: var(--primary); }
+.convo-card.running { border-left: 3px solid var(--primary); }
+.convo-card.complete { border-left: 3px solid var(--color-success, #5aab61); }
+.convo-card.error { border-left: 3px solid var(--del-color); }
+.convo-card-participants { display: flex; gap: -4px; }
+.mini-avatar { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: 600; color: #fff; border: 2px solid var(--background-color); margin-left: -6px; }
+.mini-avatar:first-child { margin-left: 0; }
+.convo-card-topic { font-weight: 500; margin-bottom: 0.25rem; }
+.convo-card-meta { font-size: 0.8rem; }
+.convo-card-id { font-size: 0.75rem; font-family: monospace; }
+.status-badge { font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 999px; font-weight: 600; }
+.status-running { background: var(--primary-background); color: var(--primary); }
+.status-complete { background: #d1fae5; color: #065f46; }
+.status-stopped { background: var(--secondary-background); color: var(--muted-color); }
+.status-error { background: #fee2e2; color: #991b1b; }
+@media (max-width: 768px) {
+    .two-col-layout { grid-template-columns: 1fr; }
+}
+</style>
+
+{% endblock %}

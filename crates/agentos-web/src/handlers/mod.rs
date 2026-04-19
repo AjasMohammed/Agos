@@ -1,4 +1,5 @@
 pub mod a2a;
+pub mod agent_convo;
 pub mod agent_detail;
 pub mod agents;
 pub mod audit;
@@ -12,9 +13,11 @@ pub mod doctor;
 pub mod escalations;
 pub mod events;
 pub mod events_log;
+pub mod files;
 pub mod hal_page;
 pub mod identity_page;
 pub mod logs;
+pub mod manual_page;
 pub mod management;
 pub mod marketplace;
 pub mod mcp_page;

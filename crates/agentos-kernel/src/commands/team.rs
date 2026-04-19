@@ -185,6 +185,7 @@ impl Kernel {
             is_team_coordinator: true, // enables reliable filtering in `team list`
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
+            spawner_agent_id: None,
         };
 
         self.scheduler.enqueue(coordinator_task).await;

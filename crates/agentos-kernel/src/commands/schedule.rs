@@ -41,6 +41,79 @@ impl Kernel {
         KernelResponse::ScheduleList(self.schedule_manager.list_jobs().await)
     }
 
+    #[allow(dead_code)]
+    pub(crate) async fn cmd_create_schedule_once(
+        &self,
+        name: String,
+        agent_name: String,
+        task_prompt: String,
+        fire_at: chrono::DateTime<chrono::Utc>,
+    ) -> KernelResponse {
+        match self
+            .schedule_manager
+            .create_once_job(name.clone(), fire_at, agent_name.clone(), task_prompt)
+            .await
+        {
+            Ok(id) => {
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::ScheduledJobCreated,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "job_name": name,
+                        "schedule_id": id,
+                        "fire_at": fire_at.to_rfc3339(),
+                        "once": true,
+                        "source": "cli",
+                    }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                KernelResponse::ScheduleId(id)
+            }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn cmd_list_once_jobs(&self) -> KernelResponse {
+        KernelResponse::OnceJobList(self.schedule_manager.list_once_jobs().await)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn cmd_cancel_once_job(&self, name: String) -> KernelResponse {
+        match self.schedule_manager.cancel_once_job_by_name(&name).await {
+            Ok(job) => {
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::ScheduledJobDeleted,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "job_name": job.name,
+                        "job_id": job.id.to_string(),
+                        "once": true,
+                    }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                KernelResponse::Success { data: None }
+            }
+            Err(e) => KernelResponse::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+
     /// Resolve a schedule by name or UUID string.
     async fn resolve_schedule(&self, name: &str) -> Option<ScheduledJob> {
         if let Some(job) = self.schedule_manager.get_by_name(name).await {

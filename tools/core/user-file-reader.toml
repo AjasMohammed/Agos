@@ -1,0 +1,36 @@
+[manifest]
+name        = "user-file-reader"
+version     = "1.0.0"
+description = "Reads files uploaded by users via the AgentOS web UI or API. Accepts a file_id (UUID) or file_name to look up the file in the upload registry and return its content. Text files are returned as UTF-8 strings; binary files as base64."
+author      = "agentos-core"
+trust_tier  = "core"
+group       = "fs"
+
+[capabilities_required]
+permissions = ["fs.user_data:r"]
+
+[capabilities_provided]
+outputs = ["content.text", "content.binary"]
+
+[intent_schema]
+input  = "UserFileReadIntent"
+output = "FileContent"
+
+[input_schema]
+type = "object"
+
+[input_schema.properties.file_id]
+type        = "string"
+description = "UUID of the uploaded file (from the file registry)"
+
+[input_schema.properties.file_name]
+type        = "string"
+description = "Original filename or display name of the uploaded file"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 64
+max_cpu_ms    = 10000
+syscalls      = []

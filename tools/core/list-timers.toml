@@ -1,0 +1,30 @@
+[manifest]
+name        = "list-timers"
+version     = "1.0.0"
+description = "List all pending one-shot timers and their fire times"
+author      = "agentos-core"
+trust_tier  = "core"
+group       = "events"
+risk_class  = "readonly_scoped"
+
+[capabilities_required]
+permissions = ["schedule.timer:r"]
+
+[capabilities_provided]
+outputs = ["timer_list"]
+
+[intent_schema]
+input  = "ListTimersIntent"
+output = "ListTimersResult"
+
+[input_schema]
+type = "object"
+description = "No input required"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 4
+max_cpu_ms    = 100
+syscalls      = []

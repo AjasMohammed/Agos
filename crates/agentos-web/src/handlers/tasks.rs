@@ -515,6 +515,7 @@ pub async fn resume(
         autonomous: payload.task.autonomous,
         parent_task_id: payload.task.parent_task_id,
         spawn_depth: payload.task.spawn_depth,
+        spawner_agent_id: payload.task.spawner_agent_id,
         is_team_coordinator: payload.task.is_team_coordinator,
         skip_checkpoint: payload.task.skip_checkpoint,
         thinking_level: payload.task.thinking_level,
@@ -592,11 +593,7 @@ pub async fn log_stream(
     // and transitions from CONNECTING to OPEN without a 1-second gap.
     let started_at = tokio::time::Instant::now();
     let stream = stream::unfold(
-        Some((
-            resume_from,
-            tokio::time::Instant::now(),
-            Duration::ZERO,
-        )),
+        Some((resume_from, tokio::time::Instant::now(), Duration::ZERO)),
         move |state_opt| {
             let audit = audit.clone();
             let scheduler = scheduler.clone();

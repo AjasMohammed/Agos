@@ -159,17 +159,17 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
             serde_json::to_string_pretty(json).unwrap_or_else(|_| json.to_string())
         }
 
-        let json_value = if let Some(s) = value.as_str() {
+        let mut rendered = if let Some(s) = value.as_str() {
             match serde_json::from_str::<serde_json::Value>(s) {
-                Ok(v) => v,
-                Err(_) => serde_json::Value::String(s.to_string()),
+                Ok(v) => prettify(&v),
+                // Not valid JSON — return the raw string without wrapping it in quotes.
+                Err(_) => s.to_string(),
             }
         } else {
-            serde_json::to_value(&value)
-                .unwrap_or_else(|_| serde_json::Value::String(value.to_string()))
+            let json_value = serde_json::to_value(&value)
+                .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+            prettify(&json_value)
         };
-
-        let mut rendered = prettify(&json_value);
         if rendered.len() > MAX_BYTES {
             let mut end = MAX_BYTES;
             while end > 0 && !rendered.is_char_boundary(end) {
@@ -214,6 +214,15 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
         "audit_detail.html",
         include_str!("templates/audit_detail.html"),
     )?;
+    env.add_template(
+        "agent_convo_list.html",
+        include_str!("templates/agent_convo_list.html"),
+    )?;
+    env.add_template(
+        "agent_convo.html",
+        include_str!("templates/agent_convo.html"),
+    )?;
+    env.add_template("files.html", include_str!("templates/files.html"))?;
     env.add_template("chat.html", include_str!("templates/chat.html"))?;
     env.add_template(
         "chat_conversation.html",
@@ -246,6 +255,7 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
         include_str!("templates/webhooks_page.html"),
     )?;
     env.add_template("doctor.html", include_str!("templates/doctor.html"))?;
+    env.add_template("manual.html", include_str!("templates/manual.html"))?;
     env.add_template("scratchpad.html", include_str!("templates/scratchpad.html"))?;
     env.add_template(
         "resources_page.html",

@@ -1,0 +1,34 @@
+[manifest]
+name        = "cancel-timer"
+version     = "1.0.0"
+description = "Cancel a pending one-shot timer by name before it fires"
+author      = "agentos-core"
+trust_tier  = "core"
+group       = "events"
+risk_class  = "write_scoped"
+
+[capabilities_required]
+permissions = ["schedule.timer:w"]
+
+[capabilities_provided]
+outputs = ["status"]
+
+[intent_schema]
+input  = "CancelTimerIntent"
+output = "CancelTimerResult"
+
+[input_schema]
+type = "object"
+required = ["name"]
+
+[input_schema.properties.name]
+type        = "string"
+description = "Name of the timer to cancel"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 4
+max_cpu_ms    = 100
+syscalls      = []

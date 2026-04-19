@@ -1,9 +1,12 @@
+use crate::auth::file_owner_principal;
+use crate::auth::AuthToken;
 use crate::chat_inflight::InFlightInference;
+use crate::handlers::files;
 use crate::state::AppState;
 use agentos_kernel::kernel::ChatStreamEvent;
-use axum::extract::{Form, Path, State};
+use axum::extract::{Extension, Form, Path, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum_extra::extract::CookieJar;
@@ -27,11 +30,15 @@ fn html_escape(s: &str) -> String {
 pub struct NewSessionForm {
     pub agent_name: String,
     pub message: String,
+    #[serde(default)]
+    pub file_ids: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct SendForm {
     pub message: String,
+    #[serde(default)]
+    pub file_ids: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -91,7 +98,7 @@ fn spawn_streaming_inference(
                 let sid = session_id.clone();
                 let answer = inf.answer.clone();
                 match tokio::task::spawn_blocking(move || {
-                    store.add_message(&sid, "assistant", &answer)
+                    store.add_message(&sid, "assistant", &answer, None)
                 })
                 .await
                 {
@@ -119,6 +126,28 @@ fn spawn_streaming_inference(
         inflight_handle.mark_done().await;
         inflight_map.schedule_cleanup(session_id);
     });
+}
+
+/// Build LLM user text: optional attached files, then @mentions, then message body.
+async fn expand_user_message_for_llm(
+    content: &str,
+    file_ids: Option<&str>,
+    state: &AppState,
+    owner_principal: &str,
+) -> String {
+    let with_mentions =
+        files::resolve_at_mentions(content, state, owner_principal).await;
+    let file_ctx = match file_ids {
+        Some(ids) if !ids.trim().is_empty() => {
+            files::resolve_file_ids_to_context(ids, state, owner_principal).await
+        }
+        _ => String::new(),
+    };
+    if file_ctx.is_empty() {
+        with_mentions
+    } else {
+        format!("{file_ctx}\n---\n{with_mentions}")
+    }
 }
 
 /// GET /chat — session list + new session compose form.
@@ -371,6 +400,9 @@ pub async fn export_session(
 /// POST /chat/new — create a session and send the first message.
 pub async fn new_session(
     State(state): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Extension(auth): Extension<AuthToken>,
     Form(form): Form<NewSessionForm>,
 ) -> Response {
     let message = form.message.trim().to_string();
@@ -408,13 +440,26 @@ pub async fn new_session(
         }
     }
 
+    let principal = file_owner_principal(&jar, &headers, &auth);
+    let file_ids_opt = form
+        .file_ids
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    // Resolve @mentions and attached file IDs into LLM context.
+    // The original message is what gets stored in the DB; the expanded version goes to inference.
+    let llm_message =
+        expand_user_message_for_llm(&message, file_ids_opt, &state, &principal).await;
+
     // Create session and persist the first user message atomically.
     let session_id = {
         let store = Arc::clone(&state.chat_store);
         let agent = agent_name.clone();
         let msg = message.clone();
+        let fid = file_ids_opt.map(|s| s.to_string());
         match tokio::task::spawn_blocking(move || {
-            store.create_session_with_first_message(&agent, &msg)
+            store.create_session_with_first_message(&agent, &msg, fid.as_deref())
         })
         .await
         {
@@ -451,7 +496,7 @@ pub async fn new_session(
         session_id.clone(),
         agent_name.clone(),
         Vec::new(),
-        message,
+        llm_message,
         inflight,
     );
 
@@ -469,6 +514,9 @@ pub async fn new_session(
 pub async fn send(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Extension(auth): Extension<AuthToken>,
     Form(form): Form<SendForm>,
 ) -> Response {
     if uuid::Uuid::parse_str(&session_id).is_err() {
@@ -482,6 +530,16 @@ pub async fn send(
     if message.len() > 32_768 {
         return (StatusCode::BAD_REQUEST, "Message too long (max 32 KB)").into_response();
     }
+
+    let principal = file_owner_principal(&jar, &headers, &auth);
+    let file_ids_opt = form
+        .file_ids
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let llm_message =
+        expand_user_message_for_llm(&message, file_ids_opt, &state, &principal).await;
 
     let session = {
         let store = Arc::clone(&state.chat_store);
@@ -507,16 +565,12 @@ pub async fn send(
     };
 
     // Load prior messages for LLM context (everything before the one we're about to
-    // insert). Only user/assistant roles feed the model.
-    let history: Vec<(String, String)> = {
+    // insert). Only user/assistant roles feed the model. Re-expand prior user attachments.
+    let prior_msgs = {
         let store = Arc::clone(&state.chat_store);
         let sid = session_id.clone();
         match tokio::task::spawn_blocking(move || store.get_messages(&sid)).await {
-            Ok(Ok(msgs)) => msgs
-                .into_iter()
-                .filter(|m| m.role == "user" || m.role == "assistant")
-                .map(|m| (m.role, m.content))
-                .collect(),
+            Ok(Ok(msgs)) => msgs,
             _ => {
                 state.inflight_chat.abandon(&session_id);
                 return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to load history")
@@ -525,12 +579,31 @@ pub async fn send(
         }
     };
 
+    let mut history: Vec<(String, String)> = Vec::new();
+    for m in prior_msgs {
+        if m.role != "user" && m.role != "assistant" {
+            continue;
+        }
+        let text = if m.role == "user" {
+            expand_user_message_for_llm(&m.content, m.file_ids.as_deref(), &state, &principal)
+                .await
+        } else {
+            m.content
+        };
+        history.push((m.role, text));
+    }
+
     // Persist the user message now that the slot is reserved.
     {
         let store = Arc::clone(&state.chat_store);
         let sid = session_id.clone();
         let msg = message.clone();
-        match tokio::task::spawn_blocking(move || store.add_message(&sid, "user", &msg)).await {
+        let fid = file_ids_opt.map(|s| s.to_string());
+        match tokio::task::spawn_blocking(move || {
+            store.add_message(&sid, "user", &msg, fid.as_deref())
+        })
+        .await
+        {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 tracing::error!("Failed to save user message: {e}");
@@ -553,7 +626,7 @@ pub async fn send(
         session_id.clone(),
         session.agent_name.clone(),
         history,
-        message.clone(),
+        llm_message,
         Arc::clone(&inflight),
     );
 

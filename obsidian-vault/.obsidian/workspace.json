@@ -41,12 +41,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "reference/handbook/26-Channel Adapters.md",
+                "file": "roadmap/File Attachment Known Issues.md",
                 "mode": "preview",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "26-Channel Adapters"
+              "title": "File Attachment Known Issues"
             }
           },
           {
@@ -228,6 +228,12 @@
   },
   "active": "134a15ee3e7e7b5a",
   "lastOpenFiles": [
+    "plans/agentos-agent-scheduling.md.tmp.816799.1776616748647",
+    "plans/mobile-app/01-cloud-deployment-foundation.md",
+    "roadmap/File Attachment Known Issues.md",
+    "plans/agentos-agent-scheduling.md",
+    "plans/mobile-app/Mobile App Plan.md",
+    "reference/handbook/26-Channel Adapters.md",
     "plans/capability-discoverability/Capability Discoverability Plan.md.tmp.80762.1775566925003",
     "plans/graceful-degradation-chains/Graceful Degradation Chains Plan.md.tmp.80762.1775566913187",
     "plans/capability-discoverability/01-semantic-tool-search.md.tmp.80762.1775566893108",
@@ -238,7 +244,6 @@
     "plans/multi-agent-coordination/Multi-Agent Coordination Plan.md.tmp.80762.1775566857049",
     "plans/task-checkpointing/04-checkpoint-lifecycle.md.tmp.16113.1775566137263",
     "plans/task-checkpointing/03-crash-recovery.md.tmp.16113.1775566136223",
-    "plans/task-checkpointing/02-state-serialization.md.tmp.16113.1775566135204",
     "plans/graceful-degradation-chains/01-fallback-schema-and-error-categories.md",
     "plans/graceful-degradation-chains/Graceful Degradation Chains Plan.md",
     "plans/multi-agent-coordination/Multi-Agent Coordination Plan.md",
@@ -258,11 +263,6 @@
     "plans/peripheral-device-ecosystem/06-display-driver.md",
     "plans/peripheral-device-ecosystem/05-bluetooth-driver.md",
     "plans/peripheral-device-ecosystem/04-audio-driver.md",
-    "plans/gap-closure-research/Gap Closure Research Plan.md",
-    "plans/peripheral-device-ecosystem/02-printer-driver.md",
-    "plans/observability-uplift/Observability Uplift Plan.md",
-    "plans/event-driven-completion/Event-Driven Completion Plan.md",
-    "plans/event-driven-completion/01-async-task-execution.md",
-    "plans/observability-uplift/03-audit-log-viewer.md"
+    "plans/gap-closure-research/Gap Closure Research Plan.md"
   ]
 }

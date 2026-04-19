@@ -103,11 +103,33 @@ pub async fn incoming_webhook(
         }
     };
 
-    // 6. Build event with only safe headers (no auth/cookie headers)
+    // 6. Build event with only safe headers (no auth/cookie/secret headers).
+    // Allow known provider event-metadata headers; deny auth/credential patterns
+    // that would expose secrets to downstream agents and the audit log.
     let safe_headers: HashMap<String, String> = header_map
         .into_iter()
         .filter(|(name, _)| {
-            name.starts_with("x-") || name == "content-type" || name == "user-agent"
+            if name == "content-type" || name == "user-agent" {
+                return true;
+            }
+            if !name.starts_with("x-") {
+                return false;
+            }
+            // Denylist x-* headers that carry credentials or secrets.
+            !matches!(
+                name.as_str(),
+                "x-api-key"
+                    | "x-auth-token"
+                    | "x-access-token"
+                    | "x-secret"
+                    | "x-secret-key"
+                    | "x-private-key"
+                    | "x-password"
+                    | "x-token"
+                    | "x-authorization"
+            ) && !name.starts_with("x-auth-")
+                && !name.starts_with("x-secret-")
+                && !name.starts_with("x-access-")
         })
         .collect();
 

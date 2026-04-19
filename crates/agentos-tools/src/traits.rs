@@ -277,13 +277,10 @@ mod tests {
         let r = resolve_tool_path("%C0%AE%C0%AE/etc/passwd", &data_dir(), &[]);
         // Either it's blocked by traversal detection, or the literal path doesn't
         // contain a ParentDir component and is just a weird filename — both are safe.
-        match r {
-            Ok(p) => {
-                // If allowed, the resulting path must still be under data_dir
-                // (the canonicalize check in the caller enforces this at runtime)
-                assert!(!p.to_string_lossy().contains(".."));
-            }
-            Err(_) => {} // blocked is also fine
+        if let Ok(p) = r {
+            // If allowed, the resulting path must still be under data_dir
+            // (the canonicalize check in the caller enforces this at runtime)
+            assert!(!p.to_string_lossy().contains(".."));
         }
     }
 

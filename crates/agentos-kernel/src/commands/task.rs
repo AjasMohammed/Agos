@@ -122,6 +122,7 @@ impl Kernel {
             is_team_coordinator: false,
             skip_checkpoint: no_checkpoint,
             thinking_level: effective_thinking_level,
+            spawner_agent_id: None,
         };
 
         self.scheduler.register_external(task.clone()).await;
@@ -393,6 +394,7 @@ impl Kernel {
             is_team_coordinator: false,
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
+            spawner_agent_id: None,
         };
 
         // Check for circular dependencies before enqueuing
@@ -452,6 +454,137 @@ impl Kernel {
             "delegated_to": target_agent_name,
             "child_task_id": child_task.id.to_string(),
             "status": "queued",
+        }))
+    }
+
+    /// Fire-and-forget async spawn. No scheduler dependency is added so the spawning task
+    /// continues without waiting. When the child completes, `inject_sub_agent_result` in
+    /// `task_completion.rs` fires (triggered by `parent_task_id`) — but only if the spawner's
+    /// context window is still active. Use `poll-agent` with the returned task_id for reliable
+    /// status checks across task boundaries.
+    pub(crate) async fn handle_spawn_async(
+        &self,
+        spawner_task: &AgentTask,
+        target_agent_name: &str,
+        prompt: &str,
+        priority: u8,
+        timeout_secs: u64,
+    ) -> Result<serde_json::Value, AgentOSError> {
+        // Enforce spawn depth limit — same cap as cmd_spawn_sub_agent.
+        const MAX_SPAWN_DEPTH: u8 = 5;
+        if spawner_task.spawn_depth >= MAX_SPAWN_DEPTH {
+            return Err(AgentOSError::PermissionDenied {
+                resource: "agent.spawn".to_string(),
+                operation: format!(
+                    "spawn depth limit ({MAX_SPAWN_DEPTH}) exceeded (current: {})",
+                    spawner_task.spawn_depth
+                ),
+            });
+        }
+
+        let registry = self.agent_registry.read().await;
+        let target = registry
+            .get_by_name(target_agent_name)
+            .ok_or_else(|| AgentOSError::AgentNotFound(target_agent_name.to_string()))?
+            .clone();
+
+        if target.status == AgentStatus::Offline {
+            return Err(AgentOSError::AgentNotFound(format!(
+                "Agent '{}' is offline",
+                target_agent_name
+            )));
+        }
+
+        let target_permissions = registry.compute_effective_permissions(&target.id);
+        drop(registry);
+
+        let child_permissions = spawner_task.capability_token.permissions.clone();
+        let effective_permissions = child_permissions.intersect(&target_permissions);
+
+        let child_token = self.capability_engine.issue_token(
+            TaskID::new(),
+            target.id,
+            spawner_task.capability_token.allowed_tools.clone(),
+            spawner_task.capability_token.allowed_intents.clone(),
+            effective_permissions,
+            Duration::from_secs(timeout_secs),
+        )?;
+
+        let child_task = AgentTask {
+            id: child_token.task_id,
+            state: TaskState::Queued,
+            agent_id: target.id,
+            capability_token: child_token,
+            // Must mirror cmd_spawn_sub_agent: set both parent_task AND parent_task_id so
+            // cmd_cancel_task's root-task check and is_root_task() stay consistent.
+            assigned_llm: Some(target.id),
+            priority,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            timeout: Duration::from_secs(timeout_secs),
+            original_prompt: prompt.to_string(),
+            history: Vec::new(),
+            parent_task: Some(spawner_task.id),
+            reasoning_hints: Some(infer_reasoning_hints(prompt)),
+            max_iterations: None,
+            trigger_source: None,
+            // Sub-agents are always bounded — never inherit parent autonomy.
+            autonomous: false,
+            parent_task_id: Some(spawner_task.id),
+            spawn_depth: spawner_task.spawn_depth.saturating_add(1),
+            is_team_coordinator: false,
+            skip_checkpoint: false,
+            thinking_level: ThinkingLevel::Off,
+            // Stored for future cross-task ownership queries (not yet used).
+            spawner_agent_id: Some(spawner_task.agent_id),
+        };
+
+        let _ = self.scheduler.enqueue(child_task.clone()).await;
+        // Register child for cascade-cancel: cancelling the spawner cancels this child too.
+        self.scheduler
+            .register_child(spawner_task.id, child_task.id)
+            .await;
+        // Intentionally no add_dependency — parent is NOT blocked.
+
+        self.emit_event(
+            EventType::TaskDelegated,
+            EventSource::TaskScheduler,
+            EventSeverity::Info,
+            serde_json::json!({
+                "parent_task_id": spawner_task.id.to_string(),
+                "child_task_id": child_task.id.to_string(),
+                "parent_agent_id": spawner_task.agent_id.to_string(),
+                "target_agent_id": target.id.to_string(),
+                "target_agent_name": target_agent_name,
+                "async": true,
+                "prompt_preview": prompt.chars().take(200).collect::<String>(),
+            }),
+            0,
+        )
+        .await;
+
+        self.emit_event(
+            EventType::DelegationReceived,
+            EventSource::TaskScheduler,
+            EventSeverity::Info,
+            serde_json::json!({
+                "child_task_id": child_task.id.to_string(),
+                "parent_task_id": spawner_task.id.to_string(),
+                "delegating_agent_id": spawner_task.agent_id.to_string(),
+                "target_agent_id": target.id.to_string(),
+                "target_agent_name": target_agent_name,
+                "async": true,
+                "prompt_preview": prompt.chars().take(200).collect::<String>(),
+            }),
+            0,
+        )
+        .await;
+
+        Ok(serde_json::json!({
+            "spawned_agent": target_agent_name,
+            "task_id": child_task.id.to_string(),
+            "status": "queued",
+            "notification": "result injected into your context if still running; use poll-agent for reliable status",
         }))
     }
 
@@ -564,6 +697,7 @@ impl Kernel {
             is_team_coordinator: payload.task.is_team_coordinator,
             skip_checkpoint: payload.task.skip_checkpoint,
             thinking_level: payload.task.thinking_level,
+            spawner_agent_id: payload.task.spawner_agent_id,
         };
 
         // 6. Restore context window from checkpoint.

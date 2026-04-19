@@ -136,6 +136,7 @@ pub async fn setup_kernel() -> (
         .await
         .unwrap(),
     );
+    kernel.wire_inbound_chat_bridge();
 
     let kernel_clone = kernel.clone();
     let run_handle = tokio::spawn(async move {
@@ -182,6 +183,7 @@ pub async fn register_mock_agent(kernel: &Kernel, name: &str, responses: Vec<Str
         base_url: None,
         default_thinking_level: ThinkingLevel::Off,
         system_prompt: None,
+        manually_offline: false,
     };
 
     kernel.agent_registry.write().await.register(profile);
@@ -219,6 +221,7 @@ pub async fn register_mock_agent_with_responses(
         base_url: None,
         default_thinking_level: ThinkingLevel::Off,
         system_prompt: None,
+        manually_offline: false,
     };
 
     kernel.agent_registry.write().await.register(profile);

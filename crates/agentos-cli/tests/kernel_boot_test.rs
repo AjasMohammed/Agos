@@ -58,6 +58,7 @@ max_cpu_ms = 1000
         .await
         .unwrap(),
     );
+    kernel.wire_inbound_chat_bridge();
 
     let logs = kernel.audit.query_recent(10).unwrap();
     assert!(logs

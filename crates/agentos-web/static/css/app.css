@@ -1353,6 +1353,59 @@ html, body {
     border: var(--aos-border);
 }
 
+.chat-attach-btn {
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.35rem 0.75rem;
+    font-size: 0.82rem;
+    border: var(--aos-border);
+    border-radius: var(--pico-border-radius, 4px);
+    background: transparent;
+    color: var(--pico-muted-color);
+    transition: background 0.15s, color 0.15s;
+    user-select: none;
+}
+.chat-attach-btn:hover { background: var(--pico-secondary-background); color: var(--pico-color); }
+.chat-attach-btn.uploading { opacity: 0.6; cursor: wait; }
+
+.chat-attach-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.4rem;
+}
+.chat-attach-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.2rem 0.5rem;
+    font-size: 0.78rem;
+    background: var(--pico-secondary-background);
+    border: var(--aos-border);
+    border-radius: 999px;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.chat-attach-chip button {
+    all: unset;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    color: var(--pico-muted-color);
+    flex-shrink: 0;
+}
+.chat-attach-chip button:hover { color: var(--pico-color); }
+
+.chat-attach-error {
+    color: var(--pico-del-color, #c0392b);
+    font-size: 0.875rem;
+    margin-top: 0.25rem;
+}
+
 /* ── Conversation view ───────────────────────────────────── */
 .chat-conversation-area {
     display: flex;
@@ -1469,6 +1522,13 @@ html, body {
 .chat-activity-error .chat-activity-icon { color: var(--aos-red); }
 .chat-activity-warn { border-color: var(--aos-amber); background: #fff3cd; }
 .chat-activity-warn .chat-activity-icon { color: var(--aos-amber); }
+.chat-activity-running { opacity: 0.7; animation: aos-pulse 1.4s ease-in-out infinite; }
+@keyframes aos-pulse { 0%,100% { opacity:0.7; } 50% { opacity: 1; } }
+
+/* Interleaved content area: tool cards and text segments stack vertically */
+.chat-stream-content { display: flex; flex-direction: column; gap: 0.25rem; }
+.chat-text-segment { line-height: 1.6; }
+.chat-text-segment:empty { display: none; }
 
 /* ── Thinking indicator ──────────────────────────────────── */
 .chat-thinking {
@@ -1960,4 +2020,271 @@ table th {
     font-size: 0.78rem;
     letter-spacing: 0.05em;
     background: var(--aos-beige-dark);
+}
+
+.pipeline-hero {
+    align-items: start;
+    gap: 1rem;
+}
+
+.eyebrow {
+    margin: 0 0 0.35rem;
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--aos-orange);
+}
+
+.pipeline-panel-palette {
+    background: linear-gradient(180deg, rgba(17, 95, 168, 0.08), rgba(255, 255, 255, 0));
+}
+
+.node-palette-rich {
+    grid-template-columns: 1fr;
+}
+
+.node-template-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    align-items: flex-start;
+    border: var(--aos-border);
+    border-left-width: 6px;
+    border-radius: 0;
+    padding: 1rem;
+    text-align: left;
+    background: var(--pico-card-background-color);
+    box-shadow: var(--aos-shadow);
+    cursor: pointer;
+}
+
+.node-template-card:hover {
+    transform: translateY(-1px);
+    box-shadow: 5px 5px 0 rgba(17, 17, 17, 0.18);
+}
+
+.node-template-title {
+    font-size: 0.95rem;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.node-template-copy {
+    font-size: 0.85rem;
+    color: var(--pico-muted-color);
+}
+
+.pipeline-quick-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.6rem;
+    margin-top: 1rem;
+}
+
+.pipeline-guidance {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    margin-top: 0.9rem;
+}
+
+.pipeline-inspector {
+    position: sticky;
+    top: 1rem;
+}
+
+.pipeline-connection-groups {
+    display: grid;
+    gap: 0.85rem;
+}
+
+.pipeline-connection-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin-top: 0.45rem;
+}
+
+.pipeline-connection-chip {
+    padding: 0.3rem 0.55rem;
+    min-height: auto;
+    border: 1px solid var(--aos-black);
+    background: var(--aos-beige);
+    color: var(--aos-black);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+}
+
+.pipeline-canvas-header {
+    align-items: start;
+}
+
+.pipeline-stat {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.2rem 0.55rem;
+    border: 1px solid rgba(17, 17, 17, 0.2);
+    background: rgba(255, 255, 255, 0.8);
+    font-size: 0.8rem;
+}
+
+.pipeline-canvas-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.pipeline-canvas-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.pipeline-zoom-label {
+    min-width: 3.75rem;
+    text-align: center;
+    font-weight: 700;
+}
+
+.pipeline-canvas {
+    isolation: isolate;
+}
+
+.pipeline-canvas-stage {
+    position: relative;
+    width: 1800px;
+    height: 960px;
+    transform-origin: top left;
+}
+
+.pipeline-empty-state {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: min(420px, calc(100% - 2rem));
+    transform: translate(-50%, -50%);
+    padding: 1rem 1.2rem;
+    border: 2px dashed rgba(17, 17, 17, 0.28);
+    background: rgba(255, 255, 255, 0.88);
+    text-align: center;
+    z-index: 0;
+}
+
+.pipeline-empty-state p {
+    margin-bottom: 0;
+}
+
+.pipeline-drop-preview {
+    position: absolute;
+    width: 220px;
+    height: 104px;
+    border: 2px dashed var(--aos-orange);
+    background: rgba(243, 125, 0, 0.08);
+    pointer-events: none;
+    z-index: 2;
+}
+
+.pipeline-edge-layer {
+    z-index: 1;
+    pointer-events: none;
+}
+
+.pipeline-edge-hitbox {
+    fill: none;
+    stroke: transparent;
+    stroke-width: 18;
+    pointer-events: stroke;
+}
+
+.pipeline-edge {
+    pointer-events: stroke;
+}
+
+.pipeline-edge-selected {
+    color: var(--aos-orange);
+    stroke-width: 4;
+}
+
+.pipeline-edge-preview {
+    color: var(--aos-blue);
+    stroke-dasharray: 8 6;
+}
+
+.pipeline-node {
+    z-index: 3;
+    width: 220px;
+    min-height: 104px;
+    transition: box-shadow 120ms ease, transform 120ms ease;
+}
+
+.pipeline-node:hover {
+    transform: translateY(-1px);
+}
+
+.pipeline-node-header {
+    margin-right: 1.25rem;
+}
+
+.pipeline-node-header small {
+    color: rgba(17, 17, 17, 0.66);
+}
+
+.pipeline-port {
+    top: 48px;
+}
+
+.pipeline-port-input {
+    left: -11px;
+}
+
+.pipeline-port-output {
+    right: -11px;
+}
+
+.pipeline-yaml-dialog {
+    min-width: min(860px, calc(100vw - 2rem));
+}
+
+@media (max-width: 980px) {
+    .pipeline-hero {
+        flex-direction: column;
+    }
+
+    .pipeline-toolbar {
+        width: 100%;
+    }
+
+    .pipeline-quick-actions {
+        grid-template-columns: 1fr;
+    }
+
+    .pipeline-inspector {
+        position: static;
+    }
+
+    .pipeline-status-inline {
+        align-items: flex-start;
+    }
+}
+
+@media (max-width: 640px) {
+    .pipeline-toolbar,
+    .pipeline-canvas-toolbar,
+    .pipeline-status-inline {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .pipeline-stat,
+    .pipeline-zoom-label {
+        width: 100%;
+        justify-content: center;
+    }
+
+    .pipeline-yaml-dialog {
+        min-width: calc(100vw - 1rem);
+    }
 }

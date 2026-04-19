@@ -73,7 +73,7 @@ where
                     "Retryable error, backing off"
                 );
                 tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(policy.max_delay);
+                delay = delay.saturating_mul(2).min(policy.max_delay);
             }
             Err(e) => return Err(e),
         }

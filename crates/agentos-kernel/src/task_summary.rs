@@ -219,6 +219,7 @@ mod tests {
             is_team_coordinator: false,
             skip_checkpoint: false,
             thinking_level: Default::default(),
+            spawner_agent_id: None,
         }
     }
 

@@ -4,12 +4,28 @@ use agentos_types::AgentOSError;
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use std::net::IpAddr;
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use url::Url;
 use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Strip the URL from a reqwest error before logging so credentials in
+/// query strings cannot leak into logs or audit entries.
+pub(crate) fn safe_reqwest_err(e: &reqwest::Error) -> String {
+    if let Some(status) = e.status() {
+        format!("HTTP {status}")
+    } else if e.is_timeout() {
+        "request timed out".to_string()
+    } else if e.is_connect() {
+        "connection failed".to_string()
+    } else {
+        "network error".to_string()
+    }
+}
 
 pub struct WebhookAdapter {
     pub target_url: String,
@@ -122,6 +138,113 @@ impl ChannelAdapter for WebhookAdapter {
         }
     }
 }
+
+// ── URL validation helpers ────────────────────────────────────────────────────
+
+/// Validate an outbound webhook URL. Requires HTTPS and blocks private IPs.
+pub(crate) fn validate_webhook_url(raw: &str) -> Result<(), AgentOSError> {
+    validate_url_inner(raw, true, "webhook")
+}
+
+/// Validate a channel server base URL (Matrix homeserver, Mattermost base URL).
+/// Allows http or https; blocks private IPs to prevent SSRF.
+pub(crate) fn validate_server_base_url(raw: &str, adapter: &str) -> Result<(), AgentOSError> {
+    validate_url_inner(raw, false, adapter)
+}
+
+fn validate_url_inner(raw: &str, require_https: bool, name: &str) -> Result<(), AgentOSError> {
+    let parsed = Url::parse(raw).map_err(|e| AgentOSError::ToolExecutionFailed {
+        tool_name: name.to_string(),
+        reason: format!("invalid URL: {e}"),
+    })?;
+
+    if require_https && parsed.scheme() != "https" {
+        return Err(AgentOSError::ToolExecutionFailed {
+            tool_name: name.to_string(),
+            reason: format!("{name} URL must use HTTPS"),
+        });
+    }
+    if !require_https && parsed.scheme() != "https" && parsed.scheme() != "http" {
+        return Err(AgentOSError::ToolExecutionFailed {
+            tool_name: name.to_string(),
+            reason: format!(
+                "server URL must use http or https, got '{}'",
+                parsed.scheme()
+            ),
+        });
+    }
+
+    let host = parsed
+        .host()
+        .ok_or_else(|| AgentOSError::ToolExecutionFailed {
+            tool_name: name.to_string(),
+            reason: "URL must have a host".to_string(),
+        })?;
+
+    match host {
+        url::Host::Domain(h) => {
+            let h = h.to_lowercase();
+            if h == "localhost"
+                || h == "localhost."
+                || h.ends_with(".local")
+                || h.ends_with(".internal")
+                || h.ends_with(".lan")
+            {
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name: name.to_string(),
+                    reason: "URL targets a private host".to_string(),
+                });
+            }
+        }
+        url::Host::Ipv4(v4) => {
+            if is_private_ip(IpAddr::V4(v4)) {
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name: name.to_string(),
+                    reason: "URL targets a private IP address".to_string(),
+                });
+            }
+        }
+        url::Host::Ipv6(v6) => {
+            // Unmap IPv4-mapped addresses (::ffff:127.0.0.1) to catch SSRF via IPv6 form.
+            let addr = if let Some(v4) = v6.to_ipv4_mapped() {
+                IpAddr::V4(v4)
+            } else {
+                IpAddr::V6(v6)
+            };
+            if is_private_ip(addr) {
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name: name.to_string(),
+                    reason: "URL targets a private IP address".to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_unspecified()
+                || o[0] == 10
+                || (o[0] == 172 && (16..=31).contains(&o[1]))
+                || (o[0] == 192 && o[1] == 168)
+                || (o[0] == 169 && o[1] == 254)
+                || (o[0] == 100 && (64..=127).contains(&o[1]))
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (s[0] & 0xfe00) == 0xfc00
+                || (s[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

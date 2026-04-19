@@ -96,6 +96,20 @@ pub trait DeliveryAdapter: Send + Sync {
     ) -> Result<tokio::task::JoinHandle<()>, DeliveryError> {
         Err(DeliveryError("inbound not supported".into()))
     }
+
+    /// When the outbound recipient was unknown at connect time (Telegram webhook +
+    /// empty `chat_id`), apply the discovered ID on the matching adapter instance.
+    ///
+    /// Long-poll Telegram instead discovers inside `telegram_poll_loop`; webhook-only
+    /// adapters skip that loop, so the kernel calls this from `InboundRouter` on the
+    /// first inbound message.
+    async fn hydrate_discovered_recipient(
+        &self,
+        _channel_instance_id: &ChannelInstanceID,
+        _external_id: &str,
+    ) -> bool {
+        false
+    }
 }
 
 /// Kernel subsystem that receives `UserMessage` objects from agents or kernel
@@ -138,6 +152,32 @@ impl NotificationRouter {
             .write()
             .await
             .retain(|a| a.adapter_instance_id().as_deref() != Some(instance_id));
+    }
+
+    /// Notify delivery adapters that a channel instance now has a concrete external
+    /// recipient id (e.g. Telegram `chat_id` learned from the first webhook update).
+    pub async fn hydrate_discovered_recipient(
+        &self,
+        channel_instance_id: &ChannelInstanceID,
+        external_id: &str,
+    ) {
+        if external_id.is_empty() {
+            return;
+        }
+        let adapters = self.adapters.read().await;
+        for adapter in adapters.iter() {
+            if adapter
+                .hydrate_discovered_recipient(channel_instance_id, external_id)
+                .await
+            {
+                tracing::info!(
+                    %channel_instance_id,
+                    %external_id,
+                    "Hydrated delivery adapter with discovered external recipient"
+                );
+                return;
+            }
+        }
     }
 
     /// Deliver a message:
@@ -335,6 +375,42 @@ impl NotificationRouter {
                 });
             }
         }
+    }
+
+    /// Deliver a message to a single channel adapter identified by `target_instance_id`.
+    ///
+    /// Unlike `deliver`, this does not fan out to all registered adapters — it persists
+    /// to the inbox then delivers only to the adapter whose `adapter_instance_id` matches.
+    /// Used by `InboundRouter` to route replies back to the originating channel only,
+    /// preventing cross-channel leakage of private chat content.
+    pub async fn deliver_to_channel(
+        &self,
+        msg: UserMessage,
+        target_instance_id: &str,
+    ) -> Result<(), AgentOSError> {
+        self.check_rate_limit(&msg.from).await?;
+        self.inbox.write(&msg).await?;
+        let adapters = self.adapters.read().await;
+        for adapter in adapters.iter() {
+            if adapter.adapter_instance_id().as_deref() == Some(target_instance_id) {
+                if adapter.is_available().await {
+                    if let Err(e) = adapter.deliver(&msg).await {
+                        tracing::warn!(
+                            notification_id = %msg.id,
+                            target = %target_instance_id,
+                            error = %e,
+                            "Targeted channel delivery failed"
+                        );
+                    }
+                }
+                return Ok(());
+            }
+        }
+        tracing::debug!(
+            target = %target_instance_id,
+            "deliver_to_channel: no adapter found for instance id"
+        );
+        Ok(())
     }
 
     /// Return a clone of the `UserInbox` handle for use by command handlers.

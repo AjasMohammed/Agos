@@ -1,0 +1,44 @@
+[manifest]
+name        = "task-spawn-async"
+version     = "1.0.0"
+description = "Spawn a background task on a named agent and return immediately. The caller is never blocked. If still running when the child completes, the result is injected into the caller's context. Use poll-agent with the returned task_id for reliable status checks."
+author      = "agentos-core"
+trust_tier  = "core"
+risk_class  = "control_plane"
+
+[capabilities_required]
+permissions = ["agent.spawn:x"]
+
+[capabilities_provided]
+outputs = ["task_id", "status"]
+
+[intent_schema]
+input  = "TaskSpawnAsyncIntent"
+output = "SpawnAsyncResult"
+
+[input_schema]
+type = "object"
+required = ["agent", "task"]
+
+[input_schema.properties.agent]
+type = "string"
+description = "Target agent name"
+
+[input_schema.properties.task]
+type = "string"
+description = "Task prompt for the target agent"
+
+[input_schema.properties.priority]
+type = "integer"
+default = 5
+minimum = 0
+maximum = 255
+description = "Task scheduling priority (lower = higher priority)"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

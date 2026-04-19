@@ -23,6 +23,8 @@ pub struct ChatSession {
 pub struct ChatMessage {
     pub role: String, // "user" | "assistant" | "tool"
     pub content: String,
+    /// Comma-separated upload UUIDs attached to this user message (LLM context), if any.
+    pub file_ids: Option<String>,
     pub created_at: String,
     /// Tool name (populated when role == "tool").
     pub tool_name: Option<String>,
@@ -256,6 +258,25 @@ impl ChatStore {
             )?;
         }
 
+        // Migration v5: optional file attachment IDs per user message (multi-turn LLM context).
+        let version: i64 = conn.query_row(
+            "SELECT version FROM chat_store_version WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )?;
+        if version < 5 {
+            let has_file_ids: bool = conn
+                .prepare("PRAGMA table_info(chat_messages)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .any(|col| col.as_deref() == Ok("file_ids"));
+            if !has_file_ids {
+                conn.execute_batch(
+                    "ALTER TABLE chat_messages ADD COLUMN file_ids TEXT;",
+                )?;
+            }
+            conn.execute_batch("UPDATE chat_store_version SET version = 5 WHERE id = 1;")?;
+        }
+
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -266,6 +287,7 @@ impl ChatStore {
         &self,
         agent_name: &str,
         first_message: &str,
+        file_ids: Option<&str>,
     ) -> Result<String, rusqlite::Error> {
         let id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
@@ -277,9 +299,9 @@ impl ChatStore {
             params![id, agent_name, now],
         )?;
         tx.execute(
-            "INSERT INTO chat_messages (session_id, role, content, created_at)
-             VALUES (?1, 'user', ?2, ?3)",
-            params![id, first_message, now],
+            "INSERT INTO chat_messages (session_id, role, content, file_ids, created_at)
+             VALUES (?1, 'user', ?2, ?3, ?4)",
+            params![id, first_message, file_ids, now],
         )?;
         tx.commit()?;
         Ok(id)
@@ -376,10 +398,10 @@ impl ChatStore {
         )?;
         tx.execute(
             "INSERT INTO chat_messages (
-                 session_id, role, content, tool_name, tool_duration_ms, tool_intent_type,
+                 session_id, role, content, file_ids, tool_name, tool_duration_ms, tool_intent_type,
                  tool_payload_json, tool_result_json, tool_success, created_at
              )
-             SELECT ?1, role, content, tool_name, tool_duration_ms, tool_intent_type,
+             SELECT ?1, role, content, file_ids, tool_name, tool_duration_ms, tool_intent_type,
                     tool_payload_json, tool_result_json, tool_success, created_at
              FROM chat_messages
              WHERE session_id = ?2
@@ -392,11 +414,14 @@ impl ChatStore {
 
     /// Add a message to an existing session. Both the INSERT and the session
     /// timestamp UPDATE are committed atomically in a single transaction.
+    ///
+    /// `file_ids` is only stored for `role == "user"` (comma-separated upload UUIDs).
     pub fn add_message(
         &self,
         session_id: &str,
         role: &str,
         content: &str,
+        file_ids: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
         debug_assert!(
             role == "user" || role == "assistant" || role == "tool",
@@ -405,10 +430,15 @@ impl ChatStore {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.unchecked_transaction()?;
+        let fid = if role == "user" {
+            file_ids
+        } else {
+            None
+        };
         tx.execute(
-            "INSERT INTO chat_messages (session_id, role, content, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, role, content, now],
+            "INSERT INTO chat_messages (session_id, role, content, file_ids, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id, role, content, fid, now],
         )?;
         tx.execute(
             "UPDATE chat_sessions SET updated_at = ?1 WHERE id = ?2",
@@ -422,7 +452,7 @@ impl ChatStore {
     pub fn get_messages(&self, session_id: &str) -> Result<Vec<ChatMessage>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT m.role, m.content, m.created_at,
+            "SELECT m.role, m.content, m.file_ids, m.created_at,
                     COALESCE(c.tool_name, m.tool_name) as tool_name,
                     COALESCE(c.tool_duration_ms, m.tool_duration_ms) as tool_duration_ms,
                     COALESCE(c.tool_intent_type, m.tool_intent_type) as tool_intent_type,
@@ -441,13 +471,14 @@ impl ChatStore {
                 Ok(ChatMessage {
                     role: row.get(0)?,
                     content: row.get(1)?,
-                    created_at: row.get(2)?,
-                    tool_name: row.get(3)?,
-                    tool_duration_ms: row.get::<_, Option<i64>>(4)?.map(|v| v.max(0) as u64),
-                    tool_intent_type: row.get(5)?,
-                    tool_payload_json: row.get(6)?,
-                    tool_result_json: row.get(7)?,
-                    tool_success: row.get::<_, Option<i64>>(8)?.map(|v| v > 0),
+                    file_ids: row.get(2)?,
+                    created_at: row.get(3)?,
+                    tool_name: row.get(4)?,
+                    tool_duration_ms: row.get::<_, Option<i64>>(5)?.map(|v| v.max(0) as u64),
+                    tool_intent_type: row.get(6)?,
+                    tool_payload_json: row.get(7)?,
+                    tool_result_json: row.get(8)?,
+                    tool_success: row.get::<_, Option<i64>>(9)?.map(|v| v > 0),
                 })
             })?
             .collect::<Result<_, _>>()?;
@@ -608,5 +639,56 @@ impl ChatStore {
         )?;
         tx.commit()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persists_and_reads_file_ids_on_user_messages() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("chat.db");
+        let store = ChatStore::open(&db).expect("open");
+        let fid = "550e8400-e29b-41d4-a716-446655440000";
+        let sid = store
+            .create_session_with_first_message("agent", "summarize this", Some(fid))
+            .expect("create");
+
+        let msgs = store.get_messages(&sid).expect("get");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].content, "summarize this");
+        assert_eq!(msgs[0].file_ids.as_deref(), Some(fid));
+
+        store
+            .add_message(&sid, "assistant", "done", None)
+            .expect("assistant");
+        store
+            .add_message(&sid, "user", "translate", Some(fid))
+            .expect("user2");
+
+        let msgs = store.get_messages(&sid).expect("get2");
+        let users: Vec<_> = msgs.iter().filter(|m| m.role == "user").collect();
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0].content, "summarize this");
+        assert_eq!(users[0].file_ids.as_deref(), Some(fid));
+        assert_eq!(users[1].content, "translate");
+        assert_eq!(users[1].file_ids.as_deref(), Some(fid));
+    }
+
+    #[test]
+    fn fork_session_copies_file_ids() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("chat.db");
+        let store = ChatStore::open(&db).expect("open");
+        let fid = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+        let sid = store
+            .create_session_with_first_message("a", "m", Some(fid))
+            .expect("create");
+        let forked = store.fork_session(&sid, None).expect("fork");
+        let msgs = store.get_messages(&forked).expect("get fork");
+        assert_eq!(msgs[0].file_ids.as_deref(), Some(fid));
     }
 }

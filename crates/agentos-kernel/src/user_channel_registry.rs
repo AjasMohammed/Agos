@@ -39,6 +39,7 @@ impl UserChannelRegistry {
                 reply_topic     TEXT,
                 server_url      TEXT,
                 webhook_url     TEXT,
+                active_agent_name TEXT,
                 connected_at    TEXT NOT NULL,
                 last_active     TEXT NOT NULL,
                 active          INTEGER NOT NULL DEFAULT 1
@@ -50,6 +51,7 @@ impl UserChannelRegistry {
 
         // Migration: add webhook_url column for existing databases.
         let _ = conn.execute_batch("ALTER TABLE user_channels ADD COLUMN webhook_url TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE user_channels ADD COLUMN active_agent_name TEXT;");
 
         Ok(Self {
             db: Arc::new(Mutex::new(conn)),
@@ -67,6 +69,7 @@ impl UserChannelRegistry {
         let reply = ch.reply_topic.clone();
         let surl = ch.server_url.clone();
         let whurl = ch.webhook_url.clone();
+        let active_agent = ch.active_agent_name.clone();
         let conn_at = ch.connected_at.to_rfc3339();
         let last = ch.last_active.to_rfc3339();
 
@@ -75,15 +78,28 @@ impl UserChannelRegistry {
             conn.execute(
                 "INSERT INTO user_channels
                     (id, kind, external_id, display_name, credential_key, reply_topic, server_url,
-                     webhook_url, connected_at, last_active, active)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1)
+                     webhook_url, active_agent_name, connected_at, last_active, active)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1)
                  ON CONFLICT(id) DO UPDATE SET
                     kind=excluded.kind, external_id=excluded.external_id,
                     display_name=excluded.display_name, credential_key=excluded.credential_key,
                     reply_topic=excluded.reply_topic, server_url=excluded.server_url,
                     webhook_url=excluded.webhook_url,
+                    active_agent_name=excluded.active_agent_name,
                     last_active=excluded.last_active, active=1",
-                params![ch_id, kind, ext, disp, cred, reply, surl, whurl, conn_at, last],
+                params![
+                    ch_id,
+                    kind,
+                    ext,
+                    disp,
+                    cred,
+                    reply,
+                    surl,
+                    whurl,
+                    active_agent,
+                    conn_at,
+                    last
+                ],
             )
             .map_err(|e| AgentOSError::KernelError {
                 reason: format!("UserChannelRegistry::register failed: {e}"),
@@ -125,7 +141,7 @@ impl UserChannelRegistry {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, kind, external_id, display_name, credential_key, \
-                     reply_topic, server_url, webhook_url, connected_at, last_active, active \
+                     reply_topic, server_url, webhook_url, active_agent_name, connected_at, last_active, active \
                      FROM user_channels WHERE active = 1 ORDER BY connected_at ASC",
                 )
                 .map_err(|e| AgentOSError::KernelError {
@@ -143,9 +159,10 @@ impl UserChannelRegistry {
                         row.get::<_, Option<String>>(5)?,
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, Option<String>>(7)?,
-                        row.get::<_, String>(8)?,
+                        row.get::<_, Option<String>>(8)?,
                         row.get::<_, String>(9)?,
-                        row.get::<_, bool>(10)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, bool>(11)?,
                     ))
                 })
                 .map_err(|e| AgentOSError::KernelError {
@@ -154,12 +171,35 @@ impl UserChannelRegistry {
 
             let mut channels = Vec::new();
             for row in rows {
-                let (id, kind_str, ext, disp, cred, reply, surl, whurl, conn_at, last, active) =
-                    row.map_err(|e| AgentOSError::KernelError {
-                        reason: format!("UserChannelRegistry::list_active row error: {e}"),
-                    })?;
+                let (
+                    id,
+                    kind_str,
+                    ext,
+                    disp,
+                    cred,
+                    reply,
+                    surl,
+                    whurl,
+                    active_agent,
+                    conn_at,
+                    last,
+                    active,
+                ) = row.map_err(|e| AgentOSError::KernelError {
+                    reason: format!("UserChannelRegistry::list_active row error: {e}"),
+                })?;
                 channels.push(row_to_channel((
-                    id, kind_str, ext, disp, cred, reply, surl, whurl, conn_at, last, active,
+                    id,
+                    kind_str,
+                    ext,
+                    disp,
+                    cred,
+                    reply,
+                    surl,
+                    whurl,
+                    active_agent,
+                    conn_at,
+                    last,
+                    active,
                 ))?);
             }
             Ok(channels)
@@ -181,7 +221,7 @@ impl UserChannelRegistry {
             let conn = db.blocking_lock();
             let result = conn.query_row(
                 "SELECT id, kind, external_id, display_name, credential_key, \
-                 reply_topic, server_url, webhook_url, connected_at, last_active, active \
+                 reply_topic, server_url, webhook_url, active_agent_name, connected_at, last_active, active \
                  FROM user_channels WHERE id = ?1",
                 params![id_str],
                 |row| {
@@ -194,9 +234,10 @@ impl UserChannelRegistry {
                         row.get::<_, Option<String>>(5)?,
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, Option<String>>(7)?,
-                        row.get::<_, String>(8)?,
+                        row.get::<_, Option<String>>(8)?,
                         row.get::<_, String>(9)?,
-                        row.get::<_, bool>(10)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, bool>(11)?,
                     ))
                 },
             );
@@ -240,6 +281,34 @@ impl UserChannelRegistry {
         })?
     }
 
+    /// Set the default agent for inbound channel chat (`/agent` command).
+    pub async fn update_active_agent_name(
+        &self,
+        id: &ChannelInstanceID,
+        agent_name: Option<&str>,
+    ) -> Result<(), AgentOSError> {
+        let db = self.db.clone();
+        let id_str = id.to_string();
+        let agent = agent_name
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        tokio::task::spawn_blocking(move || {
+            let conn = db.blocking_lock();
+            conn.execute(
+                "UPDATE user_channels SET active_agent_name = ?1 WHERE id = ?2",
+                params![agent, id_str],
+            )
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("UserChannelRegistry::update_active_agent_name failed: {e}"),
+            })?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| AgentOSError::KernelError {
+            reason: format!("UserChannelRegistry::update_active_agent_name task panicked: {e}"),
+        })?
+    }
+
     /// Update the `last_active` timestamp of a registered channel.
     pub async fn update_last_active(&self, id: &ChannelInstanceID) -> Result<(), AgentOSError> {
         let db = self.db.clone();
@@ -275,13 +344,27 @@ type ChannelRow = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
     String,
     String,
     bool,
 );
 
 fn row_to_channel(
-    (id, kind_str, ext, disp, cred, reply, surl, whurl, conn_at, last, active): ChannelRow,
+    (
+        id,
+        kind_str,
+        ext,
+        disp,
+        cred,
+        reply,
+        surl,
+        whurl,
+        active_agent,
+        conn_at,
+        last,
+        active,
+    ): ChannelRow,
 ) -> Result<RegisteredChannel, AgentOSError> {
     Ok(RegisteredChannel {
         id: id.parse().map_err(|e| AgentOSError::KernelError {
@@ -296,6 +379,7 @@ fn row_to_channel(
         reply_topic: reply,
         server_url: surl,
         webhook_url: whurl,
+        active_agent_name: active_agent,
         connected_at: conn_at.parse().map_err(|e| AgentOSError::KernelError {
             reason: format!("UserChannelRegistry: bad connected_at: {e}"),
         })?,
@@ -393,6 +477,7 @@ mod tests {
             reply_topic: None,
             server_url: None,
             webhook_url: None,
+            active_agent_name: None,
             connected_at: now,
             last_active: now,
             active: true,

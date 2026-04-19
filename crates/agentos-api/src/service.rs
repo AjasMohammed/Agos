@@ -130,6 +130,15 @@ pub trait KernelService: Send + Sync {
     async fn verify_webhook_secret(&self, channel_id: &str, secret: &str)
         -> Result<bool, ApiError>;
 
+    /// Returns the configured `external_id` for a channel (e.g. Telegram `chat_id`).
+    ///
+    /// Used by webhook handlers to ignore traffic from chats other than the pinned
+    /// recipient. An empty string means auto-discovery is still in progress.
+    async fn channel_pinned_external_id(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<String>, ApiError>;
+
     /// Forward a raw inbound message from a webhook to the kernel's inbound router.
     async fn forward_webhook_message(
         &self,

@@ -68,6 +68,7 @@ const HAL_TOOL_NAMES: &[&str] = &[
 const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "agent-message",
     "task-delegate",
+    "task-spawn-async",
     "agent-call",
     "agent-list",
     "task-status",
@@ -104,6 +105,12 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "build-run",
     "build-test",
     "build-lint",
+    "set-timer",
+    "cancel-timer",
+    "list-timers",
+    "schedule-once",
+    "cancel-once-job",
+    "list-once-jobs",
 ];
 
 const SPECIAL_CONTEXT_TOOL_NAMES: &[&str] = &["agent-manual", "agent-self"];

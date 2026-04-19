@@ -14,10 +14,11 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::AuthToken;
 use crate::handlers::{
-    a2a, agent_detail, agents, audit, channels, chat, config_page, connectors, costs, dashboard,
-    doctor, escalations, events, events_log, hal_page, identity_page, logs, management,
-    marketplace, mcp_page, notifications, oauth, observability, pipeline_ui, pipelines, plugins,
-    resources_page, roles, schedules, scratchpad, secrets, tasks, teams, tools, webhooks,
+    a2a, agent_convo, agent_detail, agents, audit, channels, chat, config_page, connectors, costs,
+    dashboard, doctor, escalations, events, events_log, files, hal_page, identity_page,     logs,
+    manual_page,
+    management, marketplace, mcp_page, notifications, oauth, observability, pipeline_ui, pipelines,
+    plugins, resources_page, roles, schedules, scratchpad, secrets, tasks, teams, tools, webhooks,
     webhooks_page,
 };
 use crate::state::AppState;
@@ -103,6 +104,18 @@ pub fn build_router(
         // memory exhaustion DoS. Most webhook payloads are well under 100 KiB.
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024)) // 256 KiB
         .with_state(Arc::new(state.clone()));
+
+    // Telegram Bot API webhooks — same handler as `agentos-api`; must live on the
+    // Web UI server because `agentos web serve` only exposes this Axum app (not the
+    // standalone REST API). Without this route, `setWebhook` succeeds but Telegram
+    // POSTs hit 404 and chat_id auto-discovery never runs.
+    let telegram_webhook_routes = Router::new()
+        .route(
+            "/api/v1/webhooks/telegram/{channel_id}",
+            axum::routing::post(agentos_api::handlers::webhooks::telegram_webhook),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
+        .with_state(state.service.clone());
 
     Ok(Router::new()
         .route("/", axum::routing::get(dashboard::index))
@@ -259,6 +272,35 @@ pub fn build_router(
             "/dashboard-recent-audit",
             axum::routing::get(dashboard::recent_audit_partial),
         )
+        // Agent-to-Agent Conversations
+        .route("/agent-chat", axum::routing::get(agent_convo::list))
+        .route(
+            "/agent-chat/new",
+            axum::routing::post(agent_convo::new_convo),
+        )
+        .route("/agent-chat/{id}", axum::routing::get(agent_convo::detail))
+        .route(
+            "/agent-chat/{id}/stop",
+            axum::routing::post(agent_convo::stop),
+        )
+        .route(
+            "/agent-chat/{id}/stream",
+            axum::routing::get(agent_convo::stream),
+        )
+        // File upload and management
+        .route("/files", axum::routing::get(files::list))
+        .route(
+            "/files/upload",
+            axum::routing::post(files::upload)
+                .layer(axum::extract::DefaultBodyLimit::max(101 * 1024 * 1024)),
+        )
+        .route("/files/{id}/delete", axum::routing::post(files::delete))
+        .route("/files/{id}/download", axum::routing::get(files::download))
+        .route(
+            "/api/files/upload",
+            axum::routing::post(files::upload_api)
+                .layer(axum::extract::DefaultBodyLimit::max(101 * 1024 * 1024)),
+        )
         // Chat (session-based, separate from the task system)
         .route("/chat", axum::routing::get(chat::list))
         .route("/chat/new", axum::routing::post(chat::new_session))
@@ -372,6 +414,7 @@ pub fn build_router(
             axum::routing::post(webhooks_page::rotate),
         )
         .route("/doctor", axum::routing::get(doctor::page))
+        .route("/manual", axum::routing::get(manual_page::page))
         .route("/scratchpad", axum::routing::get(scratchpad::page))
         .route(
             "/agents/{name}/scratchpad",
@@ -433,21 +476,24 @@ pub fn build_router(
         //   → Extension(auth_token) → require_auth → csrf_middleware → handler
         // CSRF middleware runs after auth, so only authenticated sessions reach it.
         .layer(axum::middleware::from_fn_with_state(
-            state,
+            state.clone(),
             crate::csrf::csrf_middleware,
         ))
         // Auth middleware — must be inside the Extension layer so the token is available.
-        .layer(axum::middleware::from_fn(crate::auth::require_auth))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require_auth,
+        ))
         // Extension layer — adds auth_token to every request before auth middleware runs.
         .layer(axum::Extension(auth_token))
         // Merge unauthenticated webhook routes — placed after auth layer so they
         // bypass auth/CSRF but still get security headers, compression, and rate limiting.
         .merge(webhook_routes)
+        .merge(telegram_webhook_routes)
         // Security headers on all responses.
         .layer(axum::middleware::from_fn(add_security_headers))
         .layer(CompressionLayer::new().compress_when(
-            DefaultPredicate::new()
-                .and(NotForContentType::new("text/event-stream")),
+            DefaultPredicate::new().and(NotForContentType::new("text/event-stream")),
         ))
         .layer(TraceLayer::new_for_http())
         .layer(cors)

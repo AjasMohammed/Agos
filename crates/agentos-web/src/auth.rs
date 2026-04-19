@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use axum::extract::{Extension, State};
-use axum::http::{Request, StatusCode};
+use axum::http::header::AUTHORIZATION;
+use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use axum_extra::extract::CookieJar;
+use rand::RngCore;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -34,14 +36,45 @@ pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
     a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
+/// Stable principal for uploaded file rows: hashes the browser session cookie or bearer token
+/// so the raw secret is never stored as the `owner_principal` column value.
+pub fn file_owner_principal(jar: &CookieJar, headers: &HeaderMap, token: &AuthToken) -> String {
+    if let Some(cookie) = jar.get("agentos_session") {
+        return crate::csrf::session_key(cookie.value());
+    }
+    if let Some(h) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+        if let Some(candidate) = h.strip_prefix("Bearer ") {
+            if ct_eq(candidate, token.0.as_str()) {
+                return crate::csrf::session_key(candidate);
+            }
+        }
+    }
+    crate::csrf::session_key(token.0.as_str())
+}
+
+fn opaque_browser_session_valid(state: &AppState, cookie_value: &str) -> bool {
+    let key = crate::csrf::session_key(cookie_value);
+    let Some(entry) = state.browser_sessions.get(&key) else {
+        return false;
+    };
+    let ok = entry.value().elapsed() <= crate::csrf::TOKEN_TTL;
+    drop(entry);
+    if !ok {
+        state.browser_sessions.remove(&key);
+    }
+    ok
+}
+
 /// Axum middleware for dual-mode authentication.
 ///
 /// Accepts either:
 /// 1. `Authorization: Bearer <token>` header (API / CLI clients)
-/// 2. `agentos_session` cookie (browser / HTMX clients)
+/// 2. `agentos_session` cookie (browser / HTMX clients) — opaque per-login ID registered
+///    in `AppState::browser_sessions` (see [`login_submit`]).
 ///
 /// Requests to `/static/` prefix and `/login` bypass authentication.
 pub async fn require_auth(
+    State(state): State<AppState>,
     Extension(token): Extension<AuthToken>,
     jar: CookieJar,
     request: Request<axum::body::Body>,
@@ -55,7 +88,7 @@ pub async fn require_auth(
     }
 
     // 1. Bearer token (for API / CLI clients) — constant-time comparison.
-    if let Some(header) = request.headers().get(axum::http::header::AUTHORIZATION) {
+    if let Some(header) = request.headers().get(AUTHORIZATION) {
         if let Ok(h) = header.to_str() {
             if let Some(candidate) = h.strip_prefix("Bearer ") {
                 if ct_eq(candidate, token.0.as_str()) {
@@ -65,9 +98,9 @@ pub async fn require_auth(
         }
     }
 
-    // 2. Session cookie (for browser / HTMX requests) — constant-time comparison.
+    // 2. Session cookie — opaque value issued at login, keyed in `browser_sessions`.
     if let Some(cookie) = jar.get("agentos_session") {
-        if ct_eq(cookie.value(), token.0.as_str()) {
+        if opaque_browser_session_valid(&state, cookie.value()) {
             return next.run(request).await;
         }
     }
@@ -132,7 +165,17 @@ pub async fn login_submit(
     // Move the token into a Zeroizing wrapper immediately so it's cleared on drop.
     let candidate = Zeroizing::new(std::mem::take(&mut form.token));
     if ct_eq(&candidate, auth_token.0.as_str()) {
-        let cookie = Cookie::build(("agentos_session", auth_token.0.as_str().to_string()))
+        // Opaque per-login session so concurrent users sharing one deployment token get
+        // distinct file-owner principals (see `FileStore::owner_principal`).
+        let mut bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        let opaque_session = hex::encode(bytes);
+        let session_key = crate::csrf::session_key(&opaque_session);
+        state
+            .browser_sessions
+            .insert(session_key, std::time::Instant::now());
+
+        let cookie = Cookie::build(("agentos_session", opaque_session))
             .path("/")
             .http_only(true)
             .secure(state.secure_cookies)

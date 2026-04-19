@@ -41,7 +41,15 @@ impl ChannelManager {
             child_cancel.clone(),
         );
 
-        self.channels.write().await.insert(
+        let mut channels = self.channels.write().await;
+        // Cancel and detach any prior listener for this instance_id to prevent leaks.
+        if let Some(prev) = channels.remove(instance_id) {
+            prev.cancel.cancel();
+            // Detach (don't await) — the task will exit on its own; we just ensure
+            // the cancel signal is sent.
+            drop(prev.listener_handle);
+        }
+        channels.insert(
             instance_id.to_string(),
             ManagedChannel {
                 adapter,
@@ -66,25 +74,48 @@ impl ChannelManager {
     }
 
     pub async fn send(&self, instance_id: &str, msg: OutboundMessage) -> Result<(), AgentOSError> {
-        let channels = self.channels.read().await;
-        let managed =
+        // Clone the Arc under a short read-lock so the lock isn't held across network I/O.
+        let adapter = {
+            let channels = self.channels.read().await;
             channels
                 .get(instance_id)
+                .map(|m| m.adapter.clone())
                 .ok_or_else(|| AgentOSError::ToolExecutionFailed {
                     tool_name: "channel_manager".to_string(),
                     reason: format!("channel {} not found", instance_id),
-                })?;
-        managed.adapter.send(msg).await?;
+                })?
+        };
+        adapter.send(msg).await?;
         Ok(())
     }
 
+    /// Returns health for all channels concurrently, each check capped at 10 seconds.
     pub async fn health(&self) -> HashMap<String, ChannelHealth> {
-        let channels = self.channels.read().await;
-        let mut results = HashMap::new();
-        for (id, managed) in channels.iter() {
-            results.insert(id.clone(), managed.adapter.health_check().await);
-        }
-        results
+        let entries: Vec<(String, Arc<dyn ChannelAdapter>)> = {
+            let channels = self.channels.read().await;
+            channels
+                .iter()
+                .map(|(id, m)| (id.clone(), m.adapter.clone()))
+                .collect()
+        };
+
+        let futs: Vec<_> = entries
+            .into_iter()
+            .map(|(id, adapter)| async move {
+                let health = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    adapter.health_check(),
+                )
+                .await
+                .unwrap_or_else(|_| ChannelHealth::Degraded("health check timed out".to_string()));
+                (id, health)
+            })
+            .collect();
+
+        futures_util::future::join_all(futs)
+            .await
+            .into_iter()
+            .collect()
     }
 
     /// Supervision loop: checks listener health every 30 seconds and restarts
@@ -106,15 +137,17 @@ impl ChannelManager {
         for (id, managed) in channels.iter_mut() {
             if managed.listener_handle.is_finished() {
                 warn!(channel = %id, "Listener died, restarting");
-                // Create a new child cancel token
                 let child_cancel = self.cancel.child_token();
                 let handle = Self::spawn_listener(
                     managed.adapter.clone(),
                     self.inbound_tx.clone(),
                     child_cancel.clone(),
                 );
-                managed.listener_handle = handle;
-                managed.cancel = child_cancel;
+                // Signal the old task and abort it; replace state atomically.
+                let old_cancel = std::mem::replace(&mut managed.cancel, child_cancel);
+                let old_handle = std::mem::replace(&mut managed.listener_handle, handle);
+                old_cancel.cancel();
+                old_handle.abort();
             }
         }
     }
@@ -122,6 +155,11 @@ impl ChannelManager {
     pub async fn deregister(&self, instance_id: &str) {
         if let Some(managed) = self.channels.write().await.remove(instance_id) {
             managed.cancel.cancel();
+            managed.listener_handle.abort();
+            // Wait briefly for the task to flush any in-flight work.
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(5), managed.listener_handle)
+                    .await;
         }
     }
 
@@ -216,5 +254,23 @@ mod tests {
         assert_eq!(manager.adapter_count().await, 1);
         manager.deregister("inst1").await;
         assert_eq!(manager.adapter_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_register_dedup_cancels_old_listener() {
+        let (tx, _rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        let manager = ChannelManager::new(tx, cancel);
+
+        manager
+            .register("inst1", Arc::new(MockAdapter))
+            .await
+            .unwrap();
+        // Registering again with same ID should not increase count
+        manager
+            .register("inst1", Arc::new(MockAdapter))
+            .await
+            .unwrap();
+        assert_eq!(manager.adapter_count().await, 1);
     }
 }

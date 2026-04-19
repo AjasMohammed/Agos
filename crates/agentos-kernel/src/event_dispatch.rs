@@ -569,6 +569,7 @@ impl Kernel {
             is_team_coordinator: false,
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
+            spawner_agent_id: None,
         };
 
         self.scheduler.enqueue(task).await;

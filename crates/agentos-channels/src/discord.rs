@@ -3,6 +3,7 @@ use crate::{ChannelAdapter, ChannelCapabilities, ChannelHealth};
 use agentos_types::AgentOSError;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
+use rand::Rng;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -129,7 +130,6 @@ impl ChannelAdapter for DiscordAdapter {
                 }
             };
 
-            listener_alive.store(true, Ordering::Release);
             let (mut write, mut read) = ws_stream.split();
             let mut heartbeat_interval: Option<tokio::time::Interval> = None;
             let mut sequence: Option<u64> = None;
@@ -158,18 +158,22 @@ impl ChannelAdapter for DiscordAdapter {
                             Some(Ok(Message::Text(text))) => {
                                 if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&text) {
                                     let op = payload["op"].as_u64().unwrap_or(255);
-                                    let s = payload["s"].as_u64();
-                                    if let Some(seq) = s { sequence = Some(seq); }
 
                                     match op {
                                         10 => { // HELLO
                                             let interval_ms = payload["d"]["heartbeat_interval"]
                                                 .as_u64()
                                                 .unwrap_or(41250);
-                                            heartbeat_interval = Some(tokio::time::interval(
+                                            // Per Discord docs: jitter the first heartbeat to avoid
+                                            // thundering herd on reconnect.
+                                            let jitter_ms = rand::thread_rng().gen_range(0..interval_ms);
+                                            heartbeat_interval = Some(tokio::time::interval_at(
+                                                tokio::time::Instant::now()
+                                                    + std::time::Duration::from_millis(jitter_ms),
                                                 std::time::Duration::from_millis(interval_ms),
                                             ));
                                             if let Some(token) = bot_token.take() {
+                                                // GUILD_MESSAGES(512) | MESSAGE_CONTENT(32768) = 33280
                                                 let identify = serde_json::json!({
                                                     "op": 2,
                                                     "d": {
@@ -185,8 +189,17 @@ impl ChannelAdapter for DiscordAdapter {
                                                 let _ = write.send(Message::Text(identify.to_string())).await;
                                             }
                                         }
-                                        0 => { // DISPATCH
-                                            if payload["t"].as_str() == Some("MESSAGE_CREATE") {
+                                        0 => { // DISPATCH — only DISPATCH carries meaningful sequence numbers
+                                            // Update sequence cursor only on DISPATCH events.
+                                            if let Some(seq) = payload["s"].as_u64() {
+                                                sequence = Some(seq);
+                                            }
+                                            let event_type = payload["t"].as_str();
+                                            if event_type == Some("READY") {
+                                                // Gateway is ready and authenticated.
+                                                listener_alive.store(true, Ordering::Release);
+                                            }
+                                            if event_type == Some("MESSAGE_CREATE") {
                                                 let d = &payload["d"];
                                                 if d["channel_id"].as_str() == Some(&channel_id) {
                                                     if let Some(content) = d["content"].as_str() {

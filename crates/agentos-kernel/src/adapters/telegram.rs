@@ -1,13 +1,129 @@
 use crate::notification_router::{DeliveryAdapter, DeliveryError, InboundMessage};
 use agentos_types::{
-    ChannelInstanceID, DeliveryChannel, NotificationPriority, UserMessage, UserMessageKind,
+    ChannelInstanceID, DeliveryChannel, NotificationPriority, NotificationSource, UserMessage,
+    UserMessageKind,
 };
 use async_trait::async_trait;
 use chrono::Utc;
+use reqwest::StatusCode;
 use serde::Deserialize;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
+use zeroize::Zeroizing;
+
+/// Telegram documents a 4096-character cap on `sendMessage` text (stricter when using entities).
+const TELEGRAM_MAX_MESSAGE_CHARS: usize = 4096;
+const TELEGRAM_POST_MAX_ATTEMPTS: u32 = 5;
+
+fn telegram_error_summary(v: &Value) -> String {
+    let desc = v
+        .get("description")
+        .and_then(|x| x.as_str())
+        .unwrap_or("unknown error");
+    let code = v.get("error_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    format!("Telegram API error {code}: {desc}")
+}
+
+fn retry_after_from_telegram_json(v: &Value) -> u64 {
+    v.get("parameters")
+        .map(retry_after_from_parameters_object)
+        .unwrap_or(1)
+}
+
+fn retry_after_from_parameters_object(p: &Value) -> u64 {
+    p.get("retry_after")
+        .and_then(|x| x.as_u64())
+        .or_else(|| {
+            p.get("retry_after")
+                .and_then(|x| x.as_i64())
+                .map(|i| i.max(0) as u64)
+        })
+        .unwrap_or(1)
+        .min(3600)
+}
+
+/// POST JSON to the Bot API, sleeping and retrying on HTTP 429 or flood-wait (`error_code` 429).
+async fn telegram_post_json_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    body: &Value,
+) -> Result<Value, DeliveryError> {
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        let resp =
+            client.post(url).json(body).send().await.map_err(|_| {
+                DeliveryError("Telegram HTTP request failed (details redacted)".into())
+            })?;
+
+        let status = resp.status();
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let hdr_wait = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|h| h.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(1)
+                .min(3600);
+            if attempt >= TELEGRAM_POST_MAX_ATTEMPTS {
+                return Err(DeliveryError(
+                    "Telegram rate limit: too many retries (HTTP 429)".into(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_secs(hdr_wait)).await;
+            continue;
+        }
+
+        let bytes = resp.bytes().await.map_err(|_| {
+            DeliveryError("Telegram response body read failed (details redacted)".into())
+        })?;
+        let v: Value = serde_json::from_slice(&bytes).unwrap_or(json!({"ok": false}));
+
+        if v.get("error_code").and_then(|c| c.as_i64()) == Some(429) {
+            let wait = retry_after_from_telegram_json(&v).max(1);
+            if attempt >= TELEGRAM_POST_MAX_ATTEMPTS {
+                return Err(DeliveryError(format!(
+                    "Telegram flood control: {}",
+                    telegram_error_summary(&v)
+                )));
+            }
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            continue;
+        }
+
+        if !status.is_success() {
+            return Err(DeliveryError(format!(
+                "Telegram HTTP {}: {}",
+                status.as_u16(),
+                telegram_error_summary(&v)
+            )));
+        }
+
+        if v.get("ok").and_then(|o| o.as_bool()) != Some(true) {
+            return Err(DeliveryError(telegram_error_summary(&v)));
+        }
+
+        return Ok(v);
+    }
+}
+
+/// Split plain UTF-8 text into chunks that stay within the Bot API length cap.
+fn chunk_telegram_text(text: &str, max_chars: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut out = Vec::new();
+    let mut rest = text.to_string();
+    while !rest.is_empty() {
+        let piece: String = rest.chars().take(max_chars).collect();
+        let n = piece.chars().count();
+        rest = rest.chars().skip(n).collect();
+        out.push(piece);
+    }
+    out
+}
 
 /// Notification sent once when a Telegram chat_id is auto-discovered.
 pub struct ChatDiscovered {
@@ -18,7 +134,13 @@ pub struct ChatDiscovered {
 /// Telegram Bot API delivery and inbound adapter.
 ///
 /// Outbound: sends formatted messages via `sendMessage` (with optional inline
-/// keyboard for `Question` messages).
+/// keyboard for `Question` messages). Long bodies are split across multiple
+/// `sendMessage` calls (except interactive `Question` payloads, which stay on
+/// one message so the inline keyboard remains valid). Plain notifications disable
+/// link previews and honor `UserMessage::reply_to_external_id` as Telegram
+/// `reply_to_message_id` on the final segment. HTTP 429 / flood `error_code` 429
+/// responses trigger bounded backoff using `retry_after` / `Retry-After`.
+///
 /// Inbound: long-polls `getUpdates` in a background task; every message from
 /// the registered chat is forwarded to the `InboundRouter` via `mpsc::Sender`.
 ///
@@ -30,7 +152,7 @@ pub struct ChatDiscovered {
 /// kept here.  The actual token is retrieved at startup by the kernel and passed
 /// to `new()`.
 pub struct TelegramDeliveryAdapter {
-    bot_token: String,
+    bot_token: Zeroizing<String>,
     chat_id: Arc<RwLock<String>>,
     channel_instance_id: ChannelInstanceID,
     client: reqwest::Client,
@@ -60,7 +182,7 @@ impl TelegramDeliveryAdapter {
             .build()
             .unwrap_or_default();
         Self {
-            bot_token,
+            bot_token: Zeroizing::new(bot_token),
             chat_id: Arc::new(RwLock::new(chat_id)),
             channel_instance_id,
             client,
@@ -70,7 +192,10 @@ impl TelegramDeliveryAdapter {
     }
 
     fn api_url(&self, method: &str) -> String {
-        format!("https://api.telegram.org/bot{}/{method}", self.bot_token)
+        format!(
+            "https://api.telegram.org/bot{}/{method}",
+            self.bot_token.as_str()
+        )
     }
 
     /// Enable webhook mode. Must be called before `start_listening`.
@@ -87,53 +212,28 @@ impl TelegramDeliveryAdapter {
         webhook_url: &str,
         secret_token: &str,
     ) -> Result<(), DeliveryError> {
-        let resp = self
-            .client
-            .post(self.api_url("setWebhook"))
-            .json(&serde_json::json!({
+        let _ = telegram_post_json_with_retry(
+            &self.client,
+            &self.api_url("setWebhook"),
+            &json!({
                 "url": webhook_url,
                 "secret_token": secret_token,
                 "allowed_updates": ["message", "callback_query"],
-            }))
-            .send()
-            .await
-            .map_err(|_| DeliveryError("setWebhook request failed".into()))?;
-
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(DeliveryError(format!("setWebhook failed: {body}")));
-        }
-
-        let body: serde_json::Value = serde_json::from_str(
-            &resp
-                .text()
-                .await
-                .unwrap_or_else(|_| r#"{"ok":false}"#.into()),
+                "drop_pending_updates": true,
+            }),
         )
-        .unwrap_or_default();
-        if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-            let desc = body
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown error");
-            return Err(DeliveryError(format!("setWebhook rejected: {desc}")));
-        }
+        .await?;
         Ok(())
     }
 
     /// Call Telegram `deleteWebhook` to unregister the webhook and revert to polling.
     pub async fn delete_webhook(&self) -> Result<(), DeliveryError> {
-        let resp = self
-            .client
-            .post(self.api_url("deleteWebhook"))
-            .send()
-            .await
-            .map_err(|_| DeliveryError("deleteWebhook request failed".into()))?;
-
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(DeliveryError(format!("deleteWebhook failed: {body}")));
-        }
+        let _ = telegram_post_json_with_retry(
+            &self.client,
+            &self.api_url("deleteWebhook"),
+            &json!({ "drop_pending_updates": false }),
+        )
+        .await?;
         Ok(())
     }
 }
@@ -152,34 +252,49 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
             ));
         }
 
-        let text = format_telegram_message(msg);
+        // Plain text only — MarkdownV2 is brittle with arbitrary agent/user content
+        // (URLs, punctuation, code) and causes sendMessage 400s with no user-visible copy.
+        let text = format_telegram_plain(msg);
         let reply_markup = build_inline_keyboard(msg);
+        let reply_to = msg
+            .reply_to_external_id
+            .as_ref()
+            .and_then(|s| s.parse::<i64>().ok());
 
-        let mut payload = serde_json::json!({
-            "chat_id": &*chat_id,
-            "text": text,
-            "parse_mode": "MarkdownV2",
-        });
-        if !reply_markup.is_null() {
-            payload["reply_markup"] = reply_markup;
+        let url = self.api_url("sendMessage");
+        let has_markup = !reply_markup.is_null();
+
+        // Inline keyboards must attach to a single message; avoid splitting Question payloads.
+        let chunks: Vec<String> = if has_markup {
+            vec![text.chars().take(TELEGRAM_MAX_MESSAGE_CHARS).collect()]
+        } else {
+            chunk_telegram_text(&text, TELEGRAM_MAX_MESSAGE_CHARS)
+        };
+
+        let n = chunks.len();
+        for (i, chunk) in chunks.iter().enumerate() {
+            if chunk.is_empty() {
+                continue;
+            }
+            let is_last = i + 1 == n;
+            let mut payload = json!({
+                "chat_id": &*chat_id,
+                "text": chunk,
+                "disable_web_page_preview": true,
+            });
+            // Only the final segment replies to the operator message (Telegram rejects invalid ids).
+            if is_last {
+                if let Some(rid) = reply_to {
+                    payload["reply_to_message_id"] = json!(rid);
+                }
+                if has_markup {
+                    payload["reply_markup"] = reply_markup.clone();
+                }
+            }
+
+            let _ = telegram_post_json_with_retry(&self.client, &url, &payload).await?;
         }
 
-        let resp = self
-            .client
-            .post(self.api_url("sendMessage"))
-            .json(&payload)
-            .send()
-            .await
-            // Suppress the error value — it contains the full API URL including the bot token.
-            .map_err(|_| DeliveryError("Telegram sendMessage request failed".into()))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(DeliveryError(format!(
-                "Telegram sendMessage HTTP {status}: {body}"
-            )));
-        }
         Ok(())
     }
 
@@ -197,11 +312,33 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
         !self.webhook_mode
     }
 
+    async fn hydrate_discovered_recipient(
+        &self,
+        channel_instance_id: &ChannelInstanceID,
+        external_id: &str,
+    ) -> bool {
+        if &self.channel_instance_id != channel_instance_id || external_id.is_empty() {
+            return false;
+        }
+        let mut guard = self.chat_id.write().await;
+        if guard.is_empty() {
+            *guard = external_id.to_string();
+            tracing::info!(
+                channel = %channel_instance_id,
+                chat_id = %external_id,
+                "Telegram chat_id hydrated (webhook discovery path)"
+            );
+            true
+        } else {
+            false
+        }
+    }
+
     async fn start_listening(
         &self,
         tx: mpsc::Sender<InboundMessage>,
     ) -> Result<tokio::task::JoinHandle<()>, DeliveryError> {
-        let token = self.bot_token.clone();
+        let token = self.bot_token.as_str().to_string();
         let chat_id = self.chat_id.clone();
         let channel_instance_id = self.channel_instance_id;
         let client = self.client.clone();
@@ -250,6 +387,21 @@ async fn telegram_poll_loop(
             format!("https://api.telegram.org/bot{token}/getUpdates?offset={offset}&timeout=30");
         match client.get(&url).send().await {
             Ok(resp) => {
+                if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                    let wait = resp
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|h| h.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(5)
+                        .min(300);
+                    tracing::warn!(
+                        wait_secs = wait,
+                        "Telegram getUpdates HTTP 429; backing off"
+                    );
+                    tokio::time::sleep(Duration::from_secs(wait)).await;
+                    continue;
+                }
                 match resp.json::<TelegramUpdatesResponse>().await {
                     Ok(updates) if updates.ok => {
                         backoff_secs = 5; // reset only on ok=true
@@ -257,15 +409,19 @@ async fn telegram_poll_loop(
                             offset = update.update_id + 1;
 
                             // Auto-discover chat_id from the first inbound message.
-                            let current = chat_id.read().await.clone();
-                            if current.is_empty() {
-                                if let Some(discovered) = extract_chat_id_from_update(&update) {
+                            // Hold the write lock across the is_empty check and the
+                            // write to prevent two concurrent updates racing to set
+                            // different chat_ids from the same batch of updates.
+                            if let Some(discovered) = extract_chat_id_from_update(&update) {
+                                let mut guard = chat_id.write().await;
+                                if guard.is_empty() {
                                     tracing::info!(
                                         %discovered,
                                         channel = %channel_instance_id,
                                         "Telegram chat_id auto-discovered"
                                     );
-                                    *chat_id.write().await = discovered.clone();
+                                    *guard = discovered.clone();
+                                    drop(guard);
                                     if let Some(dtx) = discovery_tx.take() {
                                         let _ = dtx
                                             .send(ChatDiscovered {
@@ -283,26 +439,17 @@ async fn telegram_poll_loop(
                                 let ack_url = format!(
                                     "https://api.telegram.org/bot{token}/answerCallbackQuery"
                                 );
-                                match client
-                                    .post(&ack_url)
-                                    .json(&serde_json::json!({
-                                        "callback_query_id": cq.id
-                                    }))
-                                    .send()
-                                    .await
+                                if let Err(e) = telegram_post_json_with_retry(
+                                    &client,
+                                    &ack_url,
+                                    &json!({
+                                        "callback_query_id": cq.id,
+                                        "cache_time": 0,
+                                    }),
+                                )
+                                .await
                                 {
-                                    Ok(resp) if !resp.status().is_success() => {
-                                        tracing::warn!(
-                                            "answerCallbackQuery HTTP {}",
-                                            resp.status()
-                                        );
-                                    }
-                                    Err(_) => {
-                                        tracing::warn!(
-                                            "answerCallbackQuery request failed (details redacted)"
-                                        );
-                                    }
-                                    _ => {}
+                                    tracing::warn!(error = %e, "answerCallbackQuery failed");
                                 }
                             }
 
@@ -323,6 +470,18 @@ async fn telegram_poll_loop(
                     }
                     Ok(err_resp) => {
                         let code = err_resp.error_code.unwrap_or(0);
+                        if code == 429 {
+                            let wait = err_resp
+                                .parameters
+                                .as_ref()
+                                .map(retry_after_from_parameters_object)
+                                .unwrap_or(5)
+                                .clamp(1, 300);
+                            tracing::warn!(wait_secs = wait, "Telegram getUpdates flood wait");
+                            tokio::time::sleep(Duration::from_secs(wait)).await;
+                            backoff_secs = 5;
+                            continue;
+                        }
                         let desc = err_resp
                             .description
                             .as_deref()
@@ -416,8 +575,20 @@ pub fn extract_inbound_message(
     None
 }
 
-/// Format a `UserMessage` for Telegram (MarkdownV2 escaping for special chars).
-fn format_telegram_message(msg: &UserMessage) -> String {
+/// Format a `UserMessage` for Telegram as plain UTF-8 (no parse_mode).
+///
+/// Keeps under Telegram's 4096 code-point limit for `sendMessage` text.
+/// Agent chat replies (from `NotificationSource::Agent`, subject wrapped in `[…]`)
+/// are sent as raw body text without the notification banner.
+fn format_telegram_plain(msg: &UserMessage) -> String {
+    let is_agent_chat_reply = matches!(msg.from, NotificationSource::Agent(_))
+        && msg.subject.starts_with('[')
+        && msg.subject.ends_with(']');
+
+    if is_agent_chat_reply {
+        return msg.body.chars().take(4090).collect();
+    }
+
     let icon = match msg.priority {
         NotificationPriority::Critical => "\u{1f6a8}",
         NotificationPriority::Urgent => "\u{26a0}\u{fe0f}",
@@ -425,16 +596,27 @@ fn format_telegram_message(msg: &UserMessage) -> String {
         NotificationPriority::Info => "\u{2139}\u{fe0f}",
     };
 
-    let subject = escape_markdown_v2(&msg.subject);
-    // Escape before truncating to avoid splitting an escape sequence at the boundary.
-    let body = escape_markdown_v2(&msg.body);
-    let body: String = body.chars().take(2000).collect();
+    let subject: String = msg.subject.chars().take(400).collect();
+    let body: String = msg.body.chars().take(3600).collect();
 
-    if body.is_empty() {
-        format!("{icon} *AgentOS* \u{2014} {subject}")
+    let out = if body.trim().is_empty() {
+        format!("{icon} AgentOS — {subject}")
     } else {
-        format!("{icon} *AgentOS* \u{2014} {subject}\n\n{body}")
+        format!("{icon} AgentOS — {subject}\n\n{body}")
+    };
+    out.chars().take(4090).collect()
+}
+
+/// Truncate `s` to at most `max_bytes` UTF-8 bytes without splitting a code point.
+fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
+    let mut out = String::with_capacity(max_bytes.min(s.len()));
+    for c in s.chars() {
+        if out.len() + c.len_utf8() > max_bytes {
+            break;
+        }
+        out.push(c);
     }
+    out
 }
 
 /// Build an inline keyboard for `Question` messages with defined options.
@@ -447,13 +629,26 @@ fn build_inline_keyboard(msg: &UserMessage) -> serde_json::Value {
         if !opts.is_empty() {
             let buttons: Vec<Vec<serde_json::Value>> = opts
                 .chunks(2)
-                .map(|row| {
+                .enumerate()
+                .map(|(chunk_idx, row)| {
                     row.iter()
-                        .map(|opt| {
-                            // Telegram limits callback_data to 64 bytes; truncate by char boundary.
-                            let cb: String = opt.chars().take(64).collect();
+                        .enumerate()
+                        .map(|(item_idx, opt)| {
+                            // Telegram: callback_data ≤ 64 bytes, button text ≤ 64 chars.
+                            // Fall back to an index key when truncation produces an empty
+                            // string (e.g. the option begins with a 4-byte emoji).
+                            let btn_idx = chunk_idx * 2 + item_idx;
+                            let cb = {
+                                let t = truncate_to_bytes(opt, 64);
+                                if t.is_empty() {
+                                    format!("opt:{btn_idx}")
+                                } else {
+                                    t
+                                }
+                            };
+                            let label: String = opt.chars().take(64).collect();
                             serde_json::json!({
-                                "text": opt,
+                                "text": label,
                                 "callback_data": cb,
                             })
                         })
@@ -464,25 +659,6 @@ fn build_inline_keyboard(msg: &UserMessage) -> serde_json::Value {
         }
     }
     serde_json::Value::Null
-}
-
-/// Escape special characters for Telegram MarkdownV2.
-///
-/// `\` must be escaped first (before adding `\` escapes for other chars),
-/// otherwise the escape characters themselves would be double-escaped.
-fn escape_markdown_v2(text: &str) -> String {
-    const SPECIAL: &[char] = &[
-        '\\', '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.',
-        '!',
-    ];
-    let mut out = String::with_capacity(text.len() + 16);
-    for ch in text.chars() {
-        if SPECIAL.contains(&ch) {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 // ── Telegram API response types ───────────────────────────────────────────────
@@ -498,6 +674,9 @@ pub struct TelegramUpdatesResponse {
     /// Human-readable error description (present when `ok` is false).
     #[serde(default)]
     description: Option<String>,
+    /// Optional `parameters` object (e.g. `retry_after` on flood control).
+    #[serde(default)]
+    parameters: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -530,4 +709,25 @@ pub struct TelegramCallbackQuery {
     pub data: Option<String>,
     #[serde(default)]
     pub message: Option<TelegramMessage>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_telegram_text_splits() {
+        let s = "a".repeat(9000);
+        let parts = chunk_telegram_text(&s, 4096);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].len(), 4096);
+        assert_eq!(parts[1].len(), 4096);
+        assert_eq!(parts[2].len(), 808);
+    }
+
+    #[test]
+    fn retry_after_from_parameters_object_reads_int() {
+        let v = json!({"retry_after": 17});
+        assert_eq!(retry_after_from_parameters_object(&v), 17);
+    }
 }

@@ -29,6 +29,17 @@ impl WebServer {
                 .map_err(|e| anyhow::anyhow!("Failed to open chat store: {}", e))?,
         );
 
+        let convo_db_path = kernel.data_dir().join("agent_convos.db");
+        let convo_store = Arc::new(
+            crate::convo_store::ConvoStore::open(&convo_db_path)
+                .map_err(|e| anyhow::anyhow!("Failed to open convo store: {}", e))?,
+        );
+
+        let file_store = Arc::new(
+            crate::file_store::FileStore::open(kernel.data_dir())
+                .map_err(|e| anyhow::anyhow!("Failed to open file store: {}", e))?,
+        );
+
         // Create the notification broadcast channel and register the SSE adapter
         // with the kernel's NotificationRouter so it receives real-time pushes.
         let (notification_tx, _) = tokio::sync::broadcast::channel(256);
@@ -45,9 +56,13 @@ impl WebServer {
             service,
             templates,
             csrf_tokens: Arc::new(dashmap::DashMap::<String, (String, std::time::Instant)>::new()),
+            browser_sessions: Arc::new(dashmap::DashMap::new()),
             allowed_tool_dirs,
             chat_store,
             inflight_chat: Arc::new(crate::chat_inflight::InFlightChat::new()),
+            convo_store,
+            inflight_convos: Arc::new(crate::convo_inflight::InFlightConvos::new()),
+            file_store,
             notification_tx,
             secure_cookies: !bind_addr.ip().is_loopback(),
         };
@@ -76,6 +91,7 @@ impl WebServer {
         // Periodically evict expired CSRF tokens to prevent unbounded map growth.
         // Tokens older than 2× TOKEN_TTL are safe to remove.
         let csrf_tokens = Arc::clone(&self.state.csrf_tokens);
+        let browser_sessions = Arc::clone(&self.state.browser_sessions);
         let sweep_shutdown = shutdown.clone();
         tokio::spawn(async move {
             let sweep_interval = tokio::time::Duration::from_secs(30 * 60); // every 30 min
@@ -85,6 +101,7 @@ impl WebServer {
                     _ = tokio::time::sleep(sweep_interval) => {
                         let cutoff = std::time::Instant::now() - max_age;
                         csrf_tokens.retain(|_, (_, issued_at)| *issued_at > cutoff);
+                        browser_sessions.retain(|_, issued_at| *issued_at > cutoff);
                     }
                     _ = sweep_shutdown.cancelled() => break,
                 }

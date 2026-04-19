@@ -35,6 +35,12 @@ pub struct AgentProfile {
     /// Optional custom system prompt extension for this agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// Set to `true` when the user explicitly runs `agentos agent disconnect`.
+    /// Auto-reactivation on kernel restart skips agents with this flag set so
+    /// that intentional disconnects are respected across restarts.
+    /// Cleared when the agent reconnects via `agentos agent connect`.
+    #[serde(default)]
+    pub manually_offline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

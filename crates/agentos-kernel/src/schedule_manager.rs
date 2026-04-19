@@ -1,3 +1,4 @@
+use agentos_types::schedule::{OnceJob, OnceJobState, TimerAction, TimerEntry};
 use agentos_types::*;
 use cron::Schedule;
 use std::collections::HashMap;
@@ -16,6 +17,8 @@ pub struct ScheduleNotification {
 
 pub struct ScheduleManager {
     jobs: RwLock<HashMap<ScheduleID, ScheduledJob>>,
+    timers: RwLock<HashMap<ScheduleID, TimerEntry>>,
+    once_jobs: RwLock<HashMap<ScheduleID, OnceJob>>,
     /// Optional channel for notifying the kernel of schedule events.
     /// The kernel converts these into properly signed EventMessages.
     notification_sender: RwLock<Option<mpsc::Sender<ScheduleNotification>>>,
@@ -25,6 +28,8 @@ impl ScheduleManager {
     pub fn new() -> Self {
         Self {
             jobs: RwLock::new(HashMap::new()),
+            timers: RwLock::new(HashMap::new()),
+            once_jobs: RwLock::new(HashMap::new()),
             notification_sender: RwLock::new(None),
         }
     }
@@ -256,6 +261,164 @@ impl ScheduleManager {
             }),
         )
         .await;
+    }
+
+    // ── Timers ────────────────────────────────────────────────────────────────
+
+    /// Create a one-shot in-memory timer. Fires once after `delay_secs` seconds.
+    /// The `_extra` parameter is reserved for future use.
+    pub async fn create_timer(
+        &self,
+        name: String,
+        delay_secs: u64,
+        agent_name: String,
+        action: TimerAction,
+        _extra: Option<serde_json::Value>,
+    ) -> Result<ScheduleID, AgentOSError> {
+        if name.is_empty() || name.len() > 128 {
+            return Err(AgentOSError::SchemaValidation(
+                "Timer name must be 1–128 characters".into(),
+            ));
+        }
+        if delay_secs == 0 || delay_secs > 86400 {
+            return Err(AgentOSError::SchemaValidation(
+                "Timer delay_secs must be 1–86400".into(),
+            ));
+        }
+        let fire_at = chrono::Utc::now() + chrono::Duration::seconds(delay_secs as i64);
+        let entry = TimerEntry {
+            id: ScheduleID::new(),
+            name: name.clone(),
+            agent_name,
+            fire_at,
+            action,
+            created_at: chrono::Utc::now(),
+        };
+        let id = entry.id;
+        let mut timers = self.timers.write().await;
+        if timers.values().any(|t| t.name == name) {
+            return Err(AgentOSError::SchemaValidation(format!(
+                "Timer '{}' already exists",
+                name
+            )));
+        }
+        timers.insert(id, entry);
+        Ok(id)
+    }
+
+    pub async fn list_timers(&self) -> Vec<TimerEntry> {
+        self.timers.read().await.values().cloned().collect()
+    }
+
+    pub async fn cancel_timer_by_name(&self, name: &str) -> Result<TimerEntry, AgentOSError> {
+        let mut timers = self.timers.write().await;
+        let id = timers
+            .values()
+            .find(|t| t.name == name)
+            .map(|t| t.id)
+            .ok_or_else(|| AgentOSError::KernelError {
+                reason: format!("Timer '{}' not found", name),
+            })?;
+        timers.remove(&id).ok_or_else(|| AgentOSError::KernelError {
+            reason: format!("timer '{}' vanished between find and remove", name),
+        })
+    }
+
+    /// Return and remove all timers whose `fire_at` is in the past.
+    pub async fn check_due_timers(&self) -> Vec<TimerEntry> {
+        let now = chrono::Utc::now();
+        let mut timers = self.timers.write().await;
+        let due_ids: Vec<ScheduleID> = timers
+            .values()
+            .filter(|t| now >= t.fire_at)
+            .map(|t| t.id)
+            .collect();
+        due_ids
+            .into_iter()
+            .filter_map(|id| timers.remove(&id))
+            .collect()
+    }
+
+    // ── Once jobs ─────────────────────────────────────────────────────────────
+
+    /// Schedule a task to run once at `fire_at`. Survives until fired or cancelled.
+    pub async fn create_once_job(
+        &self,
+        name: String,
+        fire_at: chrono::DateTime<chrono::Utc>,
+        agent_name: String,
+        task_prompt: String,
+    ) -> Result<ScheduleID, AgentOSError> {
+        if name.is_empty() || name.len() > 128 {
+            return Err(AgentOSError::SchemaValidation(
+                "Once-job name must be 1–128 characters".into(),
+            ));
+        }
+        let now = chrono::Utc::now();
+        if fire_at <= now {
+            return Err(AgentOSError::SchemaValidation(
+                "fire_at must be in the future".into(),
+            ));
+        }
+        if fire_at > now + chrono::Duration::days(30) {
+            return Err(AgentOSError::SchemaValidation(
+                "fire_at must be within 30 days of now".into(),
+            ));
+        }
+        let job = OnceJob {
+            id: ScheduleID::new(),
+            name: name.clone(),
+            agent_name,
+            task_prompt,
+            fire_at,
+            created_at: chrono::Utc::now(),
+            state: OnceJobState::Pending,
+        };
+        let id = job.id;
+        let mut once_jobs = self.once_jobs.write().await;
+        if once_jobs.values().any(|j| j.name == name) {
+            return Err(AgentOSError::SchemaValidation(format!(
+                "Once-job '{}' already exists",
+                name
+            )));
+        }
+        once_jobs.insert(id, job);
+        Ok(id)
+    }
+
+    pub async fn list_once_jobs(&self) -> Vec<OnceJob> {
+        self.once_jobs.read().await.values().cloned().collect()
+    }
+
+    pub async fn cancel_once_job_by_name(&self, name: &str) -> Result<OnceJob, AgentOSError> {
+        let mut once_jobs = self.once_jobs.write().await;
+        let id = once_jobs
+            .values()
+            .find(|j| j.name == name && j.state == OnceJobState::Pending)
+            .map(|j| j.id)
+            .ok_or_else(|| AgentOSError::KernelError {
+                reason: format!("Pending once-job '{}' not found", name),
+            })?;
+        let mut job = once_jobs.remove(&id).ok_or_else(|| AgentOSError::KernelError {
+            reason: format!("once-job '{}' vanished between find and remove", name),
+        })?;
+        job.state = OnceJobState::Cancelled;
+        Ok(job)
+    }
+
+    /// Return and remove all pending once-jobs whose `fire_at` is in the past.
+    pub async fn check_due_once_jobs(&self) -> Vec<OnceJob> {
+        let now = chrono::Utc::now();
+        let mut once_jobs = self.once_jobs.write().await;
+        let due_ids: Vec<ScheduleID> = once_jobs
+            .values()
+            .filter(|j| j.state == OnceJobState::Pending && now >= j.fire_at)
+            .map(|j| j.id)
+            .collect();
+        due_ids
+            .into_iter()
+            .filter_map(|id| once_jobs.remove(&id))
+            .collect()
     }
 }
 

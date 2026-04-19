@@ -28,6 +28,7 @@ async fn test_secrets_full_lifecycle() {
         .await
         .unwrap(),
     );
+    kernel.wire_inbound_chat_bridge();
 
     // Spawn kernel in background
     let kernel_clone = kernel.clone();

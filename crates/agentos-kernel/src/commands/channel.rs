@@ -20,8 +20,12 @@ impl Kernel {
         reply_topic: Option<String>,
         server_url: Option<String>,
         webhook_url: Option<String>,
+        active_agent_name: Option<String>,
     ) -> KernelResponse {
         let now = Utc::now();
+        let active_agent_name = active_agent_name
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let ch = RegisteredChannel {
             id: ChannelInstanceID::new(),
             kind: kind.clone(),
@@ -31,11 +35,23 @@ impl Kernel {
             reply_topic: reply_topic.clone(),
             server_url: server_url.clone(),
             webhook_url: webhook_url.clone(),
+            active_agent_name,
             connected_at: now,
             last_active: now,
             active: true,
         };
         let ch_id = ch.id;
+
+        if let Some(ref n) = ch.active_agent_name {
+            let reg = self.agent_registry.read().await;
+            if reg.get_by_name(n).is_none() {
+                return KernelResponse::Error {
+                    message: format!(
+                        "Unknown agent '{n}' — omit --active-agent or use an existing agent name."
+                    ),
+                };
+            }
+        }
 
         // Persist to registry.
         if let Err(e) = self.channel_registry.register(ch).await {
@@ -189,6 +205,64 @@ impl Kernel {
         KernelResponse::Success {
             data: Some(serde_json::json!({
                 "message": format!("Channel '{channel_id}' disconnected"),
+            })),
+        }
+    }
+
+    pub(crate) async fn cmd_set_channel_active_agent(
+        &self,
+        channel_id: String,
+        agent_name: Option<String>,
+    ) -> KernelResponse {
+        let id: ChannelInstanceID = match channel_id.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                return KernelResponse::Error {
+                    message: format!("Invalid channel ID: '{channel_id}'"),
+                }
+            }
+        };
+
+        if self
+            .channel_registry
+            .get_by_id(&id)
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            return KernelResponse::Error {
+                message: format!("Channel '{channel_id}' not found"),
+            };
+        }
+
+        let normalized = agent_name
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        if let Some(ref name) = normalized {
+            let reg = self.agent_registry.read().await;
+            if reg.get_by_name(name).is_none() {
+                return KernelResponse::Error {
+                    message: format!("Unknown agent '{name}'"),
+                };
+            }
+        }
+
+        if let Err(e) = self
+            .channel_registry
+            .update_active_agent_name(&id, normalized.as_deref())
+            .await
+        {
+            return KernelResponse::Error {
+                message: format!("Failed to update channel: {e}"),
+            };
+        }
+
+        KernelResponse::Success {
+            data: Some(serde_json::json!({
+                "channel_id": channel_id,
+                "active_agent_name": normalized,
             })),
         }
     }

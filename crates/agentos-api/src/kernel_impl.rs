@@ -737,6 +737,21 @@ impl KernelService for Kernel {
         Ok(secrets.get(&cid).map(|s| s.as_str()) == Some(secret))
     }
 
+    async fn channel_pinned_external_id(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<String>, ApiError> {
+        let cid: agentos_types::ChannelInstanceID = channel_id
+            .parse()
+            .map_err(|_| ApiError::BadRequest(format!("Invalid channel ID: {channel_id}")))?;
+        let ch = self
+            .channel_registry
+            .get_by_id(&cid)
+            .await
+            .map_err(|e| ApiError::Internal(format!("Channel registry error: {e}")))?;
+        Ok(ch.map(|c| c.external_id))
+    }
+
     async fn forward_webhook_message(
         &self,
         message: agentos_kernel::notification_router::InboundMessage,

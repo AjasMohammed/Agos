@@ -22,26 +22,33 @@ AgentOS is a minimalist, LLM-native operating system written in Rust, designed f
 crates/
   agentos-types/        # Shared type definitions (IDs, IntentMessage, AgentTask, etc.)
   agentos-kernel/       # Central orchestrator — scheduler, router, context, agent registry
-  agentos-cli/          # CLI binary `agentctl` (clap-based, 12 command groups)
+  agentos-cli/          # CLI binary `agentos` (clap-based, renamed from agentctl 2026-04-02)
   agentos-bus/          # Unix domain socket IPC between CLI and kernel
   agentos-llm/          # LLM adapter trait + Ollama, OpenAI, Anthropic, Gemini, Mock impls
-  agentos-tools/        # Built-in tools (file I/O, memory, shell, data parser, etc.)
+  agentos-tools/        # Built-in tools (file I/O, memory, shell, data parser, web search, etc.)
   agentos-capability/   # HMAC-SHA256 signed capability tokens & permission system
   agentos-vault/        # AES-256-GCM encrypted secrets store (Argon2id key derivation)
   agentos-audit/        # Append-only SQLite audit log (83+ event types)
-  agentos-memory/       # Multi-tier memory (semantic + episodic) with embeddings
+  agentos-memory/       # Multi-tier memory (semantic + episodic + procedural) with embeddings
   agentos-pipeline/     # Multi-step workflow orchestration engine
   agentos-sandbox/      # Seccomp-BPF syscall filtering (Linux-only)
   agentos-wasm/         # WASM tool execution via Wasmtime
   agentos-hal/          # Hardware Abstraction Layer (system, process, network, GPU, etc.)
-  agentos-scratch/      # Agent scratchpad — markdown pages, wikilinks, backlink graph (planned)
+  agentos-scratch/      # Agent scratchpad — markdown pages, wikilinks, backlink graph
   agentos-sdk/          # Ergonomic macros and re-exports for tool development
   agentos-sdk-macros/   # Proc-macro crate for #[tool] attribute
-  agentos-web/          # Web UI server (Axum + HTMX, under development)
+  agentos-web/          # Web UI server (Axum + HTMX + Pico CSS)
+  agentos-api/          # 50 REST endpoints, OpenAI-compat /v1/chat/completions SSE, API key auth
+  agentos-channels/     # ChannelAdapter trait + Discord, Slack, Telegram, Teams, Matrix, etc.
+  agentos-skills/       # SkillManifest (SKILL.toml), SkillRegistry; 7 core skills in skills/core/
+  agentos-agent-tester/ # LLM-driven agent test harness
 docs/guide/             # 7 markdown guides (architecture, CLI, tools, security, config)
-config/                 # default.toml kernel configuration
+config/                 # default.toml + providers.toml (20+ LLM providers)
 obsidian-vault/         # Planning docs, roadmaps, reference notes
 v1-plans/ v2-plans/ v3-plans/  # Phase-specific planning documents
+plugins/core/           # 7 plugin manifests (discord, slack, telegram, teams, mattermost, line, matrix)
+skills/core/            # 7 built-in skill prompts (researcher, secops-monitor, cost-optimizer, etc.)
+tools/core/             # Tool manifests (.toml) for all built-in tools
 ```
 
 ## Build & Test Commands
@@ -438,4 +445,106 @@ For legacy `next-steps/` files, add a row to `obsidian-vault/next-steps/Index.md
 
 ## Current Development Phase
 
-The project is on **V3** — see `agos-implementation-spec.md` and `v3-plans/` for the roadmap. Recent work added cost tracking (`cost_tracker.rs`), escalation handling (`escalation.rs`), resource arbitration (`resource_arbiter.rs`), injection scanning (`injection_scanner.rs`), and intent validation (`intent_validator.rs`).
+The project is on **feat/release-v1**. V3 is complete and all OpenClaw-Inspired Improvements (7 phases) are done as of 2026-04-09. The focus is now on release readiness and web UI improvements.
+
+---
+
+## Implemented Systems (Current State)
+
+### Binary & CLI
+- Primary binary is `agentos` (crate: `agentos-cli`), renamed from `agentctl` on 2026-04-02
+- `rust-embed` embeds `config/` and `skills/core/` directly into the binary
+
+### Key Type & API Changes
+- `agentos-types` — re-exports at crate root; use `agentos_types::Foo` not `agentos_types::module::Foo`
+- `ToolRegistry::register()` returns `Result<ToolID, AgentOSError>` (was `ToolID`)
+- `PermissionSet` has `deny_entries: Vec<String>` field — struct literals must include it
+- `AgentTask` has `skip_checkpoint: bool` (`#[serde(default)]`) and `thinking_level: ThinkingLevel`
+- `ToolManifest` has `risk_class: RiskClass` field
+
+### Trust Tier System
+- `TrustTier` enum: `Core / Verified / Community / Blocked` in `agentos-types/src/tool.rs`
+- Core tools: no runtime sig check; all `tools/core/*.toml` have `trust_tier = "core"`
+- Community/Verified: require Ed25519 `author_pubkey` + `signature`
+- Blocked: kernel hard-rejects with `AgentOSError::ToolBlocked`
+- CLI: `agentos tool keygen`, `tool sign`, `tool verify` (offline, no bus)
+
+### Memory System (fully implemented)
+- 3 SQLite tiers with FTS5: `episodic_memory.db`, `semantic_memory.db`, `procedural_memory.db`
+- fastembed MiniLM-L6-v2 (384-dim) hybrid FTS5+cosine+RRF search
+- Episodic auto-write on task completion (`task_completion.rs`)
+- Consolidation engine distills patterns → procedures (`consolidation.rs`)
+- Retrieval gate multi-index search (`retrieval_gate.rs`)
+- Memory extraction from tool results (`memory_extraction.rs`)
+- 15 memory tools, all with manifests in `tools/core/`
+
+### Task Checkpointing
+- `CheckpointStore` — SQLite-backed, one checkpoint per task (UPSERT)
+- Written after each tool call; deleted on normal task completion
+- `KernelCommand::ResumeTask` / `ListCheckpoints` wired end-to-end
+- CLI: `agentos task resume <id>`, `agentos task checkpoints`, `agentos task run --no-checkpoint`
+- Checkpoints >72h pruned by TimeoutChecker every 10min
+
+### LLM Provider Ecosystem
+- `ThinkingLevel` enum (Off/Low/Medium/High/Max) on `AgentTask`
+- Anthropic extended thinking + prompt caching always enabled in task executor
+- `config/providers.toml`: 20+ providers (OpenAI, Anthropic, Gemini, Mistral, XAI, Azure, Cohere, etc.)
+- `ProviderCatalog` loaded at kernel boot; `agentos provider list` CLI
+
+### Hook System
+- `HookEvent` enum with 11 variants (TaskStart/End, ToolPre/Post, MemorySearch/Write, etc.)
+- `HookRegistry`: Arc-cloned vec before firing — no lock held during async execution
+- `AuditHook` registered first; `ApprovalHook` registered second (ToolPre only)
+- Only ToolPre/TaskStart can abort; Post hooks ignore Abort
+
+### Interactive Approval Workflows
+- `RiskClass`: ReadonlyScoped / ReadonlyExternal / WriteScoped / ExecCapable / ControlPlane / Interactive
+- `AutoApprovePolicy`: JSON path matching (not substring — no bypass)
+- Unknown tools default to `ExecCapable` (fail-closed)
+- `PendingEscalation` auto-denies after 5min (`sweep_expired()`)
+
+### Plugin & Channel System
+- `PluginManifest` TOML with TrustTier, channels, tools, permissions, Ed25519 sig
+- `PluginRegistry`: spawn_blocking for FS I/O; `PluginStatus` Discovered→Active↔Disabled (Blocked terminal)
+- Channels: Discord, Slack, Telegram, Teams, Mattermost, Matrix, Line, WhatsApp, Webhook
+- All channel adapters use `Zeroizing<String>` for tokens
+- `PairingManager`: 6-char DM pairing codes, 10-min expiry
+- `ChannelHealthMonitor`: periodic health checks
+
+### Web Search Tool
+- `WebSearchTool` with 4-provider fallback: Brave → Tavily → Serper → DuckDuckGo scrape
+- SSRF guard on scraped URLs; `risk_class = "readonly_external"`
+
+### Kernel Mediated Capabilities (8 phases complete)
+- `CapabilityProvider` trait + registry; 5 providers: env/storage/proc/net/build
+- Dynamic capability broker + policy engine
+
+### Enforcement Hardening
+- `PermissionSet.check()`: path-prefix matching + deny entries + SSRF blocking
+- Snapshot expiration: `sweep_expired_snapshots()` deletes >72h snapshots
+- System prompt includes standing injection safety instruction (`<user_data>` tags)
+- `CostAttribution` audit event; structured cost JSON per inference
+
+### REST API (`agentos-api`)
+- 50 REST endpoints + OpenAI-compat `/v1/chat/completions` SSE streaming
+- API key auth via HMAC-SHA256
+- `KernelService` trait decouples `agentos-api` and `agentos-web` from kernel internals
+
+## Active / Planned Work
+
+| Plan | Status | Notes |
+|------|--------|-------|
+| Web UI Overhaul | planned | Chat streaming, template fixes, CLI parity |
+| WebUI Redesign | planned | Dashboard, task management, audit viewer |
+| MCP Catalog Installer | planned | `agentos mcp install <id>`, runtime resolver, 8 seed entries |
+| Gmail MCP Server | planned | Standalone Rust repo, 9 phases |
+| Graceful Degradation Chains | planned | Tool fallback in manifests, kernel resolver |
+| Capability Discoverability | planned | Semantic tool search, capability tags |
+| Production Stability Fixes | planned | Memory resilience, health monitor, graceful shutdown |
+| Logging & Observability | planned | Span instrumentation, structured logs |
+| Agent Web Search | planned | DDG instant answers, SearXNG |
+| Sandbox Execution Policy | planned | SandboxPolicy config, trust-aware dispatch |
+
+## Key Feedback Rules
+- Never auto-commit — only commit when explicitly asked
+- Always use `/review` skill for code review (covers logic, cross-file traces, concurrency, serde, lifecycle, security)

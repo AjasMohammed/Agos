@@ -6,13 +6,13 @@
         <div class="chat-thinking-dots"><span></span><span></span><span></span></div>
         <span class="muted">Reconnecting to in-flight response…</span>
     </div>
-    <div class="chat-activity-list" data-role="chat-activity-list"></div>
     <div data-role="chat-stream-response" class="chat-row chat-row-agent" style="display:none;">
         <div class="chat-agent-avatar" aria-hidden="true">{{ agent_initial }}</div>
         <div class="chat-agent-column">
             <div class="chat-agent-name muted">{{ agent_name }}</div>
             <div class="chat-bubble chat-bubble-agent">
-                <div data-role="chat-stream-text" class="chat-bubble-content-agent chat-streaming chat-stream-markdown markdown-content"></div>
+                <!-- Tool calls and text segments are appended here interleaved -->
+                <div data-role="chat-stream-content" class="chat-stream-content chat-streaming"></div>
             </div>
         </div>
     </div>

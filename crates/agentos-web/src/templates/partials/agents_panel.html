@@ -1,0 +1,9 @@
+<div class="grid" id="agent-grid">
+    {% include "partials/agent_card.html" %}
+</div>
+
+{% if agents|length == 0 %}
+{% with icon="●", title="No agents connected", message="Connect an LLM agent to start processing tasks. Use the button above to get started." %}
+{% include "partials/empty_state.html" %}
+{% endwith %}
+{% endif %}

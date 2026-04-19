@@ -1,0 +1,34 @@
+[manifest]
+name        = "cancel-once-job"
+version     = "1.0.0"
+description = "Cancel a pending once-job by name before it fires."
+author      = "agentos-core"
+trust_tier  = "core"
+group       = "scheduling"
+risk_class  = "write_scoped"
+
+[capabilities_required]
+permissions = ["schedule.job:w"]
+
+[capabilities_provided]
+outputs = ["cancelled", "job_name"]
+
+[intent_schema]
+input  = "CancelOnceJobIntent"
+output = "CancelOnceJobResult"
+
+[input_schema]
+type     = "object"
+required = ["name"]
+
+[input_schema.properties.name]
+type        = "string"
+description = "Name of the once-job to cancel"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 4
+max_cpu_ms    = 100
+syscalls      = []

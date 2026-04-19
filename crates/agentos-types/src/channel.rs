@@ -76,6 +76,9 @@ pub struct RegisteredChannel {
     /// `setWebhook` instead of long-polling `getUpdates`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webhook_url: Option<String>,
+    /// Default target agent for inbound channel chat (`/chat` without switching).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_agent_name: Option<String>,
     pub connected_at: DateTime<Utc>,
     pub last_active: DateTime<Utc>,
     pub active: bool,

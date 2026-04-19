@@ -49,3 +49,6 @@ reports/
 .env
 .env.*
 !.env.example
+
+
+graphify-out/*

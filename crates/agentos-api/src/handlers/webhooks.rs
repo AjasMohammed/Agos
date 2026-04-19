@@ -41,15 +41,33 @@ pub async fn telegram_webhook(
         Err(_) => return StatusCode::BAD_REQUEST,
     };
 
-    // Extract the chat_id and text from the update.
-    let inbound = agentos_kernel::adapters::telegram::extract_inbound_message(&update, "", cid);
+    let pinned = match svc.channel_pinned_external_id(&channel_id).await {
+        Ok(v) => v,
+        Err(_) => return StatusCode::BAD_REQUEST,
+    };
 
-    // If chat_id filter is empty string, extract_inbound_message won't match.
-    // Use extract_chat_id_from_update to get the actual chat_id and build the message.
-    let inbound = inbound.or_else(|| {
-        let chat_id = agentos_kernel::adapters::telegram::extract_chat_id_from_update(&update)?;
-        agentos_kernel::adapters::telegram::extract_inbound_message(&update, &chat_id, cid)
-    });
+    // When a chat_id was configured at connect time, only accept that chat — even
+    // if the webhook URL and secret were compromised, other chats cannot drive commands.
+    let inbound = match pinned
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some(registered_chat_id) => agentos_kernel::adapters::telegram::extract_inbound_message(
+            &update,
+            registered_chat_id,
+            cid,
+        ),
+        None => {
+            let first =
+                agentos_kernel::adapters::telegram::extract_inbound_message(&update, "", cid);
+            first.or_else(|| {
+                let chat_id =
+                    agentos_kernel::adapters::telegram::extract_chat_id_from_update(&update)?;
+                agentos_kernel::adapters::telegram::extract_inbound_message(&update, &chat_id, cid)
+            })
+        }
+    };
 
     if let Some(msg) = inbound {
         if let Err(e) = svc.forward_webhook_message(msg).await {

@@ -823,6 +823,7 @@ async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
     println!("🚀 Booting AgentOS kernel...");
 
     let kernel = Arc::new(Kernel::boot(config_path, &passphrase).await?);
+    kernel.wire_inbound_chat_bridge();
 
     // Start the webhook wake-up loop now that kernel is wrapped in Arc.
     kernel.start_webhook_wakeup().await;

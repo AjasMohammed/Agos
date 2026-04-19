@@ -56,14 +56,85 @@
           hx-target="#chat-messages-list"
           hx-swap="beforeend"
           hx-disabled-elt="find textarea, find button"
-          class="chat-compose-form">
+          class="chat-compose-form"
+          x-data="{
+              fileIds: [],
+              fileChips: [],
+              uploading: false,
+              uploadError: '',
+              async attachFile(input) {
+                  const file = input.files[0];
+                  if (!file) return;
+                  input.value = '';
+                  if (file.size > 100 * 1024 * 1024) {
+                      this.uploadError = 'File too large (max 100 MiB)';
+                      return;
+                  }
+                  this.uploading = true;
+                  this.uploadError = '';
+                  const csrfToken = document.querySelector('meta[name=csrf-token]')?.content ?? '';
+                  const fd = new FormData();
+                  fd.append('file', file);
+                  try {
+                      const r = await fetch('/api/files/upload', {
+                          method: 'POST',
+                          headers: { 'X-CSRF-Token': csrfToken },
+                          body: fd,
+                      });
+                      if (!r.ok) {
+                          const msg = await r.text();
+                          this.uploadError = msg || \`Upload failed (HTTP \${r.status})\`;
+                      } else {
+                          let data;
+                          try { data = await r.json(); } catch(_) { this.uploadError = 'Malformed upload response'; this.uploading = false; return; }
+                          if (!this.fileIds.includes(data.id)) {
+                              this.fileIds.push(data.id);
+                              this.fileChips.push({ id: data.id, name: data.original_name.substring(0, 60) });
+                          }
+                      }
+                  } catch(e) {
+                      this.uploadError = 'Upload failed (network error)';
+                  }
+                  this.uploading = false;
+              },
+              removeFile(id) {
+                  this.fileIds = this.fileIds.filter(x => x !== id);
+                  this.fileChips = this.fileChips.filter(x => x.id !== id);
+              },
+              afterSend(event) {
+                  if (event.detail.successful) {
+                      this.fileIds = [];
+                      this.fileChips = [];
+                      this.uploadError = '';
+                  }
+              }
+          }"
+          @htmx:afterRequest="afterSend($event)">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="file_ids" :value="fileIds.join(',')">
         <label for="reply-message">Continue the conversation
             <textarea id="reply-message" name="message" rows="3"
-                      placeholder="Reply to {{ agent_name }}…"
+                      placeholder="Reply to {{ agent_name }}… or use @filename to reference an uploaded file"
                       onkeydown="if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); this.form.requestSubmit(); }"></textarea>
         </label>
-        <div style="display: flex; justify-content: flex-end;">
+
+        <!-- File attachment chips -->
+        <div x-show="fileChips.length > 0" class="chat-attach-chips">
+            <template x-for="chip in fileChips" :key="chip.id">
+                <span class="chat-attach-chip">
+                    <span x-text="chip.name"></span>
+                    <button type="button" @click="removeFile(chip.id)" aria-label="Remove attachment">×</button>
+                </span>
+            </template>
+        </div>
+        <div x-show="uploadError" x-text="uploadError" class="chat-attach-error"></div>
+
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <label class="chat-attach-btn" :class="{ 'uploading': uploading }" title="Attach a file">
+                <input type="file" style="display:none" @change="attachFile($el)" :disabled="uploading">
+                <span x-show="!uploading">+ Attach</span>
+                <span x-show="uploading">Uploading…</span>
+            </label>
             <button type="submit">Send →</button>
         </div>
     </form>

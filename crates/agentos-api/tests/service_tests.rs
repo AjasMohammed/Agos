@@ -134,6 +134,7 @@ async fn boot_test_kernel() -> (Arc<Kernel>, tempfile::TempDir) {
         .await
         .unwrap(),
     );
+    kernel.wire_inbound_chat_bridge();
 
     (kernel, temp_dir)
 }

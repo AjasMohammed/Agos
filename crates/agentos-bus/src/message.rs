@@ -501,6 +501,16 @@ pub enum KernelCommand {
         /// When set, the adapter calls `setWebhook` instead of long-polling.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         webhook_url: Option<String>,
+        /// Default agent for inbound channel chat (`/agent` without retyping each message).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_agent_name: Option<String>,
+    },
+    /// Set or clear the default chat agent for a connected channel.
+    SetChannelActiveAgent {
+        channel_id: String,
+        /// Agent name, or omit / empty to clear the default.
+        #[serde(default)]
+        agent_name: Option<String>,
     },
     /// Deregister a channel and stop its listener.
     DisconnectChannel {
@@ -777,6 +787,9 @@ pub enum KernelResponse {
     // agentd
     ScheduleList(Vec<agentos_types::schedule::ScheduledJob>),
     ScheduleId(agentos_types::ScheduleID),
+    TimerList(Vec<agentos_types::schedule::TimerEntry>),
+    TimerId(agentos_types::ScheduleID),
+    OnceJobList(Vec<agentos_types::schedule::OnceJob>),
     BackgroundPoolList(Vec<agentos_types::schedule::BackgroundTask>),
     BackgroundLogs(Vec<String>),
 

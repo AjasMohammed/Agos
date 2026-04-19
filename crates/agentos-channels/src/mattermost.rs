@@ -25,8 +25,13 @@ pub struct MattermostAdapter {
 }
 
 impl MattermostAdapter {
-    pub fn new(base_url: String, token: String, default_channel_id: String) -> Self {
-        Self {
+    pub fn new(
+        base_url: String,
+        token: String,
+        default_channel_id: String,
+    ) -> Result<Self, agentos_types::AgentOSError> {
+        crate::webhook::validate_server_base_url(&base_url, "mattermost")?;
+        Ok(Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(15))
                 .build()
@@ -35,7 +40,7 @@ impl MattermostAdapter {
             token: Zeroizing::new(token),
             default_channel_id,
             name: "mattermost".to_string(),
-        }
+        })
     }
 
     fn api_url(&self, path: &str) -> String {

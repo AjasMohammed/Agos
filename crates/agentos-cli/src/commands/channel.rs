@@ -35,6 +35,20 @@ pub enum ChannelCommands {
         /// When set, Telegram pushes updates to this URL instead of long-polling.
         #[arg(long)]
         webhook_url: Option<String>,
+
+        /// Default agent for inbound chat on this channel (Telegram `/agent` uses this).
+        #[arg(long)]
+        active_agent: Option<String>,
+    },
+
+    /// Set or clear the default agent for inbound channel chat
+    SetAgent {
+        /// Channel ID (from `channel list`)
+        #[arg(long)]
+        id: String,
+        /// Agent name (omit or pass empty string to clear)
+        #[arg(long)]
+        agent: Option<String>,
     },
 
     /// Disconnect a registered channel
@@ -63,6 +77,7 @@ pub async fn handle(client: &mut BusClient, command: ChannelCommands) -> anyhow:
             reply_topic,
             server_url,
             webhook_url,
+            active_agent,
         } => {
             let channel_kind: ChannelKind = kind
                 .parse()
@@ -77,6 +92,7 @@ pub async fn handle(client: &mut BusClient, command: ChannelCommands) -> anyhow:
                     reply_topic,
                     server_url,
                     webhook_url,
+                    active_agent_name: active_agent,
                 })
                 .await?;
 
@@ -96,6 +112,23 @@ pub async fn handle(client: &mut BusClient, command: ChannelCommands) -> anyhow:
                     } else {
                         println!("Channel connected.");
                     }
+                }
+                KernelResponse::Error { message } => anyhow::bail!("Error: {message}"),
+                _ => anyhow::bail!("Unexpected response from kernel"),
+            }
+        }
+
+        ChannelCommands::SetAgent { id, agent } => {
+            let resp = client
+                .send_command(KernelCommand::SetChannelActiveAgent {
+                    channel_id: id.clone(),
+                    agent_name: agent,
+                })
+                .await?;
+
+            match resp {
+                KernelResponse::Success { .. } => {
+                    println!("Channel '{id}' default chat agent updated.");
                 }
                 KernelResponse::Error { message } => anyhow::bail!("Error: {message}"),
                 _ => anyhow::bail!("Unexpected response from kernel"),

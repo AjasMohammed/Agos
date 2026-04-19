@@ -2,6 +2,7 @@ use crate::types::*;
 use crate::{ChannelAdapter, ChannelCapabilities, ChannelHealth};
 use agentos_types::AgentOSError;
 use async_trait::async_trait;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -20,14 +21,29 @@ impl WhatsAppAdapter {
         phone_number_id: String,
         recipient_phone: String,
         instance_id: String,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, AgentOSError> {
+        // phone_number_id is interpolated into the URL path; reject anything
+        // that is not purely numeric to prevent path traversal.
+        if phone_number_id.is_empty() || !phone_number_id.chars().all(|c| c.is_ascii_digit()) {
+            return Err(AgentOSError::ToolExecutionFailed {
+                tool_name: "whatsapp".to_string(),
+                reason: format!(
+                    "invalid phone_number_id {:?}: must contain only ASCII digits",
+                    phone_number_id
+                ),
+            });
+        }
+        Ok(Self {
             access_token: Zeroizing::new(access_token),
             phone_number_id,
             recipient_phone,
             instance_id,
-            client: reqwest::Client::new(),
-        }
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .expect("HTTP client build failed"),
+        })
     }
 }
 
@@ -72,13 +88,16 @@ impl ChannelAdapter for WhatsAppAdapter {
                 .await
                 .map_err(|e| AgentOSError::ToolExecutionFailed {
                     tool_name: "whatsapp".to_string(),
-                    reason: e.to_string(),
+                    reason: format!(
+                        "HTTP request failed: {}",
+                        crate::webhook::safe_reqwest_err(&e)
+                    ),
                 })?;
 
             if !resp.status().is_success() {
                 return Err(AgentOSError::ToolExecutionFailed {
                     tool_name: "whatsapp".to_string(),
-                    reason: format!("WhatsApp API error: {}", resp.status()),
+                    reason: format!("WhatsApp API error: HTTP {}", resp.status().as_u16()),
                 });
             }
 
@@ -112,8 +131,38 @@ impl ChannelAdapter for WhatsAppAdapter {
             .await
         {
             Ok(r) if r.status().is_success() => ChannelHealth::Connected,
-            Ok(r) => ChannelHealth::Degraded(format!("status {}", r.status())),
-            Err(e) => ChannelHealth::Disconnected(e.to_string()),
+            Ok(r) => ChannelHealth::Degraded(format!("HTTP {}", r.status().as_u16())),
+            Err(e) => ChannelHealth::Disconnected(crate::webhook::safe_reqwest_err(&e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_phone_number_id_validation() {
+        assert!(WhatsAppAdapter::new(
+            "token".into(),
+            "1234567890".into(),
+            "+1555".into(),
+            "inst".into()
+        )
+        .is_ok());
+
+        // path traversal attempt
+        assert!(WhatsAppAdapter::new(
+            "token".into(),
+            "123/messages".into(),
+            "+1555".into(),
+            "inst".into()
+        )
+        .is_err());
+
+        // empty
+        assert!(
+            WhatsAppAdapter::new("token".into(), "".into(), "+1555".into(), "inst".into()).is_err()
+        );
     }
 }

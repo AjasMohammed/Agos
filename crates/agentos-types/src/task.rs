@@ -55,6 +55,10 @@ pub struct AgentTask {
     /// Translates to `InferenceOptions::thinking_budget_tokens` at execution time.
     #[serde(default)]
     pub thinking_level: ThinkingLevel,
+    /// Set when spawned via `task-spawn-async`: the agent that owns this task for
+    /// ownership-based status queries across task boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawner_agent_id: Option<AgentID>,
 }
 
 /// Controls how much extended thinking budget the LLM is given for a task.
@@ -171,6 +175,7 @@ impl Default for AgentTask {
             autonomous: false,
             parent_task_id: None,
             spawn_depth: 0,
+            spawner_agent_id: None,
             is_team_coordinator: false,
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,

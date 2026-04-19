@@ -1,0 +1,29 @@
+[manifest]
+name        = "list-once-jobs"
+version     = "1.0.0"
+description = "List all pending once-jobs (one-shot scheduled tasks)."
+author      = "agentos-core"
+trust_tier  = "core"
+group       = "scheduling"
+risk_class  = "readonly_scoped"
+
+[capabilities_required]
+permissions = ["schedule.job:r"]
+
+[capabilities_provided]
+outputs = ["jobs", "count"]
+
+[intent_schema]
+input  = "ListOnceJobsIntent"
+output = "ListOnceJobsResult"
+
+[input_schema]
+type = "object"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 4
+max_cpu_ms    = 100
+syscalls      = []

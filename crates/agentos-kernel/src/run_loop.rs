@@ -1759,6 +1759,7 @@ impl Kernel {
                 reply_topic,
                 server_url,
                 webhook_url,
+                active_agent_name,
             } => {
                 self.cmd_connect_channel(
                     kind,
@@ -1768,8 +1769,16 @@ impl Kernel {
                     reply_topic,
                     server_url,
                     webhook_url,
+                    active_agent_name,
                 )
                 .await
+            }
+            KernelCommand::SetChannelActiveAgent {
+                channel_id,
+                agent_name,
+            } => {
+                self.cmd_set_channel_active_agent(channel_id, agent_name)
+                    .await
             }
             KernelCommand::DisconnectChannel { channel_id } => {
                 self.cmd_disconnect_channel(channel_id).await
@@ -2036,6 +2045,193 @@ impl Kernel {
                             .emit_task_failed(&job, &e.to_string())
                             .await;
                     }
+                }
+            }
+
+            // Fire due in-memory timers.
+            let due_timers = self.schedule_manager.check_due_timers().await;
+            for timer in due_timers {
+                tracing::info!(timer_name = %timer.name, "Firing timer");
+                self.fire_timer(timer).await;
+            }
+
+            // Fire due once-jobs.
+            let due_once = self.schedule_manager.check_due_once_jobs().await;
+            for job in due_once {
+                tracing::info!(job_name = %job.name, "Firing once-job");
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id: agentos_types::TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::ScheduledJobFired,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({ "job_name": job.name, "once": true }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                if let Err(e) = self
+                    .create_background_task(
+                        job.name.clone(),
+                        job.agent_name.clone(),
+                        job.task_prompt.clone(),
+                        false,
+                    )
+                    .await
+                {
+                    tracing::warn!(job_name = %job.name, error = %e, "Once-job failed to launch");
+                }
+            }
+        }
+    }
+
+    /// Dispatch a fired timer action: deliver notification and/or launch a background task.
+    async fn fire_timer(&self, timer: agentos_types::schedule::TimerEntry) {
+        use agentos_types::schedule::TimerAction;
+        use agentos_types::{
+            NotificationID, NotificationPriority, NotificationSource, TraceID, UserMessage,
+            UserMessageKind,
+        };
+        use std::collections::HashMap;
+
+        let trace_id = TraceID::new();
+        self.audit_log(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id,
+            event_type: agentos_audit::AuditEventType::TimerFired,
+            agent_id: None,
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({
+                "timer_name": timer.name,
+                "timer_id": timer.id.to_string(),
+                "agent_name": timer.agent_name,
+            }),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
+
+        let deliver_notification = |subject: String, body: String, priority_str: String| {
+            let priority = match priority_str.as_str() {
+                "warning" => NotificationPriority::Warning,
+                "urgent" => NotificationPriority::Urgent,
+                "critical" => NotificationPriority::Critical,
+                _ => NotificationPriority::Info,
+            };
+            UserMessage {
+                id: NotificationID::new(),
+                from: NotificationSource::Kernel,
+                task_id: None,
+                trace_id: TraceID::new(),
+                kind: UserMessageKind::Notification,
+                priority,
+                subject,
+                body,
+                interaction: None,
+                delivery_status: HashMap::new(),
+                response: None,
+                created_at: chrono::Utc::now(),
+                expires_at: None,
+                read: false,
+                thread_id: None,
+                reply_to_external_id: None,
+            }
+        };
+
+        match timer.action {
+            TimerAction::NotifyUser {
+                subject,
+                body,
+                priority,
+            } => {
+                let msg = deliver_notification(subject, body, priority);
+                if let Err(e) = self.notification_router.deliver(msg).await {
+                    tracing::warn!(timer_name = %timer.name, error = %e, "Timer notification delivery failed");
+                    self.audit_log(agentos_audit::AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        trace_id,
+                        event_type: agentos_audit::AuditEventType::TimerActionFailed,
+                        agent_id: None,
+                        task_id: None,
+                        tool_id: None,
+                        details: serde_json::json!({ "timer_name": timer.name, "action": "notify_user", "error": e.to_string() }),
+                        severity: agentos_audit::AuditSeverity::Warn,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
+                }
+            }
+            TimerAction::RunTask { prompt } => {
+                if let Err(e) = self
+                    .create_background_task(
+                        timer.name.clone(),
+                        timer.agent_name.clone(),
+                        prompt,
+                        false,
+                    )
+                    .await
+                {
+                    tracing::warn!(timer_name = %timer.name, error = %e, "Timer task launch failed");
+                    self.audit_log(agentos_audit::AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        trace_id,
+                        event_type: agentos_audit::AuditEventType::TimerActionFailed,
+                        agent_id: None,
+                        task_id: None,
+                        tool_id: None,
+                        details: serde_json::json!({ "timer_name": timer.name, "action": "run_task", "error": e.to_string() }),
+                        severity: agentos_audit::AuditSeverity::Warn,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
+                }
+            }
+            TimerAction::RunTaskAndNotify {
+                prompt,
+                subject,
+                body,
+                priority,
+            } => {
+                let msg = deliver_notification(subject, body, priority);
+                if let Err(e) = self.notification_router.deliver(msg).await {
+                    tracing::warn!(timer_name = %timer.name, error = %e, "Timer notification delivery failed");
+                    self.audit_log(agentos_audit::AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        trace_id,
+                        event_type: agentos_audit::AuditEventType::TimerActionFailed,
+                        agent_id: None,
+                        task_id: None,
+                        tool_id: None,
+                        details: serde_json::json!({ "timer_name": timer.name, "action": "run_task_and_notify/notify", "error": e.to_string() }),
+                        severity: agentos_audit::AuditSeverity::Warn,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
+                }
+                if let Err(e) = self
+                    .create_background_task(
+                        timer.name.clone(),
+                        timer.agent_name.clone(),
+                        prompt,
+                        false,
+                    )
+                    .await
+                {
+                    tracing::warn!(timer_name = %timer.name, error = %e, "Timer task launch failed");
+                    self.audit_log(agentos_audit::AuditEntry {
+                        timestamp: chrono::Utc::now(),
+                        trace_id,
+                        event_type: agentos_audit::AuditEventType::TimerActionFailed,
+                        agent_id: None,
+                        task_id: None,
+                        tool_id: None,
+                        details: serde_json::json!({ "timer_name": timer.name, "action": "run_task_and_notify/task", "error": e.to_string() }),
+                        severity: agentos_audit::AuditSeverity::Warn,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
                 }
             }
         }

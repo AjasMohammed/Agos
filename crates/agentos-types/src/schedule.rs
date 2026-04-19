@@ -1,6 +1,59 @@
 use crate::*;
 use serde::{Deserialize, Serialize};
 
+/// What the kernel does when a timer fires.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TimerAction {
+    /// Send a notification to the user inbox.
+    NotifyUser {
+        subject: String,
+        body: String,
+        /// "info" | "warning" | "urgent" | "critical"
+        priority: String,
+    },
+    /// Run a task prompt on the timer's agent.
+    RunTask { prompt: String },
+    /// Run a task AND send a user notification.
+    RunTaskAndNotify {
+        prompt: String,
+        subject: String,
+        body: String,
+        priority: String,
+    },
+}
+
+/// A pending one-shot timer. Removed from the store once it fires or is cancelled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimerEntry {
+    pub id: ScheduleID,
+    pub name: String,
+    pub agent_name: String,
+    pub fire_at: chrono::DateTime<chrono::Utc>,
+    pub action: TimerAction,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Lifecycle state of a one-shot scheduled job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OnceJobState {
+    Pending,
+    Fired,
+    Cancelled,
+}
+
+/// A one-shot scheduled job that runs a task once at a specific datetime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnceJob {
+    pub id: ScheduleID,
+    pub name: String,
+    pub agent_name: String,
+    pub task_prompt: String,
+    pub fire_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub state: OnceJobState,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledJob {
     pub id: ScheduleID,

@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="page-header">
+    <div>
+        <h1>Files</h1>
+        <p class="page-meta">Uploaded files accessible to agents and chat</p>
+    </div>
+    <div class="page-header-actions">
+        <a href="#upload-section" role="button" class="btn-sm">+ Upload</a>
+    </div>
+</div>
+
+<!-- Upload section -->
+<article id="upload-section">
+    <header><strong>Upload Files</strong></header>
+    <form enctype="multipart/form-data"
+          x-data="{
+              dragging: false,
+              files: [],
+              uploading: false,
+              error: '',
+              csrfToken: '{{ csrf_token }}',
+              async submitUpload(el) {
+                  this.uploading = true;
+                  this.error = '';
+                  const fd = new FormData(el);
+                  try {
+                      const r = await fetch('/files/upload', {
+                          method: 'POST',
+                          headers: { 'X-CSRF-Token': this.csrfToken },
+                          body: fd,
+                          redirect: 'follow',
+                      });
+                      if (r.ok || r.redirected) {
+                          window.location.href = '/files';
+                      } else {
+                          const msg = await r.text().catch(() => 'Upload failed');
+                          this.error = msg;
+                      }
+                  } catch(e) {
+                      this.error = 'Upload failed: ' + e.message;
+                  } finally {
+                      this.uploading = false;
+                  }
+              }
+          }"
+          @submit.prevent="submitUpload($el)"
+          @dragover.prevent="dragging = true"
+          @dragleave.prevent="dragging = false"
+          @drop.prevent="dragging = false; $refs.fileInput.files = $event.dataTransfer.files; files = Array.from($event.dataTransfer.files).map(f => f.name)">
+
+        <!-- Drop zone -->
+        <div :class="dragging ? 'file-drop-zone active' : 'file-drop-zone'"
+             @click="$refs.fileInput.click()">
+            <input x-ref="fileInput" type="file" name="file" multiple
+                   style="display:none"
+                   @change="files = Array.from($event.target.files).map(f => f.name)">
+            <p style="margin:0; color: var(--pico-muted-color)">
+                <template x-if="files.length === 0">
+                    <span>Click or drag files here to upload</span>
+                </template>
+                <template x-if="files.length > 0">
+                    <span x-text="files.join(', ')"></span>
+                </template>
+            </p>
+        </div>
+
+        <label for="file-tags" style="margin-top:0.75rem">
+            Tags <small style="font-weight:normal">(optional, comma-separated)</small>
+            <input id="file-tags" type="text" name="tags"
+                   placeholder="report, pdf, project-x"
+                   maxlength="200">
+        </label>
+
+        <div x-show="error" x-text="error"
+             style="color:var(--pico-del-color); margin-top:0.5rem; font-size:0.9em"></div>
+
+        <div style="display:flex; justify-content:flex-end; margin-top:0.5rem">
+            <button type="submit" :disabled="files.length === 0 || uploading"
+                    x-text="uploading ? 'Uploading…' : 'Upload'">Upload</button>
+        </div>
+    </form>
+</article>
+
+<!-- File list -->
+<article>
+    <header>
+        <strong>Uploaded Files</strong>
+        <small style="font-weight:normal; margin-left:0.5rem">{{ files|length }} file{% if files|length != 1 %}s{% endif %}</small>
+    </header>
+
+    {% if files|length == 0 %}
+    <p style="color:var(--pico-muted-color); text-align:center; padding:2rem 0">
+        No files uploaded yet. Use the form above to upload your first file.
+    </p>
+    {% else %}
+    <div style="overflow-x:auto">
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Size</th>
+                    <th>Tags</th>
+                    <th>Uploaded</th>
+                    <th>Mention</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for f in files %}
+                <tr>
+                    <td>
+                        <a href="/files/{{ f.id }}/download" title="{{ f.original_name }}">
+                            {% if f.is_text %}📄{% else %}📎{% endif %}
+                            {{ f.original_name }}
+                        </a>
+                    </td>
+                    <td><code style="font-size:0.8em">{{ f.mime }}</code></td>
+                    <td>{{ f.size_kb }} KB</td>
+                    <td>
+                        {% if f.tags %}
+                        <span style="color:var(--pico-muted-color); font-size:0.85em">{{ f.tags }}</span>
+                        {% else %}—{% endif %}
+                    </td>
+                    <td><small>{{ f.uploaded_at | relative_time }}</small></td>
+                    <td>
+                        <!-- Click-to-copy @mention syntax -->
+                        <code x-data="{ copied: false }"
+                              style="cursor:pointer; font-size:0.8em; user-select:all"
+                              title="Click to copy mention"
+                              @click="navigator.clipboard.writeText('@{{ f.name }}').then(() => { copied = true; setTimeout(() => copied = false, 1500) })">
+                            <span x-show="!copied">@{{ f.name }}</span>
+                            <span x-show="copied" style="color:var(--pico-primary)">Copied!</span>
+                        </code>
+                    </td>
+                    <td>
+                        <form method="post" action="/files/{{ f.id }}/delete" style="display:inline">
+                            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                            <button type="submit" class="outline secondary btn-sm"
+                                    onclick="return confirm('Delete {{ f.original_name }}?')"
+                                    style="padding:2px 8px; font-size:0.8em">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    {% if files|length > 0 %}
+    <footer style="margin-top:1rem; padding-top:0.75rem; border-top:1px solid var(--pico-muted-border-color)">
+        <small style="color:var(--pico-muted-color)">
+            Agents can read any file using the <code>user-file-reader</code> tool.
+            Reference files in chat or tasks with <code>@filename</code> — the content is injected automatically.
+        </small>
+    </footer>
+    {% endif %}
+</article>
+
+<style>
+.file-drop-zone {
+    border: 2px dashed var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    padding: 2rem;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+}
+.file-drop-zone:hover,
+.file-drop-zone.active {
+    border-color: var(--pico-primary);
+    background: color-mix(in srgb, var(--pico-primary) 5%, transparent);
+}
+</style>
+
+{% endblock %}

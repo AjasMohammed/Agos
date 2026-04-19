@@ -32,36 +32,22 @@
             var line = lines[i];
             if (/^\s*[-*]\s+/.test(line)) {
                 if (!inUl) {
-                    if (inOl) {
-                        out.push("</ol>");
-                        inOl = false;
-                    }
-                    out.push("<ul>");
-                    inUl = true;
+                    if (inOl) { out.push("</ol>"); inOl = false; }
+                    out.push("<ul>"); inUl = true;
                 }
                 out.push("<li>" + line.replace(/^\s*[-*]\s+/, "") + "</li>");
                 continue;
             }
             if (/^\s*\d+\.\s+/.test(line)) {
                 if (!inOl) {
-                    if (inUl) {
-                        out.push("</ul>");
-                        inUl = false;
-                    }
-                    out.push("<ol>");
-                    inOl = true;
+                    if (inUl) { out.push("</ul>"); inUl = false; }
+                    out.push("<ol>"); inOl = true;
                 }
                 out.push("<li>" + line.replace(/^\s*\d+\.\s+/, "") + "</li>");
                 continue;
             }
-            if (inUl) {
-                out.push("</ul>");
-                inUl = false;
-            }
-            if (inOl) {
-                out.push("</ol>");
-                inOl = false;
-            }
+            if (inUl) { out.push("</ul>"); inUl = false; }
+            if (inOl) { out.push("</ol>"); inOl = false; }
             if (line.trim() === "") {
                 out.push("");
             } else if (!/^<h[1-3]>/.test(line) && !/^<pre>/.test(line)) {
@@ -119,11 +105,7 @@
     }
 
     function parseEventData(data) {
-        try {
-            return JSON.parse(data);
-        } catch (_) {
-            return null;
-        }
+        try { return JSON.parse(data); } catch (_) { return null; }
     }
 
     function attachStream(container) {
@@ -133,22 +115,23 @@
         var sessionId = container.dataset.sessionId;
         if (!sessionId) return;
 
-        var thinking = container.querySelector('[data-role="chat-thinking-indicator"]');
+        var thinking   = container.querySelector('[data-role="chat-thinking-indicator"]');
         var responseDiv = container.querySelector('[data-role="chat-stream-response"]');
-        var textDiv = container.querySelector('[data-role="chat-stream-text"]');
-        var activityList = container.querySelector('[data-role="chat-activity-list"]');
-        var msgList = document.getElementById("chat-messages-list");
+        var contentEl  = container.querySelector('[data-role="chat-stream-content"]');
+        var msgList    = document.getElementById("chat-messages-list");
 
-        var hasText = false;
-        var rawMarkdown = "";
+        // currentTextEl: the active text segment div. Nulled when a tool call starts
+        // so the next text-delta creates a fresh segment after the tool card.
+        var currentTextEl = null;
+        var hasContent    = false;
 
         function scrollToBottom() {
             if (msgList) msgList.scrollTop = msgList.scrollHeight;
         }
 
         function showResponseIfNeeded() {
-            if (!hasText) {
-                hasText = true;
+            if (!hasContent) {
+                hasContent = true;
                 if (thinking) thinking.style.display = "none";
                 if (responseDiv) responseDiv.style.display = "";
             }
@@ -159,33 +142,36 @@
             thinking.style.display = "";
             var label = thinking.querySelector(".muted");
             if (label) {
-                label.textContent = iteration ? ("Thinking... (iteration " + iteration + ")") : "Thinking...";
+                label.textContent = iteration
+                    ? ("Thinking... (iteration " + iteration + ")")
+                    : "Thinking...";
             }
         }
 
-        function appendActivity(label, klass) {
-            if (!activityList) return;
+        // Create a new text segment div and append it to contentEl.
+        function newTextSegment() {
+            var el = document.createElement("div");
+            el.className = "chat-text-segment markdown-content";
+            el.dataset.rawMarkdown = "";
+            if (contentEl) contentEl.appendChild(el);
+            return el;
+        }
+
+        // Append a tool activity pill to contentEl and return it.
+        function appendToolCard(label, klass) {
+            if (!contentEl) return null;
             var el = document.createElement("div");
             el.className = "chat-activity " + (klass || "");
-            el.innerHTML = '<span class="chat-activity-icon">•</span><span class="chat-activity-label"></span>';
+            el.innerHTML =
+                '<span class="chat-activity-icon">•</span>' +
+                '<span class="chat-activity-label"></span>';
             var target = el.querySelector(".chat-activity-label");
             if (target) target.textContent = label;
-            activityList.appendChild(el);
+            contentEl.appendChild(el);
+            return el;
         }
 
-        function renderResponse() {
-            if (!textDiv) return;
-            textDiv.dataset.rawMarkdown = rawMarkdown;
-            textDiv.innerHTML = renderMarkdown(rawMarkdown);
-            highlightCode(textDiv);
-        }
-
-        function finalize() {
-            container.dataset.streamFinalized = "1";
-            container.removeAttribute("data-role");
-            if (thinking) thinking.remove();
-            if (textDiv) textDiv.classList.remove("chat-streaming");
-        }
+        var pendingToolCards = {}; // tool_name → most recently appended running card
 
         var es = new EventSource("/chat/" + encodeURIComponent(sessionId) + "/stream");
 
@@ -197,49 +183,87 @@
                 case "thinking":
                     setThinking(d.iteration);
                     break;
+
                 case "text-delta":
                     showResponseIfNeeded();
-                    rawMarkdown += d.text || "";
-                    renderResponse();
+                    // Re-use the current text segment or start a new one.
+                    if (!currentTextEl) {
+                        currentTextEl = newTextSegment();
+                    }
+                    currentTextEl.dataset.rawMarkdown =
+                        (currentTextEl.dataset.rawMarkdown || "") + (d.text || "");
+                    currentTextEl.innerHTML = renderMarkdown(currentTextEl.dataset.rawMarkdown);
+                    highlightCode(currentTextEl);
                     break;
-                case "tool-start":
-                    appendActivity("Using " + (d.tool_name || "tool") + "...", "chat-activity-tool");
-                    break;
-                case "tool-result": {
-                    var suffix = (d.duration_ms || 0) + "ms";
-                    if (d.result_preview) suffix += " · " + d.result_preview;
-                    appendActivity(
-                        (d.tool_name || "tool") + " (" + suffix + ")",
-                        d.success ? "chat-activity-done" : "chat-activity-error"
-                    );
+
+                case "tool-start": {
+                    showResponseIfNeeded();
+                    // Freeze the current text segment so the next text-delta starts fresh.
+                    currentTextEl = null;
+                    var toolName = d.tool_name || "tool";
+                    var card = appendToolCard("Using " + toolName + "…", "chat-activity-tool chat-activity-running");
+                    // Track so tool-result can find it.
+                    if (!pendingToolCards[toolName]) pendingToolCards[toolName] = [];
+                    pendingToolCards[toolName].push(card);
                     break;
                 }
+
+                case "tool-result": {
+                    var toolName2 = d.tool_name || "tool";
+                    var queue = pendingToolCards[toolName2];
+                    var card2 = queue && queue.length ? queue.shift() : null;
+                    if (card2) {
+                        card2.classList.remove("chat-activity-running");
+                        card2.classList.add(d.success ? "chat-activity-done" : "chat-activity-error");
+                        var labelEl = card2.querySelector(".chat-activity-label");
+                        if (labelEl) {
+                            var suffix = (d.duration_ms || 0) + "ms";
+                            if (d.result_preview) suffix += " · " + d.result_preview;
+                            labelEl.textContent = toolName2 + " (" + suffix + ")";
+                        }
+                    }
+                    // Freeze text segment so any following text starts in a new segment.
+                    currentTextEl = null;
+                    break;
+                }
+
                 case "done":
-                    if (!hasText && d.answer) {
+                    if (!hasContent && d.answer) {
                         showResponseIfNeeded();
-                        rawMarkdown = d.answer;
-                        renderResponse();
+                        currentTextEl = newTextSegment();
+                        currentTextEl.dataset.rawMarkdown = d.answer;
+                        currentTextEl.innerHTML = renderMarkdown(d.answer);
+                        highlightCode(currentTextEl);
                     }
                     es.close();
                     finalize();
                     break;
+
                 case "error": {
                     showResponseIfNeeded();
-                    rawMarkdown = "Error: " + (d.message || "Unknown error");
-                    if (textDiv) {
-                        textDiv.innerHTML = '<p style="color:var(--pico-color-red-500)">' + escapeHtml(rawMarkdown) + "</p>";
-                    }
-                    appendActivity("Stream error", "chat-activity-error");
+                    var errEl = newTextSegment();
+                    errEl.innerHTML =
+                        '<p style="color:var(--pico-color-red-500)">' +
+                        escapeHtml("Error: " + (d.message || "Unknown error")) + "</p>";
+                    currentTextEl = null;
                     es.close();
                     finalize();
                     break;
                 }
+
                 default:
                     break;
             }
 
             scrollToBottom();
         });
+
+        function finalize() {
+            container.dataset.streamFinalized = "1";
+            container.removeAttribute("data-role");
+            if (thinking) thinking.remove();
+            if (contentEl) contentEl.classList.remove("chat-streaming");
+        }
 
         es.onerror = function () {
             es.close();

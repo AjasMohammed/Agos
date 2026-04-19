@@ -12,7 +12,6 @@ use reqwest::Client;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -24,15 +23,16 @@ pub struct TeamsAdapter {
 }
 
 impl TeamsAdapter {
-    pub fn new(webhook_url: String) -> Self {
-        Self {
+    pub fn new(webhook_url: String) -> Result<Self, AgentOSError> {
+        crate::webhook::validate_webhook_url(&webhook_url)?;
+        Ok(Self {
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
                 .expect("HTTP client build failed"),
             webhook_url: Zeroizing::new(webhook_url),
             name: "teams".to_string(),
-        }
+        })
     }
 }
 
@@ -69,7 +69,10 @@ impl ChannelAdapter for TeamsAdapter {
             .await
             .map_err(|e| AgentOSError::ToolExecutionFailed {
                 tool_name: "teams".into(),
-                reason: format!("HTTP request failed: {e}"),
+                reason: format!(
+                    "HTTP request failed: {}",
+                    crate::webhook::safe_reqwest_err(&e)
+                ),
             })?;
 
         if !response.status().is_success() {
@@ -96,16 +99,11 @@ impl ChannelAdapter for TeamsAdapter {
     }
 
     async fn health_check(&self) -> ChannelHealth {
-        match self.client.head(self.webhook_url.as_str()).send().await {
-            Ok(r) if r.status().is_success() || r.status().as_u16() == 405 => {
-                ChannelHealth::Connected
-            }
-            Ok(r) => ChannelHealth::Degraded(format!("HTTP {}", r.status())),
-            Err(e) => {
-                warn!(error = %e, "Teams health check failed");
-                ChannelHealth::Disconnected(e.to_string())
-            }
-        }
+        // Teams Incoming Webhook URLs embed the secret in the path — issuing a HEAD
+        // request would leak the credential and is not a meaningful connectivity probe
+        // (the endpoint only accepts POST). Report Connected passively; actual delivery
+        // failures surface through send() errors.
+        ChannelHealth::Connected
     }
 }
 
@@ -115,9 +113,21 @@ mod tests {
 
     #[test]
     fn test_teams_capabilities() {
-        let adapter = TeamsAdapter::new("https://example.com".to_string());
+        let adapter = TeamsAdapter::new("https://example.com".to_string()).unwrap();
         let caps = adapter.capabilities();
         assert!(caps.rich_formatting);
         assert!(caps.threads);
+    }
+
+    #[test]
+    fn test_teams_rejects_private_url() {
+        assert!(TeamsAdapter::new("http://localhost/hook".to_string()).is_err());
+        assert!(TeamsAdapter::new("https://192.168.1.1/hook".to_string()).is_err());
+        assert!(TeamsAdapter::new("https://169.254.169.254/latest".to_string()).is_err());
+    }
+
+    #[test]
+    fn test_teams_rejects_plain_http() {
+        assert!(TeamsAdapter::new("http://example.com/hook".to_string()).is_err());
     }
 }

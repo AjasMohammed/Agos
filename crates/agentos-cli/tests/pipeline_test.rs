@@ -24,6 +24,7 @@ async fn setup_kernel_and_client(temp_dir: &tempfile::TempDir) -> (Arc<Kernel>, 
         .await
         .unwrap(),
     );
+    kernel.wire_inbound_chat_bridge();
 
     let kernel_clone = kernel.clone();
     tokio::spawn(async move {

@@ -6,6 +6,7 @@ pub mod capability_broker;
 pub mod capability_dispatch;
 pub mod capability_provider;
 pub mod capability_registry;
+pub mod channel_chat_bridge;
 pub mod checkpoint_store;
 pub mod commands;
 pub mod config;

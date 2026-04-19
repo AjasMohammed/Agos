@@ -820,7 +820,17 @@ impl Kernel {
             .await
             .map(|s| s.cost_usd);
 
-        let subject = Self::format_completion_subject(outcome, &task.original_prompt);
+        let agent_name = {
+            let reg = self.agent_registry.read().await;
+            reg.get_by_id(&task.agent_id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| task.agent_id.to_string())
+        };
+        let base_subject = Self::format_completion_subject(outcome, &task.original_prompt);
+        let subject = format!("[{agent_name}] {base_subject}")
+            .chars()
+            .take(80)
+            .collect::<String>();
         let body = Self::format_completion_body(
             outcome,
             &task.original_prompt,

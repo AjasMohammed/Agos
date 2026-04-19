@@ -53,6 +53,19 @@ fn validate_server_url_inner(url: &str) -> Result<(), String> {
         let end = after_scheme
             .find(['/', '?', '#', ':'])
             .unwrap_or(after_scheme.len());
+        // If host extraction stopped at ':' and more ':' follow, this is an
+        // unbracketed IPv6 literal (e.g. "fe80::1") — RFC 3986 §3.2.2 requires
+        // brackets. Our extraction only captured the first group ("fe80"), which
+        // would bypass IPv6 SSRF checks below.
+        if end < after_scheme.len() && after_scheme.as_bytes()[end] == b':' {
+            let rest = &after_scheme[end + 1..];
+            if rest.contains(':') {
+                return Err(
+                    "Server URL contains an unbracketed IPv6 address; use [...] notation"
+                        .to_string(),
+                );
+            }
+        }
         after_scheme[..end].to_ascii_lowercase()
     };
 
@@ -134,6 +147,19 @@ fn validate_webhook_url_inner(url: &str) -> Result<(), String> {
         let end = after_scheme
             .find(['/', '?', '#', ':'])
             .unwrap_or(after_scheme.len());
+        // If host extraction stopped at ':' and more ':' follow, this is an
+        // unbracketed IPv6 literal (e.g. "fe80::1") — RFC 3986 §3.2.2 requires
+        // brackets. Our extraction only captured the first group ("fe80"), which
+        // would bypass IPv6 SSRF checks below.
+        if end < after_scheme.len() && after_scheme.as_bytes()[end] == b':' {
+            let rest = &after_scheme[end + 1..];
+            if rest.contains(':') {
+                return Err(
+                    "Webhook URL contains an unbracketed IPv6 address; use [...] notation"
+                        .to_string(),
+                );
+            }
+        }
         after_scheme[..end].to_ascii_lowercase()
     };
 
@@ -331,5 +357,33 @@ mod tests {
     fn allows_public_ipv6() {
         assert!(validate_webhook_url("https://[2001:db8::1]/notify").is_ok());
         assert!(validate_webhook_url("https://[2001:db8::1]:443/notify").is_ok());
+    }
+
+    // ── Unbracketed IPv6 bypass regression tests ─────────────────────────────
+
+    #[test]
+    fn blocks_unbracketed_ipv6_link_local_webhook() {
+        assert!(validate_webhook_url("https://fe80::1/notify").is_err());
+    }
+
+    #[test]
+    fn blocks_unbracketed_ipv6_link_local_server() {
+        assert!(validate_server_url("http://fe80::1/path").is_err());
+    }
+
+    #[test]
+    fn blocks_unbracketed_ipv6_loopback_server() {
+        assert!(validate_server_url("http://::1/path").is_err());
+    }
+
+    #[test]
+    fn blocks_unbracketed_ipv6_ula_server() {
+        assert!(validate_server_url("http://fd00::1/path").is_err());
+    }
+
+    #[test]
+    fn allows_host_with_port_server() {
+        assert!(validate_server_url("http://example.com:8080/path").is_ok());
+        assert!(validate_server_url("https://example.com:443/path").is_ok());
     }
 }
