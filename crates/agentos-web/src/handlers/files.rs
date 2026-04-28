@@ -1,5 +1,5 @@
-use crate::auth::AuthToken;
 use crate::auth::file_owner_principal;
+use crate::auth::AuthToken;
 use crate::file_store::{sanitize_display_name, sanitize_storage_name, UploadedFile};
 use crate::state::AppState;
 use axum::extract::{Extension, Multipart, Path, State};
@@ -64,7 +64,7 @@ pub async fn upload(
     multipart: Multipart,
 ) -> Response {
     let principal = file_owner_principal(&jar, &headers, &auth);
-    match process_upload(multipart, &state, &principal).await {
+    match process_upload(multipart, &state, &principal, "global").await {
         Ok(_) => Redirect::to("/files").into_response(),
         Err(resp) => resp,
     }
@@ -79,11 +79,14 @@ pub async fn upload_api(
     multipart: Multipart,
 ) -> Response {
     let principal = file_owner_principal(&jar, &headers, &auth);
-    match process_upload(multipart, &state, &principal).await {
+    // The scope is extracted from a `scope` field inside the multipart body by process_upload.
+    // Default to "global" if the frontend doesn't send one.
+    match process_upload(multipart, &state, &principal, "global").await {
         Ok(f) => axum::Json(serde_json::json!({
             "id":            f.id,
             "name":          f.name,
             "original_name": f.original_name,
+            "scope":         f.scope,
         }))
         .into_response(),
         Err(resp) => resp,
@@ -246,11 +249,13 @@ async fn process_upload(
     mut multipart: Multipart,
     state: &AppState,
     owner_principal: &str,
+    default_scope: &str,
 ) -> Result<UploadedFile, Response> {
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut file_name = String::from("upload");
     let mut file_mime = String::from("application/octet-stream");
     let mut tags = String::new();
+    let mut upload_scope = default_scope.to_string();
 
     while let Ok(Some(mut field)) = multipart.next_field().await {
         let field_name = field.name().unwrap_or("").to_string();
@@ -317,9 +322,22 @@ async fn process_upload(
                 file_bytes = Some(buf);
             }
             _ => {
-                // Skip unknown fields without draining — axum-multipart advances automatically.
-                // Draining with .bytes().await would allow an unbounded read on a large garbage
-                // field; the outer DefaultBodyLimit is the authoritative cap.
+                // Check for known extra fields like `scope`.
+                if field_name == "scope" {
+                    if let Ok(b) = field.bytes().await {
+                        let s = String::from_utf8_lossy(&b).trim().to_string();
+                        // Only allow well-formed scope values.
+                        if s == "global" {
+                            upload_scope = s;
+                        } else if let Some(session_part) = s.strip_prefix("session:") {
+                            // Validate the session portion is a proper UUID.
+                            if uuid::Uuid::parse_str(session_part).is_ok() {
+                                upload_scope = s;
+                            }
+                        }
+                    }
+                }
+                // Skip other unknown fields.
             }
         }
     }
@@ -343,14 +361,22 @@ async fn process_upload(
     let fmime = file_mime.clone();
     let ftags = tags.clone();
     let owner = owner_principal.to_string();
+    let fscope = upload_scope.clone();
     // Clone for use after the closure (closure moves disk_path and disk_path_str).
     let disk_path_str_ret = disk_path_str.clone();
 
     match tokio::task::spawn_blocking(move || -> Result<(), String> {
         std::fs::write(&disk_path, &bytes).map_err(|e| format!("write to disk: {e}"))?;
-        if let Err(e) =
-            store.register_file(&fid, &fname, &fmime, size, &disk_path_str, &ftags, &owner)
-        {
+        if let Err(e) = store.register_file(
+            &fid,
+            &fname,
+            &fmime,
+            size,
+            &disk_path_str,
+            &ftags,
+            &owner,
+            &fscope,
+        ) {
             // Best-effort cleanup: remove the orphaned file if DB registration fails.
             let _ = std::fs::remove_file(&disk_path_str);
             return Err(format!("register in db: {e}"));
@@ -391,6 +417,7 @@ async fn process_upload(
             .map(String::from)
             .collect(),
         uploaded_at: Utc::now().to_rfc3339(),
+        scope: upload_scope,
     })
 }
 
@@ -399,7 +426,7 @@ async fn process_upload(
 async fn load_files(state: &AppState, owner_principal: &str) -> Vec<UploadedFile> {
     let store = Arc::clone(&state.file_store);
     let p = owner_principal.to_string();
-    tokio::task::spawn_blocking(move || store.list_files(&p))
+    tokio::task::spawn_blocking(move || store.list_files(&p, Some("global")))
         .await
         .unwrap_or_else(|e| {
             tracing::error!(error = %e, "load_files: spawn_blocking panicked");
@@ -465,19 +492,18 @@ pub async fn resolve_file_ids_to_context(
     let store = Arc::clone(&state.file_store);
     let owner = owner_principal.to_string();
 
-    let records = match tokio::task::spawn_blocking(move || store.get_files_by_ids(&ids, &owner))
-        .await
-    {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            tracing::warn!(error = %e, "resolve_file_ids_to_context: DB lookup failed");
-            return String::new();
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "resolve_file_ids_to_context: spawn_blocking panicked");
-            return String::new();
-        }
-    };
+    let records =
+        match tokio::task::spawn_blocking(move || store.get_files_by_ids(&ids, &owner)).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "resolve_file_ids_to_context: DB lookup failed");
+                return String::new();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "resolve_file_ids_to_context: spawn_blocking panicked");
+                return String::new();
+            }
+        };
 
     // Canonicalize uploads_dir once before the loop — syscall per path component is expensive.
     let canonical_uploads = match state.file_store.uploads_dir.canonicalize() {
@@ -514,12 +540,13 @@ pub async fn resolve_file_ids_to_context(
         }
 
         let safe_name = escape_html_attr(&record.original_name);
+        let file_id = escape_html_attr(&record.id);
         if is_text_mime(&record.mime) {
             match tokio::fs::read_to_string(&canonical).await {
                 Ok(content) => {
                     // Cap inlined content at 1 MiB to avoid flooding the context window.
                     const MAX_INLINE: usize = 1024 * 1024;
-                    let body = if content.len() > MAX_INLINE {
+                    if content.len() > MAX_INLINE {
                         // Find a valid char boundary at or before MAX_INLINE.
                         let cut = content
                             .char_indices()
@@ -527,20 +554,22 @@ pub async fn resolve_file_ids_to_context(
                             .last()
                             .map(|(i, c)| i + c.len_utf8())
                             .unwrap_or(0);
-                        format!(
-                            "{}\n[... truncated — {} total bytes]",
-                            &content[..cut],
-                            content.len()
-                        )
+                        let safe_body = escape_user_data_close(&content[..cut]);
+                        parts.push(format!(
+                            "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\" truncated=\"true\" total_bytes=\"{}\">\n\
+                             {safe_body}\n\
+                             [... truncated at 1 MiB — {} total bytes. \
+                             To read the full file, use the user-file-reader tool with file_id=\"{}\"]\n\
+                             </user_data>\n",
+                            content.len(), content.len(), record.id
+                        ));
                     } else {
-                        content
-                    };
-                    // Wrap in <user_data> so the system-prompt injection guard applies.
-                    // Escape any </user_data> inside the file so it cannot close the tag early.
-                    let safe_body = escape_user_data_close(&body);
-                    parts.push(format!(
-                        "<user_data filename=\"{safe_name}\">\n{safe_body}\n</user_data>\n"
-                    ));
+                        // Wrap in <user_data> so the system-prompt injection guard applies.
+                        let safe_body = escape_user_data_close(&content);
+                        parts.push(format!(
+                            "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\">\n{safe_body}\n</user_data>\n"
+                        ));
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(file_id = %record.id, error = %e, "resolve_file_ids_to_context: could not read file");
@@ -550,8 +579,9 @@ pub async fn resolve_file_ids_to_context(
         } else {
             let safe_mime = escape_html_attr(&record.mime);
             parts.push(format!(
-                "<user_data filename=\"{safe_name}\" type=\"binary\" size_kib=\"{}\" mime=\"{safe_mime}\" />\n",
-                record.size.saturating_add(1023) / 1024,
+                "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\" type=\"binary\" size_kib=\"{}\" mime=\"{safe_mime}\" \
+                 note=\"Binary file attached. Use user-file-reader tool with file_id=&quot;{}&quot; to read contents.\" />\n",
+                record.size.saturating_add(1023) / 1024, record.id,
             ));
         }
     }
@@ -561,10 +591,12 @@ pub async fn resolve_file_ids_to_context(
 
 /// Resolve `@filename` mentions in a message string to inline file content.
 /// Looks up each mention in the FileStore and prepends the content.
+/// `session_id` is used to also search session-scoped files.
 pub async fn resolve_at_mentions(
     message: &str,
     state: &AppState,
     owner_principal: &str,
+    session_id: Option<&str>,
 ) -> String {
     // Simple pattern: @word or @word.ext — alphanumeric, dot, dash, underscore.
     let re = match regex::Regex::new(r"@([\w.\-]+)") {
@@ -595,10 +627,13 @@ pub async fn resolve_at_mentions(
         let m = mention.clone();
         let s = Arc::clone(&store);
         let o = owner.clone();
-        let record = match tokio::task::spawn_blocking(move || s.find_by_name(&m, &o)).await {
-            Ok(Ok(Some(r))) => r,
-            _ => continue,
-        };
+        let sid = session_id.map(|s| s.to_string());
+        let record =
+            match tokio::task::spawn_blocking(move || s.find_by_name(&m, &o, sid.as_deref())).await
+            {
+                Ok(Ok(Some(r))) => r,
+                _ => continue,
+            };
 
         let disk_path = std::path::PathBuf::from(&record.path);
         let canonical = match disk_path.canonicalize() {
@@ -610,34 +645,39 @@ pub async fn resolve_at_mentions(
         }
 
         let safe_name = escape_html_attr(&record.original_name);
+        let file_id = escape_html_attr(&record.id);
         if is_text_mime(&record.mime) {
             if let Ok(content) = tokio::fs::read_to_string(&canonical).await {
                 const MAX_INLINE: usize = 512 * 1024;
-                let body = if content.len() > MAX_INLINE {
+                if content.len() > MAX_INLINE {
                     let cut = content
                         .char_indices()
                         .take_while(|(i, _)| *i < MAX_INLINE)
                         .last()
                         .map(|(i, c)| i + c.len_utf8())
                         .unwrap_or(0);
-                    format!(
-                        "{}\n[... truncated — {} total bytes]",
-                        &content[..cut],
-                        content.len()
-                    )
+                    let safe_body = escape_user_data_close(&content[..cut]);
+                    preamble.push_str(&format!(
+                        "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\" truncated=\"true\" total_bytes=\"{}\">\n\
+                         {safe_body}\n\
+                         [... truncated at 512 KiB — {} total bytes. \
+                         To read the full file, use the user-file-reader tool with file_id=\"{}\"]\n\
+                         </user_data>\n\n",
+                        content.len(), content.len(), record.id
+                    ));
                 } else {
-                    content
-                };
-                let safe_body = escape_user_data_close(&body);
-                preamble.push_str(&format!(
-                    "<user_data filename=\"{safe_name}\">\n{safe_body}\n</user_data>\n\n"
-                ));
+                    let safe_body = escape_user_data_close(&content);
+                    preamble.push_str(&format!(
+                        "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\">\n{safe_body}\n</user_data>\n\n"
+                    ));
+                }
             }
         } else {
             let safe_mime = escape_html_attr(&record.mime);
             preamble.push_str(&format!(
-                "<user_data filename=\"{safe_name}\" type=\"binary\" size_kib=\"{}\" mime=\"{safe_mime}\" />\n\n",
-                record.size.saturating_add(1023) / 1024,
+                "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\" type=\"binary\" size_kib=\"{}\" mime=\"{safe_mime}\" \
+                 note=\"Binary file attached. Use user-file-reader tool with file_id=&quot;{}&quot; to read contents.\" />\n\n",
+                record.size.saturating_add(1023) / 1024, record.id,
             ));
         }
     }
@@ -647,4 +687,60 @@ pub async fn resolve_at_mentions(
     } else {
         format!("{preamble}---\n{message}")
     }
+}
+
+/// GET /api/files/search?q=...&session_id=... — fuzzy file search for the @mention typeahead.
+pub async fn search_api(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Extension(auth): Extension<AuthToken>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let principal = file_owner_principal(&jar, &headers, &auth);
+    let query = params.get("q").map(|s| s.as_str()).unwrap_or("");
+    let session_id = params.get("session_id").map(|s| s.as_str());
+
+    // Validate session_id if provided.
+    if let Some(sid) = session_id {
+        if uuid::Uuid::parse_str(sid).is_err() {
+            return (StatusCode::BAD_REQUEST, "Invalid session_id").into_response();
+        }
+    }
+
+    let store = Arc::clone(&state.file_store);
+    let p = principal.clone();
+    let q = query.to_string();
+    let sid = session_id.map(String::from);
+
+    let results =
+        match tokio::task::spawn_blocking(move || store.search_files(&q, &p, sid.as_deref(), 20))
+            .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "File search failed");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Search failed").into_response();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "File search task panicked");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response();
+            }
+        };
+
+    let items: Vec<serde_json::Value> = results
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "id": f.id,
+                "name": f.name,
+                "original_name": f.original_name,
+                "mime": f.mime,
+                "size_kb": f.size.saturating_add(1023) / 1024,
+                "scope": f.scope,
+            })
+        })
+        .collect();
+
+    axum::Json(serde_json::json!({ "files": items })).into_response()
 }

@@ -1,0 +1,44 @@
+[manifest]
+name        = "get-schedule-runs"
+version     = "1.0.0"
+description = "Return the most recent runs for a schedule/once-job/timer the calling agent owns."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["schedule.self:r"]
+
+[capabilities_provided]
+outputs = ["runs"]
+
+[intent_schema]
+input  = "GetScheduleRunsIntent"
+output = "GetScheduleRunsResult"
+
+[input_schema]
+type = "object"
+required = ["schedule_id"]
+
+[input_schema.properties.schedule_id]
+type        = "string"
+description = "ID of the schedule, once-job, or timer to fetch runs for."
+
+[input_schema.properties.limit]
+type        = "integer"
+minimum     = 1
+maximum     = 100
+description = "Maximum number of runs to return. Default 20, max 100."
+
+[input_schema.properties.state]
+type        = "string"
+description = "Filter by run state: 'Queued' | 'Running' | 'Complete' | 'Failed' | 'Missed'."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 8
+max_cpu_ms    = 500
+syscalls      = []
+
+risk_class = "readonly_scoped"

@@ -1,0 +1,35 @@
+[node]
+id = "shell-run"
+version = 1
+display_name = "Shell Command"
+description = "Run a shell command on the host system. Requires ExecCapable permission."
+category = "core"
+icon = "terminal"
+color = "#1e293b"
+risk_class = "exec_capable"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "command"
+display_name = "Command"
+type = "template"
+required = true
+placeholder = "echo {{input}}"
+description = "Shell command to run. Use {{var}} for workflow values."
+
+[[node.properties]]
+name = "timeout_seconds"
+display_name = "Timeout (seconds)"
+type = "number"
+required = false
+default = 30
+
+[node.execute]
+kind = "tool"
+tool_id = "shell"

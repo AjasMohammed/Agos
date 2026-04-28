@@ -1,0 +1,51 @@
+[node]
+id = "channel-send"
+version = 1
+display_name = "Channel Send"
+description = "Send a message to a connected channel (Slack, Telegram, Discord, etc.)."
+category = "channels"
+icon = "message-circle"
+color = "#ec4899"
+risk_class = "write_scoped"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "message"
+display_name = "Message"
+type = "template"
+required = true
+placeholder = "Task complete! Result: {{input}}"
+description = "Message to send. Use {{var}} to include workflow outputs."
+
+[[node.properties]]
+name = "channel_format"
+display_name = "Format"
+type = "options"
+required = false
+default = "text"
+
+  [[node.properties.options]]
+  value = "text"
+  label = "Plain text"
+
+  [[node.properties.options]]
+  value = "markdown"
+  label = "Markdown"
+
+  [[node.properties.options]]
+  value = "code"
+  label = "Code block"
+
+[node.execute]
+kind = "kernel_command"
+command = "channel_send"
+
+[node.execute.parameter_mapping]
+message = "message"
+format = "channel_format"

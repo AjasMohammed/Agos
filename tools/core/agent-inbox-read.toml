@@ -1,0 +1,32 @@
+[manifest]
+name        = "agent-inbox-read"
+version     = "1.0.0"
+description = "Read a single inbox notification by ID, returning its full body. Marks the entry as read."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = ["id", "kind", "title", "body", "created_at"]
+
+[intent_schema]
+input  = "AgentInboxReadIntent"
+output = "AgentInboxReadResult"
+
+[input_schema]
+type     = "object"
+required = ["id"]
+
+[input_schema.properties.id]
+type        = "string"
+description = "Inbox entry ID from agent-inbox-list"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 8
+max_cpu_ms    = 500
+syscalls      = []

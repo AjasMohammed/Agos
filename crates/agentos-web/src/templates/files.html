@@ -21,23 +21,50 @@
               uploading: false,
               error: '',
               csrfToken: '{{ csrf_token }}',
-              async submitUpload(el) {
+              handleFileSelection(input) {
+                  this.files = Array.from(input.files || []).map(f => f.name);
+                  if (this.files.length > 0 && !this.uploading) {
+                      this.submitUpload();
+                  }
+              },
+              handleDrop(event) {
+                  const dropped = event.dataTransfer?.files || [];
+                  if (dropped.length === 0) return;
+                  this.$refs.fileInput.files = dropped;
+                  this.files = Array.from(dropped).map(f => f.name);
+                  if (!this.uploading) {
+                      this.submitUpload();
+                  }
+              },
+              async submitUpload() {
+                  if (this.uploading) return;
+                  const fileInput = this.$refs.fileInput;
+                  if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+                      this.error = 'Please choose at least one file';
+                      return;
+                  }
                   this.uploading = true;
                   this.error = '';
-                  const fd = new FormData(el);
+                  const tagsInput = this.$refs.tagsInput;
                   try {
-                      const r = await fetch('/files/upload', {
-                          method: 'POST',
-                          headers: { 'X-CSRF-Token': this.csrfToken },
-                          body: fd,
-                          redirect: 'follow',
-                      });
-                      if (r.ok || r.redirected) {
-                          window.location.href = '/files';
-                      } else {
-                          const msg = await r.text().catch(() => 'Upload failed');
-                          this.error = msg;
+                      for (const file of fileInput.files) {
+                          const fd = new FormData();
+                          fd.append('file', file);
+                          fd.append('tags', tagsInput ? tagsInput.value : '');
+                          const r = await fetch('/files/upload', {
+                              method: 'POST',
+                              headers: { 'X-CSRF-Token': this.csrfToken },
+                              body: fd,
+                              credentials: 'same-origin',
+                          });
+                          if (!r.ok && !r.redirected) {
+                              const msg = await r.text().catch(() => 'Upload failed');
+                              this.error = msg;
+                              this.uploading = false;
+                              return;
+                          }
                       }
+                      window.location.href = '/files';
                   } catch(e) {
                       this.error = 'Upload failed: ' + e.message;
                   } finally {
@@ -45,30 +72,27 @@
                   }
               }
           }"
-          @submit.prevent="submitUpload($el)"
+          @submit.prevent="submitUpload()"
           @dragover.prevent="dragging = true"
           @dragleave.prevent="dragging = false"
-          @drop.prevent="dragging = false; $refs.fileInput.files = $event.dataTransfer.files; files = Array.from($event.dataTransfer.files).map(f => f.name)">
+          @drop.prevent="dragging = false; handleDrop($event)">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
 
         <!-- Drop zone -->
-        <div :class="dragging ? 'file-drop-zone active' : 'file-drop-zone'"
+        <div class="file-drop-zone" :class="dragging ? 'active' : ''"
              @click="$refs.fileInput.click()">
             <input x-ref="fileInput" type="file" name="file" multiple
                    style="display:none"
-                   @change="files = Array.from($event.target.files).map(f => f.name)">
-            <p style="margin:0; color: var(--pico-muted-color)">
-                <template x-if="files.length === 0">
-                    <span>Click or drag files here to upload</span>
-                </template>
-                <template x-if="files.length > 0">
-                    <span x-text="files.join(', ')"></span>
-                </template>
-            </p>
+                   @change="handleFileSelection($event.target)">
+            <div style="margin:0; color: var(--pico-muted-color)">
+                <span x-show="files.length === 0">Click or drag files here to upload</span>
+                <span x-show="files.length > 0" x-text="files.join(', ')" style="display: none;"></span>
+            </div>
         </div>
 
         <label for="file-tags" style="margin-top:0.75rem">
             Tags <small style="font-weight:normal">(optional, comma-separated)</small>
-            <input id="file-tags" type="text" name="tags"
+            <input x-ref="tagsInput" id="file-tags" type="text" name="tags"
                    placeholder="report, pdf, project-x"
                    maxlength="200">
         </label>
@@ -139,7 +163,7 @@
                         <form method="post" action="/files/{{ f.id }}/delete" style="display:inline">
                             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                             <button type="submit" class="outline secondary btn-sm"
-                                    onclick="return confirm('Delete {{ f.original_name }}?')"
+                                    data-confirm="Delete {{ f.original_name }}?"
                                     style="padding:2px 8px; font-size:0.8em">Delete</button>
                         </form>
                     </td>
@@ -159,21 +183,5 @@
     </footer>
     {% endif %}
 </article>
-
-<style>
-.file-drop-zone {
-    border: 2px dashed var(--pico-muted-border-color);
-    border-radius: var(--pico-border-radius);
-    padding: 2rem;
-    text-align: center;
-    cursor: pointer;
-    transition: border-color 0.2s, background 0.2s;
-}
-.file-drop-zone:hover,
-.file-drop-zone.active {
-    border-color: var(--pico-primary);
-    background: color-mix(in srgb, var(--pico-primary) 5%, transparent);
-}
-</style>
 
 {% endblock %}

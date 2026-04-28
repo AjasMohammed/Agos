@@ -1,0 +1,54 @@
+[node]
+id = "memory-search"
+version = 1
+display_name = "Memory Search"
+description = "Search the agent's semantic memory for relevant facts and context."
+category = "memory"
+icon = "search"
+color = "#8b5cf6"
+risk_class = "readonly_scoped"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "query"
+display_name = "Search Query"
+type = "template"
+required = true
+placeholder = "What do we know about {{topic}}?"
+description = "Query to search memory with. Supports semantic (meaning-based) search."
+
+[[node.properties]]
+name = "tier"
+display_name = "Memory Tier"
+type = "options"
+required = false
+default = "semantic"
+
+  [[node.properties.options]]
+  value = "semantic"
+  label = "Semantic (facts & knowledge)"
+
+  [[node.properties.options]]
+  value = "episodic"
+  label = "Episodic (past events)"
+
+  [[node.properties.options]]
+  value = "procedural"
+  label = "Procedural (how-to patterns)"
+
+[[node.properties]]
+name = "limit"
+display_name = "Max Results"
+type = "number"
+required = false
+default = 5
+
+[node.execute]
+kind = "tool"
+tool_id = "memory-search"

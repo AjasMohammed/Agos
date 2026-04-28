@@ -314,6 +314,18 @@ impl Kernel {
                     0,
                 )
                 .await;
+
+                // Refresh the shared tool catalogue so agent-manual reflects the new tool.
+                {
+                    let registry = self.tool_registry.read().await;
+                    let all_tools = registry.list_all();
+                    let fresh =
+                        agentos_tools::agent_manual::AgentManualTool::summaries_from_registry(
+                            &all_tools,
+                        );
+                    *self.tool_summaries.write().await = fresh;
+                    tracing::debug!("agent-manual catalogue refreshed after tool install");
+                }
             }
             ToolLifecycleEvent::Removed { tool_id, tool_name } => {
                 self.emit_event(
@@ -340,6 +352,18 @@ impl Kernel {
                     0,
                 )
                 .await;
+
+                // Refresh the shared tool catalogue so agent-manual reflects the removed tool.
+                {
+                    let registry = self.tool_registry.read().await;
+                    let all_tools = registry.list_all();
+                    let fresh =
+                        agentos_tools::agent_manual::AgentManualTool::summaries_from_registry(
+                            &all_tools,
+                        );
+                    *self.tool_summaries.write().await = fresh;
+                    tracing::debug!("agent-manual catalogue refreshed after tool removal");
+                }
             }
             ToolLifecycleEvent::ChecksumMismatch {
                 tool_name,

@@ -300,11 +300,44 @@ impl ToolRunner {
         )));
     }
 
-    /// Register the agent-manual tool with a snapshot of tool summaries.
+    /// Register the agent-manual tool with a shared tool catalogue.
     /// Called by the kernel after the tool registry is fully loaded, so the
     /// manual has an accurate view of all available tools.
-    pub fn register_agent_manual(&mut self, tool_summaries: Vec<crate::agent_manual::ToolSummary>) {
+    pub fn register_agent_manual(
+        &mut self,
+        tool_summaries: crate::agent_manual::SharedToolSummaries,
+    ) {
         self.register(Box::new(crate::agent_manual::AgentManualTool::new(
+            tool_summaries,
+        )));
+    }
+
+    /// Register the list-tools tool with a shared tool catalogue.
+    pub fn register_list_tools(
+        &mut self,
+        tool_summaries: crate::agent_manual::SharedToolSummaries,
+    ) {
+        self.register(Box::new(crate::list_tools::ListToolsTool::new(
+            tool_summaries,
+        )));
+    }
+
+    /// Register the describe-tool tool with a shared tool catalogue.
+    pub fn register_describe_tool(
+        &mut self,
+        tool_summaries: crate::agent_manual::SharedToolSummaries,
+    ) {
+        self.register(Box::new(crate::describe_tool::DescribeToolTool::new(
+            tool_summaries,
+        )));
+    }
+
+    /// Register the search-tools tool with a shared tool catalogue.
+    pub fn register_search_tools(
+        &mut self,
+        tool_summaries: crate::agent_manual::SharedToolSummaries,
+    ) {
+        self.register(Box::new(crate::search_tools::SearchToolsTool::new(
             tool_summaries,
         )));
     }
@@ -315,8 +348,8 @@ impl ToolRunner {
     /// can report the complete tool list to the calling agent.  The list of
     /// available names can be obtained from `self.list_tools()` before calling
     /// this method.
-    pub fn register_agent_self(&mut self, tool_names: Vec<String>) {
-        self.register(Box::new(crate::agent_self::AgentSelfTool::new(tool_names)));
+    pub fn register_agent_self(&mut self, tool_count: usize) {
+        self.register(Box::new(crate::agent_self::AgentSelfTool::new(tool_count)));
     }
 
     /// Execute a tool by name. Returns the JSON result.

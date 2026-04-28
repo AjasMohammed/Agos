@@ -497,9 +497,9 @@ mod tests {
     fn test_factory_classifies_all_non_kernel_tools_registered_by_runner() {
         let tmp = TempDir::new().unwrap();
         let mut runner = crate::ToolRunner::new(tmp.path()).unwrap();
-        runner.register_agent_manual(Vec::new());
-        let tool_names = runner.list_tools();
-        runner.register_agent_self(tool_names);
+        runner.register_agent_manual(std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())));
+        let tool_count = runner.list_tools().len();
+        runner.register_agent_self(tool_count);
         let registered_tools: BTreeSet<String> = runner.list_tools().into_iter().collect();
         let explicitly_non_sandboxable: BTreeSet<String> = KERNEL_CONTEXT_TOOL_NAMES
             .iter()

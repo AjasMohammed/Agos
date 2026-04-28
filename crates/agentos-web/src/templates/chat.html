@@ -4,57 +4,66 @@
 <div class="page-header">
     <div>
         <h1>Chat</h1>
-        <p class="page-meta">{{ sessions|length }} session{% if sessions|length != 1 %}s{% endif %}</p>
+        <p class="page-meta">A calmer chat workspace with {{ sessions|length }} session{% if sessions|length != 1 %}s{% endif %}</p>
     </div>
 </div>
 
 <div class="chat-layout">
 
-    <!-- Left: session list -->
     <aside class="chat-sidebar">
-        <div class="chat-sidebar-header"><strong>Sessions</strong></div>
+        <div class="chat-sidebar-header">
+            <div>
+                <strong>Sessions</strong>
+                <p class="chat-sidebar-subtitle">Jump back into recent conversations.</p>
+            </div>
+        </div>
         {% if sessions|length == 0 %}
         <div class="chat-sidebar-empty muted">
             <p>No sessions yet.</p>
-            <p>Start a conversation.</p>
+            <p>Start one from the composer.</p>
         </div>
         {% else %}
         <nav class="chat-thread-list">
             {% for s in sessions %}
             <a href="/chat/{{ s.id }}" class="chat-thread-item">
-                <div class="chat-thread-agent">{{ s.title|default(s.agent_name) }}</div>
+                <div class="chat-thread-topline">
+                    <div class="chat-thread-agent">{{ s.title|default(s.agent_name) }}</div>
+                    <small class="muted">{{ s.updated_at|relative_time }}</small>
+                </div>
                 <div class="chat-thread-meta">
-                    <small class="muted">{{ s.agent_name }}</small>
+                    <small class="muted">with {{ s.agent_name }}</small>
                 </div>
                 {% if s.preview %}
                 <div class="chat-thread-preview muted">{{ s.preview }}</div>
                 {% endif %}
-                <div class="chat-thread-meta">
-                    <small class="muted">{{ s.updated_at|relative_time }}</small>
-                </div>
             </a>
             {% endfor %}
         </nav>
         {% endif %}
     </aside>
 
-    <!-- Right: new conversation form -->
     <main class="chat-compose-area">
-        <article>
-            <header>New Conversation</header>
+        <article class="chat-launchpad">
+            <header class="chat-launchpad-header">
+                <div>
+                    <p class="chat-eyebrow">New conversation</p>
+                    <h2>Start with a clean prompt</h2>
+                </div>
+                <p class="muted">Pick an agent, drop in context, and send.</p>
+            </header>
 
             {% if agents|length == 0 %}
-            <div class="empty-state" style="padding: 2rem 0;">
+            <div class="empty-state chat-launchpad-empty">
                 <div class="empty-state-icon" aria-hidden="true">○</div>
                 <p class="empty-state-title">No agents online</p>
                 <p class="empty-state-message muted">
                     Connect an agent on the <a href="/agents">Agents</a> page before starting a chat.
-                    Once an agent is online you can talk to it directly here — responses are streamed
+                    Once an agent is online you can talk to it directly here. Responses are streamed
                     back in real time without creating a task.
                 </p>
             </div>
             {% else %}
-            <form method="post" action="/chat/new" class="chat-compose-form"
+            <form method="post" action="/chat/new" class="chat-compose-form chat-compose-card"
                   x-data="{
                       fileIds: [],
                       fileChips: [],
@@ -81,7 +90,7 @@
                               });
                               if (!r.ok) {
                                   const msg = await r.text();
-                                  this.uploadError = msg || \`Upload failed (HTTP \${r.status})\`;
+                                  this.uploadError = msg || `Upload failed (HTTP ${r.status})`;
                               } else {
                                   let data;
                                   try { data = await r.json(); } catch(_) { this.uploadError = 'Malformed upload response'; this.uploading = false; return; }
@@ -113,10 +122,10 @@
 
                 <label for="message">Message
                     <textarea id="message" name="message" rows="5" required
-                              placeholder="Ask the agent anything… or use @filename to reference an uploaded file"></textarea>
+                              data-autoresize data-file-mention
+                              placeholder="Ask the agent anything, or use @filename to reference an uploaded file"></textarea>
                 </label>
 
-                <!-- File attachment chips -->
                 <div x-show="fileChips.length > 0" class="chat-attach-chips">
                     <template x-for="chip in fileChips" :key="chip.id">
                         <span class="chat-attach-chip">
@@ -127,13 +136,13 @@
                 </div>
                 <div x-show="uploadError" x-text="uploadError" class="chat-attach-error"></div>
 
-                <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div class="chat-compose-actions">
                     <label class="chat-attach-btn" :class="{ 'uploading': uploading }" title="Attach a file">
                         <input type="file" style="display:none" @change="attachFile($el)" :disabled="uploading">
                         <span x-show="!uploading">+ Attach</span>
                         <span x-show="uploading">Uploading…</span>
                     </label>
-                    <button type="submit">Send →</button>
+                    <button type="submit">Send</button>
                 </div>
             </form>
             {% endif %}
@@ -142,4 +151,8 @@
 
 </div>
 
+{% endblock %}
+
+{% block head_extra %}
+<script src="/static/js/file-mention.js" defer></script>
 {% endblock %}

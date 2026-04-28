@@ -1,0 +1,28 @@
+[node]
+id = "set-variables"
+version = 1
+display_name = "Set Variables"
+description = "Define named variables that can be referenced in later nodes with {{var_name}}."
+category = "core"
+icon = "variable"
+color = "#94a3b8"
+risk_class = "readonly_scoped"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "variables"
+display_name = "Variables (JSON)"
+type = "json"
+required = true
+description = "Key-value pairs to set as workflow variables. Values may reference {{previous_node_output}}."
+placeholder = '{"my_var": "{{input}}", "api_key": "@my_api_key"}'
+
+[node.execute]
+kind = "builtin"
+name = "set_variables"

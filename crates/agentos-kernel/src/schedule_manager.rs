@@ -399,9 +399,11 @@ impl ScheduleManager {
             .ok_or_else(|| AgentOSError::KernelError {
                 reason: format!("Pending once-job '{}' not found", name),
             })?;
-        let mut job = once_jobs.remove(&id).ok_or_else(|| AgentOSError::KernelError {
-            reason: format!("once-job '{}' vanished between find and remove", name),
-        })?;
+        let mut job = once_jobs
+            .remove(&id)
+            .ok_or_else(|| AgentOSError::KernelError {
+                reason: format!("once-job '{}' vanished between find and remove", name),
+            })?;
         job.state = OnceJobState::Cancelled;
         Ok(job)
     }

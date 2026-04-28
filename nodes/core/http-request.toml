@@ -1,0 +1,71 @@
+[node]
+id = "http-request"
+version = 1
+display_name = "HTTP Request"
+description = "Make an HTTP request to any external URL. Supports GET, POST, PUT, DELETE."
+category = "core"
+icon = "globe"
+color = "#0ea5e9"
+risk_class = "readonly_external"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "url"
+display_name = "URL"
+type = "template"
+required = true
+placeholder = "https://api.example.com/endpoint"
+description = "The URL to request. Use {{variable}} for dynamic values."
+
+[[node.properties]]
+name = "method"
+display_name = "Method"
+type = "options"
+required = true
+default = "GET"
+
+  [[node.properties.options]]
+  value = "GET"
+  label = "GET"
+
+  [[node.properties.options]]
+  value = "POST"
+  label = "POST"
+
+  [[node.properties.options]]
+  value = "PUT"
+  label = "PUT"
+
+  [[node.properties.options]]
+  value = "DELETE"
+  label = "DELETE"
+
+  [[node.properties.options]]
+  value = "PATCH"
+  label = "PATCH"
+
+[[node.properties]]
+name = "body"
+display_name = "Request Body"
+type = "template"
+required = false
+description = "Request body. Use {{variable}} for dynamic values. Leave empty for GET requests."
+
+[[node.properties]]
+name = "bearer_token"
+display_name = "Bearer Token"
+type = "string"
+required = false
+secret = true
+description = "Authorization bearer token. Use @keyname to reference a vault secret."
+
+[node.execute]
+kind = "http"
+url_template = "{{url}}"
+method = "GET"

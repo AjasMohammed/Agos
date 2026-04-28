@@ -1,8 +1,15 @@
 use crate::traits::{AgentTool, ToolExecutionContext};
-use agentos_types::{AgentOSError, PermissionOp};
+use agentos_types::{AgentID, AgentOSError, PermissionOp};
 use async_trait::async_trait;
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+/// Live-refreshable tool catalogue shared between AgentManualTool and the kernel.
+pub type SharedToolSummaries = Arc<RwLock<Vec<ToolSummary>>>;
 
 /// Which section of the agent manual to query.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,16 +124,169 @@ pub struct ToolSummary {
     pub trust_tier: String,
     /// Semantic capability tags for discoverability.
     pub capability_tags: Vec<String>,
+    /// Inferred category for browsing (core/memory/mcp/scratchpad/channel/events/skills/plugins/capabilities).
+    pub category: String,
+    /// Semantic tags from manifest (read/write/exec/network/fs/meta).
+    pub tags: Vec<String>,
+    /// Risk class from manifest (e.g. "readonly_scoped", "exec_capable").
+    pub risk_class: String,
 }
 
 /// The agent-manual tool. Provides queryable OS documentation.
 pub struct AgentManualTool {
-    tool_summaries: Vec<ToolSummary>,
+    tool_summaries: SharedToolSummaries,
 }
 
 impl AgentManualTool {
-    pub fn new(tool_summaries: Vec<ToolSummary>) -> Self {
+    fn bounded_page_size(page_size: usize) -> usize {
+        page_size.clamp(1, 50)
+    }
+
+    /// Async wrapper — loads usage scores via spawn_blocking so rusqlite
+    /// never blocks the async runtime.
+    pub async fn load_usage_scores_async(
+        data_dir: std::path::PathBuf,
+        agent_id: AgentID,
+    ) -> HashMap<String, f64> {
+        tokio::task::spawn_blocking(move || Self::load_usage_scores(data_dir.as_path(), &agent_id))
+            .await
+            .unwrap_or_default()
+    }
+
+    fn load_usage_scores(data_dir: &Path, agent_id: &AgentID) -> HashMap<String, f64> {
+        let db_path = data_dir.join("agent_tool_usage.db");
+        let Ok(conn) = Connection::open(&db_path) else {
+            tracing::warn!(path = %db_path.display(), "Failed to open tool usage DB");
+            return HashMap::new();
+        };
+        let now = chrono::Utc::now().timestamp() as f64;
+        let mut stmt = match conn.prepare(
+            "SELECT tool_name, count, last_used_at
+             FROM tool_usage WHERE agent_id = ?1",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to prepare tool usage query");
+                return HashMap::new();
+            }
+        };
+        let rows = match stmt.query_map(params![agent_id.to_string()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to query tool usage scores");
+                return HashMap::new();
+            }
+        };
+
+        let mut scores = HashMap::new();
+        for row in rows.flatten() {
+            let (tool_name, count, last_used_epoch) = row;
+            let age_hours = ((now - last_used_epoch as f64).max(0.0)) / 3600.0;
+            let score = (count as f64) * f64::exp(-age_hours / 168.0);
+            scores.insert(tool_name, score);
+        }
+        scores
+    }
+
+    /// Derive a browsing category from tool name and capability_tags.
+    pub fn infer_tool_category(name: &str, capability_tags: &[String]) -> String {
+        if name.starts_with("memory-")
+            || name.starts_with("episodic-")
+            || name.starts_with("semantic-")
+            || name.starts_with("procedural-")
+        {
+            return "memory".into();
+        }
+        if name.starts_with("mcp-") {
+            return "mcp".into();
+        }
+        if name.starts_with("scratch") {
+            return "scratchpad".into();
+        }
+        if name.starts_with("channel-") {
+            return "channel".into();
+        }
+        if name.starts_with("event-") {
+            return "events".into();
+        }
+        if name.starts_with("skill-") {
+            return "skills".into();
+        }
+        if name.starts_with("plugin-") {
+            return "plugins".into();
+        }
+        if name.starts_with("container-") {
+            return "containers".into();
+        }
+        if name.starts_with("webhook-") {
+            return "webhooks".into();
+        }
+        if name.starts_with("kmc-") || name.starts_with("capability-") {
+            return "capabilities".into();
+        }
+        if name.starts_with("hal-") || name.starts_with("device-") {
+            return "hal".into();
+        }
+        if capability_tags.iter().any(|t| t == "memory") {
+            return "memory".into();
+        }
+        if capability_tags.iter().any(|t| t == "mcp") {
+            return "mcp".into();
+        }
+        "core".into()
+    }
+
+    fn derive_tool_tags(
+        name: &str,
+        manifest_tags: &Option<Vec<String>>,
+        permissions: &[String],
+    ) -> Vec<String> {
+        if let Some(tags) = manifest_tags {
+            if !tags.is_empty() {
+                return tags.clone();
+            }
+        }
+        let mut tags = Vec::new();
+        if matches!(
+            name,
+            "agent-manual" | "agent-self" | "list-tools" | "describe-tool" | "search-tools"
+        ) {
+            tags.push("meta".into());
+            return tags;
+        }
+        if permissions.iter().any(|p| p.starts_with("network")) {
+            tags.push("network".into());
+        }
+        if permissions.iter().any(|p| p.starts_with("fs")) {
+            tags.push("fs".into());
+        }
+        let has_write = permissions.iter().any(|p| {
+            p.split(':')
+                .next_back()
+                .map(|r| r.contains('w') || r.contains('x'))
+                .unwrap_or(false)
+        });
+        if has_write {
+            tags.push("write".into());
+        } else {
+            tags.push("read".into());
+        }
+        tags
+    }
+
+    pub fn new(tool_summaries: SharedToolSummaries) -> Self {
         Self { tool_summaries }
+    }
+
+    /// Convenience constructor for tests and one-off static lists.
+    pub fn from_static(summaries: Vec<ToolSummary>) -> Self {
+        Self::new(Arc::new(RwLock::new(summaries)))
     }
 
     fn schema_type_string(schema: &serde_json::Value) -> String {
@@ -307,19 +467,48 @@ impl AgentManualTool {
         Some(serde_json::Value::Object(summary))
     }
 
+    /// Public wrapper around `summarize_input_schema` for use by describe-tool.
+    pub fn public_summarize_input_schema(
+        schema: Option<&serde_json::Value>,
+    ) -> Option<serde_json::Value> {
+        Self::summarize_input_schema(schema)
+    }
+
     /// Build ToolSummary list from a slice of RegisteredTool references.
     /// Called by the kernel/runner when constructing the tool.
     pub fn summaries_from_registry(tools: &[&agentos_types::RegisteredTool]) -> Vec<ToolSummary> {
         tools
             .iter()
-            .map(|t| ToolSummary {
-                name: t.manifest.manifest.name.clone(),
-                description: t.manifest.manifest.description.clone(),
-                version: t.manifest.manifest.version.clone(),
-                permissions: t.manifest.capabilities_required.permissions.clone(),
-                input_schema: t.manifest.input_schema.clone(),
-                trust_tier: format!("{:?}", t.manifest.manifest.trust_tier).to_lowercase(),
-                capability_tags: t.manifest.manifest.capability_tags.clone(),
+            .map(|t| {
+                let name = t.manifest.manifest.name.clone();
+                let permissions = t.manifest.capabilities_required.permissions.clone();
+                let manifest_tags = t.manifest.manifest.tags.clone();
+                let capability_tags = t.manifest.manifest.capability_tags.clone();
+                let category = Self::infer_tool_category(&name, &capability_tags);
+                let tags = Self::derive_tool_tags(&name, &manifest_tags, &permissions);
+                let risk_class = format!("{:?}", t.manifest.risk_class)
+                    .chars()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        if c.is_uppercase() && i > 0 {
+                            format!("_{}", c.to_ascii_lowercase())
+                        } else {
+                            c.to_ascii_lowercase().to_string()
+                        }
+                    })
+                    .collect();
+                ToolSummary {
+                    name,
+                    description: t.manifest.manifest.description.clone(),
+                    version: t.manifest.manifest.version.clone(),
+                    permissions,
+                    input_schema: t.manifest.input_schema.clone(),
+                    trust_tier: format!("{:?}", t.manifest.manifest.trust_tier).to_lowercase(),
+                    capability_tags,
+                    category,
+                    tags,
+                    risk_class,
+                }
             })
             .collect()
     }
@@ -358,52 +547,101 @@ impl AgentManualTool {
         }))
     }
 
-    fn section_tools(&self) -> Result<serde_json::Value, AgentOSError> {
-        let tools: Vec<serde_json::Value> = self
-            .tool_summaries
+    fn section_tools(
+        summaries: &[ToolSummary],
+        usage_scores: &HashMap<String, f64>,
+        category_filter: Option<&str>,
+        tag_filter: Option<&str>,
+        page: usize,
+        page_size: usize,
+    ) -> Result<serde_json::Value, AgentOSError> {
+        let mut filtered: Vec<&ToolSummary> = summaries
+            .iter()
+            .filter(|t| {
+                let cat_ok = category_filter
+                    .map(|c| t.category.eq_ignore_ascii_case(c))
+                    .unwrap_or(true);
+                let tag_ok = tag_filter
+                    .map(|tf| t.tags.iter().any(|tag| tag.eq_ignore_ascii_case(tf)))
+                    .unwrap_or(true);
+                cat_ok && tag_ok
+            })
+            .collect();
+
+        if !usage_scores.is_empty() {
+            filtered.sort_by(|a, b| {
+                let a_score = usage_scores.get(&a.name).copied().unwrap_or(0.0);
+                let b_score = usage_scores.get(&b.name).copied().unwrap_or(0.0);
+                b_score
+                    .partial_cmp(&a_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+        } else {
+            filtered.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+
+        let page_size = Self::bounded_page_size(page_size);
+        let total = filtered.len();
+        let start = page.saturating_mul(page_size).min(total);
+        let end = start.saturating_add(page_size).min(total);
+        let tools: Vec<serde_json::Value> = filtered[start..end]
             .iter()
             .map(|t| {
                 serde_json::json!({
                     "name": t.name,
                     "description": t.description,
+                    "category": t.category,
+                    "tags": t.tags,
                     "permissions": t.permissions,
                     "trust_tier": t.trust_tier,
+                    "risk_class": t.risk_class,
                 })
             })
             .collect();
 
         Ok(serde_json::json!({
             "section": "tools",
-            "count": tools.len(),
+            "count": total,
+            "page": page,
+            "page_size": page_size,
+            "next_page": if end < total { Some(page + 1) } else { None::<usize> },
+            "category_filter": category_filter,
+            "tag_filter": tag_filter,
             "tools": tools,
-            "hint": "Use {\"section\": \"tool-detail\", \"name\": \"<tool-name>\"} for full schema and docs."
+            "hint": "Use describe-tool(name=<name>) for full schema. Filter: category=<cat>, tag=<tag>."
         }))
     }
 
-    fn section_tool_detail(&self, name: &str) -> Result<serde_json::Value, AgentOSError> {
-        let tool = self
-            .tool_summaries
+    fn section_tool_detail(
+        summaries: &[ToolSummary],
+        name: &str,
+        verbose: bool,
+    ) -> Result<serde_json::Value, AgentOSError> {
+        let tool = summaries
             .iter()
             .find(|t| t.name == name)
             .ok_or_else(|| AgentOSError::ToolNotFound(name.to_string()))?;
 
         let input_schema_docs = Self::summarize_input_schema(tool.input_schema.as_ref());
-        let input_schema_pretty = tool
-            .input_schema
-            .as_ref()
-            .and_then(|schema| serde_json::to_string_pretty(schema).ok());
 
-        Ok(serde_json::json!({
+        let mut result = serde_json::json!({
             "section": "tool-detail",
             "name": tool.name,
             "version": tool.version,
             "description": tool.description,
+            "category": tool.category,
+            "tags": tool.tags,
             "permissions": tool.permissions,
             "trust_tier": tool.trust_tier,
-            "input_schema": tool.input_schema,
+            "risk_class": tool.risk_class,
+            "capability_tags": tool.capability_tags,
             "input_schema_docs": input_schema_docs,
-            "input_schema_pretty": input_schema_pretty,
-        }))
+        });
+        if verbose {
+            result["input_schema"] = tool.input_schema.clone().unwrap_or(serde_json::Value::Null);
+        }
+        Ok(result)
     }
 
     fn section_permissions(&self) -> Result<serde_json::Value, AgentOSError> {
@@ -1405,13 +1643,15 @@ impl AgentManualTool {
     }
 
     /// Suggest tools based on a free-text query, using keyword scoring.
-    fn section_suggest(&self, query: &str) -> Result<serde_json::Value, AgentOSError> {
+    fn section_suggest(
+        summaries: &[ToolSummary],
+        query: &str,
+    ) -> Result<serde_json::Value, AgentOSError> {
         let query_lower = query.to_lowercase();
         let query_words: Vec<&str> = query_lower.split_whitespace().collect();
 
         // Score each tool by keyword overlap with query
-        let mut scored: Vec<(usize, f64)> = self
-            .tool_summaries
+        let mut scored: Vec<(usize, f64)> = summaries
             .iter()
             .enumerate()
             .map(|(i, ts)| {
@@ -1464,7 +1704,7 @@ impl AgentManualTool {
             .take(top_k)
             .filter(|(_, score)| *score >= min_score)
             .map(|(idx, score)| {
-                let ts = &self.tool_summaries[*idx];
+                let ts = &summaries[*idx];
                 serde_json::json!({
                     "tool": ts.name,
                     "description": ts.description,
@@ -1502,7 +1742,7 @@ impl AgentTool for AgentManualTool {
     async fn execute(
         &self,
         payload: serde_json::Value,
-        _context: ToolExecutionContext,
+        context: ToolExecutionContext,
     ) -> Result<serde_json::Value, AgentOSError> {
         let section_str = payload
             .get("section")
@@ -1522,9 +1762,28 @@ impl AgentTool for AgentManualTool {
             ))
         })?;
 
+        let summaries = {
+            let guard = self.tool_summaries.read().await;
+            guard.clone()
+        };
+
         match section {
             ManualSection::Index => self.section_index(),
-            ManualSection::Tools => self.section_tools(),
+            ManualSection::Tools => {
+                let usage_scores =
+                    Self::load_usage_scores_async(context.data_dir.clone(), context.agent_id).await;
+                Self::section_tools(
+                    &summaries,
+                    &usage_scores,
+                    payload.get("category").and_then(|v| v.as_str()),
+                    payload.get("tag").and_then(|v| v.as_str()),
+                    payload.get("page").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                    payload
+                        .get("page_size")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(20) as usize,
+                )
+            }
             ManualSection::ToolDetail => {
                 let name = payload
                     .get("name")
@@ -1534,7 +1793,14 @@ impl AgentTool for AgentManualTool {
                             "tool-detail section requires 'name' field".into(),
                         )
                     })?;
-                self.section_tool_detail(name)
+                Self::section_tool_detail(
+                    &summaries,
+                    name,
+                    payload
+                        .get("verbose")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                )
             }
             ManualSection::Permissions => self.section_permissions(),
             ManualSection::Memory => self.section_memory(),
@@ -1556,7 +1822,7 @@ impl AgentTool for AgentManualTool {
                             "suggest section requires 'query' field".into(),
                         )
                     })?;
-                self.section_suggest(query)
+                Self::section_suggest(&summaries, query)
             }
             ManualSection::Scratchpad => self.section_scratchpad(),
             ManualSection::Channels => self.section_channels(),
@@ -1649,6 +1915,9 @@ mod tests {
                 input_schema: None,
                 trust_tier: "core".into(),
                 capability_tags: vec!["file-io".into(), "reading".into()],
+                category: "core".into(),
+                tags: vec!["read".into(), "fs".into()],
+                risk_class: "readonly_scoped".into(),
             },
             ToolSummary {
                 name: "http-client".into(),
@@ -1658,13 +1927,16 @@ mod tests {
                 input_schema: None,
                 trust_tier: "core".into(),
                 capability_tags: vec!["network".into(), "api".into(), "web".into()],
+                category: "core".into(),
+                tags: vec!["network".into(), "write".into()],
+                risk_class: "readonly_external".into(),
             },
         ]
     }
 
     #[test]
     fn test_section_index_has_all_sections() {
-        let tool = AgentManualTool::new(vec![]);
+        let tool = AgentManualTool::from_static(vec![]);
         let result = tool.section_index().unwrap();
         let sections = result["sections"].as_array().unwrap();
         assert_eq!(sections.len(), 24); // index is not listed in index
@@ -1672,7 +1944,7 @@ mod tests {
 
     #[test]
     fn test_section_escalation_has_subsections() {
-        let tool = AgentManualTool::new(vec![]);
+        let tool = AgentManualTool::from_static(vec![]);
         let result = tool.section_escalation().unwrap();
         assert_eq!(result["section"], "escalation");
         let subsections = result["subsections"].as_array().unwrap();
@@ -1687,30 +1959,32 @@ mod tests {
 
     #[test]
     fn test_section_tools_returns_count() {
-        let tool = AgentManualTool::new(make_test_summaries());
-        let result = tool.section_tools().unwrap();
+        let summaries = make_test_summaries();
+        let result =
+            AgentManualTool::section_tools(&summaries, &HashMap::new(), None, None, 0, 20).unwrap();
         assert_eq!(result["count"], 2);
         assert_eq!(result["tools"][0]["name"], "file-reader");
     }
 
     #[test]
     fn test_section_tool_detail_found() {
-        let tool = AgentManualTool::new(make_test_summaries());
-        let result = tool.section_tool_detail("file-reader").unwrap();
+        let summaries = make_test_summaries();
+        let result =
+            AgentManualTool::section_tool_detail(&summaries, "file-reader", false).unwrap();
         assert_eq!(result["name"], "file-reader");
         assert_eq!(result["version"], "1.1.0");
     }
 
     #[test]
     fn test_section_tool_detail_not_found() {
-        let tool = AgentManualTool::new(make_test_summaries());
-        let result = tool.section_tool_detail("nonexistent");
+        let summaries = make_test_summaries();
+        let result = AgentManualTool::section_tool_detail(&summaries, "nonexistent", false);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_section_tool_detail_includes_schema_docs() {
-        let tool = AgentManualTool::new(vec![ToolSummary {
+        let summaries = vec![ToolSummary {
             name: "file-reader".into(),
             description: "Read files".into(),
             version: "1.1.0".into(),
@@ -1725,9 +1999,12 @@ mod tests {
             })),
             trust_tier: "core".into(),
             capability_tags: vec![],
-        }]);
+            category: "core".into(),
+            tags: vec!["read".into()],
+            risk_class: "readonly_scoped".into(),
+        }];
 
-        let result = tool.section_tool_detail("file-reader").unwrap();
+        let result = AgentManualTool::section_tool_detail(&summaries, "file-reader", true).unwrap();
         assert_eq!(result["section"], "tool-detail");
         assert!(result["input_schema_docs"]["fields"].is_array());
         assert!(result["input_schema_docs"]["fields"]
@@ -1735,12 +2012,12 @@ mod tests {
             .unwrap()
             .iter()
             .any(|f| f["name"] == "path" && f["required"] == true));
-        assert!(result["input_schema_pretty"].as_str().is_some());
+        assert!(result["input_schema"].is_object());
     }
 
     #[test]
     fn test_section_permissions_has_resource_classes() {
-        let tool = AgentManualTool::new(vec![]);
+        let tool = AgentManualTool::from_static(vec![]);
         let result = tool.section_permissions().unwrap();
         let classes = result["resource_classes"].as_array().unwrap();
         assert!(classes.len() >= 5);
@@ -1748,7 +2025,7 @@ mod tests {
 
     #[test]
     fn test_section_memory_has_three_tiers() {
-        let tool = AgentManualTool::new(vec![]);
+        let tool = AgentManualTool::from_static(vec![]);
         let result = tool.section_memory().unwrap();
         let tiers = result["tiers"].as_array().unwrap();
         assert_eq!(tiers.len(), 3);
@@ -1756,7 +2033,7 @@ mod tests {
 
     #[test]
     fn test_section_events_has_all_categories() {
-        let tool = AgentManualTool::new(vec![]);
+        let tool = AgentManualTool::from_static(vec![]);
         let result = tool.section_events().unwrap();
         let categories = result["categories"].as_array().unwrap();
         // One entry per EventCategory variant in agentos-types::event.
@@ -1776,7 +2053,7 @@ mod tests {
 
     #[test]
     fn test_section_commands_has_domains() {
-        let tool = AgentManualTool::new(vec![]);
+        let tool = AgentManualTool::from_static(vec![]);
         let result = tool.section_commands().unwrap();
         let domains = result["domains"].as_array().unwrap();
         assert!(domains.len() >= 8);
@@ -1784,7 +2061,7 @@ mod tests {
 
     #[test]
     fn test_section_commands_kernel_only_distinction() {
-        let tool = AgentManualTool::new(vec![]);
+        let tool = AgentManualTool::from_static(vec![]);
         let result = tool.section_commands().unwrap();
         let domains = result["domains"].as_array().unwrap();
 
@@ -1849,7 +2126,7 @@ mod tests {
 
     #[test]
     fn test_section_errors_has_entries() {
-        let tool = AgentManualTool::new(vec![]);
+        let tool = AgentManualTool::from_static(vec![]);
         let result = tool.section_errors().unwrap();
         let errors = result["errors"].as_array().unwrap();
         assert!(errors.len() >= 5);
@@ -1857,14 +2134,14 @@ mod tests {
 
     #[test]
     fn test_section_feedback_has_format() {
-        let tool = AgentManualTool::new(vec![]);
+        let tool = AgentManualTool::from_static(vec![]);
         let result = tool.section_feedback().unwrap();
         assert!(result["format"]["fields"].as_array().unwrap().len() >= 4);
     }
 
     #[test]
     fn test_section_agents_has_subsections() {
-        let tool = AgentManualTool::new(vec![]);
+        let tool = AgentManualTool::from_static(vec![]);
         let result = tool.section_agents().unwrap();
         assert_eq!(result["section"], "agents");
         let subsections = result["subsections"].as_array().unwrap();
@@ -1879,7 +2156,7 @@ mod tests {
 
     #[test]
     fn test_section_tasks_has_states_and_inspect() {
-        let tool = AgentManualTool::new(vec![]);
+        let tool = AgentManualTool::from_static(vec![]);
         let result = tool.section_tasks().unwrap();
         assert_eq!(result["section"], "tasks");
         let subsections = result["subsections"].as_array().unwrap();
@@ -1894,7 +2171,7 @@ mod tests {
 
     #[test]
     fn test_section_procedural_has_record_and_find() {
-        let tool = AgentManualTool::new(vec![]);
+        let tool = AgentManualTool::from_static(vec![]);
         let result = tool.section_procedural().unwrap();
         assert_eq!(result["section"], "procedural");
         let subsections = result["subsections"].as_array().unwrap();
@@ -1909,7 +2186,7 @@ mod tests {
 
     #[test]
     fn test_section_coordination_has_subsections() {
-        let tool = AgentManualTool::new(vec![]);
+        let tool = AgentManualTool::from_static(vec![]);
         let result = tool.section_coordination().unwrap();
         assert_eq!(result["section"], "coordination");
         let subsections = result["subsections"].as_array().unwrap();

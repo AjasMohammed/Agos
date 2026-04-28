@@ -15,6 +15,7 @@ pub mod context_memory_update;
 pub mod coordination;
 pub mod data_parser;
 pub mod datetime;
+pub mod describe_tool;
 pub mod display;
 pub mod episodic_list;
 pub mod escalation_status;
@@ -35,6 +36,7 @@ pub mod file_writer;
 pub mod hardware_info;
 pub mod http_client;
 pub mod kmc_tools;
+pub mod list_tools;
 pub mod loader;
 pub mod log_reader;
 pub mod memory_block_delete;
@@ -65,6 +67,7 @@ pub mod scratch_links;
 pub mod scratch_read;
 pub mod scratch_search;
 pub mod scratch_write;
+pub mod search_tools;
 pub mod set_timer;
 pub mod shell_exec;
 pub mod signing;
@@ -97,6 +100,7 @@ pub use cancel_agent::CancelAgentTool;
 pub use coordination::{AwaitAgentsTool, SpawnAgentTool};
 pub use data_parser::DataParser;
 pub use datetime::DatetimeTool;
+pub use describe_tool::DescribeToolTool;
 pub use display::DisplayConfigTool;
 pub use episodic_list::EpisodicList;
 pub use factory::{
@@ -115,6 +119,7 @@ pub use file_reader::FileReader;
 pub use file_writer::FileWriter;
 pub use hardware_info::HardwareInfoTool;
 pub use http_client::HttpClientTool;
+pub use list_tools::ListToolsTool;
 pub use loader::{load_all_manifests, load_manifest};
 pub use log_reader::LogReaderTool;
 pub use memory_block_delete::MemoryBlockDeleteTool;
@@ -143,6 +148,7 @@ pub use scratch_links::ScratchLinksTool;
 pub use scratch_read::ScratchReadTool;
 pub use scratch_search::ScratchSearchTool;
 pub use scratch_write::ScratchWriteTool;
+pub use search_tools::SearchToolsTool;
 pub use shell_exec::ShellExec;
 pub use signing::{pubkey_hex_from_seed, sign_manifest, signing_payload, verify_manifest};
 pub use sys_monitor::SysMonitorTool;
@@ -1910,7 +1916,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_index_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "index"}), ctx)
@@ -1924,7 +1930,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_tools_section_empty() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "tools"}), ctx)
@@ -1947,6 +1953,9 @@ mod tests {
                 input_schema: None,
                 trust_tier: "core".into(),
                 capability_tags: vec![],
+                category: "core".into(),
+                tags: vec!["read".into()],
+                risk_class: "readonly_scoped".into(),
             },
             crate::agent_manual::ToolSummary {
                 name: "http-client".into(),
@@ -1956,9 +1965,12 @@ mod tests {
                 input_schema: None,
                 trust_tier: "core".into(),
                 capability_tags: vec![],
+                category: "core".into(),
+                tags: vec!["network".into()],
+                risk_class: "readonly_external".into(),
             },
         ];
-        let tool = crate::agent_manual::AgentManualTool::new(summaries);
+        let tool = crate::agent_manual::AgentManualTool::from_static(summaries);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "tools"}), ctx)
@@ -1984,12 +1996,15 @@ mod tests {
             ),
             trust_tier: "core".into(),
             capability_tags: vec![],
+            category: "core".into(),
+            tags: vec!["read".into()],
+            risk_class: "readonly_scoped".into(),
         }];
-        let tool = crate::agent_manual::AgentManualTool::new(summaries);
+        let tool = crate::agent_manual::AgentManualTool::from_static(summaries);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(
-                serde_json::json!({"section": "tool-detail", "name": "file-reader"}),
+                serde_json::json!({"section": "tool-detail", "name": "file-reader", "verbose": true}),
                 ctx,
             )
             .await
@@ -2003,7 +2018,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_tool_detail_not_found() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(
@@ -2018,7 +2033,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_tool_detail_missing_name() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "tool-detail"}), ctx)
@@ -2033,7 +2048,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_permissions_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "permissions"}), ctx)
@@ -2046,7 +2061,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_memory_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "memory"}), ctx)
@@ -2064,7 +2079,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_events_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "events"}), ctx)
@@ -2079,7 +2094,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_commands_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "commands"}), ctx)
@@ -2092,7 +2107,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_errors_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "errors"}), ctx)
@@ -2111,7 +2126,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_feedback_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "feedback"}), ctx)
@@ -2125,7 +2140,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_invalid_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "nonexistent"}), ctx)
@@ -2139,7 +2154,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_missing_section_field() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"query": "hello"}), ctx)
@@ -2154,7 +2169,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_requires_no_permissions() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         // Use an empty permission set — should still work
         let ctx = make_context_with_permissions(dir.path(), PermissionSet::new());
         let result = tool
@@ -2170,15 +2185,20 @@ mod tests {
     async fn test_agent_manual_registered_with_summaries() {
         let dir = TempDir::new().unwrap();
         let mut runner = ToolRunner::new(dir.path()).unwrap();
-        runner.register_agent_manual(vec![crate::agent_manual::ToolSummary {
-            name: "test-tool".into(),
-            description: "A test".into(),
-            version: "0.1.0".into(),
-            permissions: vec![],
-            input_schema: None,
-            trust_tier: "core".into(),
-            capability_tags: vec![],
-        }]);
+        runner.register_agent_manual(std::sync::Arc::new(tokio::sync::RwLock::new(vec![
+            crate::agent_manual::ToolSummary {
+                name: "test-tool".into(),
+                description: "A test".into(),
+                version: "0.1.0".into(),
+                permissions: vec![],
+                input_schema: None,
+                trust_tier: "core".into(),
+                capability_tags: vec![],
+                category: "core".into(),
+                tags: vec!["read".into()],
+                risk_class: "readonly_scoped".into(),
+            },
+        ])));
         let tools = runner.list_tools();
         assert!(tools.contains(&"agent-manual".to_string()));
 

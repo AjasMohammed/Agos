@@ -473,14 +473,14 @@ impl KernelAction {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let action: TimerAction =
-                    match serde_json::from_value(value.get("action")?.clone()) {
-                        Ok(a) => a,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "set_timer: failed to deserialize TimerAction");
-                            return None;
-                        }
-                    };
+                let action: TimerAction = match serde_json::from_value(value.get("action")?.clone())
+                {
+                    Ok(a) => a,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "set_timer: failed to deserialize TimerAction");
+                        return None;
+                    }
+                };
                 Some(Self::SetTimer {
                     name,
                     delay_secs,
@@ -501,14 +501,15 @@ impl KernelAction {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let fire_at: chrono::DateTime<chrono::Utc> =
-                    match serde_json::from_value(value.get("fire_at")?.clone()) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "schedule_once: failed to deserialize fire_at");
-                            return None;
-                        }
-                    };
+                let fire_at: chrono::DateTime<chrono::Utc> = match serde_json::from_value(
+                    value.get("fire_at")?.clone(),
+                ) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "schedule_once: failed to deserialize fire_at");
+                        return None;
+                    }
+                };
                 Some(Self::ScheduleOnce {
                     name,
                     task_prompt,

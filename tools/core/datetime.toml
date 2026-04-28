@@ -1,7 +1,7 @@
 [manifest]
 name        = "datetime"
 version     = "1.0.0"
-description = "Return the current UTC date and time as ISO 8601, unix timestamp (seconds and milliseconds), and human-readable date/time strings."
+description = "Return current UTC and local date/time as ISO 8601, unix timestamps, and human-readable strings including UTC offset."
 author      = "agentos-core"
 trust_tier  = "core"
 

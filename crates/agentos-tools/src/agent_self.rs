@@ -41,21 +41,21 @@ fn format_permission_entry(entry: &PermissionEntry) -> String {
 /// `agent-list` / `task-list` tools with `agent.registry:r` permission.
 ///
 /// # Constructor
-/// `AgentSelfTool::new(tool_names)` — pass the list of tool names available in
-/// the runner. The `ToolRunner::register_agent_self` helper populates this.
+/// `AgentSelfTool::new(tool_count)` — pass the count of tools available in the
+/// runner. Use `agent-manual` to browse the actual tool list.
 pub struct AgentSelfTool {
-    tool_names: Vec<String>,
+    tool_count: usize,
 }
 
 impl AgentSelfTool {
-    pub fn new(tool_names: Vec<String>) -> Self {
-        Self { tool_names }
+    pub fn new(tool_count: usize) -> Self {
+        Self { tool_count }
     }
 }
 
 impl Default for AgentSelfTool {
     fn default() -> Self {
-        Self::new(vec![])
+        Self::new(0)
     }
 }
 
@@ -117,9 +117,7 @@ impl AgentTool for AgentSelfTool {
             // The field is reserved for when a CostTrackerQuery interface
             // is added to the context (see: Spec §11 cost attribution).
             budget: None,
-            tools: self.tool_names.clone(),
-            // Subscription query is not yet exposed via ToolExecutionContext.
-            // Will be populated when an EventBusQuery interface is added.
+            tool_count: self.tool_count,
             subscriptions: vec![],
             active_tasks,
         };
@@ -160,7 +158,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_self_returns_own_agent_id() {
-        let tool = AgentSelfTool::new(vec![]);
+        let tool = AgentSelfTool::new(0);
         let agent_id = AgentID::new();
         let ctx = ToolExecutionContext {
             agent_id,
@@ -176,7 +174,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_self_works_without_any_permissions() {
-        let tool = AgentSelfTool::new(vec![]);
+        let tool = AgentSelfTool::new(0);
         let result = tool
             .execute(serde_json::json!({}), make_ctx(PermissionSet::new()))
             .await;
@@ -192,7 +190,7 @@ mod tests {
         perms.grant("fs.user_data".to_string(), true, false, false, None);
         perms.grant("memory.semantic".to_string(), true, true, false, None);
 
-        let tool = AgentSelfTool::new(vec![]);
+        let tool = AgentSelfTool::new(0);
         let result = tool
             .execute(serde_json::json!({}), make_ctx(perms))
             .await
@@ -218,7 +216,7 @@ mod tests {
         perms.grant("fs.user_data".to_string(), true, false, false, None);
         perms.deny_entries.push("fs:/etc/".to_string());
 
-        let tool = AgentSelfTool::new(vec![]);
+        let tool = AgentSelfTool::new(0);
         let result = tool
             .execute(serde_json::json!({}), make_ctx(perms))
             .await
@@ -229,21 +227,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_self_returns_tool_names() {
-        let tool_names = vec!["file-reader".to_string(), "shell-exec".to_string()];
-        let tool = AgentSelfTool::new(tool_names.clone());
+    async fn agent_self_returns_tool_count() {
+        let tool = AgentSelfTool::new(42);
         let result = tool
             .execute(serde_json::json!({}), make_ctx(PermissionSet::new()))
             .await
             .unwrap();
 
-        let returned: Vec<String> = serde_json::from_value(result["tools"].clone()).unwrap();
-        assert_eq!(returned, tool_names);
+        assert_eq!(result["tool_count"].as_u64().unwrap(), 42);
     }
 
     #[tokio::test]
     async fn agent_self_without_registry_returns_unknown_status() {
-        let tool = AgentSelfTool::new(vec![]);
+        let tool = AgentSelfTool::new(0);
         let result = tool
             .execute(serde_json::json!({}), make_ctx(PermissionSet::new()))
             .await
@@ -272,7 +268,7 @@ mod tests {
             ..make_ctx(perms)
         };
 
-        let tool = AgentSelfTool::new(vec![]);
+        let tool = AgentSelfTool::new(0);
         let result = tool.execute(serde_json::json!({}), ctx).await.unwrap();
 
         assert_eq!(result["name"].as_str().unwrap(), "my-agent");
@@ -300,7 +296,7 @@ mod tests {
             ..make_ctx(PermissionSet::new())
         };
 
-        let tool = AgentSelfTool::new(vec![]);
+        let tool = AgentSelfTool::new(0);
         let result = tool.execute(serde_json::json!({}), ctx).await.unwrap();
 
         assert_eq!(result["status"].as_str().unwrap(), "unknown");
@@ -353,7 +349,7 @@ mod tests {
             ..make_ctx(PermissionSet::new())
         };
 
-        let tool = AgentSelfTool::new(vec![]);
+        let tool = AgentSelfTool::new(0);
         let result = tool.execute(serde_json::json!({}), ctx).await.unwrap();
 
         let active = result["active_tasks"].as_array().unwrap();
@@ -370,7 +366,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_self_budget_is_none_by_default() {
-        let tool = AgentSelfTool::new(vec![]);
+        let tool = AgentSelfTool::new(0);
         let result = tool
             .execute(serde_json::json!({}), make_ctx(PermissionSet::new()))
             .await
@@ -380,7 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_self_subscriptions_empty_by_default() {
-        let tool = AgentSelfTool::new(vec![]);
+        let tool = AgentSelfTool::new(0);
         let result = tool
             .execute(serde_json::json!({}), make_ctx(PermissionSet::new()))
             .await

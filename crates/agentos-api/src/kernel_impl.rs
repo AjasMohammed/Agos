@@ -424,6 +424,8 @@ impl KernelService for Kernel {
                 answer: result.answer,
                 tool_calls,
                 iterations: result.iterations,
+                tokens_used: result.tokens_used,
+                cost_usd: result.cost_usd,
             })
             .await;
 

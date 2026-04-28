@@ -16,7 +16,21 @@ impl Kernel {
         task_trace_id: &TraceID,
     ) -> anyhow::Result<(String, String, String, crate::retrieval_gate::RetrievalPlan)> {
         // 1. Collect elements for CompilationInputs
-        let tools_desc = self.tool_registry.read().await.tools_for_prompt();
+        let base_tools_desc = self.tool_registry.read().await.tools_for_prompt();
+        // Append recently-used tool hint from the in-memory LRU (cap 10 per agent).
+        let tools_desc = {
+            let lru_guard = self.agent_tool_lru.read().await;
+            if let Some(recent) = lru_guard.get(&task.agent_id) {
+                if !recent.is_empty() {
+                    let names: Vec<&str> = recent.iter().map(|s| s.as_str()).collect();
+                    format!("{}\nRecently used: {}.", base_tools_desc, names.join(", "))
+                } else {
+                    base_tools_desc
+                }
+            } else {
+                base_tools_desc
+            }
+        };
         let agent_directory = self.build_agent_directory(&task.agent_id).await;
 
         // Build system prompt from the canonical builder — same prompt structure
@@ -53,6 +67,7 @@ impl Kernel {
             // Task execution does not stream through the chat output filter,
             // so the `<final>` enforcement convention does not apply.
             enforce_final_tag: false,
+            timezone: system_prompt::local_timezone_str(),
         });
 
         // We initialize context with empty string; Compiler injects the true system prompt

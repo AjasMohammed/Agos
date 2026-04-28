@@ -29,6 +29,8 @@ pub enum ChatStreamFrame {
         iterations: u32,
         #[serde(skip_serializing_if = "Option::is_none")]
         tokens_used: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
     },
     /// An error occurred during inference.
     Error { message: String },
@@ -55,18 +57,22 @@ mod tests {
             answer: "done".into(),
             iterations: 3,
             tokens_used: Some(150),
+            cost_usd: Some(0.0015),
         };
         let json = serde_json::to_string(&frame).unwrap();
         assert!(json.contains(r#""type":"done""#));
         assert!(json.contains(r#""tokens_used":150"#));
+        assert!(json.contains(r#""cost_usd":0.0015"#));
 
         let frame = ChatStreamFrame::Done {
             answer: "done".into(),
             iterations: 1,
             tokens_used: None,
+            cost_usd: None,
         };
         let json = serde_json::to_string(&frame).unwrap();
         assert!(!json.contains("tokens_used"));
+        assert!(!json.contains("cost_usd"));
 
         let frame = ChatStreamFrame::Error {
             message: "boom".into(),

@@ -4,15 +4,20 @@
      data-agent-initial="{{ agent_initial }}">
     <div class="chat-thinking" data-role="chat-thinking-indicator">
         <div class="chat-thinking-dots"><span></span><span></span><span></span></div>
-        <span class="muted">Reconnecting to in-flight response…</span>
+        <span class="muted">Reconnecting to the live response…</span>
     </div>
     <div data-role="chat-stream-response" class="chat-row chat-row-agent" style="display:none;">
         <div class="chat-agent-avatar" aria-hidden="true">{{ agent_initial }}</div>
         <div class="chat-agent-column">
-            <div class="chat-agent-name muted">{{ agent_name }}</div>
+            <div class="chat-agent-name">{{ agent_name }}</div>
             <div class="chat-bubble chat-bubble-agent">
-                <!-- Tool calls and text segments are appended here interleaved -->
                 <div data-role="chat-stream-content" class="chat-stream-content chat-streaming"></div>
+                <div class="chat-bubble-meta chat-bubble-meta-left chat-stream-meta" data-role="chat-stream-meta" style="display:none;">
+                    <span data-role="chat-stream-time">Streaming...</span>
+                    <span data-role="chat-stream-tokens"></span>
+                    <span data-role="chat-stream-cost"></span>
+                    <button class="chat-msg-action" type="button" data-role="chat-stream-copy">Copy</button>
+                </div>
             </div>
         </div>
     </div>

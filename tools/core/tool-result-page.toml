@@ -1,0 +1,43 @@
+[manifest]
+name        = "tool-result-page"
+version     = "1.0.0"
+description = "Retrieve a paged section of a previously truncated tool result. Use this when an earlier tool result was truncated and the response included a 'page_id=...' hint."
+author      = "agentos-core"
+trust_tier  = "core"
+risk_class  = "readonly_scoped"
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = ["content.text"]
+
+[intent_schema]
+input  = "ToolResultPageQuery"
+output = "ToolResultPage"
+
+[input_schema]
+type = "object"
+required = ["page_id"]
+
+[input_schema.properties.page_id]
+type = "string"
+description = "The page_id from the truncated tool result, e.g. 'overflow-1234-...'."
+
+[input_schema.properties.offset]
+type = "integer"
+default = 0
+description = "Character offset to start reading from (default 0)."
+
+[input_schema.properties.length]
+type = "integer"
+default = 4000
+description = "Number of characters to return (max 8000)."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

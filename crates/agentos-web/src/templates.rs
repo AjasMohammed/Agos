@@ -181,6 +181,141 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
         rendered
     });
 
+    // ── format_tool_data ──────────────────────────────────────────────────
+    // Extracts human-readable content from raw tool call JSON.
+    // Handles:  XML wrapper tags (<user_data>, <tool_result>, etc.),
+    //           MCP content envelopes ({"content":[{"text":"..."}],...}),
+    //           deeply nested stringified JSON.
+    env.add_filter("format_tool_data", |value: minijinja::Value| -> String {
+        const MAX_BYTES: usize = 256 * 1024;
+
+        /// Strip common XML-style wrapper tags from the string.
+        fn strip_wrapper_tags(s: &str) -> String {
+            let trimmed = s.trim();
+            // Match patterns like <user_data>...</user_data> or <tool_result>...</tool_result>
+            let tag_patterns: &[(&str, &str)] = &[
+                ("<user_data>", "</user_data>"),
+                ("<tool_result>", "</tool_result>"),
+                ("<tool_input>", "</tool_input>"),
+                ("<result>", "</result>"),
+            ];
+            for (open, close) in tag_patterns {
+                if let Some(rest) = trimmed.strip_prefix(open) {
+                    if let Some(inner) = rest.strip_suffix(close) {
+                        return inner.trim().to_string();
+                    }
+                }
+            }
+            trimmed.to_string()
+        }
+
+        /// Recursively try to parse a string as JSON. If a JSON string value
+        /// itself looks like JSON, parse it too (up to 4 levels deep).
+        fn deep_parse(s: &str, depth: u8) -> serde_json::Value {
+            if depth > 4 {
+                return serde_json::Value::String(s.to_string());
+            }
+            match serde_json::from_str::<serde_json::Value>(s) {
+                Ok(mut v) => {
+                    deep_resolve(&mut v, depth);
+                    v
+                }
+                Err(_) => serde_json::Value::String(s.to_string()),
+            }
+        }
+
+        /// Walk a parsed JSON value and recursively parse any string leaves
+        /// that look like JSON themselves.
+        fn deep_resolve(v: &mut serde_json::Value, depth: u8) {
+            match v {
+                serde_json::Value::String(s) => {
+                    let trimmed = s.trim();
+                    if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+                    {
+                        *v = deep_parse(trimmed, depth + 1);
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    for item in arr.iter_mut() {
+                        deep_resolve(item, depth);
+                    }
+                }
+                serde_json::Value::Object(map) => {
+                    for item in map.values_mut() {
+                        deep_resolve(item, depth);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        /// Try to extract the meaningful payload from an MCP content envelope.
+        /// MCP shape: {"content": [{"text": "...", "type": "text"}, ...], "isError": bool}
+        fn unwrap_mcp_envelope(v: &serde_json::Value) -> Option<serde_json::Value> {
+            let obj = v.as_object()?;
+            let content = obj.get("content")?.as_array()?;
+            // Collect text entries
+            let texts: Vec<&str> = content
+                .iter()
+                .filter(|item| {
+                    item.get("type").and_then(|t| t.as_str()) == Some("text")
+                })
+                .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                .collect();
+            if texts.is_empty() {
+                return None;
+            }
+            let combined = texts.join("\n");
+            // Try parsing the combined text as JSON for pretty display
+            match serde_json::from_str::<serde_json::Value>(&combined) {
+                Ok(parsed) => Some(parsed),
+                Err(_) => Some(serde_json::Value::String(combined)),
+            }
+        }
+
+        // 1. Get the raw string
+        let raw = match value.as_str() {
+            Some(s) => s.to_string(),
+            None => {
+                let json_value = serde_json::to_value(&value)
+                    .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+                serde_json::to_string_pretty(&json_value)
+                    .unwrap_or_else(|_| json_value.to_string())
+            }
+        };
+
+        // 2. Strip XML wrapper tags
+        let stripped = strip_wrapper_tags(&raw);
+
+        // 3. Parse and deep-resolve nested JSON strings
+        let mut parsed = deep_parse(&stripped, 0);
+
+        // 4. Unwrap MCP content envelope if present
+        if let Some(inner) = unwrap_mcp_envelope(&parsed) {
+            parsed = inner;
+        }
+        // Also check recursively resolved children
+        deep_resolve(&mut parsed, 0);
+
+        // 5. Pretty-print the result
+        let mut rendered = match &parsed {
+            serde_json::Value::String(s) => s.clone(),
+            other => serde_json::to_string_pretty(other)
+                .unwrap_or_else(|_| other.to_string()),
+        };
+
+        if rendered.len() > MAX_BYTES {
+            let mut end = MAX_BYTES;
+            while end > 0 && !rendered.is_char_boundary(end) {
+                end -= 1;
+            }
+            rendered.truncate(end);
+            rendered.push_str("\n… [truncated]");
+        }
+        rendered
+    });
+
     env.add_template("base.html", include_str!("templates/base.html"))?;
     env.add_template("dashboard.html", include_str!("templates/dashboard.html"))?;
     env.add_template("agents.html", include_str!("templates/agents.html"))?;

@@ -3,6 +3,32 @@ use std::fmt::Write;
 /// Maximum sub-agent spawn depth (mirrors `commands::sub_agent::MAX_SPAWN_DEPTH`).
 pub const MAX_SPAWN_DEPTH: u8 = 5;
 
+/// Returns the system's local timezone as an IANA name + UTC offset, e.g.
+/// "Asia/Kolkata (UTC+05:30)". Falls back to offset-only if IANA name is unavailable.
+pub fn local_timezone_str() -> String {
+    let offset = chrono::Local::now().format("UTC%:z").to_string();
+    // Try TZ env var (most reliable when set explicitly)
+    if let Ok(tz) = std::env::var("TZ") {
+        if !tz.is_empty() {
+            return format!("{tz} ({offset})");
+        }
+    }
+    // Try /etc/timezone (Debian/Ubuntu)
+    if let Ok(tz) = std::fs::read_to_string("/etc/timezone") {
+        let tz = tz.trim();
+        if !tz.is_empty() {
+            return format!("{tz} ({offset})");
+        }
+    }
+    // Try /etc/localtime symlink target (Arch/Fedora/macOS)
+    if let Ok(link) = std::fs::read_link("/etc/localtime") {
+        if let Some(tz) = link.to_str().and_then(|s| s.split("/zoneinfo/").nth(1)) {
+            return format!("{tz} ({offset})");
+        }
+    }
+    offset
+}
+
 /// Context for building the canonical AgentOS system prompt.
 ///
 /// Every context window — task execution, web UI chat, sub-agent — uses this
@@ -22,6 +48,9 @@ pub struct SystemPromptContext {
     /// mode — only text inside `<final>...</final>` tags reaches the user.
     /// The system prompt instructs the model to follow the convention.
     pub enforce_final_tag: bool,
+    /// Host timezone, e.g. "Asia/Kolkata (UTC+05:30)". Tells the agent which
+    /// timezone local times are in. Call `datetime` tool for the actual current time.
+    pub timezone: String,
 }
 
 /// Additional context injected when the executing task is a sub-agent.
@@ -48,6 +77,14 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
     )
     .ok();
 
+    if !ctx.timezone.is_empty() {
+        write!(
+            prompt,
+            "\nTimezone: {ctx_tz}. Call `datetime` for current time.",
+            ctx_tz = ctx.timezone
+        )
+        .ok();
+    }
     if !ctx.agent_roles.is_empty() {
         write!(prompt, "\nRoles: {}.", ctx.agent_roles.join(", ")).ok();
     }
@@ -189,6 +226,7 @@ mod tests {
             custom_instructions: None,
             sub_agent: None,
             enforce_final_tag: false,
+            timezone: String::new(),
         });
         assert!(prompt.contains("You are analyst, an AI agent in AgentOS"));
         assert!(!prompt.contains("Sub-Agent Context"));
@@ -203,6 +241,7 @@ mod tests {
             custom_instructions: None,
             sub_agent: None,
             enforce_final_tag: false,
+            timezone: String::new(),
         });
         assert!(prompt.contains("Roles: security, auditor."));
         assert!(prompt.contains("Watches for security anomalies."));
@@ -217,6 +256,7 @@ mod tests {
             custom_instructions: Some("Always answer with a brief checklist.".into()),
             sub_agent: None,
             enforce_final_tag: false,
+            timezone: String::new(),
         });
         assert!(prompt.contains("## Agent Custom Instructions"));
         assert!(prompt.contains("Always answer with a brief checklist."));
@@ -231,6 +271,7 @@ mod tests {
             custom_instructions: None,
             sub_agent: None,
             enforce_final_tag: false,
+            timezone: String::new(),
         });
         // Must not leak model details
         assert!(!prompt.contains("llama"));
@@ -247,6 +288,7 @@ mod tests {
             agent_roles: vec![],
             custom_instructions: None,
             enforce_final_tag: false,
+            timezone: String::new(),
             sub_agent: Some(SubAgentContext {
                 parent_task_id: "abc-123".into(),
                 spawn_depth: 2,
@@ -266,6 +308,7 @@ mod tests {
             agent_roles: vec![],
             custom_instructions: None,
             enforce_final_tag: false,
+            timezone: String::new(),
             sub_agent: Some(SubAgentContext {
                 parent_task_id: "xyz".into(),
                 spawn_depth: MAX_SPAWN_DEPTH,
@@ -283,6 +326,7 @@ mod tests {
             custom_instructions: None,
             sub_agent: None,
             enforce_final_tag: false,
+            timezone: String::new(),
         });
         for section in &[
             "## Tools",
@@ -307,6 +351,7 @@ mod tests {
             custom_instructions: None,
             sub_agent: None,
             enforce_final_tag: false,
+            timezone: String::new(),
         });
         assert!(!prompt.contains("## Output Format"));
         assert!(!prompt.contains("<final>"));
@@ -322,6 +367,7 @@ mod tests {
             custom_instructions: None,
             sub_agent: None,
             enforce_final_tag: true,
+            timezone: String::new(),
         });
         assert!(prompt.contains("## Output Format"));
         assert!(prompt.contains("<final>"));
@@ -338,6 +384,7 @@ mod tests {
             agent_roles: vec!["tester".into()],
             custom_instructions: None,
             enforce_final_tag: false,
+            timezone: String::new(),
             sub_agent: Some(SubAgentContext {
                 parent_task_id: "parent-id".into(),
                 spawn_depth: 1,

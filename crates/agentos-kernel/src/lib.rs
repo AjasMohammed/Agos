@@ -69,6 +69,7 @@ pub(crate) mod task_summary;
 pub mod task_trace;
 pub mod tool_call;
 pub mod tool_registry;
+pub mod tool_usage_store;
 pub mod trace_collector;
 pub mod trigger_prompt;
 pub mod user_channel_registry;

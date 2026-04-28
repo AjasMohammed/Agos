@@ -1,0 +1,40 @@
+[node]
+id = "end"
+version = 1
+display_name = "End"
+description = "Terminal node. Marks successful completion of the workflow."
+category = "core"
+icon = "stop-circle"
+color = "#ef4444"
+risk_class = ""
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.properties]]
+name = "output_mode"
+display_name = "Output Mode"
+type = "options"
+required = false
+description = "How to expose the final output."
+
+  [[node.properties.options]]
+  value = "return"
+  label = "Return value"
+
+  [[node.properties.options]]
+  value = "discard"
+  label = "Discard"
+
+[[node.properties]]
+name = "output_expression"
+display_name = "Output Expression"
+type = "template"
+required = false
+description = "Template for the final value returned by the workflow. Supports {{variable}} references."
+placeholder = "{{output}}"
+
+[node.execute]
+kind = "builtin"
+name = "end"

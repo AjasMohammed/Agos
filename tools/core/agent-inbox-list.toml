@@ -1,0 +1,37 @@
+[manifest]
+name        = "agent-inbox-list"
+version     = "1.0.0"
+description = "List this agent's inbox notifications. Returns titles only (not bodies) — use agent-inbox-read to fetch a full entry."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = ["entries", "count"]
+
+[intent_schema]
+input  = "AgentInboxListIntent"
+output = "AgentInboxListResult"
+
+[input_schema]
+type = "object"
+
+[input_schema.properties.limit]
+type        = "integer"
+minimum     = 1
+maximum     = 50
+description = "Maximum number of entries to return (default: 20, max: 50)"
+
+[input_schema.properties.unread_only]
+type        = "boolean"
+description = "When true (default), return only unread entries"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 8
+max_cpu_ms    = 500
+syscalls      = []

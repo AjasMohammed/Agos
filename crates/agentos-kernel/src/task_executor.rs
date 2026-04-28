@@ -23,6 +23,60 @@ pub(crate) struct TaskResult {
 }
 
 impl Kernel {
+    fn manual_query_details(
+        tool_name: &str,
+        payload: &serde_json::Value,
+        result: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let (layer, section, category, page) = match tool_name {
+            "list-tools" => (
+                "L1",
+                Some("tools".to_string()),
+                payload
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                payload.get("page").and_then(|v| v.as_u64()),
+            ),
+            "search-tools" => ("L1", Some("search".to_string()), None, None),
+            "describe-tool" | "tool-info" => ("L2", Some("tool-detail".to_string()), None, None),
+            "agent-manual" => {
+                let section = payload
+                    .get("section")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let section_lc = section
+                    .as_deref()
+                    .map(str::to_ascii_lowercase)
+                    .unwrap_or_default();
+                let layer = match section_lc.as_str() {
+                    "index" => "L0",
+                    "tools" | "suggest" => "L1",
+                    "tool-detail" => "L2",
+                    _ => return None,
+                };
+                (
+                    layer,
+                    section,
+                    payload
+                        .get("category")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    payload.get("page").and_then(|v| v.as_u64()),
+                )
+            }
+            _ => return None,
+        };
+        let token_estimate = (result.to_string().chars().count() / 4).max(1);
+        Some(serde_json::json!({
+            "layer": layer,
+            "section": section,
+            "category": category,
+            "page": page,
+            "tokens_returned": token_estimate,
+        }))
+    }
+
     pub(crate) fn classify_task_failure(
         error_message: &str,
     ) -> (&'static str, EventSeverity, bool) {
@@ -445,6 +499,7 @@ impl Kernel {
         mut tool_calls: Vec<crate::tool_call::ParsedToolCall>,
         tool_call_count: &mut u32,
         refresh_knowledge_blocks: &mut bool,
+        tool_not_found_suggest_count: &mut u32,
     ) -> Result<(), anyhow::Error> {
         let mut consecutive_push_failures: u32 = 0;
         struct PreparedParallelToolCall {
@@ -676,9 +731,47 @@ impl Kernel {
                             Some(task.id),
                         )
                         .await;
-                        let error_result = serde_json::json!({
-                            "error": format!("Unknown tool requested: {}", tool_call.tool_name)
-                        });
+                        let suggestions = if *tool_not_found_suggest_count < 3 {
+                            *tool_not_found_suggest_count += 1;
+                            let summaries = {
+                                let g = self.tool_summaries.read().await;
+                                g.clone()
+                            };
+                            suggest_tools(&summaries, &tool_call.tool_name, 3)
+                        } else {
+                            vec![]
+                        };
+                        if !suggestions.is_empty() {
+                            self.audit_log(agentos_audit::AuditEntry {
+                                timestamp: chrono::Utc::now(),
+                                trace_id,
+                                event_type: agentos_audit::AuditEventType::ToolSuggested,
+                                agent_id: Some(task.agent_id),
+                                task_id: Some(task.id),
+                                tool_id: None,
+                                details: serde_json::json!({
+                                    "missing_tool": tool_call.tool_name,
+                                    "suggestions": suggestions,
+                                    "task_suggest_count": *tool_not_found_suggest_count,
+                                }),
+                                severity: agentos_audit::AuditSeverity::Info,
+                                reversible: false,
+                                rollback_ref: None,
+                            });
+                        }
+                        let error_result = if suggestions.is_empty() {
+                            serde_json::json!({
+                                "error": format!("Unknown tool requested: {}", tool_call.tool_name)
+                            })
+                        } else {
+                            serde_json::json!({
+                                "error": format!(
+                                    "Tool '{}' not found. Did you mean: {}? Use `list-tools` or `search-tools` to discover available tools.",
+                                    tool_call.tool_name,
+                                    suggestions.join(", ")
+                                )
+                            })
+                        };
                         if let Err(e) = self
                             .context_manager
                             .push_tool_result(
@@ -1536,6 +1629,38 @@ impl Kernel {
                         )
                         .await;
                     }
+                    self.tool_usage
+                        .record(&task.agent_id.to_string(), &outcome.tool_call.tool_name)
+                        .await;
+                    // Update in-memory LRU for this agent (cap 10).
+                    {
+                        let tool_name = outcome.tool_call.tool_name.clone();
+                        let mut lru = self.agent_tool_lru.write().await;
+                        let entry = lru.entry(task.agent_id).or_default();
+                        entry.retain(|n| n != &tool_name);
+                        entry.push_front(tool_name);
+                        if entry.len() > 10 {
+                            entry.truncate(10);
+                        }
+                    }
+                    if let Some(details) = Self::manual_query_details(
+                        &outcome.tool_call.tool_name,
+                        &outcome.tool_call.payload,
+                        &result,
+                    ) {
+                        self.audit_log(agentos_audit::AuditEntry {
+                            timestamp: chrono::Utc::now(),
+                            trace_id: outcome.trace_id,
+                            event_type: agentos_audit::AuditEventType::ManualQuery,
+                            agent_id: Some(task.agent_id),
+                            task_id: Some(task.id),
+                            tool_id: None,
+                            details,
+                            severity: agentos_audit::AuditSeverity::Info,
+                            reversible: false,
+                            rollback_ref: None,
+                        });
+                    }
 
                     let context_result = if let Some(action) =
                         crate::kernel_action::KernelAction::from_tool_result(&result)
@@ -1899,6 +2024,7 @@ impl Kernel {
         let mut knowledge_blocks: Vec<String> = Vec::new();
         let mut refresh_knowledge_blocks = true;
         let mut context_warning_emitted = false;
+        let mut tool_not_found_suggest_count: u32 = 0;
 
         for iteration in 0..max_iterations {
             completed_iterations = iteration + 1;
@@ -2083,13 +2209,17 @@ impl Kernel {
             }
 
             // Filter history: only non-system Active entries
-            let history: Vec<ContextEntry> = raw_context
+            let mut history: Vec<ContextEntry> = raw_context
                 .entries
                 .into_iter()
                 .filter(|e| {
                     e.role != ContextRole::System && e.partition == ContextPartition::Active
                 })
                 .collect();
+
+            // Scrub stale meta-tool results: keep only the latest ToolResult for
+            // list-tools and search-tools so old paginated results don't stack up.
+            scrub_meta_tool_results(&mut history);
 
             // Compile the optimized context window
             let compiled_context =
@@ -2864,6 +2994,7 @@ impl Kernel {
                         parsed_tool_calls,
                         &mut tool_call_count,
                         &mut refresh_knowledge_blocks,
+                        &mut tool_not_found_suggest_count,
                     )
                     .await?;
                     continue;
@@ -3047,9 +3178,47 @@ impl Kernel {
                                 )
                                 .await;
 
-                                let error_result = serde_json::json!({
-                                    "error": format!("Unknown tool requested: {}", tool_call.tool_name)
-                                });
+                                let suggestions = if tool_not_found_suggest_count < 3 {
+                                    tool_not_found_suggest_count += 1;
+                                    let summaries = {
+                                        let g = self.tool_summaries.read().await;
+                                        g.clone()
+                                    };
+                                    suggest_tools(&summaries, &tool_call.tool_name, 3)
+                                } else {
+                                    vec![]
+                                };
+                                if !suggestions.is_empty() {
+                                    self.audit_log(agentos_audit::AuditEntry {
+                                        timestamp: chrono::Utc::now(),
+                                        trace_id,
+                                        event_type: agentos_audit::AuditEventType::ToolSuggested,
+                                        agent_id: Some(task.agent_id),
+                                        task_id: Some(task.id),
+                                        tool_id: None,
+                                        details: serde_json::json!({
+                                            "missing_tool": tool_call.tool_name,
+                                            "suggestions": suggestions,
+                                            "task_suggest_count": tool_not_found_suggest_count,
+                                        }),
+                                        severity: agentos_audit::AuditSeverity::Info,
+                                        reversible: false,
+                                        rollback_ref: None,
+                                    });
+                                }
+                                let error_result = if suggestions.is_empty() {
+                                    serde_json::json!({
+                                        "error": format!("Unknown tool requested: {}", tool_call.tool_name)
+                                    })
+                                } else {
+                                    serde_json::json!({
+                                        "error": format!(
+                                            "Tool '{}' not found. Did you mean: {}? Use `list-tools` or `search-tools` to discover available tools.",
+                                            tool_call.tool_name,
+                                            suggestions.join(", ")
+                                        )
+                                    })
+                                };
                                 if let Err(e) = self
                                     .context_manager
                                     .push_tool_result(
@@ -3847,7 +4016,7 @@ impl Kernel {
                                     &task.id,
                                     crate::trace_collector::TraceCollector::success_tool_call(
                                         &tool_call.tool_name,
-                                        seq_input_json,
+                                        seq_input_json.clone(),
                                         result.clone(),
                                         seq_duration_ms,
                                         snapshot_ref.clone(),
@@ -3890,6 +4059,38 @@ impl Kernel {
                                     Some(task.id),
                                 )
                                 .await;
+                            }
+                            self.tool_usage
+                                .record(&task.agent_id.to_string(), &tool_call.tool_name)
+                                .await;
+                            // Update in-memory LRU for this agent (cap 10).
+                            {
+                                let tool_name = tool_call.tool_name.clone();
+                                let mut lru = self.agent_tool_lru.write().await;
+                                let entry = lru.entry(task.agent_id).or_default();
+                                entry.retain(|n| n != &tool_name);
+                                entry.push_front(tool_name);
+                                if entry.len() > 10 {
+                                    entry.truncate(10);
+                                }
+                            }
+                            if let Some(details) = Self::manual_query_details(
+                                &tool_call.tool_name,
+                                &seq_input_json,
+                                &result,
+                            ) {
+                                self.audit_log(agentos_audit::AuditEntry {
+                                    timestamp: chrono::Utc::now(),
+                                    trace_id,
+                                    event_type: agentos_audit::AuditEventType::ManualQuery,
+                                    agent_id: Some(task.agent_id),
+                                    task_id: Some(task.id),
+                                    tool_id: None,
+                                    details,
+                                    severity: agentos_audit::AuditSeverity::Info,
+                                    reversible: false,
+                                    rollback_ref: None,
+                                });
                             }
 
                             // Intercept kernel actions from tool results
@@ -4884,12 +5085,87 @@ fn extract_feedback_blocks(text: &str) -> Vec<serde_json::Value> {
 ///
 /// Extracted as a pure function for testability — the full `sandbox_plan_for_tool()`
 /// method requires a running kernel with tool registry access.
+/// Drop old ToolResult entries for idempotent meta-tools (list-tools, search-tools).
+/// Keeps only the latest result per tool — older ones are replaced with a one-line placeholder
+/// so the paired assistant tool_use block stays valid (Anthropic API requires tool_use+tool_result pairs).
+fn scrub_meta_tool_results(history: &mut [ContextEntry]) {
+    const META_TOOLS: &[&str] = &["list-tools", "search-tools"];
+
+    // Find the index of the last ToolResult entry for each meta tool.
+    let mut latest: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, entry) in history.iter().enumerate() {
+        if entry.role == ContextRole::ToolResult {
+            if let Some(ref meta) = entry.metadata {
+                if let Some(ref name) = meta.tool_name {
+                    if let Some(&mt) = META_TOOLS.iter().find(|&&mt| mt == name.as_str()) {
+                        latest.insert(mt, i);
+                    }
+                }
+            }
+        }
+    }
+
+    // Replace content of all older ToolResult entries for meta tools with a short placeholder.
+    for (i, entry) in history.iter_mut().enumerate() {
+        if entry.role == ContextRole::ToolResult {
+            if let Some(ref meta) = entry.metadata {
+                if let Some(ref name) = meta.tool_name {
+                    if META_TOOLS.contains(&name.as_str()) {
+                        let is_latest = latest.get(name.as_str()).copied() == Some(i);
+                        if !is_latest {
+                            entry.content =
+                                r#"{"replaced":"Stale result — superseded by a newer call."}"#
+                                    .to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn should_sandbox_tool(policy: crate::config::SandboxPolicy, trust_tier: TrustTier) -> bool {
     match policy {
         crate::config::SandboxPolicy::Never => false,
         crate::config::SandboxPolicy::Always => true,
         crate::config::SandboxPolicy::TrustAware => trust_tier != TrustTier::Core,
     }
+}
+
+/// Return up to `max` tool names from `summaries` closest to `query`.
+/// Scores: substring containment (strong), then bigram overlap (order-sensitive).
+fn suggest_tools(
+    summaries: &[agentos_tools::agent_manual::ToolSummary],
+    query: &str,
+    max: usize,
+) -> Vec<String> {
+    let q = query.to_lowercase();
+    let q_grams: std::collections::HashSet<[u8; 2]> =
+        q.as_bytes().windows(2).map(|w| [w[0], w[1]]).collect();
+
+    let mut scored: Vec<(i32, &str)> = summaries
+        .iter()
+        .map(|s| {
+            let name = s.name.to_lowercase();
+            let mut score: i32 = 0;
+            if name.contains(q.as_str()) {
+                score += 100;
+            } else if q.contains(name.as_str()) {
+                score += 50;
+            }
+            let n_grams: std::collections::HashSet<[u8; 2]> =
+                name.as_bytes().windows(2).map(|w| [w[0], w[1]]).collect();
+            score += q_grams.intersection(&n_grams).count() as i32;
+            (score, s.name.as_str())
+        })
+        .filter(|(score, _)| *score > 0)
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    scored
+        .into_iter()
+        .take(max)
+        .map(|(_, n)| n.to_string())
+        .collect()
 }
 
 #[cfg(test)]

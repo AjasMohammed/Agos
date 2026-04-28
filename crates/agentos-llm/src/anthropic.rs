@@ -331,9 +331,13 @@ impl LLMCore for AnthropicCore {
 
         let messages = self.format_messages(context);
         let active = context.active_entries();
-        let system_prompt = active
+        let system_entries: Vec<&ContextEntry> = active
             .iter()
-            .find(|e| e.role == ContextRole::System)
+            .filter(|e| e.role == ContextRole::System)
+            .copied()
+            .collect();
+        let system_prompt = system_entries
+            .first()
             .map(|e| e.content.as_str())
             .unwrap_or("");
 
@@ -356,15 +360,34 @@ impl LLMCore for AnthropicCore {
         };
         let (anthropic_tools, intent_by_tool) = Self::build_anthropic_tools(effective_tools);
 
-        // Prompt caching: wrap system prompt as content-block array with cache_control
-        // when enabled. This instructs Anthropic to cache the prefix on the server side,
-        // cutting costs by up to 90% on repeated calls with the same system prompt.
-        let system_value = if options.enable_prompt_caching && !system_prompt.is_empty() {
-            json!([{
-                "type": "text",
-                "text": system_prompt,
-                "cache_control": { "type": "ephemeral" }
-            }])
+        // Prompt caching: represent the system prompt as multiple blocks and place
+        // a cache breakpoint at the tools/manual block. This keeps the stable prefix
+        // cached while allowing later dynamic system blocks to vary.
+        let system_value = if options.enable_prompt_caching && !system_entries.is_empty() {
+            let mut blocks: Vec<Value> = Vec::new();
+            let mut breakpoint_set = false;
+            for entry in &system_entries {
+                let mut block = json!({
+                    "type": "text",
+                    "text": entry.content,
+                });
+                if !breakpoint_set && entry.category == ContextCategory::Tools {
+                    block["cache_control"] = json!({ "type": "ephemeral" });
+                    breakpoint_set = true;
+                }
+                blocks.push(block);
+            }
+            if !breakpoint_set && !blocks.is_empty() {
+                blocks[0]["cache_control"] = json!({ "type": "ephemeral" });
+            }
+            Value::Array(blocks)
+        } else if !system_entries.is_empty() {
+            let merged = system_entries
+                .iter()
+                .map(|e| e.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            json!(merged)
         } else {
             json!(system_prompt)
         };
@@ -412,6 +435,13 @@ impl LLMCore for AnthropicCore {
                 body["temperature"] = json!(temp);
             }
         }
+
+        tracing::debug!(
+            target: "agentos::llm::input",
+            model = %self.model,
+            "LLM input body: {}",
+            serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
+        );
 
         let thinking_enabled = options.thinking_budget_tokens.is_some();
         let res = crate::retry::send_with_retry(
@@ -573,6 +603,13 @@ impl LLMCore for AnthropicCore {
             body["tools"] = Value::Array(anthropic_tools);
             body["tool_choice"] = json!({"type": "auto"});
         }
+
+        tracing::debug!(
+            target: "agentos::llm::input",
+            model = %self.model,
+            "LLM input body (stream): {}",
+            serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
+        );
 
         let res = self
             .client

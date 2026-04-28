@@ -1,0 +1,34 @@
+[manifest]
+name        = "get-task-logs"
+version     = "1.0.0"
+description = "Return the full result and tool-call trace for a specific scheduled run the calling agent owns."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["schedule.self:r"]
+
+[capabilities_provided]
+outputs = ["run"]
+
+[intent_schema]
+input  = "GetTaskLogsIntent"
+output = "GetTaskLogsResult"
+
+[input_schema]
+type = "object"
+required = ["run_id"]
+
+[input_schema.properties.run_id]
+type        = "string"
+description = "ID of the scheduled run to retrieve."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 8
+max_cpu_ms    = 500
+syscalls      = []
+
+risk_class = "readonly_scoped"

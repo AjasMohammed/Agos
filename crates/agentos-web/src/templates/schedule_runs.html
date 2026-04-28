@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<hgroup>
+    <h2>{{ schedule_name }} — Runs</h2>
+    <p class="muted">Recent task fires for this schedule. Click a row to see the full tool-call trace.</p>
+</hgroup>
+
+<form method="get" style="display:flex;gap:0.5rem;align-items:flex-end;margin-bottom:1rem">
+    <label style="flex:1">
+        State filter
+        <select name="state">
+            <option value="" {% if not state_filter %}selected{% endif %}>All</option>
+            <option value="Queued" {% if state_filter == "Queued" %}selected{% endif %}>Queued</option>
+            <option value="Running" {% if state_filter == "Running" %}selected{% endif %}>Running</option>
+            <option value="Complete" {% if state_filter == "Complete" %}selected{% endif %}>Complete</option>
+            <option value="Failed" {% if state_filter == "Failed" %}selected{% endif %}>Failed</option>
+            <option value="Missed" {% if state_filter == "Missed" %}selected{% endif %}>Missed</option>
+        </select>
+    </label>
+    <button type="submit">Filter</button>
+</form>
+
+{% if runs|length == 0 %}
+<article><p class="muted">No runs found{% if state_filter %} with state "{{ state_filter }}"{% endif %}.</p></article>
+{% else %}
+{% include "partials/schedule_runs_table.html" %}
+{% endif %}
+
+<p><a href="/schedules">&larr; Back to schedules</a></p>
+{% endblock %}

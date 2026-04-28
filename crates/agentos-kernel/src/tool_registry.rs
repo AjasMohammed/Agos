@@ -278,7 +278,35 @@ impl ToolRegistry {
         }
     }
 
-    /// Get the list of all tools formatted for the system prompt.
+    /// Category breakdown of registered tools. Used for the compact L0 prompt.
+    pub fn category_counts(&self) -> std::collections::BTreeMap<String, usize> {
+        let mut counts = std::collections::BTreeMap::new();
+        for tool in self.tools.values() {
+            let cat = agentos_tools::agent_manual::AgentManualTool::infer_tool_category(
+                &tool.manifest.manifest.name,
+                &tool.manifest.manifest.capability_tags,
+            );
+            *counts.entry(cat).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    /// Compact L0 tool catalogue for system prompts — one line listing category counts.
+    pub fn tools_for_prompt(&self) -> String {
+        if self.tools.is_empty() {
+            return "No tools available.".to_string();
+        }
+        let counts = self.category_counts();
+        let total: usize = counts.values().sum();
+        let parts: Vec<String> = counts.iter().map(|(cat, n)| format!("{cat}:{n}")).collect();
+        format!(
+            "Tools ({total}): {counts}. Use list-tools(category=<name>|tag=<tag>|page=N) · search-tools(query=...) · describe-tool(name=...) to explore. Note: dynamic MCP tools may not appear; run `agentos mcp list` for all MCP servers.",
+            total = total,
+            counts = parts.join(" ")
+        )
+    }
+
+    /// Get the full per-tool prompt block listing (verbose form).
     ///
     /// Each tool is rendered as a multi-line block:
     /// ```text
@@ -289,7 +317,7 @@ impl ToolRegistry {
     /// ```
     /// Blocks are separated by blank lines. Tools without an input schema show a
     /// fallback directing the agent to `agent-manual tool-detail`.
-    pub fn tools_for_prompt(&self) -> String {
+    pub fn tools_for_prompt_verbose(&self) -> String {
         let mut sorted_tools: Vec<&RegisteredTool> = self.tools.values().collect();
         sorted_tools.sort_by(|a, b| a.manifest.manifest.name.cmp(&b.manifest.manifest.name));
 
@@ -605,7 +633,7 @@ mod tests {
         }));
         registry.register(manifest).unwrap();
 
-        let prompt = registry.tools_for_prompt();
+        let prompt = registry.tools_for_prompt_verbose();
         assert!(prompt.contains("## file-reader"), "should have ## heading");
         assert!(prompt.contains("Read files"), "should have description");
         assert!(
@@ -625,7 +653,7 @@ mod tests {
             .register(make_core_manifest("no-schema-tool"))
             .unwrap();
 
-        let prompt = registry.tools_for_prompt();
+        let prompt = registry.tools_for_prompt_verbose();
         assert!(
             prompt.contains("Input: (see agent-manual tool-detail)"),
             "should fall back when schema is absent"
@@ -640,7 +668,7 @@ mod tests {
         assert!(manifest.capabilities_required.permissions.is_empty());
         registry.register(manifest).unwrap();
 
-        let prompt = registry.tools_for_prompt();
+        let prompt = registry.tools_for_prompt_verbose();
         assert!(
             !prompt.contains("Permissions:"),
             "should not emit Permissions line when empty"
@@ -653,7 +681,7 @@ mod tests {
         registry.register(make_core_manifest("zeta")).unwrap();
         registry.register(make_core_manifest("alpha")).unwrap();
 
-        let prompt = registry.tools_for_prompt();
+        let prompt = registry.tools_for_prompt_verbose();
         let alpha_pos = prompt.find("## alpha").expect("alpha missing");
         let zeta_pos = prompt.find("## zeta").expect("zeta missing");
         assert!(alpha_pos < zeta_pos, "alpha should appear before zeta");
@@ -662,7 +690,7 @@ mod tests {
     #[test]
     fn tools_for_prompt_returns_no_tools_message_when_empty() {
         let registry = ToolRegistry::new();
-        assert_eq!(registry.tools_for_prompt(), "No tools available.");
+        assert_eq!(registry.tools_for_prompt_verbose(), "No tools available.");
     }
 
     #[test]
@@ -785,7 +813,7 @@ mod tests {
         ];
         registry.register(manifest).unwrap();
 
-        let prompt = registry.tools_for_prompt();
+        let prompt = registry.tools_for_prompt_verbose();
         assert!(
             prompt.contains("Permissions: fs.user_data:r, memory.semantic:w"),
             "multiple permissions should be joined with ', '"

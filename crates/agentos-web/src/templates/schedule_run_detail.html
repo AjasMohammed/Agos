@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block content %}
+<hgroup>
+    <h2>Run <code>{{ run_id[:8] }}</code></h2>
+    <p class="muted">Full result and tool-call trace for this scheduled task execution.</p>
+</hgroup>
+
+<article>
+    <header><strong>Run Summary</strong></header>
+    <dl>
+        <dt>Run ID</dt><dd><code>{{ run_id }}</code></dd>
+        <dt>State</dt><dd>{{ state }}</dd>
+        <dt>Started</dt><dd>{{ started_at }}</dd>
+        <dt>Completed</dt><dd>{{ completed_at or "-" }}</dd>
+        <dt>Delivered</dt><dd>{{ delivered }}</dd>
+        <dt>Tool Calls</dt><dd>{{ tool_call_count }}</dd>
+        {% if error %}<dt>Error</dt><dd class="error">{{ error }}</dd>{% endif %}
+    </dl>
+</article>
+
+{% if result_json %}
+<article>
+    <header><strong>Result</strong></header>
+    <details open>
+        <summary>Result JSON</summary>
+        <pre style="overflow-x:auto;max-height:400px"><code>{{ result_json }}</code></pre>
+    </details>
+</article>
+{% endif %}
+
+{% if tool_calls|length > 0 %}
+<article>
+    <header><strong>Tool-Call Trace</strong> ({{ tool_calls|length }} calls)</header>
+    <ol>
+    {% for tc in tool_calls %}
+    <li>
+        <strong>{{ tc.tool_name }}</strong>
+        {% if tc.success %}<mark style="background:var(--pico-color-green-100)">ok</mark>{% else %}<mark style="background:var(--pico-color-red-100)">err</mark>{% endif %}
+        &mdash; {{ tc.duration_ms }}ms
+        <details>
+            <summary>Input / Output</summary>
+            <p><strong>Input:</strong> <code>{{ tc.input_preview }}</code></p>
+            <p><strong>Output:</strong> <code>{{ tc.output_preview }}</code></p>
+        </details>
+    </li>
+    {% endfor %}
+    </ol>
+</article>
+{% endif %}
+
+<p><button type="button" class="outline secondary" @click="window.history.back()">&larr; Back to runs</button></p>
+{% endblock %}

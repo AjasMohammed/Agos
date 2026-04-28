@@ -619,6 +619,10 @@ pub struct Kernel {
     pub agent_registry: Arc<RwLock<AgentRegistry>>,
     pub bus: Arc<BusServer>,
     pub tool_runner: Arc<ToolRunner>,
+    /// Live tool catalogue shared with agent-manual. Refreshed on tool install/remove.
+    pub tool_summaries: agentos_tools::agent_manual::SharedToolSummaries,
+    /// Per-agent tool usage rankings (SQLite-backed, spawn_blocking writes).
+    pub tool_usage: Arc<crate::tool_usage_store::ToolUsageStore>,
     pub sandbox: Arc<SandboxExecutor>,
     pub router: Arc<crate::router::TaskRouter>,
     pub active_llms: Arc<RwLock<HashMap<AgentID, Arc<dyn LLMCore>>>>,
@@ -765,6 +769,9 @@ pub struct Kernel {
     /// (e.g., `KernelCommand::Shutdown` writes the entry, then `cancel()` also
     /// triggers the `cancelled()` arm in `run()` which would write a second one).
     pub(crate) shutdown_audited: std::sync::atomic::AtomicBool,
+    /// In-memory LRU of recently used tool names per agent (cap 10).
+    /// Used to append a "Recently used: ..." hint to the L0 tool description in context.
+    pub agent_tool_lru: Arc<RwLock<HashMap<AgentID, std::collections::VecDeque<String>>>>,
 }
 
 /// Record of a single tool call made during chat inference.
@@ -786,6 +793,10 @@ pub struct ChatInferenceResult {
     pub tool_calls: Vec<ChatToolCallRecord>,
     /// Total number of LLM inference iterations.
     pub iterations: u32,
+    /// Aggregate token usage across all inference iterations.
+    pub tokens_used: u64,
+    /// Aggregate estimated USD cost across all inference iterations.
+    pub cost_usd: f64,
 }
 
 /// Events emitted during streaming chat inference.
@@ -810,6 +821,8 @@ pub enum ChatStreamEvent {
         answer: String,
         tool_calls: Vec<ChatToolCallRecord>,
         iterations: u32,
+        tokens_used: u64,
+        cost_usd: f64,
     },
     /// An error occurred.
     Error { message: String },
@@ -1056,6 +1069,7 @@ impl Kernel {
                 custom_instructions: agent_system_prompt,
                 sub_agent: None,
                 enforce_final_tag: self.config.chat.enforce_final_tag,
+                timezone: crate::system_prompt::local_timezone_str(),
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
@@ -1105,6 +1119,8 @@ impl Kernel {
 
         let mut tool_calls: Vec<ChatToolCallRecord> = Vec::new();
         let mut iterations = 0u32;
+        let mut total_tokens_used = 0u64;
+        let mut total_cost_usd = 0.0f64;
 
         let final_answer = loop {
             iterations += 1;
@@ -1134,6 +1150,12 @@ impl Kernel {
                 duration_ms = result.duration_ms,
                 "Chat LLM response received"
             );
+            total_tokens_used = total_tokens_used.saturating_add(result.tokens_used.total_tokens);
+            if let Some(cost) = &result.cost {
+                if cost.total_cost_usd.is_finite() && cost.total_cost_usd > 0.0 {
+                    total_cost_usd += cost.total_cost_usd;
+                }
+            }
             tracing::debug!(
                 target: "agentos::chat",
                 agent = %agent_name,
@@ -1350,6 +1372,8 @@ impl Kernel {
             answer: final_answer,
             tool_calls,
             iterations,
+            tokens_used: total_tokens_used,
+            cost_usd: total_cost_usd,
         })
     }
 
@@ -1433,6 +1457,7 @@ impl Kernel {
                 custom_instructions: agent_system_prompt,
                 sub_agent: None,
                 enforce_final_tag: self.config.chat.enforce_final_tag,
+                timezone: crate::system_prompt::local_timezone_str(),
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
@@ -1482,6 +1507,8 @@ impl Kernel {
 
         let mut tool_calls: Vec<ChatToolCallRecord> = Vec::new();
         let mut iterations = 0u32;
+        let mut total_tokens_used = 0u64;
+        let mut total_cost_usd = 0.0f64;
 
         let final_answer = loop {
             iterations += 1;
@@ -1642,6 +1669,12 @@ impl Kernel {
                 duration_ms = result.duration_ms,
                 "Chat streaming LLM response received"
             );
+            total_tokens_used = total_tokens_used.saturating_add(result.tokens_used.total_tokens);
+            if let Some(cost) = &result.cost {
+                if cost.total_cost_usd.is_finite() && cost.total_cost_usd > 0.0 {
+                    total_cost_usd += cost.total_cost_usd;
+                }
+            }
             tracing::debug!(
                 target: "agentos::chat",
                 agent = %agent_name,
@@ -1668,6 +1701,8 @@ impl Kernel {
                         answer: answer.clone(),
                         tool_calls: tool_calls.clone(),
                         iterations,
+                        tokens_used: total_tokens_used,
+                        cost_usd: total_cost_usd,
                     })
                     .await;
                 break answer;
@@ -1892,6 +1927,8 @@ impl Kernel {
                         answer: answer.clone(),
                         tool_calls: tool_calls.clone(),
                         iterations,
+                        tokens_used: total_tokens_used,
+                        cost_usd: total_cost_usd,
                     })
                     .await;
                 break answer;
@@ -1902,6 +1939,8 @@ impl Kernel {
             answer: final_answer,
             tool_calls,
             iterations,
+            tokens_used: total_tokens_used,
+            cost_usd: total_cost_usd,
         })
     }
 
@@ -2394,19 +2433,30 @@ impl Kernel {
         // Register agent-manual and agent-self tools with a snapshot of all
         // registered tools. Both tools are registered after the tool registry is
         // fully loaded so they have an accurate view of all available tools.
-        {
+        let tool_summaries_shared = {
             let registry_read = tool_registry.read().await;
             let all_tools: Vec<&agentos_types::RegisteredTool> = registry_read.list_all();
-            let summaries =
+            let summaries_vec =
                 agentos_tools::agent_manual::AgentManualTool::summaries_from_registry(&all_tools);
+            std::sync::Arc::new(tokio::sync::RwLock::new(summaries_vec))
+        };
+        {
             // Collect tool names before registering agent-self so the list
             // includes every other tool but not agent-self itself (which is
             // registered in the next line). This avoids a chicken-and-egg
             // ordering problem and keeps the list accurate.
-            let tool_names: Vec<String> = tool_runner.list_tools();
-            tool_runner.register_agent_manual(summaries);
-            tool_runner.register_agent_self(tool_names);
+            let tool_count = tool_runner.list_tools().len();
+            tool_runner.register_agent_manual(std::sync::Arc::clone(&tool_summaries_shared));
+            tool_runner.register_list_tools(std::sync::Arc::clone(&tool_summaries_shared));
+            tool_runner.register_describe_tool(std::sync::Arc::clone(&tool_summaries_shared));
+            tool_runner.register_search_tools(std::sync::Arc::clone(&tool_summaries_shared));
+            tool_runner.register_agent_self(tool_count);
         }
+
+        let tool_usage = Arc::new(
+            crate::tool_usage_store::ToolUsageStore::open(&data_dir.join("agent_tool_usage.db"))
+                .map_err(|e| anyhow::anyhow!("ToolUsageStore init failed: {}", e))?,
+        );
 
         // Create hook registry early so it can be shared with the plugin registry.
         let hook_registry_arc = crate::hooks::HookRegistry::new();
@@ -3279,6 +3329,8 @@ impl Kernel {
             agent_registry,
             bus,
             tool_runner,
+            tool_summaries: tool_summaries_shared,
+            tool_usage,
             sandbox,
             router,
             active_llms,
@@ -3382,6 +3434,7 @@ impl Kernel {
                     Arc::clone(&audit_for_dispatcher),
                 ),
             ),
+            agent_tool_lru: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // Re-wire the dispatcher to use the actual registry (the one with providers registered).

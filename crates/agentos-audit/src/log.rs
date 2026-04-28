@@ -40,6 +40,10 @@ pub enum AuditEventType {
     ToolExecutionStarted,
     ToolExecutionCompleted,
     ToolExecutionFailed,
+    /// Emitted when an agent queries the manual/discovery surface.
+    ManualQuery,
+    /// Emitted when the kernel injects tool suggestions after a ToolNotFound error.
+    ToolSuggested,
 
     // LLM events
     AgentConnected,

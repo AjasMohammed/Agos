@@ -1,0 +1,106 @@
+<div class="wb-property-panel" id="wb-inspector-content">
+  <h6 style="margin-bottom:0.25rem">{{ node_type }}</h6>
+  <small style="color:var(--pico-muted-color);display:block;margin-bottom:0.75rem">{{ node_id }}</small>
+  <hr style="margin:0.5rem 0 0.75rem">
+
+  {% for prop in properties %}
+  <label style="font-size:0.85rem;margin-bottom:0.9rem;display:block">
+    <span style="font-weight:600">
+      {{ prop.display_name }}{% if prop.required %} <span style="color:#ef4444">*</span>{% endif %}
+    </span>
+    {% if prop.description %}
+    <span style="color:var(--pico-muted-color);font-size:0.75rem;font-weight:400;display:block;margin-bottom:0.25rem">{{ prop.description }}</span>
+    {% endif %}
+
+    {% set cur = parameters[prop.name] %}
+
+    {% if prop.secret %}
+    {# Secret field — @keyname autocomplete via vault-keys-list datalist #}
+    <input type="text"
+           value="{{ cur | default(value='') }}"
+           style="font-size:0.85rem"
+           placeholder="@secret_key or value"
+           list="vault-keys-list"
+           onchange="$dispatch('param-change',{id:'{{ node_id }}',key:'{{ prop.name }}',val:this.value})">
+
+    {% elif prop.type == "string" %}
+    <input type="text"
+           value="{{ cur | default(value=prop.default | default(value='')) }}"
+           style="font-size:0.85rem"
+           placeholder="{{ prop.placeholder | default(value='') }}"
+           onchange="$dispatch('param-change',{id:'{{ node_id }}',key:'{{ prop.name }}',val:this.value})">
+
+    {% elif prop.type == "template" %}
+    <textarea rows="3"
+              style="font-size:0.85rem;font-family:inherit;resize:vertical"
+              placeholder="{{ prop.placeholder | default(value='Use {{var}} for substitution, @key for secrets') }}"
+              onchange="$dispatch('param-change',{id:'{{ node_id }}',key:'{{ prop.name }}',val:this.value})">{{ cur | default(value=prop.default | default(value='')) }}</textarea>
+
+    {% elif prop.type == "number" %}
+    <input type="number"
+           value="{{ cur | default(value=prop.default | default(value='')) }}"
+           style="font-size:0.85rem"
+           onchange="$dispatch('param-change',{id:'{{ node_id }}',key:'{{ prop.name }}',val:+this.value})">
+
+    {% elif prop.type == "boolean" %}
+    <input type="checkbox"
+           role="switch"
+           {% if cur | default(value=prop.default) %}checked{% endif %}
+           onchange="$dispatch('param-change',{id:'{{ node_id }}',key:'{{ prop.name }}',val:this.checked})">
+
+    {% elif prop.type == "options" %}
+    <select style="font-size:0.85rem"
+            onchange="$dispatch('param-change',{id:'{{ node_id }}',key:'{{ prop.name }}',val:this.value})">
+      {% for opt in prop.options %}
+      <option value="{{ opt.value }}"
+              {% if cur | default(value=prop.default) == opt.value %}selected{% endif %}>
+        {{ opt.label }}
+      </option>
+      {% endfor %}
+    </select>
+
+    {% elif prop.type == "multi_options" %}
+    <select multiple style="font-size:0.85rem"
+            onchange="$dispatch('param-change',{id:'{{ node_id }}',key:'{{ prop.name }}',val:Array.from(this.selectedOptions).map(o=>o.value)})">
+      {% for opt in prop.options %}
+      <option value="{{ opt.value }}">{{ opt.label }}</option>
+      {% endfor %}
+    </select>
+
+    {% elif prop.type == "resource_picker" %}
+    <select style="font-size:0.85rem"
+            onchange="$dispatch('param-change',{id:'{{ node_id }}',key:'{{ prop.name }}',val:this.value})">
+      <option value="">— select —</option>
+      {% for opt in prop.options %}
+      <option value="{{ opt.value }}"
+              {% if cur | default(value='') == opt.value %}selected{% endif %}>
+        {{ opt.label }}
+      </option>
+      {% endfor %}
+    </select>
+
+    {% elif prop.type == "json" %}
+    <textarea rows="6"
+              style="font-family:monospace;font-size:0.78rem;resize:vertical"
+              onchange="$dispatch('param-change',{id:'{{ node_id }}',key:'{{ prop.name }}',val:this.value})">{{ cur | default(value=prop.default | default(value='{}')) }}</textarea>
+
+    {% elif prop.type == "code" %}
+    <textarea rows="8"
+              style="font-family:monospace;font-size:0.78rem;resize:vertical"
+              onchange="$dispatch('param-change',{id:'{{ node_id }}',key:'{{ prop.name }}',val:this.value})">{{ cur | default(value=prop.default | default(value='')) }}</textarea>
+
+    {% else %}
+    <input type="text"
+           value="{{ cur | default(value='') }}"
+           style="font-size:0.85rem"
+           onchange="$dispatch('param-change',{id:'{{ node_id }}',key:'{{ prop.name }}',val:this.value})">
+    {% endif %}
+  </label>
+  {% endfor %}
+
+  {% if properties | length == 0 %}
+  <p style="color:var(--pico-muted-color);font-size:0.85rem;margin-top:1rem">
+    This node type has no configurable properties.
+  </p>
+  {% endif %}
+</div>

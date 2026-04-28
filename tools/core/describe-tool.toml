@@ -1,0 +1,34 @@
+[manifest]
+name        = "describe-tool"
+version     = "1.0.0"
+description = "Return full schema, permissions, and an example payload for one tool."
+author      = "agentos-core"
+trust_tier  = "core"
+risk_class  = "readonly_scoped"
+tags        = ["meta", "read"]
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "ToolDescribeQuery"
+output = "ToolDescription"
+
+[input_schema]
+type = "object"
+required = ["name"]
+
+[input_schema.properties.name]
+type = "string"
+description = "Exact tool name"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

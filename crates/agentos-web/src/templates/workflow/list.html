@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Workflows{% endblock %}
+{% block content %}
+<div style="max-width:960px;margin:0 auto;padding:1.5rem 1rem">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem">
+    <h1 style="margin:0">Workflows</h1>
+    <a href="/workflows/new" role="button">+ New Workflow</a>
+  </div>
+
+  {% if workflows|length == 0 %}
+  <p style="color:var(--pico-muted-color);text-align:center;margin-top:3rem">
+    No workflows yet. <a href="/workflows/new">Create one</a> to get started.
+  </p>
+  {% else %}
+  <table class="wb-workflow-list">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Version</th>
+        <th>Nodes</th>
+        <th>Status</th>
+        <th>Modified</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for wf in workflows %}
+      <tr>
+        <td><a href="/workflows/{{ wf.id }}/edit">{{ wf.name }}</a></td>
+        <td style="color:var(--pico-muted-color);font-size:0.85rem">{{ wf.version }}</td>
+        <td>{{ wf.node_count }}</td>
+        <td>
+          <span class="wb-status-badge">{{ wf.status }}</span>
+        </td>
+        <td style="color:var(--pico-muted-color);font-size:0.85rem">{{ wf.updated_at }}</td>
+        <td style="text-align:right">
+          <a href="/workflows/{{ wf.id }}/edit" role="button" class="outline" style="padding:0.2rem 0.7rem;font-size:0.8rem">Edit</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

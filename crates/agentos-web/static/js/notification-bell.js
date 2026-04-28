@@ -24,6 +24,8 @@ function notificationBell() {
             self.evtSource = new EventSource('/notifications/stream');
             self.evtSource.addEventListener('notification-new', function (e) {
                 self.unreadCount += 1;
+                // Let other page components react without opening their own SSE.
+                window.dispatchEvent(new CustomEvent('notification-inbox-update'));
                 try {
                     var data = JSON.parse(e.data);
                     window.dispatchEvent(new CustomEvent('showToast', {
@@ -41,6 +43,8 @@ function notificationBell() {
                     .then(function (r) { return r.ok ? r.json() : null; })
                     .then(function (data) { if (data) { self.unreadCount = data.count; } })
                     .catch(function () {});
+                // Also refresh the inbox list if it's on the page.
+                window.dispatchEvent(new CustomEvent('notification-inbox-update'));
             });
             self.evtSource.onopen = function () {
                 self._retries = 0;

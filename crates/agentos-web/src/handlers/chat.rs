@@ -59,6 +59,15 @@ fn spawn_streaming_inference(
     user_msg: String,
     inflight_handle: Arc<InFlightInference>,
 ) {
+    let mut total_len = 0;
+    for (idx, (role, text)) in history.iter().enumerate() {
+        total_len += text.len();
+        tracing::info!(target: "agentos::chat::debug", "History [{}] {}: {} chars", idx, role, text.len());
+    }
+    tracing::info!(target: "agentos::chat::debug", "New User Msg: {} chars", user_msg.len());
+    tracing::info!(target: "agentos::chat::debug", "Total Context Est: {} chars", total_len + user_msg.len());
+    tracing::info!(target: "agentos::chat::debug", "\n=== FULL LLM INPUT DUMP ===\nHistory: {:#?}\nNew Message: {}\n===========================\n", history, user_msg);
+
     let kernel = state.kernel.clone();
     let chat_store = Arc::clone(&state.chat_store);
     let inflight_map = Arc::clone(&state.inflight_chat);
@@ -97,8 +106,19 @@ fn spawn_streaming_inference(
                 let store = Arc::clone(&chat_store);
                 let sid = session_id.clone();
                 let answer = inf.answer.clone();
+                let tokens_used = inf.tokens_used;
+                let cost_usd = inf.cost_usd;
                 match tokio::task::spawn_blocking(move || {
-                    store.add_message(&sid, "assistant", &answer, None)
+                    store.add_assistant_message(
+                        &sid,
+                        &answer,
+                        Some(tokens_used),
+                        if cost_usd.is_finite() && cost_usd > 0.0 {
+                            Some(cost_usd)
+                        } else {
+                            None
+                        },
+                    )
                 })
                 .await
                 {
@@ -134,9 +154,10 @@ async fn expand_user_message_for_llm(
     file_ids: Option<&str>,
     state: &AppState,
     owner_principal: &str,
+    session_id: Option<&str>,
 ) -> String {
     let with_mentions =
-        files::resolve_at_mentions(content, state, owner_principal).await;
+        files::resolve_at_mentions(content, state, owner_principal, session_id).await;
     let file_ctx = match file_ids {
         Some(ids) if !ids.trim().is_empty() => {
             files::resolve_file_ids_to_context(ids, state, owner_principal).await
@@ -450,7 +471,7 @@ pub async fn new_session(
     // Resolve @mentions and attached file IDs into LLM context.
     // The original message is what gets stored in the DB; the expanded version goes to inference.
     let llm_message =
-        expand_user_message_for_llm(&message, file_ids_opt, &state, &principal).await;
+        expand_user_message_for_llm(&message, file_ids_opt, &state, &principal, None).await;
 
     // Create session and persist the first user message atomically.
     let session_id = {
@@ -538,8 +559,14 @@ pub async fn send(
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
-    let llm_message =
-        expand_user_message_for_llm(&message, file_ids_opt, &state, &principal).await;
+    let llm_message = expand_user_message_for_llm(
+        &message,
+        file_ids_opt,
+        &state,
+        &principal,
+        Some(&session_id),
+    )
+    .await;
 
     let session = {
         let store = Arc::clone(&state.chat_store);
@@ -585,8 +612,14 @@ pub async fn send(
             continue;
         }
         let text = if m.role == "user" {
-            expand_user_message_for_llm(&m.content, m.file_ids.as_deref(), &state, &principal)
-                .await
+            expand_user_message_for_llm(
+                &m.content,
+                m.file_ids.as_deref(),
+                &state,
+                &principal,
+                Some(&session_id),
+            )
+            .await
         } else {
             m.content
         };
@@ -645,6 +678,7 @@ pub async fn send(
     let html = format!(
         r#"<div class="chat-row chat-row-user">
     <div class="chat-bubble chat-bubble-user">
+        <div class="chat-speaker-tag">You</div>
         <div class="chat-bubble-content">{user_msg}</div>
     </div>
 </div>
@@ -656,13 +690,18 @@ pub async fn send(
         <div class="chat-thinking-dots"><span></span><span></span><span></span></div>
         <span class="muted">Thinking...</span>
     </div>
-    <div class="chat-activity-list" data-role="chat-activity-list"></div>
     <div data-role="chat-stream-response" class="chat-row chat-row-agent" style="display:none;">
         <div class="chat-agent-avatar" aria-hidden="true">{agent_initial}</div>
         <div class="chat-agent-column">
-            <div class="chat-agent-name muted">{agent_name}</div>
+            <div class="chat-agent-name">{agent_name}</div>
             <div class="chat-bubble chat-bubble-agent">
-                <div data-role="chat-stream-text" class="chat-bubble-content-agent chat-streaming chat-stream-markdown markdown-content"></div>
+                <div data-role="chat-stream-content" class="chat-stream-content chat-streaming"></div>
+                <div class="chat-bubble-meta chat-bubble-meta-left chat-stream-meta" data-role="chat-stream-meta" style="display:none;">
+                    <span data-role="chat-stream-time">Streaming...</span>
+                    <span data-role="chat-stream-tokens"></span>
+                    <span data-role="chat-stream-cost"></span>
+                    <button class="chat-msg-action" type="button" data-role="chat-stream-copy">Copy</button>
+                </div>
             </div>
         </div>
     </div>
@@ -734,11 +773,20 @@ pub async fn message_stream(
                 success,
             },
             ChatStreamEvent::Done {
-                answer, iterations, ..
+                answer,
+                iterations,
+                tokens_used,
+                cost_usd,
+                ..
             } => ChatStreamFrame::Done {
                 answer,
                 iterations,
-                tokens_used: None,
+                tokens_used: Some(tokens_used),
+                cost_usd: if cost_usd.is_finite() && cost_usd > 0.0 {
+                    Some(cost_usd)
+                } else {
+                    None
+                },
             },
             ChatStreamEvent::Error { message } => ChatStreamFrame::Error { message },
         };
@@ -789,6 +837,25 @@ pub async fn conversation(
         .unwrap_or(false)
         && state.inflight_chat.get(&session_id).is_some();
 
+    let total_tokens_used: u64 = timeline_entries
+        .iter()
+        .map(|e| match e {
+            TimelineEntry::Assistant { tokens_used, .. } => tokens_used.unwrap_or(0),
+            _ => 0,
+        })
+        .sum();
+    let total_tool_calls = timeline_entries
+        .iter()
+        .filter(|e| matches!(e, TimelineEntry::Tool { .. }))
+        .count();
+    let total_cost_usd: f64 = timeline_entries
+        .iter()
+        .map(|e| match e {
+            TimelineEntry::Assistant { cost_usd, .. } => cost_usd.unwrap_or(0.0),
+            _ => 0.0,
+        })
+        .sum();
+
     let messages: Vec<_> = timeline_entries
         .into_iter()
         .map(|e| match e {
@@ -814,7 +881,7 @@ pub async fn conversation(
                 content,
                 created_at,
                 tokens_used,
-                cost_usd,
+                cost_usd => cost_usd.map(|v| format!("{:.6}", v)),
             },
             TimelineEntry::Tool {
                 id,
@@ -860,6 +927,9 @@ pub async fn conversation(
         session_title => session.title.clone(),
         agent_initial,
         messages,
+        total_tokens_used,
+        total_tool_calls,
+        total_cost_usd => if total_cost_usd > 0.0 { format!("{:.6}", total_cost_usd) } else { String::new() },
         needs_stream_reconnect,
         csrf_token,
     };

@@ -1,0 +1,48 @@
+[manifest]
+name        = "list-tools"
+version     = "1.0.0"
+description = "List available tools with pagination. Filter by category or tag."
+author      = "agentos-core"
+trust_tier  = "core"
+risk_class  = "readonly_scoped"
+tags        = ["meta", "read"]
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "ToolListQuery"
+output = "ToolListPage"
+
+[input_schema]
+type = "object"
+
+[input_schema.properties.category]
+type = "string"
+description = "Optional category filter such as filesystem, memory, network, or coordination"
+
+[input_schema.properties.tag]
+type = "string"
+description = "Optional tag filter: read, write, exec, network, fs, or meta"
+
+[input_schema.properties.page]
+type = "integer"
+minimum = 0
+default = 0
+
+[input_schema.properties.page_size]
+type = "integer"
+minimum = 1
+maximum = 50
+default = 20
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

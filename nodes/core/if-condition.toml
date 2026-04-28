@@ -1,0 +1,33 @@
+[node]
+id = "if-condition"
+version = 1
+display_name = "If / Condition"
+description = "Route workflow execution based on a condition. True path runs when condition is met."
+category = "core"
+icon = "git-branch"
+color = "#84cc16"
+risk_class = "readonly_scoped"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+display_name = "True"
+
+[[node.outputs]]
+kind = "main"
+display_name = "False"
+
+[[node.properties]]
+name = "condition"
+display_name = "Condition Expression"
+type = "template"
+required = true
+placeholder = "{{status}} == 'success'"
+description = "Expression to evaluate. Supports ==, !=, >, <, contains. Use {{var}} for node outputs."
+
+[node.execute]
+kind = "builtin"
+name = "if"

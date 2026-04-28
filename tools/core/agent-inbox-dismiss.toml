@@ -1,0 +1,32 @@
+[manifest]
+name        = "agent-inbox-dismiss"
+version     = "1.0.0"
+description = "Permanently delete an inbox notification. Use after reading and acting on the entry."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = ["dismissed", "id"]
+
+[intent_schema]
+input  = "AgentInboxDismissIntent"
+output = "AgentInboxDismissResult"
+
+[input_schema]
+type     = "object"
+required = ["id"]
+
+[input_schema.properties.id]
+type        = "string"
+description = "Inbox entry ID to dismiss"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 8
+max_cpu_ms    = 500
+syscalls      = []
