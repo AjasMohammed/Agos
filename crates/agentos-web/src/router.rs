@@ -338,8 +338,13 @@ pub fn build_router(
             axum::routing::get(notifications::unread_count),
         )
         .route(
+            "/notifications/read",
+            axum::routing::delete(notifications::clear_read_notifications),
+        )
+        .route(
             "/notifications/{id}",
-            axum::routing::get(notifications::get_notification),
+            axum::routing::get(notifications::get_notification)
+                .delete(notifications::dismiss_notification),
         )
         .route(
             "/notifications/{id}/respond",

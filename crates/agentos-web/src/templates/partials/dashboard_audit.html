@@ -12,7 +12,8 @@
     <span class="activity-ts">{{ entry.timestamp }}</span>
 </div>
 {% else %}
-<div style="text-align: center; padding: 2rem 1rem; color: var(--pico-muted-color); font-size: 0.85rem;">
-    No recent activity. Events will stream here in real-time.
+<div class="inline-empty-state">
+    <p><strong>No recent activity</strong></p>
+    <p>Kernel and agent events will stream here in real time.</p>
 </div>
 {% endfor %}

@@ -667,6 +667,22 @@ impl KernelService for Kernel {
             .map_err(|e| ApiError::Internal(e.to_string()))
     }
 
+    async fn dismiss_notification(&self, id: NotificationID) -> Result<bool, ApiError> {
+        let inbox = self.notification_router.inbox();
+        inbox
+            .delete(&id)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))
+    }
+
+    async fn clear_read_notifications(&self) -> Result<usize, ApiError> {
+        let inbox = self.notification_router.inbox();
+        inbox
+            .clear_read()
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))
+    }
+
     async fn get_unread_count(&self) -> Result<u64, ApiError> {
         let inbox = self.notification_router.inbox();
         Ok(inbox.count_unread().await as u64)

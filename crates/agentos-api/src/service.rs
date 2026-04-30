@@ -114,6 +114,10 @@ pub trait KernelService: Send + Sync {
         text: String,
     ) -> Result<(), ApiError>;
 
+    async fn dismiss_notification(&self, id: NotificationID) -> Result<bool, ApiError>;
+
+    async fn clear_read_notifications(&self) -> Result<usize, ApiError>;
+
     async fn get_unread_count(&self) -> Result<u64, ApiError>;
 
     // ── Dashboard (composite) ───────────────────────────────────────────────

@@ -1,15 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-header">
+<div class="dashboard-shell">
+<section class="dashboard-hero" aria-labelledby="dashboard-title">
     <div>
-        <h1>Dashboard</h1>
+        <h1 id="dashboard-title">Dashboard</h1>
+        <p>Live kernel status, agent availability, task flow, and recent system events in one workspace.</p>
     </div>
     <div class="quick-actions">
         <a href="/agents" class="quick-action-btn">Connect Agent</a>
         <a href="/chat" class="quick-action-btn">New Chat</a>
         <a href="/tasks" class="quick-action-btn">View Tasks</a>
     </div>
-</div>
+</section>
 
 <div hx-ext="sse" sse-connect="/events/dashboard">
     <section id="dashboard-stats" sse-swap="dashboard-stats">
@@ -39,7 +41,7 @@
         </article>
     </div>
 
-    <article class="dashboard-card">
+    <article class="dashboard-card dashboard-card-wide">
         <header>
             <strong>Live Activity</strong>
             <a href="/audit" class="muted" style="font-size: 0.78rem;">Full log &rarr;</a>
@@ -48,5 +50,6 @@
             {% include "partials/dashboard_audit.html" %}
         </div>
     </article>
+</div>
 </div>
 {% endblock %}

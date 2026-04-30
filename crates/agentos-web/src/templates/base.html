@@ -20,7 +20,9 @@
     <script src="/static/js/alpine.min.js" defer></script>
     {% block head_extra %}{% endblock %}
 </head>
-<body x-data="{ sidebarOpen: false }" @keydown.escape="sidebarOpen = false">
+<body x-data="{ sidebarOpen: false, sidebarCollapsed: localStorage.getItem('aosSidebarCollapsed') === 'true' }"
+      :class="{ 'sidebar-collapsed': sidebarCollapsed }"
+      @keydown.escape="sidebarOpen = false">
     <a href="#main-content" class="skip-link">Skip to main content</a>
 
     <!-- Keyboard nav initializer (hidden) -->
@@ -30,10 +32,17 @@
     <aside class="sidebar" :class="{ 'sidebar-open': sidebarOpen }"
            aria-label="Main navigation" role="navigation">
         <div class="sidebar-brand">
-            <a href="/" style="display:flex;align-items:center;gap:0.5rem;text-decoration:none">
-                <img src="/static/logo.png" alt="AgentOS" style="height:32px;width:32px;object-fit:contain">
-                <strong>AgentOS</strong>
+            <a href="/" class="brand-link" aria-label="AgentOS dashboard">
+                <img src="/static/logo.png" alt="" class="brand-logo">
+                <strong class="brand-wordmark">AgentOS</strong>
             </a>
+            <button type="button"
+                    class="sidebar-collapse-btn"
+                    @click="sidebarCollapsed = !sidebarCollapsed; localStorage.setItem('aosSidebarCollapsed', sidebarCollapsed ? 'true' : 'false')"
+                    :aria-expanded="(!sidebarCollapsed).toString()"
+                    aria-label="Collapse sidebar">
+                <span aria-hidden="true">&lsaquo;</span>
+            </button>
         </div>
         <nav>
             <ul class="sidebar-nav">
@@ -105,7 +114,7 @@
          x-transition:enter="fade-enter" x-transition:leave="fade-leave"></div>
 
     <!-- Main wrapper (topbar + content + footer) -->
-    <div class="main-wrapper">
+    <div class="main-wrapper" :class="{ 'sidebar-is-collapsed': sidebarCollapsed }">
         <!-- Topbar -->
         <header class="topbar">
             <div class="topbar-left">
@@ -113,6 +122,13 @@
                         aria-label="Toggle navigation"
                         :aria-expanded="sidebarOpen.toString()">
                     &#9776;
+                </button>
+                <button class="topbar-sidebar-toggle"
+                        type="button"
+                        @click="sidebarCollapsed = !sidebarCollapsed; localStorage.setItem('aosSidebarCollapsed', sidebarCollapsed ? 'true' : 'false')"
+                        :aria-expanded="(!sidebarCollapsed).toString()"
+                        aria-label="Toggle sidebar width">
+                    <span aria-hidden="true">Menu</span>
                 </button>
                 {% if breadcrumbs %}
                 <nav aria-label="Breadcrumb" class="breadcrumb-nav">

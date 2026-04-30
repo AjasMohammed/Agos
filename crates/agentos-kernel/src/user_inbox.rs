@@ -231,6 +231,34 @@ impl UserInbox {
             })
     }
 
+    /// Remove a single notification from the inbox.
+    pub async fn delete(&self, id: &NotificationID) -> Result<bool, AgentOSError> {
+        let id_str = id.to_string();
+        self.store
+            .exec_mut(move |conn| {
+                let deleted =
+                    conn.execute("DELETE FROM user_messages WHERE id = ?1", params![id_str])?;
+                Ok(deleted > 0)
+            })
+            .await
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("UserInbox: delete failed: {e}"),
+            })
+    }
+
+    /// Remove all notifications that have already been read.
+    pub async fn clear_read(&self) -> Result<usize, AgentOSError> {
+        self.store
+            .exec_mut(move |conn| {
+                let deleted = conn.execute("DELETE FROM user_messages WHERE read = 1", [])?;
+                Ok(deleted)
+            })
+            .await
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("UserInbox: clear_read failed: {e}"),
+            })
+    }
+
     /// Store a user response on an interactive notification.
     ///
     /// Uses `UPDATE … WHERE response IS NULL` so only the first caller succeeds;

@@ -23,9 +23,9 @@
     {% endfor %}
 </div>
 {% else %}
-<div style="text-align: center; padding: 1.5rem 1rem; color: var(--pico-muted-color);">
-    <p style="font-size: 0.95rem; margin-bottom: 0.5rem;">No agents connected</p>
-    <p style="font-size: 0.82rem; margin-bottom: 0.75rem;">Connect an LLM agent to start processing tasks.</p>
+<div class="inline-empty-state">
+    <p><strong>No agents connected</strong></p>
+    <p>Connect an LLM agent to start processing tasks.</p>
     <a href="/agents" class="quick-action-btn">Connect Agent</a>
 </div>
 {% endif %}

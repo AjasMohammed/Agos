@@ -513,6 +513,10 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
         include_str!("templates/notifications/_notification_row.html"),
     )?;
     env.add_template(
+        "notifications/_notification_list.html",
+        include_str!("templates/notifications/_notification_list.html"),
+    )?;
+    env.add_template(
         "notifications/_respond_form.html",
         include_str!("templates/notifications/_respond_form.html"),
     )?;

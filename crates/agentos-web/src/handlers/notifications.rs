@@ -1,7 +1,7 @@
 use crate::handlers::render;
 use crate::state::AppState;
 use agentos_types::NotificationID;
-use axum::extract::{Form, Path, State};
+use axum::extract::{Form, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -13,8 +13,12 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
-/// GET /notifications — full inbox page.
-pub async fn inbox(State(state): State<AppState>, jar: CookieJar) -> Response {
+/// GET /notifications — full inbox page or notification list partial.
+pub async fn inbox(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<NotificationQuery>,
+) -> Response {
     use agentos_api::types::NotificationFilter;
 
     let filter = NotificationFilter {
@@ -47,6 +51,14 @@ pub async fn inbox(State(state): State<AppState>, jar: CookieJar) -> Response {
         unread_count,
         csrf_token,
     };
+    if query.partial.as_deref() == Some("list") {
+        return render(
+            &state.templates,
+            "notifications/_notification_list.html",
+            ctx,
+        );
+    }
+
     render(&state.templates, "notifications/inbox.html", ctx)
 }
 
@@ -65,6 +77,11 @@ pub async fn unread_count(State(state): State<AppState>) -> axum::response::Json
 #[derive(Serialize)]
 pub struct UnreadCount {
     pub count: usize,
+}
+
+#[derive(Deserialize)]
+pub struct NotificationQuery {
+    pub partial: Option<String>,
 }
 
 /// GET /notifications/{id} — detail view; also marks the notification as read.
@@ -146,6 +163,45 @@ pub async fn respond_to_notification(
             (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "Failed to submit response",
+            )
+                .into_response()
+        }
+    }
+}
+
+/// DELETE /notifications/{id} — dismiss one notification from the inbox.
+pub async fn dismiss_notification(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let notification_id: NotificationID = match id.parse() {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid notification ID").into_response(),
+    };
+
+    match state.service.dismiss_notification(notification_id).await {
+        Ok(true) => StatusCode::OK.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "Notification not found").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, notification_id = %id, "Failed to dismiss notification");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to dismiss notification",
+            )
+                .into_response()
+        }
+    }
+}
+
+/// DELETE /notifications/read — clear all notifications that are already read.
+pub async fn clear_read_notifications(State(state): State<AppState>) -> Response {
+    match state.service.clear_read_notifications().await {
+        Ok(_) => (StatusCode::OK, [("HX-Redirect", "/notifications")], "").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to clear read notifications");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to clear read notifications",
             )
                 .into_response()
         }
