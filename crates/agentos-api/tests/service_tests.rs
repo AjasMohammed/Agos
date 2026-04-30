@@ -110,6 +110,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         skills: Default::default(),
         otel: agentos_kernel::config::OtelConfig::default(),
         api: Default::default(),
+        chat: Default::default(),
     }
 }
 

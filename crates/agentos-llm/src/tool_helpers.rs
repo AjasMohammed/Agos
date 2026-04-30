@@ -92,6 +92,49 @@ pub fn validate_payload_object(tool_name: &str, provider: &str, value: Option<Va
     }
 }
 
+/// Strip fenced JSON blocks from assistant text after tool calls were recovered from them,
+/// so stored turns do not retain raw JSON that can confuse follow-up inference.
+pub fn strip_tool_json_fences(text: &str, tool_call_count: usize) -> String {
+    if tool_call_count == 0 {
+        return text.to_string();
+    }
+    let mut result = String::with_capacity(text.len());
+    let mut pos = 0;
+    while pos < text.len() {
+        if let Some(rel) = text[pos..].find("```") {
+            let fence_open = pos + rel;
+            result.push_str(&text[pos..fence_open]);
+            let after_open = fence_open + 3;
+            let line_end = text[after_open..]
+                .find('\n')
+                .map(|n| after_open + n + 1)
+                .unwrap_or(text.len());
+            let lang = text[after_open..line_end].trim().to_ascii_lowercase();
+            let body_start = line_end;
+            if let Some(close_rel) = text[body_start..].find("```") {
+                let body_end = body_start + close_rel;
+                let close_end = body_end + 3;
+                if lang.is_empty() || lang == "json" {
+                    let body = text[body_start..body_end].trim();
+                    if serde_json::from_str::<Value>(body).is_ok() {
+                        pos = close_end;
+                        continue;
+                    }
+                }
+                result.push_str(&text[fence_open..close_end]);
+                pos = close_end;
+            } else {
+                result.push_str(&text[fence_open..]);
+                pos = text.len();
+            }
+        } else {
+            result.push_str(&text[pos..]);
+            break;
+        }
+    }
+    result.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

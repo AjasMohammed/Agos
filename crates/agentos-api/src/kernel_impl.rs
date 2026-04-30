@@ -74,7 +74,7 @@ fn parse_scope(s: &str) -> SecretScope {
     }
 }
 
-fn agent_summary(profile: &agentos_types::AgentProfile) -> ApiAgentSummary {
+fn agent_summary(profile: &agentos_types::AgentProfile, supports_images: bool) -> ApiAgentSummary {
     ApiAgentSummary {
         id: profile.id,
         name: profile.name.clone(),
@@ -83,6 +83,7 @@ fn agent_summary(profile: &agentos_types::AgentProfile) -> ApiAgentSummary {
         status: status_str(&profile.status).to_string(),
         roles: profile.roles.clone(),
         connected_at: profile.created_at,
+        supports_images,
     }
 }
 
@@ -106,10 +107,17 @@ impl KernelService for Kernel {
 
     async fn list_agents(&self) -> Result<Vec<ApiAgentSummary>, ApiError> {
         let registry = self.agent_registry.read().await;
+        let llms = self.active_llms.read().await;
         Ok(registry
             .list_online()
             .into_iter()
-            .map(agent_summary)
+            .map(|p| {
+                let supports_images = llms
+                    .get(&p.id)
+                    .map(|c| c.supports_images())
+                    .unwrap_or(false);
+                agent_summary(p, supports_images)
+            })
             .collect())
     }
 
@@ -133,7 +141,14 @@ impl KernelService for Kernel {
         let profile = registry
             .get_by_name(&req.name)
             .ok_or_else(|| ApiError::Internal("Agent registered but not found".into()))?;
-        Ok(agent_summary(profile))
+        let supports_images = self
+            .active_llms
+            .read()
+            .await
+            .get(&profile.id)
+            .map(|c| c.supports_images())
+            .unwrap_or(false);
+        Ok(agent_summary(profile, supports_images))
     }
 
     async fn disconnect_agent(&self, agent_id: agentos_types::AgentID) -> Result<(), ApiError> {
@@ -148,7 +163,14 @@ impl KernelService for Kernel {
             .get_by_name(name)
             .ok_or_else(|| ApiError::NotFound(format!("Agent '{}' not found", name)))?;
 
-        let summary = agent_summary(profile);
+        let summary = {
+            let llms = self.active_llms.read().await;
+            let supports_images = llms
+                .get(&profile.id)
+                .map(|c| c.supports_images())
+                .unwrap_or(false);
+            agent_summary(profile, supports_images)
+        };
         let effective = registry.compute_effective_permissions(&profile.id);
         let permissions: Vec<String> = effective
             .entries()
@@ -359,10 +381,23 @@ impl KernelService for Kernel {
 
     // ── Chat ────────────────────────────────────────────────────────────
 
+    async fn agent_supports_images(&self, agent_name: &str) -> Result<bool, ApiError> {
+        let registry = self.agent_registry.read().await;
+        let profile = registry
+            .get_by_name(agent_name)
+            .ok_or_else(|| ApiError::NotFound(format!("Agent '{}' not found", agent_name)))?;
+        let llms = self.active_llms.read().await;
+        Ok(llms
+            .get(&profile.id)
+            .map(|c| c.supports_images())
+            .unwrap_or(false))
+    }
+
     async fn chat_send(&self, req: ChatRequest) -> Result<ChatResponse, ApiError> {
         let history: Vec<(String, String)> = req.history;
+        let user_parts = (!req.parts.is_empty()).then_some(req.parts.clone());
         let result = self
-            .chat_infer_with_tools(&req.agent_name, &history, &req.message)
+            .chat_infer_with_tools(&req.agent_name, &history, &req.message, user_parts)
             .await
             .map_err(ApiError::Internal)?;
 
@@ -397,8 +432,9 @@ impl KernelService for Kernel {
         let _ = tx.send(ChatStreamEvent::Thinking { iteration: 1 }).await;
 
         let history: Vec<(String, String)> = req.history;
+        let user_parts = (!req.parts.is_empty()).then_some(req.parts.clone());
         let result = self
-            .chat_infer_with_tools(&req.agent_name, &history, &req.message)
+            .chat_infer_with_tools(&req.agent_name, &history, &req.message, user_parts)
             .await
             .map_err(ApiError::Internal)?;
 

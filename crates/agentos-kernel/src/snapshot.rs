@@ -1,4 +1,4 @@
-use agentos_types::TaskID;
+use agentos_types::{reject_traversal, TaskID};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
 use tokio::sync::RwLock;
@@ -54,9 +54,8 @@ impl SnapshotManager {
     /// Returns `Ok(canonical)` if `path_str` resolves to a location within
     /// `self.allowed_root`, or `Err` if it escapes or contains a traversal.
     fn validate_path(&self, path_str: &str) -> anyhow::Result<PathBuf> {
-        if path_str.contains("..") {
-            anyhow::bail!("Path contains '..' traversal: {}", path_str);
-        }
+        reject_traversal(path_str)
+            .map_err(|_| anyhow::anyhow!("Path contains '..' traversal: {}", path_str))?;
         let path = PathBuf::from(path_str);
         // Resolve absolute paths directly; relative paths against allowed_root.
         let resolved = if path.is_absolute() {
@@ -412,7 +411,9 @@ mod tests {
         // Create some context entries
         let entries = vec![ContextEntry {
             role: ContextRole::User,
-            content: "hello".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "hello".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,
@@ -441,7 +442,7 @@ mod tests {
         let restored_snap = manager.restore(&snap_id).await?;
         assert_eq!(restored_snap.snap_id, snap_id);
         assert_eq!(restored_snap.context_entries.len(), 1);
-        assert_eq!(restored_snap.context_entries[0].content, "hello");
+        assert_eq!(restored_snap.context_entries[0].text(), "hello");
 
         // Verify file content restored
         let restored_content = tokio::fs::read_to_string(&test_file).await?;

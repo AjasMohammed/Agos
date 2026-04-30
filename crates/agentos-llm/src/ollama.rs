@@ -1,3 +1,4 @@
+use crate::media::{ImageResolver, NoopImageResolver};
 use crate::tool_helpers;
 use crate::traits::LLMCore;
 use crate::types::{
@@ -9,6 +10,9 @@ use agentos_types::*;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub struct OllamaCore {
@@ -21,6 +25,9 @@ pub struct OllamaCore {
     pricing: ModelPricing,
     retry_policy: crate::retry::RetryPolicy,
     circuit_breaker: crate::retry::CircuitBreaker,
+    image_resolver: Arc<dyn ImageResolver>,
+    /// Model IDs that accept `images: [...]` on user messages (e.g. `llava`). Empty → no vision.
+    vision_models: Vec<String>,
 }
 
 impl OllamaCore {
@@ -74,6 +81,8 @@ impl OllamaCore {
             pricing,
             retry_policy: crate::retry::RetryPolicy::default(),
             circuit_breaker: crate::retry::CircuitBreaker::default(),
+            image_resolver: Arc::new(NoopImageResolver),
+            vision_models: Vec::new(),
         }
     }
 
@@ -81,6 +90,73 @@ impl OllamaCore {
     pub fn with_pricing(mut self, pricing: ModelPricing) -> Self {
         self.pricing = pricing;
         self
+    }
+
+    /// Inject an image resolver so multimodal context entries can be
+    /// converted to base64 payloads. Defaults to `NoopImageResolver`.
+    pub fn with_image_resolver(mut self, resolver: Arc<dyn ImageResolver>) -> Self {
+        self.image_resolver = resolver;
+        self
+    }
+
+    /// Opt-in vision: when `model` matches an entry (or the list contains `"*"`),
+    /// [`LLMCore::supports_images`] is true and user turns emit Ollama `images` base64 payloads.
+    pub fn with_vision_models(mut self, models: Vec<String>) -> Self {
+        self.vision_models = models;
+        self
+    }
+
+    fn model_has_vision(&self) -> bool {
+        if self.vision_models.is_empty() {
+            return false;
+        }
+        let m = self.model.as_str();
+        self.vision_models
+            .iter()
+            .any(|vm| vm.as_str() == "*" || vm == m)
+    }
+
+    fn ollama_user_from_entry(&self, entry: &ContextEntry) -> OllamaChatMessage {
+        let vision = self.model_has_vision();
+        let mut text_buf = String::new();
+        let mut images: Vec<String> = Vec::new();
+        for p in &entry.parts {
+            match p {
+                ContentPart::Text { text } => text_buf.push_str(text),
+                ContentPart::Image { mime, source } => {
+                    if vision {
+                        match crate::media::resolve_image_to_base64(
+                            mime,
+                            source,
+                            &self.image_resolver,
+                        ) {
+                            Ok((_, b64)) => images.push(b64),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "ollama: failed to resolve image for message"
+                                );
+                                text_buf.push_str(&format!(" [[image error: {e}]]"));
+                            }
+                        }
+                    } else {
+                        text_buf.push_str(&crate::media::image_fallback_stub("attachment", mime));
+                    }
+                }
+            }
+        }
+        OllamaChatMessage {
+            role: "user".to_string(),
+            content: text_buf,
+            thinking: None,
+            tool_calls: Vec::new(),
+            request_tool_calls: None,
+            images: if images.is_empty() {
+                None
+            } else {
+                Some(images)
+            },
+        }
     }
 
     /// Override the HTTP request timeout for inference calls.
@@ -148,10 +224,11 @@ impl OllamaCore {
                             .filter(|v: &Vec<Value>| !v.is_empty());
                         OllamaChatMessage {
                             role: "assistant".to_string(),
-                            content: entry.content.clone(),
+                            content: entry.text(),
                             thinking: None,
                             tool_calls: Vec::new(),
                             request_tool_calls,
+                            images: None,
                         }
                     }
                     ContextRole::ToolResult => {
@@ -162,11 +239,11 @@ impl OllamaCore {
                             .and_then(|m| m.tool_call_id.as_deref())
                             .is_some()
                         {
-                            ("tool".to_string(), entry.content.clone())
+                            ("tool".to_string(), entry.text())
                         } else {
                             (
                                 "user".to_string(),
-                                format!("Tool Result:\n{}", entry.content),
+                                format!("Tool Result:\n{}", entry.text()),
                             )
                         };
                         OllamaChatMessage {
@@ -175,22 +252,18 @@ impl OllamaCore {
                             thinking: None,
                             tool_calls: Vec::new(),
                             request_tool_calls: None,
+                            images: None,
                         }
                     }
                     ContextRole::System => OllamaChatMessage {
                         role: "system".to_string(),
-                        content: entry.content.clone(),
+                        content: entry.text(),
                         thinking: None,
                         tool_calls: Vec::new(),
                         request_tool_calls: None,
+                        images: None,
                     },
-                    ContextRole::User => OllamaChatMessage {
-                        role: "user".to_string(),
-                        content: entry.content.clone(),
-                        thinking: None,
-                        tool_calls: Vec::new(),
-                        request_tool_calls: None,
-                    },
+                    ContextRole::User => self.ollama_user_from_entry(entry),
                 }
             })
             .collect()
@@ -222,6 +295,7 @@ impl OllamaCore {
         &self,
         ollama_response: OllamaChatResponse,
         duration_ms: u64,
+        intent_by_tool: &HashMap<String, String>,
     ) -> InferenceResult {
         let tool_calls: Vec<InferenceToolCall> = ollama_response
             .message
@@ -313,6 +387,31 @@ impl OllamaCore {
             );
         }
 
+        // Small-model fallback: recover tool calls embedded as fenced JSON in
+        // `content` when Ollama didn't populate the native `tool_calls` array.
+        let (mut tool_calls, text, stop_reason) = if tool_calls.is_empty() && !text.is_empty() {
+            let recovered = Self::parse_tool_calls_from_text(&text, intent_by_tool);
+            if !recovered.is_empty() {
+                let stripped = tool_helpers::strip_tool_json_fences(&text, recovered.len());
+                (recovered, stripped, StopReason::ToolUse)
+            } else {
+                (tool_calls, text, stop_reason)
+            }
+        } else {
+            (tool_calls, text, stop_reason)
+        };
+
+        // Assign synthetic ids to native Ollama tool calls (Ollama omits ids).
+        for (i, tc) in tool_calls.iter_mut().enumerate() {
+            if tc.id.is_none() {
+                tc.id = Some(format!(
+                    "ollama_{}_{}_{i}",
+                    tc.tool_name,
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+                ));
+            }
+        }
+
         InferenceResult {
             text,
             tokens_used,
@@ -324,6 +423,96 @@ impl OllamaCore {
             cost: Some(cost),
             cached_tokens: 0,
         }
+    }
+
+    /// Recover tool calls from fenced JSON blocks in model text.
+    /// Same algorithm as `CustomCore::parse_tool_calls_from_text`.
+    fn parse_tool_calls_from_text(
+        text: &str,
+        intent_by_tool: &HashMap<String, String>,
+    ) -> Vec<InferenceToolCall> {
+        if text.is_empty() || intent_by_tool.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut search_from = 0;
+        while let Some(rel) = text[search_from..].find("```") {
+            let fence_open = search_from + rel;
+            let after_open = fence_open + 3;
+            let line_end = text[after_open..]
+                .find('\n')
+                .map(|n| after_open + n + 1)
+                .unwrap_or(text.len());
+            let lang = text[after_open..line_end].trim().to_ascii_lowercase();
+            let body_start = line_end;
+            let Some(close_rel) = text[body_start..].find("```") else {
+                break;
+            };
+            let body_end = body_start + close_rel;
+            search_from = body_end + 3;
+            if !lang.is_empty() && lang != "json" {
+                continue;
+            }
+            let body = text[body_start..body_end].trim();
+            if body.is_empty() {
+                continue;
+            }
+            let candidates: Vec<Value> = match serde_json::from_str::<Value>(body) {
+                Ok(Value::Array(arr)) => arr,
+                Ok(v) => vec![v],
+                Err(_) => continue,
+            };
+            for cand in candidates {
+                let Value::Object(obj) = cand else { continue };
+                let Some(tool_name) = obj
+                    .get("tool")
+                    .or_else(|| obj.get("name"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                else {
+                    continue;
+                };
+                if !intent_by_tool.contains_key(tool_name) {
+                    continue;
+                }
+                let payload = obj
+                    .get("payload")
+                    .or_else(|| obj.get("arguments"))
+                    .or_else(|| obj.get("input"))
+                    .or_else(|| obj.get("parameters"))
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
+                let payload =
+                    tool_helpers::validate_payload_object(tool_name, "ollama", Some(payload));
+                if !tool_helpers::check_payload_size(tool_name, &payload) {
+                    continue;
+                }
+                let intent_type = obj
+                    .get("intent_type")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| intent_by_tool.get(tool_name).cloned())
+                    .unwrap_or_else(|| "query".to_string());
+                let synthetic_id = format!(
+                    "fallback_{}_{}_{}",
+                    tool_name,
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                    out.len()
+                );
+                tracing::warn!(
+                    tool = tool_name,
+                    "Recovered tool call from fenced JSON in Ollama text (small-model fallback)"
+                );
+                out.push(InferenceToolCall {
+                    id: Some(synthetic_id),
+                    tool_name: tool_name.to_string(),
+                    intent_type,
+                    payload,
+                });
+            }
+        }
+        out
     }
 }
 
@@ -411,6 +600,9 @@ struct OllamaChatMessage {
         skip_deserializing
     )]
     request_tool_calls: Option<Vec<serde_json::Value>>,
+    /// Base64-encoded raw image bytes for vision models (user role only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    images: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -429,10 +621,22 @@ struct OllamaChatResponse {
 
 #[async_trait]
 impl LLMCore for OllamaCore {
+    fn supports_images(&self) -> bool {
+        self.model_has_vision()
+    }
+
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
         let start = std::time::Instant::now();
 
         // Convert ContextWindow to Ollama chat messages format
+        let prepared = crate::media::prepare_for_inference(
+            context,
+            self.model_has_vision(),
+            self.image_resolver.clone(),
+            &self.client,
+        )
+        .await;
+        let context = &prepared;
         let messages = self.context_to_messages(context);
 
         let request = OllamaChatRequest {
@@ -449,7 +653,7 @@ impl LLMCore for OllamaCore {
 
         let ollama_response = self.send_chat_request(request).await?;
         let duration_ms = start.elapsed().as_millis() as u64;
-        Ok(self.response_to_inference_result(ollama_response, duration_ms))
+        Ok(self.response_to_inference_result(ollama_response, duration_ms, &HashMap::new()))
     }
 
     async fn infer_with_tools(
@@ -468,6 +672,14 @@ impl LLMCore for OllamaCore {
         options: &InferenceOptions,
     ) -> Result<InferenceResult, AgentOSError> {
         let start = std::time::Instant::now();
+        let prepared = crate::media::prepare_for_inference(
+            context,
+            self.model_has_vision(),
+            self.image_resolver.clone(),
+            &self.client,
+        )
+        .await;
+        let context = &prepared;
         let messages = self.context_to_messages(context);
 
         // If options disable tools, exclude them from the request.
@@ -507,9 +719,19 @@ impl LLMCore for OllamaCore {
             },
         };
 
+        let intent_by_tool: HashMap<String, String> = effective_tools
+            .iter()
+            .map(|t| {
+                let intent = tool_helpers::infer_intent_type_from_permissions(
+                    &t.capabilities_required.permissions,
+                );
+                (t.manifest.name.clone(), intent)
+            })
+            .collect();
+
         let ollama_response = self.send_chat_request(request).await?;
         let duration_ms = start.elapsed().as_millis() as u64;
-        Ok(self.response_to_inference_result(ollama_response, duration_ms))
+        Ok(self.response_to_inference_result(ollama_response, duration_ms, &intent_by_tool))
     }
 
     fn capabilities(&self) -> &ModelCapabilities {
@@ -551,6 +773,14 @@ impl LLMCore for OllamaCore {
     ) -> Result<(), AgentOSError> {
         let start = std::time::Instant::now();
 
+        let prepared = crate::media::prepare_for_inference(
+            context,
+            self.model_has_vision(),
+            self.image_resolver.clone(),
+            &self.client,
+        )
+        .await;
+        let context = &prepared;
         let messages = self.context_to_messages(context);
 
         let request = OllamaChatRequest {
@@ -722,6 +952,14 @@ impl LLMCore for OllamaCore {
         tx: mpsc::Sender<InferenceEvent>,
     ) -> Result<(), AgentOSError> {
         let start = std::time::Instant::now();
+        let prepared = crate::media::prepare_for_inference(
+            context,
+            self.model_has_vision(),
+            self.image_resolver.clone(),
+            &self.client,
+        )
+        .await;
+        let context = &prepared;
         let messages = self.context_to_messages(context);
         let ollama_tools: Vec<OllamaRequestTool> = tools
             .iter()
@@ -920,7 +1158,9 @@ mod tests {
         let mut ctx = ContextWindow::new(100);
         ctx.push(ContextEntry {
             role: ContextRole::System,
-            content: "You are a helpful assistant.".into(),
+            parts: vec![ContentPart::Text {
+                text: "You are a helpful assistant.".into(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,
@@ -932,7 +1172,9 @@ mod tests {
         });
         ctx.push(ContextEntry {
             role: ContextRole::User,
-            content: "Hello!".into(),
+            parts: vec![ContentPart::Text {
+                text: "Hello!".into(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,
@@ -992,7 +1234,9 @@ mod tests {
         let mut ctx = ContextWindow::new(100);
         ctx.push(ContextEntry {
             role: ContextRole::User,
-            content: "Say 'hello' and nothing else.".into(),
+            parts: vec![ContentPart::Text {
+                text: "Say 'hello' and nothing else.".into(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,
@@ -1013,7 +1257,9 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "tool output".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "tool output".to_string(),
+            }],
             metadata: Some(ContextMetadata {
                 tool_name: Some("shell".to_string()),
                 tool_id: None,
@@ -1044,7 +1290,9 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "tool output".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "tool output".to_string(),
+            }],
             metadata: None,
             timestamp: chrono::Utc::now(),
             importance: 0.5,
@@ -1061,6 +1309,75 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[0].content, "Tool Result:\ntool output");
+    }
+
+    #[test]
+    fn test_ollama_vision_model_sets_images_array() {
+        let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let mut ctx = ContextWindow::new(10);
+        ctx.push(ContextEntry {
+            role: ContextRole::User,
+            parts: vec![
+                ContentPart::Text {
+                    text: "describe".into(),
+                },
+                ContentPart::Image {
+                    mime: "image/png".into(),
+                    source: ImageSource::Base64 {
+                        data: png_b64.into(),
+                    },
+                },
+            ],
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::Task,
+            is_summary: false,
+        });
+        let adapter = OllamaCore::new("http://localhost:11434", "llava")
+            .with_vision_models(vec!["llava".into()]);
+        assert!(adapter.supports_images());
+        let messages = adapter.context_to_messages(&ctx);
+        assert_eq!(messages.len(), 1);
+        let imgs = messages[0].images.as_ref().expect("images");
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0], png_b64);
+    }
+
+    #[test]
+    fn test_ollama_non_vision_model_strips_image_to_stub() {
+        let mut ctx = ContextWindow::new(10);
+        ctx.push(ContextEntry {
+            role: ContextRole::User,
+            parts: vec![
+                ContentPart::Text {
+                    text: "x".into(),
+                },
+                ContentPart::Image {
+                    mime: "image/png".into(),
+                    source: ImageSource::Base64 {
+                        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+                            .into(),
+                    },
+                },
+            ],
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::Task,
+            is_summary: false,
+        });
+        let adapter = OllamaCore::new("http://localhost:11434", "llama3.2");
+        assert!(!adapter.supports_images());
+        let messages = adapter.context_to_messages(&ctx);
+        assert!(messages[0].images.is_none());
+        assert!(messages[0].content.contains("[Image:"));
     }
 
     #[test]
@@ -1119,7 +1436,7 @@ mod tests {
             "eval_count": 30
         }"#;
         let resp: OllamaChatResponse = serde_json::from_str(json).unwrap();
-        let result = adapter.response_to_inference_result(resp, 100);
+        let result = adapter.response_to_inference_result(resp, 100, &HashMap::new());
         assert_eq!(
             result.text,
             "The user asked a question and I should respond."
@@ -1142,7 +1459,7 @@ mod tests {
             "eval_count": 30
         }"#;
         let resp: OllamaChatResponse = serde_json::from_str(json).unwrap();
-        let result = adapter.response_to_inference_result(resp, 100);
+        let result = adapter.response_to_inference_result(resp, 100, &HashMap::new());
         assert_eq!(result.text, "visible answer");
     }
 
@@ -1168,7 +1485,7 @@ mod tests {
             "eval_count": 50
         }"#;
         let resp: OllamaChatResponse = serde_json::from_str(json).unwrap();
-        let result = adapter.response_to_inference_result(resp, 100);
+        let result = adapter.response_to_inference_result(resp, 100, &HashMap::new());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].tool_name, "file-writer");
         assert_eq!(result.stop_reason, StopReason::ToolUse);

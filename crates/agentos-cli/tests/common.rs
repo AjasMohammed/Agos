@@ -98,5 +98,6 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         otel: Default::default(),
         context: Default::default(),
         api: Default::default(),
+        chat: Default::default(),
     }
 }

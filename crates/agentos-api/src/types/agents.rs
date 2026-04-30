@@ -11,6 +11,9 @@ pub struct ApiAgentSummary {
     pub status: String,
     pub roles: Vec<String>,
     pub connected_at: DateTime<Utc>,
+    /// Whether the connected LLM adapter will emit native image blocks for this agent.
+    #[serde(default)]
+    pub supports_images: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

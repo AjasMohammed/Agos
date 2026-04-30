@@ -224,7 +224,9 @@ fn push_assistant_response(
         .any(|kw| response_text.to_lowercase().contains(&kw.to_lowercase()));
     ctx.push(ContextEntry {
         role: ContextRole::Assistant,
-        content: response_text,
+        parts: vec![ContentPart::Text {
+            text: response_text,
+        }],
         timestamp: chrono::Utc::now(),
         metadata: None,
         importance: 0.5,
@@ -426,7 +428,9 @@ impl TestHarness {
 
         ctx.push(ContextEntry {
             role: ContextRole::System,
-            content: self.build_testing_persona_prompt(),
+            parts: vec![ContentPart::Text {
+                text: self.build_testing_persona_prompt(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -439,7 +443,9 @@ impl TestHarness {
 
         ctx.push(ContextEntry {
             role: ContextRole::System,
-            content: scenario.system_prompt.clone(),
+            parts: vec![ContentPart::Text {
+                text: scenario.system_prompt.clone(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.9,
@@ -453,7 +459,9 @@ impl TestHarness {
         let tool_descriptions = self.get_tool_descriptions().await;
         ctx.push(ContextEntry {
             role: ContextRole::System,
-            content: format!("Available tools:\n{}", tool_descriptions),
+            parts: vec![ContentPart::Text {
+                text: format!("Available tools:\n{}", tool_descriptions),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.8,
@@ -466,7 +474,9 @@ impl TestHarness {
 
         ctx.push(ContextEntry {
             role: ContextRole::User,
-            content: scenario.initial_user_message.clone(),
+            parts: vec![ContentPart::Text {
+                text: scenario.initial_user_message.clone(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.7,
@@ -584,7 +594,7 @@ impl TestHarness {
 
                 ctx.push(ContextEntry {
                     role: ContextRole::ToolResult,
-                    content: tool_result,
+                    parts: vec![ContentPart::Text { text: tool_result }],
                     timestamp: chrono::Utc::now(),
                     metadata: None,
                     importance: 0.6,
@@ -623,7 +633,9 @@ impl TestHarness {
             if turn < scenario.max_turns {
                 ctx.push(ContextEntry {
                     role: ContextRole::User,
-                    content: "Continue with the task. Remember to emit [FEEDBACK] blocks for any observations.".to_string(),
+                    parts: vec![ContentPart::Text {
+                        text: "Continue with the task. Remember to emit [FEEDBACK] blocks for any observations.".to_string(),
+                    }],
                     timestamp: chrono::Utc::now(),
                     metadata: None,
                     importance: 0.4,

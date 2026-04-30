@@ -5,8 +5,9 @@ edition.workspace = true
 
 [dependencies]
 agentos-types = { path = "../agentos-types" }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["json", "stream", "rustls-tls"] }
 async-trait = { workspace = true }
+url = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -15,4 +16,5 @@ chrono = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 secrecy = "0.8"
+base64 = "0.22"
 toml = { workspace = true }

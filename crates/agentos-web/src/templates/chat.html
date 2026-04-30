@@ -1,10 +1,23 @@
 {% extends "base.html" %}
 {% block content %}
 
-<div class="page-header">
+<div class="chat-hero">
     <div>
-        <h1>Chat</h1>
-        <p class="page-meta">A calmer chat workspace with {{ sessions|length }} session{% if sessions|length != 1 %}s{% endif %}</p>
+        <p class="chat-eyebrow">AgentOS Chat</p>
+        <h1>Chat with your agents</h1>
+        <p class="page-meta">
+            Start a direct session, attach context, and return to recent conversations without leaving the control panel.
+        </p>
+    </div>
+    <div class="chat-hero-metrics" aria-label="Chat overview">
+        <div class="chat-hero-metric">
+            <span>Sessions</span>
+            <strong>{{ sessions|length }}</strong>
+        </div>
+        <div class="chat-hero-metric">
+            <span>Agents</span>
+            <strong>{{ agents|length }}</strong>
+        </div>
     </div>
 </div>
 
@@ -16,27 +29,42 @@
                 <strong>Sessions</strong>
                 <p class="chat-sidebar-subtitle">Jump back into recent conversations.</p>
             </div>
+            <span class="badge badge-info">{{ sessions|length }}</span>
         </div>
         {% if sessions|length == 0 %}
         <div class="chat-sidebar-empty muted">
-            <p>No sessions yet.</p>
-            <p>Start one from the composer.</p>
+            <p><strong>No sessions yet</strong></p>
+            <p>Use the composer to start your first direct agent conversation.</p>
         </div>
         {% else %}
-        <nav class="chat-thread-list">
+        <nav class="chat-thread-list" aria-label="Recent chat sessions">
             {% for s in sessions %}
-            <a href="/chat/{{ s.id }}" class="chat-thread-item">
-                <div class="chat-thread-topline">
-                    <div class="chat-thread-agent">{{ s.title|default(s.agent_name) }}</div>
-                    <small class="muted">{{ s.updated_at|relative_time }}</small>
-                </div>
-                <div class="chat-thread-meta">
-                    <small class="muted">with {{ s.agent_name }}</small>
-                </div>
-                {% if s.preview %}
-                <div class="chat-thread-preview muted">{{ s.preview }}</div>
-                {% endif %}
-            </a>
+            <div class="chat-thread-row" id="chat-row-{{ s.id }}">
+                <a href="/chat/{{ s.id }}" class="chat-thread-item" aria-label="Open chat session {{ s.title|default(s.agent_name) }}">
+                    <div class="chat-thread-topline">
+                        <div class="chat-thread-agent">{{ s.title|default(s.agent_name) }}</div>
+                        <small class="muted">{{ s.updated_at|relative_time }}</small>
+                    </div>
+                    <div class="chat-thread-meta">
+                        <span class="chat-thread-dot" aria-hidden="true"></span>
+                        <small class="muted">with {{ s.agent_name }}</small>
+                    </div>
+                    {% if s.preview %}
+                    <div class="chat-thread-preview muted">{{ s.preview }}</div>
+                    {% else %}
+                    <div class="chat-thread-preview muted">No preview captured yet.</div>
+                    {% endif %}
+                </a>
+                <button class="chat-thread-delete-btn"
+                        hx-post="/chat/{{ s.id }}/delete"
+                        hx-target="closest .chat-thread-row"
+                        hx-swap="outerHTML"
+                        hx-confirm="Delete this chat session?"
+                        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+                        hx-on::after-swap="if (!document.querySelector('.chat-thread-row')) location.reload()"
+                        title="Delete session: {{ s.title|default(s.agent_name) }}"
+                        aria-label="Delete chat session: {{ s.title|default(s.agent_name) }}">&times;</button>
+            </div>
             {% endfor %}
         </nav>
         {% endif %}
@@ -49,7 +77,7 @@
                     <p class="chat-eyebrow">New conversation</p>
                     <h2>Start with a clean prompt</h2>
                 </div>
-                <p class="muted">Pick an agent, drop in context, and send.</p>
+                <p class="muted">Pick an agent, attach supporting files, and send a focused first message.</p>
             </header>
 
             {% if agents|length == 0 %}
@@ -112,13 +140,19 @@
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="file_ids" :value="fileIds.join(',')">
 
-                <label for="agent_name">Agent
-                    <select id="agent_name" name="agent_name" required>
-                        {% for agent in agents %}
-                        <option value="{{ agent.name }}">{{ agent.name }} — {{ agent.model }}</option>
-                        {% endfor %}
-                    </select>
-                </label>
+                <div class="chat-compose-grid">
+                    <label for="agent_name">Agent
+                        <select id="agent_name" name="agent_name" required>
+                            {% for agent in agents %}
+                            <option value="{{ agent.name }}">{{ agent.name }} — {{ agent.model }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                    <div class="chat-compose-note" aria-label="Chat behavior">
+                        <strong>Direct mode</strong>
+                        <span>Messages stream back here and do not create a task.</span>
+                    </div>
+                </div>
 
                 <label for="message">Message
                     <textarea id="message" name="message" rows="5" required
@@ -130,7 +164,7 @@
                     <template x-for="chip in fileChips" :key="chip.id">
                         <span class="chat-attach-chip">
                             <span x-text="chip.name"></span>
-                            <button type="button" @click="removeFile(chip.id)" aria-label="Remove attachment">×</button>
+                            <button type="button" @click="removeFile(chip.id)" aria-label="Remove attachment">&times;</button>
                         </span>
                     </template>
                 </div>
@@ -138,7 +172,7 @@
 
                 <div class="chat-compose-actions">
                     <label class="chat-attach-btn" :class="{ 'uploading': uploading }" title="Attach a file">
-                        <input type="file" style="display:none" @change="attachFile($el)" :disabled="uploading">
+                        <input type="file" class="chat-file-input" @change="attachFile($el)" :disabled="uploading">
                         <span x-show="!uploading">+ Attach</span>
                         <span x-show="uploading">Uploading…</span>
                     </label>

@@ -80,7 +80,17 @@ pub async fn list(
 
     // Build provider list from the kernel's ProviderCatalog.
     let providers: Vec<_> = {
-        let catalog = state.kernel.provider_catalog.read().unwrap();
+        let catalog = match state.kernel.provider_catalog.read() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, "provider_catalog RwLock poisoned");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Provider catalog unavailable",
+                )
+                    .into_response();
+            }
+        };
         let mut list: Vec<_> = catalog
             .list()
             .into_iter()

@@ -37,7 +37,7 @@ use agentos_hal::{
     DeviceAccessGate, DeviceStatus, HalEventSink, HalOperation, HardwareAbstractionLayer,
     HardwareRegistry,
 };
-use agentos_llm::LLMCore;
+use agentos_llm::{LLMCore, NoopImageResolver};
 use agentos_memory::Embedder;
 use agentos_pipeline::{PipelineEngine, PipelineStore};
 use agentos_sandbox::SandboxExecutor;
@@ -626,6 +626,8 @@ pub struct Kernel {
     pub sandbox: Arc<SandboxExecutor>,
     pub router: Arc<crate::router::TaskRouter>,
     pub active_llms: Arc<RwLock<HashMap<AgentID, Arc<dyn LLMCore>>>>,
+    /// Resolves chat `ImageSource::FileRef` to base64; replaced by the web UI with a file-store implementation.
+    pub image_resolver: std::sync::RwLock<Arc<dyn agentos_llm::ImageResolver>>,
     pub message_bus: Arc<crate::agent_message_bus::AgentMessageBus>,
     pub profile_manager: Arc<ProfileManager>,
     pub episodic_memory: Arc<agentos_memory::EpisodicStore>,
@@ -666,6 +668,10 @@ pub struct Kernel {
     pub channel_registry: Arc<crate::user_channel_registry::UserChannelRegistry>,
     /// Manages background listener tasks for bidirectional channels (Phase 6).
     pub channel_listener_registry: Arc<crate::user_channel_registry::ChannelListenerRegistry>,
+    /// Live snapshot of connected channels surfaced into the system prompt's
+    /// `## Channels` block and the agent-manual filter. Refreshed on every
+    /// channel register/deregister via `refresh_connected_channels_snapshot`.
+    pub connected_channels_snapshot: agentos_tools::agent_manual::SharedConnectedChannels,
     /// Sender for inbound messages from channel listeners to InboundRouter (Phase 6).
     pub inbound_tx: tokio::sync::mpsc::Sender<crate::notification_router::InboundMessage>,
     /// Resolves channel inbound chat to `chat_infer_with_tools` after `wire_inbound_chat_bridge`.
@@ -903,6 +909,29 @@ fn generate_vault_passphrase() -> String {
     hex::encode(bytes)
 }
 
+/// Some kernel actions require a real running task context (parent/child
+/// linkage, scheduler state, blocking task suspension). Chat sessions do not
+/// own a registered task — synthetic tasks would corrupt scheduler state or
+/// deadlock the chat HTTP request. Reject those with a clean message instead
+/// of dispatching them.
+fn chat_incompatible_action_error(
+    action: &crate::kernel_action::KernelAction,
+) -> Option<&'static str> {
+    use crate::kernel_action::KernelAction;
+    match action {
+        KernelAction::SpawnAgent { .. }
+        | KernelAction::AwaitAgents { .. }
+        | KernelAction::PollAgents { .. }
+        | KernelAction::CancelAgent { .. }
+        | KernelAction::DelegateTask { .. }
+        | KernelAction::SpawnAsync { .. }
+        | KernelAction::AgentRpcCall { .. } => Some(
+            "This action requires a running task context. Run it from `agentos task run …` (or have an agent invoke it inside an executing task), not from chat.",
+        ),
+        _ => None,
+    }
+}
+
 fn persist_generated_passphrase(path: &Path, passphrase: &str) -> Result<(), anyhow::Error> {
     match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(mut file) => {
@@ -932,6 +961,32 @@ impl Kernel {
     /// Returns the kernel data directory (used by the web server to co-locate stores).
     pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
+    }
+
+    /// Re-pull the connected channel list from `UserChannelRegistry` and update
+    /// the shared snapshot used by `agent-manual` filtering. Called after every
+    /// channel register/deregister so the agent-facing view stays current.
+    pub(crate) async fn refresh_connected_channels_snapshot(&self) {
+        let new_list: Vec<agentos_tools::agent_manual::ConnectedChannel> = match self
+            .channel_registry
+            .list_active()
+            .await
+        {
+            Ok(list) => list
+                .into_iter()
+                .filter(|c| c.active)
+                .map(|c| agentos_tools::agent_manual::ConnectedChannel {
+                    name: c.display_name,
+                    kind: c.kind.to_string(),
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "refresh_connected_channels_snapshot: list_active failed");
+                return;
+            }
+        };
+        let mut guard = self.connected_channels_snapshot.write().await;
+        *guard = new_list;
     }
 
     /// Re-register all active channels that were persisted from the previous run.
@@ -992,6 +1047,26 @@ impl Kernel {
         }
     }
 
+    /// Install the image resolver used by LLM adapters for [`ImageSource::FileRef`] (e.g. web uploads).
+    pub fn set_image_resolver(&self, resolver: Arc<dyn agentos_llm::ImageResolver>) {
+        *self
+            .image_resolver
+            .write()
+            .expect("image_resolver lock poisoned") = resolver;
+    }
+
+    fn merge_chat_user_parts(
+        new_message: &str,
+        user_parts: Option<Vec<agentos_types::ContentPart>>,
+    ) -> Vec<agentos_types::ContentPart> {
+        match user_parts {
+            Some(p) if !p.is_empty() => p,
+            _ => vec![agentos_types::ContentPart::Text {
+                text: new_message.to_string(),
+            }],
+        }
+    }
+
     /// Direct chat inference — calls the agent's LLM with the conversation history.
     ///
     /// Does NOT create a task or touch the scheduler. Used exclusively by the web UI
@@ -1005,7 +1080,7 @@ impl Kernel {
         new_message: &str,
     ) -> Result<String, String> {
         let result = self
-            .chat_infer_with_tools(agent_name, history, new_message)
+            .chat_infer_with_tools(agent_name, history, new_message, None)
             .await?;
         Ok(result.answer)
     }
@@ -1020,6 +1095,7 @@ impl Kernel {
         agent_name: &str,
         history: &[(String, String)],
         new_message: &str,
+        user_parts: Option<Vec<agentos_types::ContentPart>>,
     ) -> Result<ChatInferenceResult, String> {
         let (agent_id, agent_permissions, agent_description, agent_roles, agent_system_prompt) = {
             let registry = self.agent_registry.read().await;
@@ -1053,14 +1129,33 @@ impl Kernel {
         // Build system prompt from the canonical builder — same structure as task execution.
         let (_tools_desc, llm_tool_manifests): (String, Vec<ToolManifest>) = {
             let registry = self.tool_registry.read().await;
+            // Chat flow has no capability_token filter; sending every manifest
+            // burns ~12k tokens per turn. Inline only the default chat set
+            // (file/memory/discovery/util) — agents fetch the rest on demand
+            // via `agent-manual`.
             let mut manifests = registry
                 .list_all()
                 .into_iter()
+                .filter(|tool| {
+                    agentos_tools::factory::is_chat_default_tool(&tool.manifest.manifest.name)
+                })
                 .map(|tool| tool.manifest.clone())
                 .collect::<Vec<_>>();
             manifests.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
             (registry.tools_for_prompt(), manifests)
         };
+        let connected_channels: Vec<crate::system_prompt::ChannelHint> =
+            match self.channel_registry.list_active().await {
+                Ok(list) => list
+                    .into_iter()
+                    .filter(|c| c.active)
+                    .map(|c| crate::system_prompt::ChannelHint {
+                        name: c.display_name,
+                        kind: c.kind.to_string(),
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
         let system_prompt =
             crate::system_prompt::build_system_prompt(&crate::system_prompt::SystemPromptContext {
                 agent_name: agent_name.to_string(),
@@ -1070,12 +1165,15 @@ impl Kernel {
                 sub_agent: None,
                 enforce_final_tag: self.config.chat.enforce_final_tag,
                 timezone: crate::system_prompt::local_timezone_str(),
+                connected_channels,
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
         ctx.push(agentos_types::ContextEntry {
             role: agentos_types::ContextRole::System,
-            content: system_prompt,
+            parts: vec![agentos_types::ContentPart::Text {
+                text: system_prompt,
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1093,7 +1191,9 @@ impl Kernel {
             };
             ctx.push(agentos_types::ContextEntry {
                 role: ctx_role,
-                content: content.clone(),
+                parts: vec![agentos_types::ContentPart::Text {
+                    text: content.clone(),
+                }],
                 timestamp: chrono::Utc::now(),
                 metadata: None,
                 importance: 0.5,
@@ -1106,7 +1206,7 @@ impl Kernel {
         }
         ctx.push(agentos_types::ContextEntry {
             role: agentos_types::ContextRole::User,
-            content: new_message.to_string(),
+            parts: Self::merge_chat_user_parts(new_message, user_parts),
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,
@@ -1122,8 +1222,25 @@ impl Kernel {
         let mut total_tokens_used = 0u64;
         let mut total_cost_usd = 0.0f64;
 
+        // Circuit breakers for stuck small-model loops. Reset whenever the
+        // model makes progress (different tool / non-empty text / different
+        // error). See logs around 2026-04-30T07:46 — gemma4:31b-cloud spammed
+        // the same failing `agent-manual` call 8x with empty assistant text.
+        const REPEAT_TOOL_ERROR_LIMIT: u32 = 2;
+        const EMPTY_TEXT_TOOLCALL_STREAK_LIMIT: u32 = 3;
+        let mut repeated_tool_errors: std::collections::HashMap<(String, String), u32> =
+            std::collections::HashMap::new();
+        let mut empty_text_streak_signature: Option<String> = None;
+        let mut empty_text_streak_count: u32 = 0;
+
         let final_answer = loop {
             iterations += 1;
+            let image_parts_in_context = ctx
+                .active_entries()
+                .iter()
+                .flat_map(|e| &e.parts)
+                .filter(|p| matches!(p, agentos_types::ContentPart::Image { .. }))
+                .count();
             let mut result = llm
                 .infer_with_tools(&ctx, &llm_tool_manifests)
                 .await
@@ -1145,6 +1262,7 @@ impl Kernel {
                 text_len = result.text.len(),
                 visible_text_len = visible_text.len(),
                 native_tool_calls = result.tool_calls.len(),
+                image_parts_in_context,
                 tokens_used = result.tokens_used.total_tokens,
                 model = %result.model,
                 duration_ms = result.duration_ms,
@@ -1199,6 +1317,44 @@ impl Kernel {
             }
 
             if has_native_tool_calls {
+                // Empty-text + same-tool-call streak detector. See docstring
+                // on the streaming variant for context.
+                let mut sig_names: Vec<String> = result
+                    .tool_calls
+                    .iter()
+                    .map(|tc| tc.tool_name.clone())
+                    .collect();
+                sig_names.sort();
+                sig_names.dedup();
+                let signature = sig_names.join("+");
+                if visible_text.trim().is_empty() {
+                    if empty_text_streak_signature.as_deref() == Some(signature.as_str()) {
+                        empty_text_streak_count += 1;
+                    } else {
+                        empty_text_streak_signature = Some(signature.clone());
+                        empty_text_streak_count = 1;
+                    }
+                    if empty_text_streak_count >= EMPTY_TEXT_TOOLCALL_STREAK_LIMIT {
+                        tracing::warn!(
+                            target: "agentos::chat",
+                            agent = %agent_name,
+                            iteration = iterations,
+                            tools = %signature,
+                            streak = empty_text_streak_count,
+                            "Aborting chat loop: model stuck calling same tool(s) with no text"
+                        );
+                        break format!(
+                            "{}\n\n[Note: aborted — model called {} {}x with no text. Likely stuck. Try rephrasing or use a stronger model.]",
+                            EMPTY_LLM_ANSWER_PLACEHOLDER,
+                            signature,
+                            empty_text_streak_count,
+                        );
+                    }
+                } else {
+                    empty_text_streak_signature = None;
+                    empty_text_streak_count = 0;
+                }
+
                 // Push the LLM's tool-call response into context, preserving
                 // the tool_calls array so adapters can reconstruct the
                 // provider-native assistant message format on the next turn.
@@ -1215,7 +1371,9 @@ impl Kernel {
                 };
                 ctx.push(agentos_types::ContextEntry {
                     role: agentos_types::ContextRole::Assistant,
-                    content: result.text.clone(),
+                    parts: vec![agentos_types::ContentPart::Text {
+                        text: result.text.clone(),
+                    }],
                     timestamp: chrono::Utc::now(),
                     metadata: Some(agentos_types::ContextMetadata {
                         tool_name: None,
@@ -1247,12 +1405,14 @@ impl Kernel {
                         })
                         .collect();
 
+                let mut repeat_error_abort: Option<String> = None;
                 for (tool_name, payload, intent_type_str, tool_call_id) in &calls_to_execute {
+                    let chat_trace_id = TraceID::new();
                     let exec_ctx = ToolExecutionContext {
                         data_dir: self.data_dir.clone(),
                         task_id: TaskID::new(),
                         agent_id,
-                        trace_id: TraceID::new(),
+                        trace_id: chat_trace_id,
                         permissions: agent_permissions.clone(),
                         vault: None,
                         hal: Some(self.hal.clone()),
@@ -1277,7 +1437,7 @@ impl Kernel {
                     };
 
                     let start = std::time::Instant::now();
-                    let tool_result = match self
+                    let mut tool_result = match self
                         .tool_runner
                         .execute(tool_name, payload.clone(), exec_ctx)
                         .await
@@ -1292,7 +1452,52 @@ impl Kernel {
                             serde_json::json!({"error": e.to_string()})
                         }
                     };
+                    if let Some(action) =
+                        crate::kernel_action::KernelAction::from_tool_result(&tool_result)
+                    {
+                        if let Some(reject) = chat_incompatible_action_error(&action) {
+                            tool_result = serde_json::json!({ "error": reject });
+                        } else {
+                            let synthetic_task = {
+                                let mut t = agentos_types::AgentTask {
+                                    agent_id,
+                                    ..Default::default()
+                                };
+                                t.capability_token.agent_id = agent_id;
+                                t.capability_token.task_id = t.id;
+                                t.capability_token.permissions = agent_permissions.clone();
+                                t
+                            };
+                            let outcome = self
+                                .dispatch_kernel_action(&synthetic_task, action, chat_trace_id)
+                                .await;
+                            tool_result = outcome.result;
+                        }
+                    }
                     let duration_ms = start.elapsed().as_millis() as u64;
+
+                    let success = !tool_result
+                        .as_object()
+                        .is_some_and(|o| o.contains_key("error"));
+                    if !success {
+                        let err_text = tool_result
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let mut err_sig: String = err_text.chars().take(80).collect();
+                        if err_sig.is_empty() {
+                            err_sig = "<no-message>".into();
+                        }
+                        let key = (tool_name.clone(), err_sig.clone());
+                        let count = repeated_tool_errors.entry(key).or_insert(0);
+                        *count += 1;
+                        if *count >= REPEAT_TOOL_ERROR_LIMIT {
+                            repeat_error_abort = Some(format!(
+                                "[Note: aborted — tool '{}' kept failing with the same error ({}x): {}]",
+                                tool_name, count, err_sig
+                            ));
+                        }
+                    }
 
                     tool_calls.push(ChatToolCallRecord {
                         tool_name: tool_name.clone(),
@@ -1319,7 +1524,7 @@ impl Kernel {
                     // Inject tool result with native metadata when available.
                     ctx.push(agentos_types::ContextEntry {
                         role: agentos_types::ContextRole::ToolResult,
-                        content: result_str,
+                        parts: vec![agentos_types::ContentPart::Text { text: result_str }],
                         timestamp: chrono::Utc::now(),
                         metadata: Some(agentos_types::ContextMetadata {
                             tool_name: Some(tool_name.clone()),
@@ -1336,6 +1541,19 @@ impl Kernel {
                         category: agentos_types::ContextCategory::Task,
                         is_summary: false,
                     });
+
+                    if repeat_error_abort.is_some() {
+                        break;
+                    }
+                }
+                if let Some(note) = repeat_error_abort {
+                    tracing::warn!(
+                        target: "agentos::chat",
+                        agent = %agent_name,
+                        iteration = iterations,
+                        "Aborting chat loop: repeat tool-error circuit breaker tripped"
+                    );
+                    break format!("{}\n\n{}", EMPTY_LLM_ANSWER_PLACEHOLDER, note);
                 }
             } else {
                 // No tool call — this is the final answer.
@@ -1389,6 +1607,7 @@ impl Kernel {
         agent_name: &str,
         history: &[(String, String)],
         new_message: &str,
+        user_parts: Option<Vec<agentos_types::ContentPart>>,
         tx: tokio::sync::mpsc::Sender<ChatStreamEvent>,
     ) -> Result<ChatInferenceResult, String> {
         let (agent_id, agent_permissions, agent_description, agent_roles, agent_system_prompt) = {
@@ -1441,14 +1660,33 @@ impl Kernel {
 
         let (_tools_desc, llm_tool_manifests): (String, Vec<ToolManifest>) = {
             let registry = self.tool_registry.read().await;
+            // Chat flow has no capability_token filter; sending every manifest
+            // burns ~12k tokens per turn. Inline only the default chat set
+            // (file/memory/discovery/util) — agents fetch the rest on demand
+            // via `agent-manual`.
             let mut manifests = registry
                 .list_all()
                 .into_iter()
+                .filter(|tool| {
+                    agentos_tools::factory::is_chat_default_tool(&tool.manifest.manifest.name)
+                })
                 .map(|tool| tool.manifest.clone())
                 .collect::<Vec<_>>();
             manifests.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
             (registry.tools_for_prompt(), manifests)
         };
+        let connected_channels: Vec<crate::system_prompt::ChannelHint> =
+            match self.channel_registry.list_active().await {
+                Ok(list) => list
+                    .into_iter()
+                    .filter(|c| c.active)
+                    .map(|c| crate::system_prompt::ChannelHint {
+                        name: c.display_name,
+                        kind: c.kind.to_string(),
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
         let system_prompt =
             crate::system_prompt::build_system_prompt(&crate::system_prompt::SystemPromptContext {
                 agent_name: agent_name.to_string(),
@@ -1458,12 +1696,15 @@ impl Kernel {
                 sub_agent: None,
                 enforce_final_tag: self.config.chat.enforce_final_tag,
                 timezone: crate::system_prompt::local_timezone_str(),
+                connected_channels,
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
         ctx.push(agentos_types::ContextEntry {
             role: agentos_types::ContextRole::System,
-            content: system_prompt,
+            parts: vec![agentos_types::ContentPart::Text {
+                text: system_prompt,
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1481,7 +1722,9 @@ impl Kernel {
             };
             ctx.push(agentos_types::ContextEntry {
                 role: ctx_role,
-                content: content.clone(),
+                parts: vec![agentos_types::ContentPart::Text {
+                    text: content.clone(),
+                }],
                 timestamp: chrono::Utc::now(),
                 metadata: None,
                 importance: 0.5,
@@ -1494,7 +1737,7 @@ impl Kernel {
         }
         ctx.push(agentos_types::ContextEntry {
             role: agentos_types::ContextRole::User,
-            content: new_message.to_string(),
+            parts: Self::merge_chat_user_parts(new_message, user_parts),
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,
@@ -1510,8 +1753,26 @@ impl Kernel {
         let mut total_tokens_used = 0u64;
         let mut total_cost_usd = 0.0f64;
 
+        // Circuit breakers for stuck small-model loops. Reset whenever the
+        // model makes progress (different tool / non-empty text / different
+        // error). See logs around 2026-04-30T07:46 — gemma4:31b-cloud spammed
+        // the same failing `agent-manual` call 8x with empty assistant text.
+        const REPEAT_TOOL_ERROR_LIMIT: u32 = 2;
+        const EMPTY_TEXT_TOOLCALL_STREAK_LIMIT: u32 = 3;
+        let mut repeated_tool_errors: std::collections::HashMap<(String, String), u32> =
+            std::collections::HashMap::new();
+        let mut empty_text_streak_signature: Option<String> = None;
+        let mut empty_text_streak_count: u32 = 0;
+
         let final_answer = loop {
             iterations += 1;
+
+            let image_parts_in_context = ctx
+                .active_entries()
+                .iter()
+                .flat_map(|e| &e.parts)
+                .filter(|p| matches!(p, agentos_types::ContentPart::Image { .. }))
+                .count();
 
             let _ = tx
                 .send(ChatStreamEvent::Thinking {
@@ -1664,6 +1925,7 @@ impl Kernel {
                 text_len = result.text.len(),
                 visible_text_len = visible_text.len(),
                 native_tool_calls = result.tool_calls.len(),
+                image_parts_in_context,
                 tokens_used = result.tokens_used.total_tokens,
                 model = %result.model,
                 duration_ms = result.duration_ms,
@@ -1729,6 +1991,56 @@ impl Kernel {
             }
 
             if has_native_tool_calls {
+                // Circuit breaker: same tool-call set with empty assistant
+                // text N iterations in a row. Triggers on the small-model
+                // failure mode where the model emits no prose, only repeats
+                // a tool call it cannot recover from.
+                let mut sig_names: Vec<String> = result
+                    .tool_calls
+                    .iter()
+                    .map(|tc| tc.tool_name.clone())
+                    .collect();
+                sig_names.sort();
+                sig_names.dedup();
+                let signature = sig_names.join("+");
+                if visible_text.trim().is_empty() {
+                    if empty_text_streak_signature.as_deref() == Some(signature.as_str()) {
+                        empty_text_streak_count += 1;
+                    } else {
+                        empty_text_streak_signature = Some(signature.clone());
+                        empty_text_streak_count = 1;
+                    }
+                    if empty_text_streak_count >= EMPTY_TEXT_TOOLCALL_STREAK_LIMIT {
+                        tracing::warn!(
+                            target: "agentos::chat",
+                            agent = %agent_name,
+                            iteration = iterations,
+                            tools = %signature,
+                            streak = empty_text_streak_count,
+                            "Aborting chat loop: model stuck calling same tool(s) with no text"
+                        );
+                        let answer = format!(
+                            "{}\n\n[Note: aborted — model called {} {}x with no text. Likely stuck. Try rephrasing or use a stronger model.]",
+                            EMPTY_LLM_ANSWER_PLACEHOLDER,
+                            signature,
+                            empty_text_streak_count,
+                        );
+                        let _ = tx
+                            .send(ChatStreamEvent::Done {
+                                answer: answer.clone(),
+                                tool_calls: tool_calls.clone(),
+                                iterations,
+                                tokens_used: total_tokens_used,
+                                cost_usd: total_cost_usd,
+                            })
+                            .await;
+                        break answer;
+                    }
+                } else {
+                    empty_text_streak_signature = None;
+                    empty_text_streak_count = 0;
+                }
+
                 let tool_calls_json = match serde_json::to_value(&result.tool_calls) {
                     Ok(v) => Some(v),
                     Err(e) => {
@@ -1742,7 +2054,9 @@ impl Kernel {
                 };
                 ctx.push(agentos_types::ContextEntry {
                     role: agentos_types::ContextRole::Assistant,
-                    content: result.text.clone(),
+                    parts: vec![agentos_types::ContentPart::Text {
+                        text: result.text.clone(),
+                    }],
                     timestamp: chrono::Utc::now(),
                     metadata: Some(agentos_types::ContextMetadata {
                         tool_name: None,
@@ -1774,6 +2088,7 @@ impl Kernel {
                         })
                         .collect();
 
+                let mut repeat_error_abort: Option<String> = None;
                 for (tool_name, payload, intent_type_str, tool_call_id) in &calls_to_execute {
                     let _ = tx
                         .send(ChatStreamEvent::ToolStart {
@@ -1782,11 +2097,12 @@ impl Kernel {
                         })
                         .await;
 
+                    let chat_trace_id = TraceID::new();
                     let exec_ctx = ToolExecutionContext {
                         data_dir: self.data_dir.clone(),
                         task_id: TaskID::new(),
                         agent_id,
-                        trace_id: TraceID::new(),
+                        trace_id: chat_trace_id,
                         permissions: agent_permissions.clone(),
                         vault: None,
                         hal: Some(self.hal.clone()),
@@ -1811,7 +2127,7 @@ impl Kernel {
                     };
 
                     let start = std::time::Instant::now();
-                    let tool_result = match self
+                    let mut tool_result = match self
                         .tool_runner
                         .execute(tool_name, payload.clone(), exec_ctx)
                         .await
@@ -1826,6 +2142,28 @@ impl Kernel {
                             serde_json::json!({"error": e.to_string()})
                         }
                     };
+                    if let Some(action) =
+                        crate::kernel_action::KernelAction::from_tool_result(&tool_result)
+                    {
+                        if let Some(reject) = chat_incompatible_action_error(&action) {
+                            tool_result = serde_json::json!({ "error": reject });
+                        } else {
+                            let synthetic_task = {
+                                let mut t = agentos_types::AgentTask {
+                                    agent_id,
+                                    ..Default::default()
+                                };
+                                t.capability_token.agent_id = agent_id;
+                                t.capability_token.task_id = t.id;
+                                t.capability_token.permissions = agent_permissions.clone();
+                                t
+                            };
+                            let outcome = self
+                                .dispatch_kernel_action(&synthetic_task, action, chat_trace_id)
+                                .await;
+                            tool_result = outcome.result;
+                        }
+                    }
                     let duration_ms = start.elapsed().as_millis() as u64;
 
                     let result_str = {
@@ -1857,6 +2195,26 @@ impl Kernel {
                         .as_object()
                         .is_some_and(|o| o.contains_key("error"));
 
+                    if !success {
+                        let err_text = tool_result
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let mut err_sig: String = err_text.chars().take(80).collect();
+                        if err_sig.is_empty() {
+                            err_sig = "<no-message>".into();
+                        }
+                        let key = (tool_name.clone(), err_sig.clone());
+                        let count = repeated_tool_errors.entry(key).or_insert(0);
+                        *count += 1;
+                        if *count >= REPEAT_TOOL_ERROR_LIMIT {
+                            repeat_error_abort = Some(format!(
+                                "[Note: aborted — tool '{}' kept failing with the same error ({}x): {}]",
+                                tool_name, count, err_sig
+                            ));
+                        }
+                    }
+
                     let _ = tx
                         .send(ChatStreamEvent::ToolResult {
                             tool_name: tool_name.clone(),
@@ -1877,7 +2235,7 @@ impl Kernel {
                     // Inject tool result with native metadata when available.
                     ctx.push(agentos_types::ContextEntry {
                         role: agentos_types::ContextRole::ToolResult,
-                        content: result_str,
+                        parts: vec![agentos_types::ContentPart::Text { text: result_str }],
                         timestamp: chrono::Utc::now(),
                         metadata: Some(agentos_types::ContextMetadata {
                             tool_name: Some(tool_name.clone()),
@@ -1894,6 +2252,29 @@ impl Kernel {
                         category: agentos_types::ContextCategory::Task,
                         is_summary: false,
                     });
+
+                    if repeat_error_abort.is_some() {
+                        break;
+                    }
+                }
+                if let Some(note) = repeat_error_abort {
+                    tracing::warn!(
+                        target: "agentos::chat",
+                        agent = %agent_name,
+                        iteration = iterations,
+                        "Aborting chat loop: repeat tool-error circuit breaker tripped"
+                    );
+                    let answer = format!("{}\n\n{}", EMPTY_LLM_ANSWER_PLACEHOLDER, note);
+                    let _ = tx
+                        .send(ChatStreamEvent::Done {
+                            answer: answer.clone(),
+                            tool_calls: tool_calls.clone(),
+                            iterations,
+                            tokens_used: total_tokens_used,
+                            cost_usd: total_cost_usd,
+                        })
+                        .await;
+                    break answer;
                 }
             } else {
                 let answer = if visible_text.trim().is_empty() {
@@ -2440,13 +2821,23 @@ impl Kernel {
                 agentos_tools::agent_manual::AgentManualTool::summaries_from_registry(&all_tools);
             std::sync::Arc::new(tokio::sync::RwLock::new(summaries_vec))
         };
+        // Live snapshot of connected channels — populated now from the
+        // registry, refreshed on register/deregister so the manual filter
+        // and any other consumer always see the current state.
+        // Populated at boot via `refresh_connected_channels_snapshot` (after `channel_registry` exists).
+        let connected_channels_shared: agentos_tools::agent_manual::SharedConnectedChannels =
+            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
         {
             // Collect tool names before registering agent-self so the list
             // includes every other tool but not agent-self itself (which is
             // registered in the next line). This avoids a chicken-and-egg
             // ordering problem and keeps the list accurate.
             let tool_count = tool_runner.list_tools().len();
-            tool_runner.register_agent_manual(std::sync::Arc::clone(&tool_summaries_shared));
+            tool_runner.register_agent_manual_with_channels(
+                std::sync::Arc::clone(&tool_summaries_shared),
+                std::sync::Arc::clone(&connected_channels_shared),
+            );
             tool_runner.register_list_tools(std::sync::Arc::clone(&tool_summaries_shared));
             tool_runner.register_describe_tool(std::sync::Arc::clone(&tool_summaries_shared));
             tool_runner.register_search_tools(std::sync::Arc::clone(&tool_summaries_shared));
@@ -2822,6 +3213,7 @@ impl Kernel {
                                                 record.name.clone(),
                                             ]),
                                             capability_tags: vec![],
+                                            group: String::new(),
                                         },
                                         capabilities_required:
                                             agentos_types::tool::ToolCapabilities {
@@ -2853,6 +3245,7 @@ impl Kernel {
                                         // to ExecCapable so approval is required unless the
                                         // operator has an explicit auto-approve rule.
                                         risk_class: agentos_types::RiskClass::ExecCapable,
+                                        usage_hints: None,
                                     };
                                     {
                                         let mut reg = tool_registry.write().await;
@@ -3334,6 +3727,7 @@ impl Kernel {
             sandbox,
             router,
             active_llms,
+            image_resolver: std::sync::RwLock::new(Arc::new(NoopImageResolver)),
             message_bus,
             profile_manager,
             episodic_memory,
@@ -3374,6 +3768,7 @@ impl Kernel {
             notification_router,
             channel_registry,
             channel_listener_registry,
+            connected_channels_snapshot: connected_channels_shared,
             inbound_tx,
             inbound_chat_bridge,
             pending_inbound_rx: std::sync::Mutex::new(Some(inbound_rx)),
@@ -3512,6 +3907,7 @@ impl Kernel {
 
         // Restore bidirectional channels persisted from the previous run.
         kernel.restore_channels().await;
+        kernel.refresh_connected_channels_snapshot().await;
 
         // Load connector manifests from the connectors/ directory.
         {
@@ -3597,6 +3993,7 @@ impl Kernel {
                     self.channel_registry.clone(),
                     self.scheduler.clone(),
                     self.inbound_chat_bridge.clone(),
+                    self.audit.clone(),
                     rx,
                 )
                 .run(),

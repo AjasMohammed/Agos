@@ -57,8 +57,12 @@ const HAL_TOOL_NAMES: &[&str] = &[
     "hardware-info",
     "sys-monitor",
     "process-manager",
+    "system-mounts",
+    "system-open-files",
+    "system-services",
     "log-reader",
     "network-monitor",
+    "network-sockets",
     "printer",
     "raw-usb",
     "usb-storage",
@@ -76,6 +80,7 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "shell-exec",
     "escalation-status",
     "notify-user",
+    "channel-send",
     "ask-user",
     "spawn-agent",
     "await-agents",
@@ -114,6 +119,53 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
 ];
 
 const SPECIAL_CONTEXT_TOOL_NAMES: &[&str] = &["agent-manual", "agent-self"];
+
+/// Default tool inventory exposed inline to the LLM in the chat (webui) flow.
+///
+/// Chat does not carry a `capability_token.allowed_tools` filter, so without
+/// this slim list the kernel inlines all 100+ manifests per turn (~12k tokens).
+/// Anything outside this set is reachable on demand via `agent-manual` (which
+/// paginates the full registry).
+pub const CHAT_DEFAULT_TOOL_NAMES: &[&str] = &[
+    // Discovery / introspection — required so the agent can find anything else.
+    "agent-manual",
+    "agent-self",
+    "agent-list",
+    // Filesystem
+    "file-reader",
+    "file-writer",
+    "file-editor",
+    "file-glob",
+    "file-grep",
+    "file-delete",
+    "file-move",
+    "file-diff",
+    // Memory
+    "memory-search",
+    "memory-write",
+    "memory-read",
+    "memory-stats",
+    "archival-search",
+    "episodic-list",
+    "procedure-search",
+    "context-memory-read",
+    "context-memory-update",
+    // Utility
+    "datetime",
+    "think",
+    "data-parser",
+    // Comms
+    "notify-user",
+    "ask-user",
+    "agent-message",
+    // Shell (sandboxed)
+    "shell-exec",
+];
+
+/// True if `name` is part of the default chat tool inventory.
+pub fn is_chat_default_tool(name: &str) -> bool {
+    CHAT_DEFAULT_TOOL_NAMES.contains(&name)
+}
 
 pub fn tool_category(name: &str) -> Option<ToolCategory> {
     if STATELESS_TOOL_NAMES.contains(&name) {
@@ -356,8 +408,12 @@ fn build_hal_tool(name: &str) -> Result<Option<Box<dyn AgentTool>>, AgentOSError
         "hardware-info" => Box::new(crate::hardware_info::HardwareInfoTool::new()),
         "sys-monitor" => Box::new(crate::sys_monitor::SysMonitorTool::new()),
         "process-manager" => Box::new(crate::process_manager::ProcessManagerTool::new()),
+        "system-mounts" => Box::new(crate::system_mounts::SystemMountsTool::new()),
+        "system-open-files" => Box::new(crate::system_open_files::SystemOpenFilesTool::new()),
+        "system-services" => Box::new(crate::system_services::SystemServicesTool::new()),
         "log-reader" => Box::new(crate::log_reader::LogReaderTool::new()),
         "network-monitor" => Box::new(crate::network_monitor::NetworkMonitorTool::new()),
+        "network-sockets" => Box::new(crate::network_sockets::NetworkSocketsTool::new()),
         "printer" => Box::new(crate::printer::PrinterTool::new()),
         "raw-usb" => Box::new(crate::raw_usb::RawUsbTool::new()),
         "usb-storage" => Box::new(crate::usb_storage::UsbStorageTool::new()),
@@ -475,6 +531,7 @@ mod tests {
             "agent-manual",
             "agent-self",
             "notify-user",
+            "channel-send",
             "ask-user",
         ] {
             let result = build_single_tool(name, tmp.path()).unwrap();

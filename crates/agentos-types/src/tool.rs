@@ -110,6 +110,19 @@ pub struct ToolManifest {
     /// a human approval request before execution.
     #[serde(default)]
     pub risk_class: RiskClass,
+    /// Hints for the LLM on when to use this tool and what to avoid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_hints: Option<UsageHints>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct UsageHints {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub use_for: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefer_over: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quick_example: Option<serde_json::Value>,
 }
 
 /// A single fallback rule in a tool manifest's degradation chain.
@@ -165,6 +178,9 @@ pub struct ToolInfo {
     /// Embedded alongside the description for intent-based tool search.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capability_tags: Vec<String>,
+    /// Tool-selector partition (e.g. fs, network). Empty when uncategorized.
+    #[serde(default)]
+    pub group: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

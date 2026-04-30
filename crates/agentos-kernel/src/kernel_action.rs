@@ -156,6 +156,17 @@ pub(crate) enum KernelAction {
     },
     /// List all pending once-jobs.
     ListOnceJobs,
+    /// Send a message to a single connected channel by name or ID.
+    /// Distinct from NotifyUser, which fans out to every registered delivery
+    /// adapter. ChannelSend is targeted: agent picks one channel.
+    ChannelSend {
+        /// Display name (e.g. "telegram-main") or `ChannelInstanceID` UUID.
+        channel: String,
+        /// Message body. Markdown is rendered per-platform when supported.
+        text: String,
+        /// Optional thread/reply target (platform-specific).
+        thread_id: Option<String>,
+    },
 }
 
 /// Why an agent is requesting human escalation.
@@ -284,6 +295,24 @@ impl KernelAction {
                     subject,
                     body,
                     priority,
+                })
+            }
+            "channel_send" => {
+                let channel = value.get("channel")?.as_str()?;
+                let text = value.get("text")?.as_str()?;
+                if channel.trim().is_empty() || text.is_empty() {
+                    tracing::warn!("Dropping channel_send: channel/text must be non-empty");
+                    return None;
+                }
+                let thread_id = value
+                    .get("thread_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                Some(Self::ChannelSend {
+                    channel: channel.to_string(),
+                    text: text.to_string(),
+                    thread_id,
                 })
             }
             "ask_user" => {
@@ -572,6 +601,7 @@ impl Kernel {
             KernelAction::ScheduleOnce { .. } => "schedule_once",
             KernelAction::CancelOnceJob { .. } => "cancel_once_job",
             KernelAction::ListOnceJobs => "list_once_jobs",
+            KernelAction::ChannelSend { .. } => "channel_send",
         };
 
         self.audit_log(agentos_audit::AuditEntry {
@@ -1165,6 +1195,14 @@ impl Kernel {
             }
             KernelAction::CancelOnceJob { name } => self.execute_cancel_once_job(task, name).await,
             KernelAction::ListOnceJobs => self.execute_list_once_jobs(task).await,
+            KernelAction::ChannelSend {
+                channel,
+                text,
+                thread_id,
+            } => {
+                self.execute_channel_send(task, channel, text, thread_id, trace_id)
+                    .await
+            }
         };
 
         let severity = if result.success {
@@ -2988,6 +3026,233 @@ impl Kernel {
         KernelActionResult {
             success: true,
             result: serde_json::json!({ "jobs": list, "count": list.len() }),
+        }
+    }
+
+    /// Send a message to a single connected channel by display name or ID.
+    ///
+    /// Resolution: try as `ChannelInstanceID` UUID first; fall back to a unique
+    /// `display_name` match. Ambiguous display_name (multiple matches) returns
+    /// an error listing IDs so the agent can disambiguate.
+    ///
+    /// Dispatch: Telegram/Ntfy/Email are owned by `notification_router`;
+    /// Discord/Slack/WhatsApp/Webhook are owned by `channel_manager`. The
+    /// kind drives which transport handles the send. On miss, the error
+    /// payload includes `available_channels` so the agent can self-correct
+    /// in one shot.
+    async fn execute_channel_send(
+        &self,
+        task: &AgentTask,
+        channel: String,
+        text: String,
+        thread_id: Option<String>,
+        trace_id: TraceID,
+    ) -> KernelActionResult {
+        use agentos_types::ChannelKind;
+
+        // Defense-in-depth permission check.
+        if !task
+            .capability_token
+            .permissions
+            .check(agentos_capability::PERM_CHANNEL_SEND, PermissionOp::Write)
+        {
+            return KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": format!(
+                        "Permission denied: '{}:w' required for channel-send",
+                        agentos_capability::PERM_CHANNEL_SEND
+                    )
+                }),
+            };
+        }
+
+        // Defense-in-depth payload validation (mirrors ChannelSendTool::execute).
+        if channel.trim().is_empty() {
+            return KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": "channel-send 'channel' must be non-empty"
+                }),
+            };
+        }
+        if text.is_empty() {
+            return KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": "channel-send 'text' must be non-empty"
+                }),
+            };
+        }
+
+        let registered = match self.channel_registry.list_active().await {
+            Ok(list) => list,
+            Err(e) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Failed to list channels: {e}")
+                    }),
+                };
+            }
+        };
+
+        let active_summary: Vec<serde_json::Value> = registered
+            .iter()
+            .filter(|c| c.active)
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id.to_string(),
+                    "name": c.display_name,
+                    "kind": c.kind.to_string(),
+                })
+            })
+            .collect();
+
+        // Lookup priority: try UUID first, then display_name. Ambiguous
+        // display_name (matches > 1) is an error so the agent can pick by ID.
+        let by_id = registered.iter().find(|c| c.id.to_string() == channel);
+        let target = if let Some(c) = by_id {
+            c
+        } else {
+            let by_name: Vec<&agentos_types::RegisteredChannel> = registered
+                .iter()
+                .filter(|c| c.display_name == channel)
+                .collect();
+            match by_name.len() {
+                0 => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!("Channel '{channel}' not found"),
+                            "available_channels": active_summary,
+                        }),
+                    };
+                }
+                1 => by_name[0],
+                _ => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!(
+                                "Channel name '{channel}' is ambiguous ({} matches). Pass the channel ID instead.",
+                                by_name.len()
+                            ),
+                            "matches": by_name
+                                .iter()
+                                .map(|c| serde_json::json!({
+                                    "id": c.id.to_string(),
+                                    "name": c.display_name,
+                                    "kind": c.kind.to_string(),
+                                }))
+                                .collect::<Vec<_>>(),
+                        }),
+                    };
+                }
+            }
+        };
+
+        if !target.active {
+            return KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": format!("Channel '{channel}' is registered but not active"),
+                    "available_channels": active_summary,
+                }),
+            };
+        }
+
+        let target_id = target.id;
+        let target_name = target.display_name.clone();
+        let target_kind = target.kind.clone();
+
+        // Dispatch by kind. Notification-router-owned kinds wrap the text in a
+        // UserMessage and route via deliver_to_channel (single-target). The
+        // remaining kinds use the channel_manager outbound path.
+        let send_result: Result<(), AgentOSError> = match &target_kind {
+            ChannelKind::Telegram | ChannelKind::Ntfy | ChannelKind::Email => {
+                let agent_name = {
+                    let reg = self.agent_registry.read().await;
+                    reg.get_by_id(&task.agent_id)
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| task.agent_id.to_string())
+                };
+                let subject_line: String = format!("[{agent_name}]").chars().take(80).collect();
+                let msg = UserMessage {
+                    id: NotificationID::new(),
+                    from: NotificationSource::Agent(task.agent_id),
+                    task_id: Some(task.id),
+                    trace_id,
+                    kind: UserMessageKind::Notification,
+                    priority: NotificationPriority::Info,
+                    subject: subject_line,
+                    body: text.clone(),
+                    interaction: None,
+                    delivery_status: HashMap::new(),
+                    response: None,
+                    created_at: Utc::now(),
+                    expires_at: None,
+                    read: false,
+                    thread_id: thread_id.clone().or_else(|| Some(task.id.to_string())),
+                    reply_to_external_id: thread_id.clone(),
+                };
+                self.notification_router
+                    .deliver_to_channel(msg, &target_id.to_string())
+                    .await
+            }
+            _ => {
+                let outbound = agentos_channels::types::OutboundMessage {
+                    channel_instance_id: target_id.to_string(),
+                    content: agentos_channels::types::MessageContent::Text(text.clone()),
+                    thread_id: thread_id.clone(),
+                };
+                self.channel_manager
+                    .send(&target_id.to_string(), outbound)
+                    .await
+                    .map(|_| ())
+            }
+        };
+
+        match send_result {
+            Ok(()) => {
+                let preview: String = text.chars().take(120).collect();
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id,
+                    event_type: agentos_audit::AuditEventType::ChannelMessageSent,
+                    agent_id: Some(task.agent_id),
+                    task_id: Some(task.id),
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "channel_id": target_id.to_string(),
+                        "channel_name": target_name,
+                        "kind": target_kind.to_string(),
+                        "thread_id": thread_id,
+                        "text_preview": preview,
+                        "text_len": text.chars().count(),
+                    }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                KernelActionResult {
+                    success: true,
+                    result: serde_json::json!({
+                        "status": "delivered",
+                        "channel_id": target_id.to_string(),
+                        "channel": target_name,
+                        "kind": target_kind.to_string(),
+                    }),
+                }
+            }
+            Err(e) => KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": e.to_string(),
+                    "channel_id": target_id.to_string(),
+                    "kind": target_kind.to_string(),
+                }),
+            },
         }
     }
 }

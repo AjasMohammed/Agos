@@ -89,6 +89,7 @@ dependencies = [
  "agentos-audit",
  "agentos-bus",
  "agentos-kernel",
+ "agentos-llm",
  "agentos-pipeline",
  "agentos-types",
  "agentos-vault",
@@ -151,6 +152,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -175,6 +177,7 @@ dependencies = [
 name = "agentos-channels"
 version = "0.1.0"
 dependencies = [
+ "agentos-http",
  "agentos-types",
  "async-trait",
  "base64 0.22.1",
@@ -242,6 +245,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -275,7 +279,9 @@ dependencies = [
  "chrono",
  "futures",
  "ipp",
+ "nix",
  "nusb",
+ "procfs",
  "regex",
  "reqwest 0.12.28",
  "rumqttc",
@@ -297,6 +303,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentos-http"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "agentos-kernel"
 version = "0.1.0"
 dependencies = [
@@ -314,6 +328,7 @@ dependencies = [
  "agentos-sandbox",
  "agentos-scratch",
  "agentos-skills",
+ "agentos-storage",
  "agentos-tools",
  "agentos-types",
  "agentos-vault",
@@ -367,6 +382,7 @@ version = "0.1.0"
 dependencies = [
  "agentos-types",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "futures",
  "reqwest 0.12.28",
@@ -377,6 +393,7 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -549,6 +566,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentos-storage"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "agentos-tools"
 version = "0.1.0"
 dependencies = [
@@ -656,7 +684,9 @@ dependencies = [
  "agentos-api",
  "agentos-audit",
  "agentos-kernel",
+ "agentos-llm",
  "agentos-pipeline",
+ "agentos-tools",
  "agentos-types",
  "agentos-vault",
  "anyhow",
@@ -5301,6 +5331,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "procfs"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "731e0d9356b0c25f16f33b5be79b1c57b562f141ebfcdb0ad8ac2c13a24293b4"
+dependencies = [
+ "bitflags 2.11.0",
+ "chrono",
+ "flate2",
+ "hex",
+ "lazy_static",
+ "procfs-core",
+ "rustix 0.38.44",
+]
+
+[[package]]
+name = "procfs-core"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d3554923a69f4ce04c4a754260c338f505ce22642d3830e049a399fc2059a29"
+dependencies = [
+ "bitflags 2.11.0",
+ "chrono",
+ "hex",
+]
+
+[[package]]
 name = "profiling"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9253,6 +9309,7 @@ version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 

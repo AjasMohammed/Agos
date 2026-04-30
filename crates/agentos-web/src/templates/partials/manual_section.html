@@ -1,0 +1,138 @@
+{% macro humanize(s) -%}
+{{ s | replace("_", " ") | replace("-", " ") | title }}
+{%- endmacro %}
+
+{% macro render_value(v) %}
+    {%- if v is mapping -%}
+        {{ render_object(v) }}
+    {%- elif v is sequence and v is not string -%}
+        {{ render_array(v) }}
+    {%- elif v is boolean -%}
+        <code>{{ v }}</code>
+    {%- elif v is none -%}
+        <span class="muted"><em>none</em></span>
+    {%- elif v is number -%}
+        <code>{{ v }}</code>
+    {%- else -%}
+        {{ v }}
+    {%- endif -%}
+{% endmacro %}
+
+{% macro render_array(arr) %}
+    {%- if arr | length == 0 -%}
+        <span class="muted"><em>empty</em></span>
+    {%- else -%}
+        {%- set first = arr[0] -%}
+        {%- if first is mapping -%}
+            <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap:.6rem; margin:.4rem 0;">
+                {% for item in arr %}
+                <article style="margin:0; padding:.6rem .75rem; font-size:.85rem;">
+                    {{ render_object(item) }}
+                </article>
+                {% endfor %}
+            </div>
+        {%- else -%}
+            <ul style="margin:.25rem 0 .25rem 1.25rem;">
+                {% for item in arr %}
+                <li>{{ render_value(item) }}</li>
+                {% endfor %}
+            </ul>
+        {%- endif -%}
+    {%- endif -%}
+{% endmacro %}
+
+{% macro render_object(obj) %}
+    <dl class="manual-dl" style="margin:.25rem 0;">
+        {% for k, v in obj | items %}
+        <dt style="font-weight:600; margin-top:.4rem;">{{ humanize(k) }}</dt>
+        <dd style="margin-left:1rem; margin-bottom:.25rem;">
+            {{ render_value(v) }}
+        </dd>
+        {% endfor %}
+    </dl>
+{% endmacro %}
+
+<article>
+    <header style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:.5rem;">
+        <strong>Section: <code>{{ section }}</code>{% if name %} — <code>{{ name }}</code>{% endif %}</strong>
+        <span style="display:flex; gap:.5rem;">
+            <a href="#"
+               hx-get="/manual/view?section={{ section }}{% if name %}&name={{ name }}{% endif %}"
+               hx-target="#manual-content"
+               hx-swap="innerHTML"
+               class="outline">Rendered</a>
+            <a href="#"
+               hx-get="/manual/view?section={{ section }}{% if name %}&name={{ name }}{% endif %}&raw=1"
+               hx-target="#manual-content"
+               hx-swap="innerHTML"
+               class="outline">Raw JSON</a>
+        </span>
+    </header>
+
+    {# ── Tools section: special card grid with clickable names + pagination ── #}
+    {% if section == "tools" and data.tools is defined %}
+        <p class="muted">
+            {{ data.count }} tool{% if data.count != 1 %}s{% endif %}
+            (page {{ data.page + 1 }}, page size {{ data.page_size }})
+        </p>
+        <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap:.75rem;">
+            {% for t in data.tools %}
+            <article style="margin:0;">
+                <header style="margin:0; padding:.5rem .75rem;">
+                    <a href="#"
+                       hx-get="/manual/view?section=tool-detail&name={{ t.name }}"
+                       hx-target="#manual-content"
+                       hx-swap="innerHTML"><strong>{{ t.name }}</strong></a>
+                    <span class="badge" style="font-size:.7rem; margin-left:.25rem;">{{ t.trust_tier }}</span>
+                    {% if t.risk_class %}<span class="badge" style="font-size:.7rem;">{{ t.risk_class }}</span>{% endif %}
+                </header>
+                <p style="margin:.25rem .75rem; font-size:.85rem;">{{ t.description }}</p>
+                <footer style="padding:.25rem .75rem; font-size:.75rem;">
+                    {% if t.category %}<kbd>{{ t.category }}</kbd>{% endif %}
+                    {% for tag in t.tags %}<kbd>{{ tag }}</kbd>{% endfor %}
+                </footer>
+            </article>
+            {% endfor %}
+        </div>
+        {% if data.next_page is defined and data.next_page %}
+        <p style="margin-top:.75rem;">
+            {% if data.page > 0 %}
+            <a href="#"
+               hx-get="/manual/view?section=tools&page={{ data.page - 1 }}"
+               hx-target="#manual-content"
+               hx-swap="innerHTML">← Prev</a>
+            {% endif %}
+            <a href="#"
+               hx-get="/manual/view?section=tools&page={{ data.next_page }}"
+               hx-target="#manual-content"
+               hx-swap="innerHTML">Next →</a>
+        </p>
+        {% elif data.page > 0 %}
+        <p style="margin-top:.75rem;">
+            <a href="#"
+               hx-get="/manual/view?section=tools&page={{ data.page - 1 }}"
+               hx-target="#manual-content"
+               hx-swap="innerHTML">← Prev</a>
+        </p>
+        {% endif %}
+
+    {# ── Generic structured renderer for every other section ── #}
+    {% else %}
+        {% if data.description is defined %}
+            <p>{{ data.description }}</p>
+        {% endif %}
+        {% for k, v in data | items %}
+            {% if k != "section" and k != "description" %}
+                <section style="margin-top:.85rem;">
+                    <h4 style="margin:0 0 .25rem 0;">{{ humanize(k) }}</h4>
+                    {{ render_value(v) }}
+                </section>
+            {% endif %}
+        {% endfor %}
+    {% endif %}
+
+    <details style="margin-top:1rem;">
+        <summary class="muted">View raw JSON (what the agent sees)</summary>
+        <pre style="max-height:500px; overflow:auto; font-size:.8rem;"><code>{{ pretty }}</code></pre>
+    </details>
+</article>

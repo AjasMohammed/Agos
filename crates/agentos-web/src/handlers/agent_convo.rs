@@ -506,7 +506,7 @@ async fn run_conversation(
 
         let result = state
             .kernel
-            .chat_infer_streaming(&agent_name, &[], &new_message, kernel_tx)
+            .chat_infer_streaming(&agent_name, &[], &new_message, None, kernel_tx)
             .await;
 
         let _ = forwarder.await;

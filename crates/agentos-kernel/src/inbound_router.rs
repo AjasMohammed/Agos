@@ -2,6 +2,7 @@ use crate::channel_chat_bridge::KernelChatBridge;
 use crate::notification_router::{InboundMessage, NotificationRouter};
 use crate::scheduler::TaskScheduler;
 use crate::user_channel_registry::UserChannelRegistry;
+use agentos_audit::{AuditEntry, AuditEventType, AuditLog, AuditSeverity};
 use agentos_types::{
     AgentOSError, ChannelInstanceID, ChannelKind, DeliveryChannel, NotificationID,
     NotificationPriority, NotificationSource, TaskState, TraceID, UserMessage, UserMessageKind,
@@ -44,6 +45,7 @@ pub struct InboundRouter {
     channel_registry: Arc<UserChannelRegistry>,
     scheduler: Arc<TaskScheduler>,
     chat_bridge: Arc<KernelChatBridge>,
+    audit: Arc<AuditLog>,
     rx: mpsc::Receiver<InboundMessage>,
     /// Per-channel rate limiter: (message count, window start instant).
     rate_limiter: HashMap<ChannelInstanceID, (u32, Instant)>,
@@ -57,6 +59,7 @@ impl InboundRouter {
         channel_registry: Arc<UserChannelRegistry>,
         scheduler: Arc<TaskScheduler>,
         chat_bridge: Arc<KernelChatBridge>,
+        audit: Arc<AuditLog>,
         rx: mpsc::Receiver<InboundMessage>,
     ) -> Self {
         Self {
@@ -64,6 +67,7 @@ impl InboundRouter {
             channel_registry,
             scheduler,
             chat_bridge,
+            audit,
             rx,
             rate_limiter: HashMap::new(),
             last_prune: Instant::now(),
@@ -501,12 +505,15 @@ impl InboundRouter {
     }
 
     async fn send_reply(&self, original: &InboundMessage, text: String) {
+        let trace_id = TraceID::new();
+        let preview: String = text.chars().take(120).collect();
+        let text_len = text.chars().count();
         let subject: String = text.chars().take(80).collect();
         let reply = UserMessage {
             id: NotificationID::new(),
             from: NotificationSource::Kernel,
             task_id: None,
-            trace_id: TraceID::new(),
+            trace_id,
             kind: UserMessageKind::Notification,
             priority: NotificationPriority::Info,
             subject,
@@ -522,25 +529,50 @@ impl InboundRouter {
         };
         // Route back to the originating channel only — not all registered adapters.
         let instance_id = original.channel_instance_id.to_string();
-        if let Err(e) = self
+        match self
             .notification_router
             .deliver_to_channel(reply, &instance_id)
             .await
         {
-            tracing::warn!(
-                channel = %original.channel,
-                error = %e,
-                "InboundRouter: failed to deliver reply"
-            );
+            Ok(()) => {
+                let _ = self.audit.append(AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id,
+                    event_type: AuditEventType::ChannelMessageSent,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "channel_id": instance_id,
+                        "channel": original.channel,
+                        "source": "kernel_command_reply",
+                        "text_preview": preview,
+                        "text_len": text_len,
+                    }),
+                    severity: AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    channel = %original.channel,
+                    error = %e,
+                    "InboundRouter: failed to deliver reply"
+                );
+            }
         }
     }
 
     async fn send_agent_chat_reply(&self, original: &InboundMessage, agent_name: &str, body: &str) {
-        let from = if let Some(id) = self.chat_bridge.agent_id_for_name(agent_name).await {
-            NotificationSource::Agent(id)
-        } else {
-            NotificationSource::Kernel
+        let agent_id_opt = self.chat_bridge.agent_id_for_name(agent_name).await;
+        let from = match agent_id_opt {
+            Some(id) => NotificationSource::Agent(id),
+            None => NotificationSource::Kernel,
         };
+        let trace_id = TraceID::new();
+        let preview: String = body.chars().take(120).collect();
+        let text_len = body.chars().count();
         let subject = format!("[{agent_name}]")
             .chars()
             .take(80)
@@ -549,7 +581,7 @@ impl InboundRouter {
             id: NotificationID::new(),
             from,
             task_id: None,
-            trace_id: TraceID::new(),
+            trace_id,
             kind: UserMessageKind::Notification,
             priority: NotificationPriority::Info,
             subject,
@@ -565,16 +597,39 @@ impl InboundRouter {
         };
         // Route back to the originating channel only — not all registered adapters.
         let instance_id = original.channel_instance_id.to_string();
-        if let Err(e) = self
+        match self
             .notification_router
             .deliver_to_channel(reply, &instance_id)
             .await
         {
-            tracing::warn!(
-                channel = %original.channel,
-                error = %e,
-                "InboundRouter: failed to deliver agent chat reply"
-            );
+            Ok(()) => {
+                let _ = self.audit.append(AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id,
+                    event_type: AuditEventType::ChannelMessageSent,
+                    agent_id: agent_id_opt,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "channel_id": instance_id,
+                        "channel": original.channel,
+                        "source": "agent_chat_reply",
+                        "agent_name": agent_name,
+                        "text_preview": preview,
+                        "text_len": text_len,
+                    }),
+                    severity: AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    channel = %original.channel,
+                    error = %e,
+                    "InboundRouter: failed to deliver agent chat reply"
+                );
+            }
         }
     }
 }

@@ -25,7 +25,7 @@ async fn test_chat_no_tool_call() {
     .await;
 
     let result = kernel
-        .chat_infer_with_tools("chat-test-agent", &[], "Hi there")
+        .chat_infer_with_tools("chat-test-agent", &[], "Hi there", None)
         .await
         .expect("chat_infer_with_tools failed");
 
@@ -56,7 +56,7 @@ async fn test_chat_tool_call_detected_and_executed() {
     .await;
 
     let result = kernel
-        .chat_infer_with_tools("chat-test-agent", &[], "What tools are available?")
+        .chat_infer_with_tools("chat-test-agent", &[], "What tools are available?", None)
         .await
         .expect("chat_infer_with_tools failed");
 
@@ -94,7 +94,7 @@ async fn test_chat_max_iterations() {
     common::register_mock_agent_with_responses(&kernel, "chat-test-agent", responses).await;
 
     let result = kernel
-        .chat_infer_with_tools("chat-test-agent", &[], "Loop forever please")
+        .chat_infer_with_tools("chat-test-agent", &[], "Loop forever please", None)
         .await
         .expect("chat_infer_with_tools failed");
 
@@ -134,7 +134,7 @@ async fn test_chat_tool_error_injected_and_llm_retries() {
     .await;
 
     let result = kernel
-        .chat_infer_with_tools("chat-test-agent", &[], "Try a failing tool")
+        .chat_infer_with_tools("chat-test-agent", &[], "Try a failing tool", None)
         .await
         .expect("chat_infer_with_tools failed");
 

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
+use zeroize::Zeroizing;
 
 /// Manages webhook endpoint registrations.
 ///
@@ -21,7 +22,7 @@ pub struct WebhookRegistry {
 #[derive(Clone)]
 struct CachedEndpoint {
     pub endpoint: WebhookEndpointMeta,
-    pub secret: String,
+    pub secret: Zeroizing<String>,
 }
 
 impl WebhookRegistry {
@@ -142,7 +143,7 @@ impl WebhookRegistry {
                         last_received_at,
                         total_received,
                     },
-                    secret,
+                    secret: Zeroizing::new(secret),
                 },
             );
         }
@@ -194,12 +195,12 @@ impl WebhookRegistry {
             total_received: 0,
         };
 
-        let secret_copy = secret.clone();
+        let secret_zeroizing = Zeroizing::new(secret.clone());
         self.endpoints.write().await.insert(
             id,
             CachedEndpoint {
                 endpoint: meta.clone(),
-                secret,
+                secret: secret_zeroizing,
             },
         );
 
@@ -210,7 +211,7 @@ impl WebhookRegistry {
             "Created webhook endpoint"
         );
 
-        Ok((meta, secret_copy))
+        Ok((meta, secret))
     }
 
     /// Look up an endpoint by ID. Returns the metadata and secret for verification.
@@ -221,7 +222,7 @@ impl WebhookRegistry {
         let cache = self.endpoints.read().await;
         cache
             .get(id)
-            .map(|c| (c.endpoint.clone(), c.secret.clone()))
+            .map(|c| (c.endpoint.clone(), c.secret.to_string()))
     }
 
     /// Look up endpoint metadata (no secret).
@@ -295,7 +296,7 @@ impl WebhookRegistry {
                 "Webhook endpoint not found in cache: {id}"
             )));
         };
-        entry.secret = new_secret.clone();
+        entry.secret = Zeroizing::new(new_secret.clone());
         tracing::info!(endpoint_id = %id, "Rotated webhook endpoint secret");
         Ok(new_secret)
     }
@@ -326,7 +327,7 @@ impl WebhookRegistry {
     /// Get the secret for a webhook endpoint (used during ingress for signature verification).
     pub async fn get_secret(&self, id: &WebhookEndpointID) -> Option<String> {
         let cache = self.endpoints.read().await;
-        cache.get(id).map(|c| c.secret.clone())
+        cache.get(id).map(|c| c.secret.to_string())
     }
 }
 

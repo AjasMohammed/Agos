@@ -21,7 +21,7 @@ required = ["section"]
 
 [input_schema.properties.section]
 type = "string"
-enum = ["index", "tools", "tool-detail", "permissions", "memory", "events", "commands", "errors", "feedback", "agents", "tasks", "procedural", "escalation", "coordination", "suggest", "scratchpad", "channels", "mcp", "hal", "plugins", "skills", "notifications", "containers", "webhooks", "capabilities"]
+enum = ["index", "tools", "tool-detail", "permissions", "memory", "events", "commands", "errors", "feedback", "agents", "tasks", "procedural", "escalation", "coordination", "suggest", "scratchpad", "channels", "mcp", "hal", "plugins", "skills", "notifications", "containers", "webhooks", "capabilities", "channel-telegram"]
 description = "Manual section to return"
 
 [input_schema.properties.name]

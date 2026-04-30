@@ -415,6 +415,7 @@ mod tests {
                 trust_tier: TrustTier::Community,
                 tags: None,
                 capability_tags: vec![],
+                group: String::new(),
             },
             capabilities_required: ToolCapabilities {
                 permissions: vec![],
@@ -437,6 +438,7 @@ mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: Default::default(),
+            usage_hints: None,
         }
     }
 
@@ -453,6 +455,7 @@ mod tests {
                 trust_tier: TrustTier::Core,
                 tags: None,
                 capability_tags: vec![],
+                group: String::new(),
             },
             capabilities_required: ToolCapabilities {
                 permissions: vec![],
@@ -475,6 +478,7 @@ mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: Default::default(),
+            usage_hints: None,
         }
     }
 

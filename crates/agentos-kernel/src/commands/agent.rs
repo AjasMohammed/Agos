@@ -40,6 +40,11 @@ impl Kernel {
         // is set to "" (e.g. docker-compose `AGENTOS_LLM_URL=${AGENTOS_LLM_URL:-}`).
         // Treat them as unset so the config fallback still applies.
         let base_url = base_url.filter(|s| !s.trim().is_empty());
+        let image_resolver = self
+            .image_resolver
+            .read()
+            .expect("image_resolver lock poisoned")
+            .clone();
         match provider {
             LLMProvider::Ollama => {
                 let host = base_url
@@ -54,7 +59,8 @@ impl Kernel {
                     Arc::new(
                         OllamaCore::new(&host, model)
                             .with_request_timeout(self.config.ollama.request_timeout_secs)
-                            .with_context_window(self.config.llm.ollama_context_window),
+                            .with_context_window(self.config.llm.ollama_context_window)
+                            .with_image_resolver(image_resolver.clone()),
                     ),
                     effective,
                 ))
@@ -81,15 +87,20 @@ impl Kernel {
                     .or_else(|| self.config.llm.openai_base_url.clone());
                 if let Some(url) = resolved_base_url {
                     Ok((
-                        Arc::new(OpenAICore::with_base_url(
-                            sec,
-                            model.to_string(),
-                            url.clone(),
-                        )),
+                        Arc::new(
+                            OpenAICore::with_base_url(sec, model.to_string(), url.clone())
+                                .with_image_resolver(image_resolver.clone()),
+                        ),
                         Some(url),
                     ))
                 } else {
-                    Ok((Arc::new(OpenAICore::new(sec, model.to_string())), None))
+                    Ok((
+                        Arc::new(
+                            OpenAICore::new(sec, model.to_string())
+                                .with_image_resolver(image_resolver.clone()),
+                        ),
+                        None,
+                    ))
                 }
             }
             LLMProvider::Anthropic => {
@@ -112,7 +123,11 @@ impl Kernel {
                     AnthropicCore::new(sec, model.to_string())
                 };
                 Ok((
-                    Arc::new(adapter.with_max_tokens(self.config.llm.max_tokens)),
+                    Arc::new(
+                        adapter
+                            .with_max_tokens(self.config.llm.max_tokens)
+                            .with_image_resolver(image_resolver.clone()),
+                    ),
                     resolved_url,
                 ))
             }
@@ -129,7 +144,13 @@ impl Kernel {
                     "Missing 'gemini_api_key' in vault. Please store it first.".to_string()
                 })?;
                 let sec = SecretString::new(entry.as_str().to_string());
-                Ok((Arc::new(GeminiCore::new(sec, model.to_string())), None))
+                Ok((
+                    Arc::new(
+                        GeminiCore::new(sec, model.to_string())
+                            .with_image_resolver(image_resolver.clone()),
+                    ),
+                    None,
+                ))
             }
             LLMProvider::Custom(custom_name) => {
                 // Check the provider catalog first for known providers.
@@ -164,7 +185,11 @@ impl Kernel {
                         model.to_string()
                     };
                     Ok((
-                        Arc::new(CustomCore::new(sec, effective_model, url.clone())),
+                        Arc::new(
+                            CustomCore::new(sec, effective_model, url.clone())
+                                .with_vision_models(catalog_entry.vision_models.clone())
+                                .with_image_resolver(image_resolver.clone()),
+                        ),
                         Some(url),
                     ))
                 } else {
@@ -191,7 +216,10 @@ impl Kernel {
                             "Missing custom LLM endpoint. Provide --base-url, set AGENTOS_LLM_URL, or configure llm.custom_base_url in config.".to_string()
                         })?;
                     Ok((
-                        Arc::new(CustomCore::new(sec, model.to_string(), url.clone())),
+                        Arc::new(
+                            CustomCore::new(sec, model.to_string(), url.clone())
+                                .with_image_resolver(image_resolver.clone()),
+                        ),
                         Some(url),
                     ))
                 }
@@ -972,11 +1000,17 @@ Once you have explored, briefly summarise what you found and confirm you are rea
         };
 
         // Build a new LLMCore with the new URL using the same credentials
+        let image_resolver = self
+            .image_resolver
+            .read()
+            .expect("image_resolver lock poisoned")
+            .clone();
         let new_core: Result<Arc<dyn LLMCore>, String> = match &provider {
             LLMProvider::Ollama => Ok(Arc::new(
                 OllamaCore::new(&url, &model)
                     .with_request_timeout(self.config.ollama.request_timeout_secs)
-                    .with_context_window(self.config.llm.ollama_context_window),
+                    .with_context_window(self.config.llm.ollama_context_window)
+                    .with_image_resolver(image_resolver.clone()),
             )),
             LLMProvider::OpenAI => {
                 let key_result = match self.vault.get(&format!("{}_openai_api_key", name)).await {
@@ -986,11 +1020,10 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                 match key_result {
                     Ok(entry) => {
                         let sec = SecretString::new(entry.as_str().to_string());
-                        Ok(Arc::new(OpenAICore::with_base_url(
-                            sec,
-                            model.clone(),
-                            url.clone(),
-                        )))
+                        Ok(Arc::new(
+                            OpenAICore::with_base_url(sec, model.clone(), url.clone())
+                                .with_image_resolver(image_resolver.clone()),
+                        ))
                     }
                     _ => Err("Missing 'openai_api_key' in vault.".to_string()),
                 }
@@ -1006,7 +1039,8 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         let sec = SecretString::new(entry.as_str().to_string());
                         Ok(Arc::new(
                             AnthropicCore::with_base_url(sec, model.clone(), url.clone())
-                                .with_max_tokens(self.config.llm.max_tokens),
+                                .with_max_tokens(self.config.llm.max_tokens)
+                                .with_image_resolver(image_resolver.clone()),
                         ))
                     }
                     _ => Err("Missing 'anthropic_api_key' in vault.".to_string()),
@@ -1048,7 +1082,16 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         },
                     }
                 };
-                Ok(Arc::new(CustomCore::new(sec, model.clone(), url.clone())))
+                Ok(Arc::new(
+                    CustomCore::new(sec, model.clone(), url.clone())
+                        .with_vision_models(
+                            catalog_entry_opt
+                                .as_ref()
+                                .map(|c| c.vision_models.clone())
+                                .unwrap_or_default(),
+                        )
+                        .with_image_resolver(image_resolver.clone()),
+                ))
             }
         };
 

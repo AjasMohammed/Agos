@@ -5,6 +5,7 @@
 ///          at `/api/channels/teams` (wired separately in agentos-web).
 use crate::types::{ChannelCapabilities, DeliveryReceipt, OutboundMessage};
 use crate::{ChannelAdapter, ChannelHealth};
+use agentos_http::{client, HttpProfile};
 use agentos_types::AgentOSError;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -26,10 +27,7 @@ impl TeamsAdapter {
     pub fn new(webhook_url: String) -> Result<Self, AgentOSError> {
         crate::webhook::validate_webhook_url(&webhook_url)?;
         Ok(Self {
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .expect("HTTP client build failed"),
+            client: client(HttpProfile::Outbound),
             webhook_url: Zeroizing::new(webhook_url),
             name: "teams".to_string(),
         })

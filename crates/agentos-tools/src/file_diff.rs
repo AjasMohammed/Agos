@@ -1,5 +1,5 @@
 use crate::traits::{resolve_tool_path, AgentTool, ToolExecutionContext};
-use agentos_types::{AgentOSError, PermissionOp};
+use agentos_types::{reject_traversal, AgentOSError, PermissionOp};
 use async_trait::async_trait;
 use similar::{ChangeTag, TextDiff};
 use std::fmt::Write as FmtWrite;
@@ -87,12 +87,10 @@ impl AgentTool for FileDiff {
 
                 // Defense-in-depth: explicit traversal check before canonicalization.
                 for p in [path_a, path_b] {
-                    if p.contains("..") {
-                        return Err(AgentOSError::PermissionDenied {
-                            resource: p.to_string(),
-                            operation: "Read (path traversal blocked)".to_string(),
-                        });
-                    }
+                    reject_traversal(p).map_err(|_| AgentOSError::PermissionDenied {
+                        resource: p.to_string(),
+                        operation: "Read (path traversal blocked)".to_string(),
+                    })?;
                 }
 
                 let data_dir_canon = context.data_dir.canonicalize().map_err(|_| {

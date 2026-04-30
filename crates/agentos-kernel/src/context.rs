@@ -110,7 +110,9 @@ impl ContextManager {
 
         window.push(ContextEntry {
             role: ContextRole::System,
-            content: system_prompt.to_string(),
+            parts: vec![ContentPart::Text {
+                text: system_prompt.to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -166,13 +168,13 @@ impl ContextManager {
         result: &agentos_types::SubAgentResult,
     ) -> Result<(), AgentOSError> {
         let status = if result.success { "ok" } else { "fail" };
-        let content = format!(
+        let body = format!(
             "[sub-agent:{}|{}|{}]\n{}",
             result.agent_name, status, result.child_task_id, result.output,
         );
         let entry = ContextEntry {
             role: ContextRole::ToolResult,
-            content,
+            parts: vec![ContentPart::Text { text: body }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.8,
@@ -248,10 +250,10 @@ impl ContextManager {
                     ContextRole::ToolResult => "ToolResult",
                     ContextRole::System => "System",
                 };
-                let snippet = if e.content.chars().count() > 150 {
-                    format!("{}...", e.content.chars().take(150).collect::<String>())
+                let snippet = if e.text().chars().count() > 150 {
+                    format!("{}...", e.text().chars().take(150).collect::<String>())
                 } else {
-                    e.content.clone()
+                    e.text()
                 };
                 format!("[{label}]: {snippet}")
             })
@@ -275,7 +277,7 @@ impl ContextManager {
                 ContextRole::ToolResult => "ToolResult",
                 ContextRole::System => "System",
             };
-            let part = format!("[{}]: {}", label, e.content);
+            let part = format!("[{}]: {}", label, e.text());
             let part_chars = part.chars().count();
             if total_chars + part_chars > max_input_chars {
                 let remaining = max_input_chars.saturating_sub(total_chars);
@@ -283,7 +285,7 @@ impl ContextManager {
                     text_parts.push(format!(
                         "[{}]: {}...",
                         label,
-                        e.content.chars().take(remaining).collect::<String>()
+                        e.text().chars().take(remaining).collect::<String>()
                     ));
                 }
                 break;
@@ -303,7 +305,9 @@ impl ContextManager {
         let mut ctx = ContextWindow::new(16);
         ctx.push(ContextEntry {
             role: ContextRole::System,
-            content: system_prompt.to_string(),
+            parts: vec![ContentPart::Text {
+                text: system_prompt.to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -315,7 +319,9 @@ impl ContextManager {
         });
         ctx.push(ContextEntry {
             role: ContextRole::User,
-            content: format!("Messages:\n{}", messages_text),
+            parts: vec![ContentPart::Text {
+                text: format!("Messages:\n{}", messages_text),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -577,7 +583,7 @@ impl ContextManager {
             task_id,
             ContextEntry {
                 role: ContextRole::ToolResult,
-                content,
+                parts: vec![ContentPart::Text { text: content }],
                 timestamp: chrono::Utc::now(),
                 metadata: Some(ContextMetadata {
                     tool_name: Some(tool_name.to_string()),

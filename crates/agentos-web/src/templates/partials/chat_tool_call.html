@@ -10,11 +10,11 @@
         <div class="chat-tool-grid">
             <div>
                 <small class="muted">Input</small>
-                <pre class="chat-tool-result"><code>{{ msg.tool_payload_json|default(msg.content)|format_tool_data }}</code></pre>
+                <div class="chat-tool-result">{{ msg.tool_payload_json|default(msg.content)|format_tool_data_html }}</div>
             </div>
             <div>
                 <small class="muted">Result</small>
-                <pre class="chat-tool-result"><code>{{ msg.tool_result_json|default(msg.content)|format_tool_data }}</code></pre>
+                <div class="chat-tool-result">{{ msg.tool_result_json|default(msg.content)|format_tool_data_html }}</div>
             </div>
         </div>
     </details>

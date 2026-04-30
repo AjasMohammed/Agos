@@ -1,0 +1,69 @@
+[manifest]
+name        = "network-sockets"
+version     = "1.0.0"
+risk_class  = "readonly_external"
+description = "List host network sockets (TCP/UDP), listening ports, and established connections via the Hardware Abstraction Layer."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[manifest.usage_hints]
+use_for = ["Finding which process is using a port", "Listing all listening services", "Checking established network connections"]
+prefer_over = ["shell-exec netstat", "shell-exec ss", "shell-exec lsof -i"]
+quick_example = { protocol = "tcp", state = "listen" }
+
+[capabilities_required]
+permissions = ["network.sockets:r"]
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "NetworkSocketsIntent"
+output = "NetworkSocketsResult"
+
+[input_schema]
+type = "object"
+
+[input_schema.properties.protocol]
+type = "string"
+enum = ["tcp", "udp", "all"]
+default = "all"
+description = "Protocol to list"
+
+[input_schema.properties.state]
+type = "string"
+enum = ["listen", "established", "all"]
+default = "all"
+description = "Socket state filter (UDP ignores state)"
+
+[input_schema.properties.ipv]
+type = "string"
+enum = ["v4", "v6", "both"]
+default = "both"
+description = "IP version filter"
+
+[input_schema.properties.port]
+type = "integer"
+minimum = 1
+maximum = 65535
+description = "Filter by exact local port number"
+
+[input_schema.properties.include_pid]
+type = "boolean"
+default = true
+description = "Attempt to resolve owning process PID and name (slower)"
+
+[input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 1000
+default = 200
+description = "Max number of sockets to return"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 32
+max_cpu_ms    = 5000
+syscalls      = []

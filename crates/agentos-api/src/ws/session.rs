@@ -79,6 +79,7 @@ impl WsSession {
                     agent_name,
                     message,
                     history: Vec::new(),
+                    parts: Vec::new(),
                 };
                 match service.chat_send(req).await {
                     Ok(resp) => {

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 agentos-types = { path = "../agentos-types" }
+agentos-http = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

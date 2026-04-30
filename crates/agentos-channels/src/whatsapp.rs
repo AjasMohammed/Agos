@@ -1,8 +1,8 @@
 use crate::types::*;
 use crate::{ChannelAdapter, ChannelCapabilities, ChannelHealth};
+use agentos_http::{client, HttpProfile};
 use agentos_types::AgentOSError;
 use async_trait::async_trait;
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -38,11 +38,7 @@ impl WhatsAppAdapter {
             phone_number_id,
             recipient_phone,
             instance_id,
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .connect_timeout(Duration::from_secs(10))
-                .build()
-                .expect("HTTP client build failed"),
+            client: client(HttpProfile::Outbound),
         })
     }
 }

@@ -8,6 +8,7 @@ use crate::ask_user::AskUserTool;
 use crate::audio::AudioTool;
 use crate::bluetooth::BluetoothTool;
 use crate::cancel_agent::CancelAgentTool;
+use crate::channel_send::ChannelSendTool;
 use crate::context_memory_read::ContextMemoryReadTool;
 use crate::context_memory_update::ContextMemoryUpdateTool;
 use crate::coordination::{AwaitAgentsTool, SpawnAgentTool, VerifyOutputTool};
@@ -62,6 +63,7 @@ use crate::task_status::TaskStatusTool;
 use crate::think::ThinkTool;
 use crate::traits::{AgentTool, ToolExecutionContext};
 use crate::usb_storage::UsbStorageTool;
+use crate::user_file_reader::UserFileReader;
 use crate::web_fetch::WebFetch;
 use crate::web_search::WebSearchTool;
 use crate::webcam::WebcamTool;
@@ -212,10 +214,12 @@ impl ToolRunner {
             Err(e) => tracing::error!("Failed to initialize web-fetch tool: {}", e),
         }
         self.register(Box::new(WebSearchTool::new()));
+        self.register(Box::new(UserFileReader::new()));
         self.register(Box::new(FileDiff::new()));
         self.register(Box::new(EscalationStatusTool::new()));
         self.register(Box::new(AgentListTool::new()));
         self.register(Box::new(NotifyUserTool::new()));
+        self.register(Box::new(ChannelSendTool::new()));
         self.register(Box::new(AskUserTool::new()));
         self.register(Box::new(TaskStatusTool::new()));
         self.register(Box::new(TaskListTool::new()));
@@ -312,6 +316,22 @@ impl ToolRunner {
         )));
     }
 
+    /// Register the agent-manual tool with both the tool catalogue and a live
+    /// view of connected channels. The manual filters per-platform sections to
+    /// match what the operator has actually wired up.
+    pub fn register_agent_manual_with_channels(
+        &mut self,
+        tool_summaries: crate::agent_manual::SharedToolSummaries,
+        connected_channels: crate::agent_manual::SharedConnectedChannels,
+    ) {
+        self.register(Box::new(
+            crate::agent_manual::AgentManualTool::new_with_channels(
+                tool_summaries,
+                connected_channels,
+            ),
+        ));
+    }
+
     /// Register the list-tools tool with a shared tool catalogue.
     pub fn register_list_tools(
         &mut self,
@@ -352,6 +372,62 @@ impl ToolRunner {
         self.register(Box::new(crate::agent_self::AgentSelfTool::new(tool_count)));
     }
 
+    /// Suggest up to `limit` registered tool names closest to `name` by
+    /// case-insensitive Levenshtein distance, with a substring tie-breaker.
+    /// Used to enrich `ToolNotFound` errors so a model that hallucinates
+    /// a tool name (`user-file-reader` vs `file-reader`) gets back a
+    /// usable hint in one round-trip instead of looping.
+    fn suggest_close_tool_names(&self, name: &str, limit: usize) -> Vec<String> {
+        fn levenshtein(a: &str, b: &str) -> usize {
+            let a: Vec<char> = a.chars().collect();
+            let b: Vec<char> = b.chars().collect();
+            let (n, m) = (a.len(), b.len());
+            if n == 0 {
+                return m;
+            }
+            if m == 0 {
+                return n;
+            }
+            let mut prev: Vec<usize> = (0..=m).collect();
+            let mut curr = vec![0usize; m + 1];
+            for i in 1..=n {
+                curr[0] = i;
+                for j in 1..=m {
+                    let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+                    curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+                }
+                std::mem::swap(&mut prev, &mut curr);
+            }
+            prev[m]
+        }
+
+        let needle = name.to_lowercase();
+        let mut all: Vec<String> = self.tools.keys().cloned().collect();
+        if let Ok(dynamic) = self.dynamic_tools.read() {
+            all.extend(dynamic.keys().cloned());
+        }
+
+        let mut scored: Vec<(usize, bool, &String)> = all
+            .iter()
+            .map(|cand| {
+                let cand_lower = cand.to_lowercase();
+                let dist = levenshtein(&needle, &cand_lower);
+                let contains = cand_lower.contains(&needle) || needle.contains(&cand_lower);
+                (dist, !contains, cand)
+            })
+            .collect();
+        scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        // Reject suggestions that are wildly different (more than half the chars).
+        let max_dist = (needle.len() / 2).max(3);
+        scored
+            .into_iter()
+            .filter(|(d, _, _)| *d <= max_dist)
+            .take(limit)
+            .map(|(_, _, s)| s.clone())
+            .collect()
+    }
+
     /// Execute a tool by name. Returns the JSON result.
     ///
     /// Defense-in-depth: verifies permissions even if the kernel already checked,
@@ -382,7 +458,15 @@ impl ToolRunner {
             Some(t) => t.as_ref(),
             None => match dynamic.as_deref() {
                 Some(t) => t,
-                None => return Err(AgentOSError::ToolNotFound(tool_name.to_string())),
+                None => {
+                    let suggestions = self.suggest_close_tool_names(tool_name, 3);
+                    let label = if suggestions.is_empty() {
+                        tool_name.to_string()
+                    } else {
+                        format!("{tool_name} (did you mean: {}?)", suggestions.join(", "))
+                    };
+                    return Err(AgentOSError::ToolNotFound(label));
+                }
             },
         };
 

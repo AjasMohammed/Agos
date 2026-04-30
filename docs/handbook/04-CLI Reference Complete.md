@@ -1880,24 +1880,65 @@ agentos skill run cost-optimizer --input "find expensive tasks today"
 
 ---
 
-## `mcp` (extended) — runtime attach, OAuth, status
+## `mcp` (extended) — runtime attach, OAuth, A2A, status
 
 Beyond the offline `serve`/`list` subcommands, the `mcp` group has runtime attach/detach commands that connect to external MCP servers without restarting the kernel. Attachments persist to SQLite and are restored on next boot.
 
 | Subcommand | Description |
 |---|---|
 | `mcp status` | Show health, tool count, and last error per attached server |
-| `mcp attach <name>` | Attach a new MCP server (`--transport stdio` or `--transport http`) |
+| `mcp attach <name>` | Attach a new MCP server (stdio or HTTP transport) |
 | `mcp detach <name>` | Detach a previously attached MCP server |
+| `mcp oauth-store <connector-id>` | Store OAuth2 credentials for an MCP server in the vault |
 | `mcp tools` | List MCP tools currently exposed by attached servers |
-| `mcp call <name> <tool>` | Direct invocation against a specific MCP tool |
+| `mcp call --tool <name> --input <json>` | Direct invocation against a specific MCP tool |
+| `mcp a2a-discover <url>` | Fetch the Agent Card from a remote A2A-capable agent |
+| `mcp a2a-delegate --url <url> --capability <name> --input <json>` | Delegate a task to a remote A2A agent |
+| `mcp a2a-card` | Display this agent's own A2A card |
 
-OAuth servers can be attached with `--oauth-connector <connector>`; tokens are stored in the encrypted vault and refreshed automatically. See [[22-MCP Integration]].
+### `mcp attach` flags
+
+| Flag | Description |
+|---|---|
+| `-- <cmd>` | Command and arguments for stdio transport (after `--`) |
+| `--url <url>` | HTTP endpoint for HTTP transport |
+| `--token <token>` | Static Bearer token for HTTP auth |
+| `--oauth-connector <id>` | OAuth2 connector ID (stored via `oauth-store`); enables auto-refresh |
+| `--env KEY=VALUE` | Environment variable for the subprocess; repeat for multiple; use `vault:<name>` to inject from the vault |
+| `--timeout <secs>` | Per-request timeout in seconds (default: 30) |
+
+### `mcp oauth-store` flags
+
+| Flag | Description |
+|---|---|
+| `--provider <name>` | Human-readable provider name (default: `custom`) |
+| `--access-token <token>` | OAuth2 access token |
+| `--refresh-token <token>` | OAuth2 refresh token |
+| `--token-endpoint <url>` | OAuth2 token endpoint for refresh |
+| `--client-id <id>` | OAuth2 client ID |
+| `--client-secret <secret>` | OAuth2 client secret (confidential clients) |
+| `--scopes <list>` | Comma-separated granted scopes |
+| `--expires-in <secs>` | Token lifetime in seconds |
 
 ```bash
-agentos mcp attach github --transport stdio --command "npx -y @modelcontextprotocol/server-github"
-agentos mcp attach jira --transport http --url https://mcp.example.com --oauth-connector jira
+# stdio — attach GitHub MCP server using a vault secret
+agentos mcp attach github \
+  --env GITHUB_TOKEN=vault:github_token \
+  -- npx -y @modelcontextprotocol/server-github
+
+# HTTP — attach with OAuth credentials
+agentos mcp oauth-store zomato \
+  --provider zomato \
+  --access-token "eyJ..." \
+  --refresh-token "dGhp..." \
+  --token-endpoint "https://accounts.zomato.com/oauth/token" \
+  --client-id "myapp_client_id"
+agentos mcp attach zomato \
+  --url https://mcp-server.zomato.com/mcp \
+  --oauth-connector zomato
+
 agentos mcp status
+agentos mcp a2a-discover http://remote-agent.example.com
 ```
 
 ---
@@ -1908,8 +1949,30 @@ The A2A protocol lets one AgentOS instance discover and delegate tasks to agents
 
 | Subcommand | Description |
 |---|---|
-| `a2a discover <url>` | Discover agents exposed by a remote AgentOS instance |
-| `a2a delegate <agent-url> --task <prompt>` | Delegate a task to a remote agent |
+| `a2a card [--url <url>]` | Display this instance's A2A identity card (fetched from `/.well-known/agent.json`) |
+| `a2a discover <agent-url>` | Discover a remote agent's capabilities (name, capabilities, endpoint) |
+| `a2a delegate --agent <url> --capability <name> --input <json>` | Delegate a task to a remote agent |
+| `a2a tasks [--url <url>]` | List active A2A task delegations on the local instance |
+
+### `a2a delegate` flags
+
+| Flag | Description |
+|---|---|
+| `--agent <url>` | Base URL of the remote A2A agent |
+| `--capability <name>` | Capability name to invoke |
+| `--input <json>` | JSON input (default: `{}`) |
+| `--token <token>` | Bearer token for authenticating with the remote agent |
+| `--wait` | Poll until the delegated task completes and print the final result (10-minute timeout) |
+
+```bash
+agentos a2a discover http://remote.example.com
+agentos a2a delegate \
+  --agent http://remote.example.com \
+  --capability summarize \
+  --input '{"text": "long article..."}' \
+  --wait
+agentos a2a card
+```
 
 ---
 
@@ -1994,6 +2057,26 @@ agentos init my-project --template secure-agent
 
 ---
 
+## `workspace` — Manage agent filesystem access
+
+Controls which host directories agents can read and write beyond the default `data_dir`. Changes are runtime-only (in-memory) unless the path is also added to `tools.workspace.allowed_paths` in the config file.
+
+| Subcommand | Description |
+|---|---|
+| `workspace add <path>` | Add an absolute path to the workspace allowlist |
+| `workspace remove <path>` | Remove a path from the allowlist |
+| `workspace list` | List all currently allowed workspace paths |
+
+```bash
+agentos workspace add /home/user/my-repo
+agentos workspace list
+agentos workspace remove /home/user/old-repo
+```
+
+> Paths added via `workspace add` are canonicalized and take effect immediately for all new tool calls. To persist across restarts, add the path to `tools.workspace.allowed_paths` in `config/default.toml`.
+
+---
+
 ## Permission Reference Table
 
 Permissions follow the format `<resource>:<flags>` where flags are `r` (read), `w` (write), and `x` (execute).
@@ -2039,7 +2122,7 @@ agentos perm grant monitor hardware.gpu:r
 
 ## Quick Reference: All Command Groups
 
-All **36** top-level command groups (an asterisk marks subcommands that work offline without a kernel connection):
+All **38** top-level command groups (an asterisk marks subcommands that work offline without a kernel connection):
 
 | Group | Description | Subcommands |
 |-------|-------------|-------------|
@@ -2070,14 +2153,15 @@ All **36** top-level command groups (an asterisk marks subcommands that work off
 | `notifications` | User notification inbox | `list`, `read`, `respond`, `watch` |
 | `channel` | External delivery channels | `connect`, `list`, `test`, `disconnect` |
 | `skill` | Autonomous skill packages | `list`, `install`, `remove`, `run`, `status` |
-| `mcp` | MCP integration | `serve`*, `list`*, `status`, `attach`, `detach`, `tools`, `call` |
-| `a2a` | Agent-to-Agent protocol | `discover`, `delegate` |
+| `mcp` | MCP integration | `serve`*, `list`*, `tools`*, `call`*, `status`, `attach`, `detach`, `oauth-store`, `a2a-discover`, `a2a-delegate`, `a2a-card` |
+| `a2a` | Agent-to-Agent protocol | `card`, `discover`, `delegate`, `tasks` |
 | `provider` | LLM provider catalog | `list`, `show` |
 | `plugin` | Plugin lifecycle | `list`, `enable`, `disable`, `info` |
 | `onboard` | Interactive setup wizard | — |
 | `doctor` | Diagnose / auto-repair | — (`--fix` flag) |
 | `config` | Read/write configuration | `get`, `set`, `list` |
 | `init` | Scaffold new project | — (`--template`) |
+| `workspace` | Runtime filesystem allowlist | `add`, `remove`, `list` |
 | `web` | Web UI server | `serve` |
 
 *\* Offline commands — do not require a running kernel.*

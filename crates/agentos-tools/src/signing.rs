@@ -234,6 +234,7 @@ mod tests {
                 trust_tier,
                 tags: None,
                 capability_tags: vec![],
+                group: String::new(),
             },
             capabilities_required: ToolCapabilities {
                 permissions: vec!["fs.read".into()],
@@ -258,6 +259,7 @@ mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: RiskClass::ReadonlyScoped,
+            usage_hints: None,
         }
     }
 

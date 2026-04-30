@@ -1,3 +1,4 @@
+use crate::media::{openai_user_content_value, ImageResolver, NoopImageResolver};
 use crate::tool_helpers;
 use crate::traits::LLMCore;
 use crate::types::{
@@ -12,6 +13,7 @@ use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -29,6 +31,9 @@ pub struct CustomCore {
     pricing: ModelPricing,
     retry_policy: crate::retry::RetryPolicy,
     circuit_breaker: crate::retry::CircuitBreaker,
+    image_resolver: Arc<dyn ImageResolver>,
+    /// When non-empty, only these model names receive native image payloads.
+    vision_models: Vec<String>,
 }
 
 impl CustomCore {
@@ -74,7 +79,35 @@ impl CustomCore {
             pricing,
             retry_policy: crate::retry::RetryPolicy::default(),
             circuit_breaker: crate::retry::CircuitBreaker::default(),
+            image_resolver: Arc::new(NoopImageResolver),
+            vision_models: Vec::new(),
         }
+    }
+
+    pub fn with_image_resolver(mut self, resolver: Arc<dyn ImageResolver>) -> Self {
+        self.image_resolver = resolver;
+        self
+    }
+
+    /// Restrict vision to specific model IDs from the provider catalog (`vision_models`).
+    pub fn with_vision_models(mut self, models: Vec<String>) -> Self {
+        self.vision_models = models;
+        self
+    }
+
+    fn model_has_vision_in_catalog(&self) -> bool {
+        if self.vision_models.is_empty() {
+            return false;
+        }
+        let cur = self.model.trim();
+        let cur_lc = cur.to_ascii_lowercase();
+        self.vision_models.iter().any(|vm| {
+            let v = vm.trim();
+            if v.eq_ignore_ascii_case("auto") && cur_lc == "auto" {
+                return true;
+            }
+            v == cur || v.eq_ignore_ascii_case(&cur_lc)
+        })
     }
 
     /// Override the pricing for this adapter instance.
@@ -99,25 +132,30 @@ impl CustomCore {
                         messages.push(json!({
                             "role": "tool",
                             "tool_call_id": call_id,
-                            "content": entry.content,
+                            "content": entry.text(),
                         }));
                     } else {
                         messages.push(json!({
                             "role": "user",
-                            "content": format!("Tool Result:\n{}", entry.content),
+                            "content": format!("Tool Result:\n{}", entry.text()),
                         }));
                     }
                 }
                 ContextRole::System => {
                     messages.push(json!({
                         "role": "system",
-                        "content": entry.content,
+                        "content": entry.text(),
                     }));
                 }
                 ContextRole::User => {
+                    let content = openai_user_content_value(
+                        entry,
+                        self.supports_images(),
+                        &self.image_resolver,
+                    );
                     messages.push(json!({
                         "role": "user",
-                        "content": entry.content,
+                        "content": content,
                     }));
                 }
                 ContextRole::Assistant => {
@@ -148,10 +186,10 @@ impl CustomCore {
                                 }))
                             })
                             .collect();
-                        let content = if entry.content.is_empty() {
+                        let content = if entry.text().is_empty() {
                             Value::Null
                         } else {
-                            Value::String(entry.content.clone())
+                            Value::String(entry.text().clone())
                         };
                         messages.push(json!({
                             "role": "assistant",
@@ -161,7 +199,7 @@ impl CustomCore {
                     } else {
                         messages.push(json!({
                             "role": "assistant",
-                            "content": entry.content,
+                            "content": entry.text(),
                         }));
                     }
                 }
@@ -250,6 +288,100 @@ impl CustomCore {
         parsed
     }
 
+    /// Fallback for small/local models that emit tool calls as JSON inside
+    /// ```json fenced markdown blocks instead of structured `tool_calls`.
+    /// Looks for objects shaped `{"tool": "<name>", "payload": {...}, ...}`
+    /// (or `arguments`/`input`/`parameters` synonyms) and synthesizes
+    /// `InferenceToolCall`s. Only matches names present in `intent_by_tool`
+    /// to avoid promoting examples or hallucinated tools.
+    fn parse_tool_calls_from_text(
+        text: &str,
+        intent_by_tool: &HashMap<String, String>,
+    ) -> Vec<InferenceToolCall> {
+        if text.is_empty() || intent_by_tool.is_empty() {
+            return Vec::new();
+        }
+
+        let mut out = Vec::new();
+        let mut search_from = 0;
+        while let Some(rel) = text[search_from..].find("```") {
+            let fence_open = search_from + rel;
+            let after_open = fence_open + 3;
+            let line_end = text[after_open..]
+                .find('\n')
+                .map(|n| after_open + n + 1)
+                .unwrap_or(text.len());
+            let lang = text[after_open..line_end].trim().to_ascii_lowercase();
+            let body_start = line_end;
+            let Some(close_rel) = text[body_start..].find("```") else {
+                break;
+            };
+            let body_end = body_start + close_rel;
+            search_from = body_end + 3;
+
+            if !lang.is_empty() && lang != "json" {
+                continue;
+            }
+            let body = text[body_start..body_end].trim();
+            if body.is_empty() {
+                continue;
+            }
+
+            let candidates: Vec<Value> = match serde_json::from_str::<Value>(body) {
+                Ok(Value::Array(arr)) => arr,
+                Ok(v) => vec![v],
+                Err(_) => continue,
+            };
+
+            for cand in candidates {
+                let Value::Object(obj) = cand else { continue };
+                let Some(tool_name) = obj
+                    .get("tool")
+                    .or_else(|| obj.get("name"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                else {
+                    continue;
+                };
+                if !intent_by_tool.contains_key(tool_name) {
+                    continue;
+                }
+                let payload = obj
+                    .get("payload")
+                    .or_else(|| obj.get("arguments"))
+                    .or_else(|| obj.get("input"))
+                    .or_else(|| obj.get("parameters"))
+                    .cloned()
+                    .unwrap_or(json!({}));
+                let payload =
+                    tool_helpers::validate_payload_object(tool_name, "custom", Some(payload));
+                if !tool_helpers::check_payload_size(tool_name, &payload) {
+                    continue;
+                }
+                let intent_type = obj
+                    .get("intent_type")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| intent_by_tool.get(tool_name).cloned())
+                    .unwrap_or_else(|| "query".to_string());
+
+                tracing::warn!(
+                    tool = tool_name,
+                    "Recovered tool call from fenced JSON in model text \
+                     (small-model fallback). Provider should emit native tool_calls."
+                );
+                out.push(InferenceToolCall {
+                    id: None,
+                    tool_name: tool_name.to_string(),
+                    intent_type,
+                    payload,
+                });
+            }
+        }
+        out
+    }
+
     /// Parse tool call arguments from OpenAI-compatible format.
     fn parse_tool_arguments(tool_name: &str, arguments: Option<&Value>) -> Value {
         match arguments {
@@ -319,6 +451,14 @@ impl LLMCore for CustomCore {
 
         let start_time = Instant::now();
         let url = format!("{}/chat/completions", self.base_url);
+        let prepared = crate::media::prepare_for_inference(
+            context,
+            crate::traits::LLMCore::supports_images(self),
+            self.image_resolver.clone(),
+            &self.client,
+        )
+        .await;
+        let context = &prepared;
         let messages = self.format_messages(context);
 
         let effective_tools = if matches!(options.tool_choice, Some(ToolChoice::None)) {
@@ -381,7 +521,21 @@ impl LLMCore for CustomCore {
             Some(Value::String(s)) => s.clone(),
             _ => String::new(),
         };
-        let tool_calls = Self::parse_tool_calls(message, &intent_by_tool);
+        let mut tool_calls = Self::parse_tool_calls(message, &intent_by_tool);
+
+        // Small-model fallback: some local models (e.g. gemma) emit tool
+        // calls as fenced JSON in `content` rather than structured
+        // `tool_calls`. Recover them so the kernel doesn't coherence-reject.
+        if tool_calls.is_empty() && !text.is_empty() {
+            let recovered = Self::parse_tool_calls_from_text(&text, &intent_by_tool);
+            if !recovered.is_empty() {
+                tool_calls = recovered;
+            }
+        }
+
+        // Strip tool-call JSON fences from text so the stored assistant turn
+        // doesn't contain raw JSON that causes the model to loop on it.
+        let text = tool_helpers::strip_tool_json_fences(&text, tool_calls.len());
 
         // Fallback to reasoning_content when content is empty and no tool calls.
         let text = if text.trim().is_empty() && tool_calls.is_empty() {
@@ -406,6 +560,7 @@ impl LLMCore for CustomCore {
             .as_str()
             .unwrap_or("stop");
         let stop_reason = match finish_reason {
+            "stop" if !tool_calls.is_empty() => StopReason::ToolUse,
             "stop" => StopReason::EndTurn,
             "tool_calls" => StopReason::ToolUse,
             "length" => StopReason::MaxTokens,
@@ -444,6 +599,10 @@ impl LLMCore for CustomCore {
 
     fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
+    }
+
+    fn supports_images(&self) -> bool {
+        self.model_has_vision_in_catalog()
     }
 
     async fn health_check(&self) -> crate::types::HealthStatus {
@@ -498,6 +657,14 @@ impl LLMCore for CustomCore {
 
         let start_time = Instant::now();
         let url = format!("{}/chat/completions", self.base_url);
+        let prepared = crate::media::prepare_for_inference(
+            context,
+            crate::traits::LLMCore::supports_images(self),
+            self.image_resolver.clone(),
+            &self.client,
+        )
+        .await;
+        let context = &prepared;
         let messages = self.format_messages(context);
         let (openai_tools, intent_by_tool) = self.build_tools_payload(tools);
 
@@ -715,6 +882,20 @@ impl LLMCore for CustomCore {
             full_text = reasoning_text;
         }
 
+        // Small-model fallback: recover tool calls embedded as fenced JSON in
+        // the streamed text when no native tool_calls deltas arrived.
+        if tool_calls.is_empty() && !full_text.is_empty() {
+            let recovered = Self::parse_tool_calls_from_text(&full_text, &intent_by_tool);
+            for tc in &recovered {
+                let _ = tx.send(InferenceEvent::ToolCallComplete(tc.clone())).await;
+            }
+            if !recovered.is_empty() {
+                stop_reason = StopReason::ToolUse;
+                full_text = tool_helpers::strip_tool_json_fences(&full_text, recovered.len());
+                tool_calls = recovered;
+            }
+        }
+
         let duration_ms = start_time.elapsed().as_millis() as u64;
         let cost = calculate_inference_cost(&usage, &self.pricing);
 
@@ -797,7 +978,9 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "result data".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "result data".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: Some(ContextMetadata {
                 tool_name: Some("file-reader".to_string()),
@@ -832,7 +1015,9 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "result data".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "result data".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,
@@ -852,6 +1037,82 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");
         assert_eq!(messages[0]["content"], "Tool Result:\nresult data");
+    }
+
+    #[test]
+    fn test_format_messages_user_image_url_with_vision_model() {
+        let mut ctx = ContextWindow::new(5);
+        ctx.push(ContextEntry {
+            role: ContextRole::User,
+            parts: vec![
+                ContentPart::Text {
+                    text: "describe".into(),
+                },
+                ContentPart::Image {
+                    mime: "image/png".into(),
+                    source: ImageSource::Base64 { data: "abc".into() },
+                },
+            ],
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::Task,
+            is_summary: false,
+        });
+
+        let adapter = CustomCore::new(
+            None,
+            "pixtral-large-latest".into(),
+            "http://localhost".into(),
+        )
+        .with_vision_models(vec!["pixtral-large-latest".into()]);
+        let messages = adapter.format_messages(&ctx);
+        assert_eq!(messages[0]["role"], "user");
+        let content = &messages[0]["content"];
+        assert!(content.is_array());
+        let arr = content.as_array().unwrap();
+        assert!(arr.iter().any(|v| v["type"] == "image_url"));
+    }
+
+    #[test]
+    fn test_format_messages_user_image_text_only_when_model_not_in_vision_list() {
+        let mut ctx = ContextWindow::new(5);
+        ctx.push(ContextEntry {
+            role: ContextRole::User,
+            parts: vec![
+                ContentPart::Text {
+                    text: "describe".into(),
+                },
+                ContentPart::Image {
+                    mime: "image/png".into(),
+                    source: ImageSource::Base64 {
+                        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+                            .into(),
+                    },
+                },
+            ],
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::Task,
+            is_summary: false,
+        });
+
+        let adapter = CustomCore::new(None, "deepseek-chat".into(), "http://localhost".into())
+            .with_vision_models(vec!["pixtral-large-latest".into()]);
+        let messages = adapter.format_messages(&ctx);
+        let content = &messages[0]["content"];
+        let blob = content.to_string();
+        assert!(
+            blob.contains("model does not support vision") || blob.contains("[Image:"),
+            "{blob}"
+        );
     }
 
     #[test]

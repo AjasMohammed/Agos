@@ -17,22 +17,32 @@ fn workflows_dir(state: &AppState) -> PathBuf {
     state.kernel.data_dir().join("workflows")
 }
 
-fn ensure_workflows_dir(state: &AppState) -> std::io::Result<PathBuf> {
+async fn ensure_workflows_dir(state: &AppState) -> std::io::Result<PathBuf> {
     let dir = workflows_dir(state);
-    std::fs::create_dir_all(&dir)?;
+    let dir_clone = dir.clone();
+    tokio::task::spawn_blocking(move || std::fs::create_dir_all(&dir_clone))
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))??;
     Ok(dir)
 }
 
-fn load_spec(path: &std::path::Path) -> Option<WorkflowSpec> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
+async fn load_spec_async(path: std::path::PathBuf) -> Option<WorkflowSpec> {
+    tokio::task::spawn_blocking(move || {
+        let raw = std::fs::read_to_string(&path).ok()?;
+        serde_json::from_str(&raw).ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
-fn persist_spec(dir: &std::path::Path, spec: &WorkflowSpec) -> std::io::Result<()> {
+async fn persist_spec(dir: &std::path::Path, spec: &WorkflowSpec) -> std::io::Result<()> {
     let path = dir.join(format!("{}.json", spec.id));
     let raw = serde_json::to_string_pretty(spec)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, raw)
+    tokio::task::spawn_blocking(move || std::fs::write(path, raw))
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
 }
 
 /* ── workflow summary for list page ──────────────────────────────────── */
@@ -64,16 +74,25 @@ impl From<WorkflowSpec> for WorkflowSummary {
 
 pub async fn list(State(state): State<AppState>) -> Response {
     let dir = workflows_dir(&state);
+    // Offload directory listing and file reads to the blocking thread pool.
+    let dir_clone = dir.clone();
+    let paths: Vec<std::path::PathBuf> = tokio::task::spawn_blocking(move || {
+        match std::fs::read_dir(&dir_clone) {
+            Ok(entries) => entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+                .collect(),
+            Err(_) => vec![],
+        }
+    })
+    .await
+    .unwrap_or_default();
+
     let mut workflows: Vec<WorkflowSummary> = vec![];
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            if let Some(spec) = load_spec(&path) {
-                workflows.push(spec.into());
-            }
+    for path in paths {
+        if let Some(spec) = load_spec_async(path).await {
+            workflows.push(spec.into());
         }
     }
     workflows.sort_by(|a, b| a.name.cmp(&b.name));
@@ -100,7 +119,7 @@ pub async fn edit_workflow(State(state): State<AppState>, Path(id): Path<String>
     }
     let dir = workflows_dir(&state);
     let path = dir.join(format!("{id}.json"));
-    let Some(spec) = load_spec(&path) else {
+    let Some(spec) = load_spec_async(path).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
     builder_page(&state, spec).await
@@ -136,14 +155,14 @@ pub async fn create(State(state): State<AppState>, Json(mut spec): Json<Workflow
     if spec.id.is_empty() {
         spec.id = Uuid::new_v4().to_string();
     }
-    let dir = match ensure_workflows_dir(&state) {
+    let dir = match ensure_workflows_dir(&state).await {
         Ok(d) => d,
         Err(e) => {
             tracing::error!(error = %e, "Failed to create workflows dir");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    if let Err(e) = persist_spec(&dir, &spec) {
+    if let Err(e) = persist_spec(&dir, &spec).await {
         tracing::error!(error = %e, "Failed to persist workflow");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -161,14 +180,14 @@ pub async fn update(
         return StatusCode::BAD_REQUEST.into_response();
     }
     spec.id = id;
-    let dir = match ensure_workflows_dir(&state) {
+    let dir = match ensure_workflows_dir(&state).await {
         Ok(d) => d,
         Err(e) => {
             tracing::error!(error = %e, "Failed to create workflows dir");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    if let Err(e) = persist_spec(&dir, &spec) {
+    if let Err(e) = persist_spec(&dir, &spec).await {
         tracing::error!(error = %e, "Failed to persist workflow");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -240,24 +259,34 @@ pub async fn node_properties(
                 .collect(),
             "workflows" => {
                 let dir = workflows_dir(&state);
-                std::fs::read_dir(&dir)
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .filter_map(|e| {
-                        let p = e.path();
-                        if p.extension().and_then(|x| x.to_str()) != Some("json") {
-                            return None;
+                let dir_clone = dir.clone();
+                let paths: Vec<std::path::PathBuf> =
+                    tokio::task::spawn_blocking(move || {
+                        match std::fs::read_dir(&dir_clone) {
+                            Ok(entries) => entries
+                                .flatten()
+                                .map(|e| e.path())
+                                .filter(|p| {
+                                    p.extension().and_then(|x| x.to_str()) == Some("json")
+                                })
+                                .collect(),
+                            Err(_) => vec![],
                         }
-                        let spec = load_spec(&p)?;
-                        Some(PropertyOption {
+                    })
+                    .await
+                    .unwrap_or_default();
+                let mut options = Vec::new();
+                for p in paths {
+                    if let Some(spec) = load_spec_async(p).await {
+                        options.push(PropertyOption {
                             value: serde_json::Value::String(spec.id.clone()),
                             label: spec.name,
                             description: None,
                             icon: None,
-                        })
-                    })
-                    .collect()
+                        });
+                    }
+                }
+                options
             }
             _ => vec![],
         };
@@ -293,7 +322,7 @@ pub async fn run_workflow(
     }
     let dir = workflows_dir(&state);
     let path = dir.join(format!("{id}.json"));
-    let Some(spec) = load_spec(&path) else {
+    let Some(spec) = load_spec_async(path).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
 

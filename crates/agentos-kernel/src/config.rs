@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 /// Controls when tools are executed in a sandbox child process vs in-process.
 ///
@@ -155,7 +156,7 @@ pub struct WebhookAdapterConfig {
     pub url: String,
     /// HMAC-SHA256 secret for X-AgentOS-Signature header. Empty = no signature.
     #[serde(default)]
-    pub secret: String,
+    pub secret: Zeroizing<String>,
     /// Minimum priority to deliver (info/warning/urgent/critical). Default: "warning".
     #[serde(default = "default_warning_priority")]
     pub min_priority: String,
@@ -175,7 +176,7 @@ impl Default for WebhookAdapterConfig {
         Self {
             enabled: false,
             url: String::new(),
-            secret: String::new(),
+            secret: Zeroizing::new(String::new()),
             min_priority: default_warning_priority(),
             max_retries: default_max_retries(),
             retry_delay_secs: default_retry_delay_secs(),

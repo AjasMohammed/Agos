@@ -379,17 +379,21 @@ impl NotificationRouter {
 
     /// Deliver a message to a single channel adapter identified by `target_instance_id`.
     ///
-    /// Unlike `deliver`, this does not fan out to all registered adapters — it persists
-    /// to the inbox then delivers only to the adapter whose `adapter_instance_id` matches.
-    /// Used by `InboundRouter` to route replies back to the originating channel only,
-    /// preventing cross-channel leakage of private chat content.
+    /// Unlike `deliver`, this does not fan out to all registered adapters and does not
+    /// persist to the user inbox — channel-bound traffic (agent→Telegram, kernel `/help`
+    /// replies, agent chat via channel) must not pollute the user-facing notifications
+    /// page (which is reserved for `notify-user`-style messages). Each caller is
+    /// responsible for emitting a `ChannelMessageSent` audit entry on success
+    /// (`kernel_action::execute_channel_send`, `InboundRouter::send_reply`,
+    /// `InboundRouter::send_agent_chat_reply`). Used by `InboundRouter` and `channel-send`
+    /// to route replies back to the originating channel only, preventing cross-channel
+    /// leakage of private chat content.
     pub async fn deliver_to_channel(
         &self,
         msg: UserMessage,
         target_instance_id: &str,
     ) -> Result<(), AgentOSError> {
         self.check_rate_limit(&msg.from).await?;
-        self.inbox.write(&msg).await?;
         let adapters = self.adapters.read().await;
         for adapter in adapters.iter() {
             if adapter.adapter_instance_id().as_deref() == Some(target_instance_id) {

@@ -1,0 +1,46 @@
+[manifest]
+name        = "system-mounts"
+version     = "1.0.0"
+risk_class  = "readonly_external"
+description = "List host filesystem mounts, storage devices, and disk usage via the Hardware Abstraction Layer."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[manifest.usage_hints]
+use_for = ["Checking disk space usage", "Listing mounted filesystems", "Checking if a mount is read-only"]
+prefer_over = ["shell-exec df", "shell-exec mount"]
+quick_example = { mount_contains = "/home" }
+
+[capabilities_required]
+permissions = ["system.mounts:r"]
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[input_schema]
+type = "object"
+
+[input_schema.properties.device_contains]
+type = "string"
+description = "Filter by device path substring"
+
+[input_schema.properties.mount_contains]
+type = "string"
+description = "Filter by mount point substring"
+
+[input_schema.properties.fs_type]
+type = "string"
+description = "Filter by exact filesystem type (e.g. ext4, btrfs, tmpfs)"
+
+[input_schema.properties.writable_only]
+type = "boolean"
+default = false
+description = "If true, only return writable mounts"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 32
+max_cpu_ms    = 5000
+syscalls      = []

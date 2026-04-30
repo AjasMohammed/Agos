@@ -2,10 +2,13 @@ use crate::auth::file_owner_principal;
 use crate::auth::AuthToken;
 use crate::file_store::{sanitize_display_name, sanitize_storage_name, UploadedFile};
 use crate::state::AppState;
+use agentos_llm::media::{is_supported_image_mime, MAX_INLINE_IMAGE_BYTES};
+use agentos_types::{AgentOSError, ContentPart, ImageSource};
 use axum::extract::{Extension, Multipart, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::CookieJar;
+use base64::Engine;
 use chrono::Utc;
 use minijinja::context;
 use std::sync::{Arc, OnceLock};
@@ -16,6 +19,8 @@ use uuid::Uuid;
 /// 100 MiB upload cap — enforced by streaming chunk accumulation.
 const MAX_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
 const MAX_FILENAME_LEN: usize = 255;
+/// Vision uploads per user message (matches adapter budgeting).
+const MAX_IMAGE_PARTS_PER_TURN: usize = 5;
 
 // ── Page handlers ──────────────────────────────────────────────────────────
 
@@ -347,6 +352,18 @@ async fn process_upload(
         None => return Err((StatusCode::BAD_REQUEST, "No file provided").into_response()),
     };
 
+    let fmime_lc = file_mime.to_ascii_lowercase();
+    if fmime_lc.starts_with("image/")
+        && is_supported_image_mime(&fmime_lc)
+        && bytes.len() > MAX_INLINE_IMAGE_BYTES
+    {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Image uploads are limited to 5 MiB",
+        )
+            .into_response());
+    }
+
     // Build a safe on-disk filename: {uuid}_{sanitized_original}.
     let file_id = Uuid::new_v4().to_string();
     let safe_part = sanitize_storage_name(&file_name);
@@ -465,31 +482,33 @@ fn escape_user_data_close(s: &str) -> std::borrow::Cow<'_, str> {
     re.replace_all(s, "&lt;/user_data&gt;")
 }
 
-/// Resolve file IDs from a comma-separated string into prepended context text.
-/// Binary files are noted by name only; text files have their content inlined.
-/// Called by the chat send handler to inject attached files into the LLM prompt.
-pub async fn resolve_file_ids_to_context(
+/// Resolve file IDs into typed context parts ([`FileStore`] lookup + path safety).
+/// Kept separate from [`AppState`] so unit tests can exercise the image branch without booting the kernel.
+///
+/// Text MIMEs become [`ContentPart::Text`]; allowlisted images become [`ContentPart::Image`] when `supports_images`.
+pub async fn resolve_file_ids_with_store(
     ids_csv: &str,
-    state: &AppState,
+    file_store: Arc<crate::file_store::FileStore>,
     owner_principal: &str,
-) -> String {
+    supports_images: bool,
+) -> Vec<ContentPart> {
     if ids_csv.trim().is_empty() {
-        return String::new();
+        return Vec::new();
     }
 
     let ids: Vec<String> = ids_csv
         .split(',')
         .map(str::trim)
         .filter(|s| Uuid::parse_str(s).is_ok())
-        .take(20) // cap to prevent DoS via thousands of placeholders and runaway prompt size
+        .take(20)
         .map(String::from)
         .collect();
 
     if ids.is_empty() {
-        return String::new();
+        return Vec::new();
     }
 
-    let store = Arc::clone(&state.file_store);
+    let store = Arc::clone(&file_store);
     let owner = owner_principal.to_string();
 
     let records =
@@ -497,28 +516,28 @@ pub async fn resolve_file_ids_to_context(
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "resolve_file_ids_to_context: DB lookup failed");
-                return String::new();
+                return Vec::new();
             }
             Err(e) => {
                 tracing::warn!(error = %e, "resolve_file_ids_to_context: spawn_blocking panicked");
-                return String::new();
+                return Vec::new();
             }
         };
 
-    // Canonicalize uploads_dir once before the loop — syscall per path component is expensive.
-    let canonical_uploads = match state.file_store.uploads_dir.canonicalize() {
+    let canonical_uploads = match file_store.uploads_dir.canonicalize() {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, "resolve_file_ids_to_context: canonicalize uploads_dir failed");
-            return String::new();
+            return Vec::new();
         }
     };
 
-    let mut parts = Vec::with_capacity(records.len());
+    let mut out: Vec<ContentPart> = Vec::with_capacity(records.len());
+    let mut image_parts_used = 0usize;
+
     for record in &records {
         let disk_path = std::path::PathBuf::from(&record.path);
 
-        // Verify the path is still within the uploads directory.
         let canonical = match disk_path.canonicalize() {
             Ok(p) => p,
             Err(e) => {
@@ -527,10 +546,12 @@ pub async fn resolve_file_ids_to_context(
                     error = %e,
                     "resolve_file_ids_to_context: file not found on disk"
                 );
-                parts.push(format!(
-                    "[Attached: {} — file not found]\n",
-                    escape_html_attr(&record.original_name)
-                ));
+                out.push(ContentPart::Text {
+                    text: format!(
+                        "[Attached: {} — file not found]\n",
+                        escape_html_attr(&record.original_name)
+                    ),
+                });
                 continue;
             }
         };
@@ -541,13 +562,13 @@ pub async fn resolve_file_ids_to_context(
 
         let safe_name = escape_html_attr(&record.original_name);
         let file_id = escape_html_attr(&record.id);
+        let mime_lc = record.mime.to_ascii_lowercase();
+
         if is_text_mime(&record.mime) {
             match tokio::fs::read_to_string(&canonical).await {
                 Ok(content) => {
-                    // Cap inlined content at 1 MiB to avoid flooding the context window.
                     const MAX_INLINE: usize = 1024 * 1024;
                     if content.len() > MAX_INLINE {
-                        // Find a valid char boundary at or before MAX_INLINE.
                         let cut = content
                             .char_indices()
                             .take_while(|(i, _)| *i < MAX_INLINE)
@@ -555,38 +576,114 @@ pub async fn resolve_file_ids_to_context(
                             .map(|(i, c)| i + c.len_utf8())
                             .unwrap_or(0);
                         let safe_body = escape_user_data_close(&content[..cut]);
-                        parts.push(format!(
-                            "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\" truncated=\"true\" total_bytes=\"{}\">\n\
-                             {safe_body}\n\
-                             [... truncated at 1 MiB — {} total bytes. \
-                             To read the full file, use the user-file-reader tool with file_id=\"{}\"]\n\
-                             </user_data>\n",
-                            content.len(), content.len(), record.id
-                        ));
+                        out.push(ContentPart::Text {
+                            text: format!(
+                                "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\" truncated=\"true\" total_bytes=\"{}\">\n\
+                                 {safe_body}\n\
+                                 [... truncated at 1 MiB — {} total bytes. \
+                                 To read the full file, use the user-file-reader tool with file_id=\"{}\"]\n\
+                                 </user_data>\n",
+                                content.len(),
+                                content.len(),
+                                record.id
+                            ),
+                        });
                     } else {
-                        // Wrap in <user_data> so the system-prompt injection guard applies.
                         let safe_body = escape_user_data_close(&content);
-                        parts.push(format!(
-                            "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\">\n{safe_body}\n</user_data>\n"
-                        ));
+                        out.push(ContentPart::Text {
+                            text: format!(
+                                "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\">\n{safe_body}\n</user_data>\n"
+                            ),
+                        });
                     }
                 }
                 Err(e) => {
                     tracing::warn!(file_id = %record.id, error = %e, "resolve_file_ids_to_context: could not read file");
-                    parts.push(format!("[Attached: {safe_name} — could not read file]\n"));
+                    out.push(ContentPart::Text {
+                        text: format!("[Attached: {safe_name} — could not read file]\n"),
+                    });
+                }
+            }
+        } else if mime_lc.starts_with("image/")
+            && supports_images
+            && is_supported_image_mime(&mime_lc)
+        {
+            if image_parts_used >= MAX_IMAGE_PARTS_PER_TURN {
+                out.push(ContentPart::Text {
+                    text: format!(
+                        "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\" note=\"image limit per turn reached ({MAX_IMAGE_PARTS_PER_TURN}); use user-file-reader\" />\n"
+                    ),
+                });
+                continue;
+            }
+            match tokio::fs::read(&canonical).await {
+                Ok(bytes) if bytes.len() <= MAX_INLINE_IMAGE_BYTES => {
+                    let safe_mime = escape_html_attr(&record.mime);
+                    out.push(ContentPart::Text {
+                        text: format!(
+                            "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\" type=\"image\" mime=\"{safe_mime}\" />\n"
+                        ),
+                    });
+                    out.push(ContentPart::Image {
+                        mime: record.mime.clone(),
+                        source: ImageSource::FileRef {
+                            file_id: record.id.clone(),
+                        },
+                    });
+                    image_parts_used += 1;
+                }
+                Ok(bytes) => {
+                    let safe_mime = escape_html_attr(&record.mime);
+                    out.push(ContentPart::Text {
+                        text: format!(
+                            "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\" type=\"binary\" size_kib=\"{}\" mime=\"{safe_mime}\" \
+                             note=\"Image too large for inline vision ({} bytes). Use user-file-reader tool with file_id=&quot;{}&quot;.\" />\n",
+                            bytes.len().saturating_add(1023) / 1024,
+                            bytes.len(),
+                            record.id,
+                        ),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(file_id = %record.id, error = %e, "resolve_file_ids_to_context: could not read image");
+                    let safe_mime = escape_html_attr(&record.mime);
+                    out.push(ContentPart::Text {
+                        text: format!(
+                            "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\" type=\"binary\" mime=\"{safe_mime}\" note=\"could not read file\" />\n"
+                        ),
+                    });
                 }
             }
         } else {
             let safe_mime = escape_html_attr(&record.mime);
-            parts.push(format!(
-                "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\" type=\"binary\" size_kib=\"{}\" mime=\"{safe_mime}\" \
-                 note=\"Binary file attached. Use user-file-reader tool with file_id=&quot;{}&quot; to read contents.\" />\n",
-                record.size.saturating_add(1023) / 1024, record.id,
-            ));
+            out.push(ContentPart::Text {
+                text: format!(
+                    "<user_data filename=\"{safe_name}\" file_id=\"{file_id}\" type=\"binary\" size_kib=\"{}\" mime=\"{safe_mime}\" \
+                     note=\"Binary file attached. Use user-file-reader tool with file_id=&quot;{}&quot; to read contents.\" />\n",
+                    record.size.saturating_add(1023) / 1024,
+                    record.id,
+                ),
+            });
         }
     }
 
-    parts.join("\n")
+    out
+}
+
+/// Same as [`resolve_file_ids_with_store`], using the web [`AppState`] file store.
+pub async fn resolve_file_ids_to_context(
+    ids_csv: &str,
+    state: &AppState,
+    owner_principal: &str,
+    supports_images: bool,
+) -> Vec<ContentPart> {
+    resolve_file_ids_with_store(
+        ids_csv,
+        Arc::clone(&state.file_store),
+        owner_principal,
+        supports_images,
+    )
+    .await
 }
 
 /// Resolve `@filename` mentions in a message string to inline file content.
@@ -689,6 +786,68 @@ pub async fn resolve_at_mentions(
     }
 }
 
+/// Resolves uploaded file IDs to `(mime, base64)` for multimodal LLM adapters.
+pub struct FileStoreImageResolver {
+    store: Arc<crate::file_store::FileStore>,
+    uploads_canon: std::path::PathBuf,
+}
+
+impl FileStoreImageResolver {
+    pub fn new(store: Arc<crate::file_store::FileStore>) -> Result<Self, std::io::Error> {
+        Ok(Self {
+            uploads_canon: store.uploads_dir.canonicalize()?,
+            store,
+        })
+    }
+}
+
+impl agentos_llm::ImageResolver for FileStoreImageResolver {
+    fn resolve_filename(&self, file_id: &str) -> Option<String> {
+        self.store
+            .get_file_by_id_unscoped(file_id)
+            .ok()
+            .flatten()
+            .map(|r| r.original_name)
+    }
+
+    fn resolve_base64(&self, file_id: &str) -> Result<(String, String), AgentOSError> {
+        let record =
+            self.store
+                .get_file_by_id_unscoped(file_id)
+                .map_err(|e| AgentOSError::KernelError {
+                    reason: format!("file lookup: {e}"),
+                })?;
+        let Some(record) = record else {
+            return Err(AgentOSError::LLMError {
+                provider: "file-store".to_string(),
+                reason: format!("unknown file_id {file_id}"),
+            });
+        };
+        let disk_path = std::path::PathBuf::from(&record.path);
+        let canonical = disk_path
+            .canonicalize()
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("canonicalize: {e}"),
+            })?;
+        if !canonical.starts_with(&self.uploads_canon) {
+            return Err(AgentOSError::KernelError {
+                reason: "path escapes uploads directory".into(),
+            });
+        }
+        let bytes = std::fs::read(&canonical).map_err(|e| AgentOSError::KernelError {
+            reason: format!("read: {e}"),
+        })?;
+        if bytes.len() > MAX_INLINE_IMAGE_BYTES {
+            return Err(AgentOSError::SchemaValidation(format!(
+                "image exceeds max inline size ({} bytes)",
+                MAX_INLINE_IMAGE_BYTES
+            )));
+        }
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok((record.mime, b64))
+    }
+}
+
 /// GET /api/files/search?q=...&session_id=... — fuzzy file search for the @mention typeahead.
 pub async fn search_api(
     State(state): State<AppState>,
@@ -743,4 +902,151 @@ pub async fn search_api(
         .collect();
 
     axum::Json(serde_json::json!({ "files": items })).into_response()
+}
+
+#[cfg(test)]
+mod resolve_multimodal_tests {
+    use super::resolve_file_ids_with_store;
+    use crate::file_store::FileStore;
+    use agentos_types::{ContentPart, ImageSource};
+    use base64::Engine;
+    use std::sync::Arc;
+
+    fn tiny_png_bytes() -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+            .expect("fixture png")
+    }
+
+    async fn seeded_png_upload(
+        owner: &str,
+        id_str: &'static str,
+        mime: &str,
+    ) -> (Arc<FileStore>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(FileStore::open(dir.path()).expect("store"));
+        let path = store.uploads_dir.join(format!("{id_str}_f.png"));
+        let bytes = if mime == "image/heic" {
+            vec![0u8; 32]
+        } else {
+            tiny_png_bytes()
+        };
+        std::fs::write(&path, &bytes).expect("write file");
+        let path_str = path.to_string_lossy().to_string();
+        store
+            .register_file(
+                id_str,
+                "f.png",
+                mime,
+                bytes.len() as u64,
+                &path_str,
+                "",
+                owner,
+                "global",
+            )
+            .expect("register");
+        (store, dir)
+    }
+
+    #[tokio::test]
+    async fn image_mime_produces_image_part() {
+        let owner = "owner_hash_integration_test____________";
+        let id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let (store, _dir) = seeded_png_upload(owner, id, "image/png").await;
+        let parts = resolve_file_ids_with_store(id, Arc::clone(&store), owner, true).await;
+        assert!(parts.iter().any(|p| matches!(p, ContentPart::Image { .. })));
+        let img = parts
+            .iter()
+            .find_map(|p| match p {
+                ContentPart::Image { mime, source } => Some((mime, source)),
+                _ => None,
+            })
+            .expect("image part");
+        assert_eq!(img.0.as_str(), "image/png");
+        assert!(matches!(
+            img.1,
+            ImageSource::FileRef {
+                ref file_id
+            } if file_id == id
+        ));
+    }
+
+    #[tokio::test]
+    async fn image_mime_falls_back_when_unsupported_adapter() {
+        let owner = "owner_hash_integration_test____________";
+        let id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let (store, _dir) = seeded_png_upload(owner, id, "image/png").await;
+        let parts = resolve_file_ids_with_store(id, Arc::clone(&store), owner, false).await;
+        assert!(!parts.iter().any(|p| matches!(p, ContentPart::Image { .. })));
+        let t = parts
+            .iter()
+            .find_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("stub text");
+        assert!(t.contains("Binary") || t.contains("image"));
+    }
+
+    #[tokio::test]
+    async fn per_turn_image_cap_stubs_extras() {
+        let owner = "owner_per_turn_cap_test________________";
+        let png = tiny_png_bytes();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(FileStore::open(dir.path()).expect("store"));
+        let uuids = [
+            "f1111111-1111-1111-1111-111111111101",
+            "f1111111-1111-1111-1111-111111111102",
+            "f1111111-1111-1111-1111-111111111103",
+            "f1111111-1111-1111-1111-111111111104",
+            "f1111111-1111-1111-1111-111111111105",
+            "f1111111-1111-1111-1111-111111111106",
+            "f1111111-1111-1111-1111-111111111107",
+        ];
+        for (i, id) in uuids.iter().enumerate() {
+            let path = store.uploads_dir.join(format!("{id}_t.png"));
+            std::fs::write(&path, &png).expect("write");
+            let path_str = path.to_string_lossy().to_string();
+            store
+                .register_file(
+                    id,
+                    &format!("t{i}.png"),
+                    "image/png",
+                    png.len() as u64,
+                    &path_str,
+                    "",
+                    owner,
+                    "global",
+                )
+                .expect("register");
+        }
+        let csv = uuids.join(",");
+        let parts = resolve_file_ids_with_store(&csv, Arc::clone(&store), owner, true).await;
+        let img_count = parts
+            .iter()
+            .filter(|p| matches!(p, ContentPart::Image { .. }))
+            .count();
+        assert_eq!(
+            img_count, 5,
+            "expected 5 native image parts, got {img_count}"
+        );
+        let stub_hints = parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .filter(|t| t.contains("image limit per turn"))
+            .count();
+        assert!(stub_hints >= 1, "expected stub for overflow images");
+    }
+
+    #[tokio::test]
+    async fn non_allowlisted_image_mime_skips_native_image_part() {
+        let owner = "owner_hash_integration_test____________";
+        let id = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        let (store, _dir) = seeded_png_upload(owner, id, "image/heic").await;
+        let parts = resolve_file_ids_with_store(id, Arc::clone(&store), owner, true).await;
+        assert!(!parts.iter().any(|p| matches!(p, ContentPart::Image { .. })));
+    }
 }

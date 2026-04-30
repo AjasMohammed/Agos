@@ -22,3 +22,7 @@ pub const PERM_USER_INTERACT: &str = "user.interact";
 
 /// Permission resource string: read/observe notification delivery status.
 pub const PERM_USER_STATUS: &str = "user.status";
+
+/// Permission resource string: send a message to one connected channel
+/// (`channel-send`). Requires the `write` bit on this resource.
+pub const PERM_CHANNEL_SEND: &str = "channel.send";

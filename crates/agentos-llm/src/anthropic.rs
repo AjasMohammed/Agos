@@ -1,3 +1,4 @@
+use crate::media::{anthropic_blocks_for_entry, ImageResolver, NoopImageResolver};
 use crate::tool_helpers;
 use crate::traits::LLMCore;
 use crate::types::{
@@ -12,6 +13,7 @@ use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -27,6 +29,7 @@ pub struct AnthropicCore {
     pricing: ModelPricing,
     retry_policy: crate::retry::RetryPolicy,
     circuit_breaker: crate::retry::CircuitBreaker,
+    image_resolver: Arc<dyn ImageResolver>,
 }
 
 impl AnthropicCore {
@@ -81,6 +84,7 @@ impl AnthropicCore {
             pricing,
             retry_policy: crate::retry::RetryPolicy::default(),
             circuit_breaker: crate::retry::CircuitBreaker::default(),
+            image_resolver: Arc::new(NoopImageResolver),
         }
     }
 
@@ -98,6 +102,12 @@ impl AnthropicCore {
         assert!(max_tokens > 0, "max_tokens must be greater than zero");
         self.max_tokens = max_tokens;
         self.capabilities.max_output_tokens = max_tokens as u64;
+        self
+    }
+
+    /// File-backed image resolution for `ImageSource::FileRef` (e.g. web uploads).
+    pub fn with_image_resolver(mut self, resolver: Arc<dyn ImageResolver>) -> Self {
+        self.image_resolver = resolver;
         self
     }
 
@@ -119,14 +129,14 @@ impl AnthropicCore {
                         pending_tool_results.push(json!({
                             "type": "tool_result",
                             "tool_use_id": use_id,
-                            "content": entry.content,
+                            "content": entry.text(),
                         }));
                     } else {
                         // Legacy fallback: add as a text content block in the
                         // pending batch to avoid consecutive user messages.
                         pending_tool_results.push(json!({
                             "type": "text",
-                            "text": format!("Tool Result:\n{}", entry.content),
+                            "text": format!("Tool Result:\n{}", entry.text()),
                         }));
                     }
                 }
@@ -140,9 +150,20 @@ impl AnthropicCore {
                     }
                     match entry.role {
                         ContextRole::User => {
+                            let blocks = anthropic_blocks_for_entry(
+                                entry,
+                                self.capabilities.supports_images,
+                                &self.image_resolver,
+                            )
+                            .unwrap_or_else(|e| {
+                                vec![json!({
+                                    "type": "text",
+                                    "text": format!("[[multimodal error: {e}]]"),
+                                })]
+                            });
                             messages.push(json!({
                                 "role": "user",
-                                "content": entry.content,
+                                "content": Value::Array(blocks),
                             }));
                         }
                         ContextRole::Assistant => {
@@ -156,9 +177,9 @@ impl AnthropicCore {
                                 .and_then(|m| m.assistant_tool_calls.as_ref())
                             {
                                 let mut content_blocks: Vec<Value> = Vec::new();
-                                if !entry.content.is_empty() {
+                                if !entry.text().is_empty() {
                                     content_blocks
-                                        .push(json!({"type": "text", "text": entry.content}));
+                                        .push(json!({"type": "text", "text": entry.text()}));
                                 }
                                 for (idx, call) in calls.iter().enumerate() {
                                     if let Some(name) =
@@ -192,7 +213,7 @@ impl AnthropicCore {
                             } else {
                                 messages.push(json!({
                                     "role": "assistant",
-                                    "content": entry.content,
+                                    "content": entry.text(),
                                 }));
                             }
                         }
@@ -329,17 +350,27 @@ impl LLMCore for AnthropicCore {
         let start_time = Instant::now();
         let url = format!("{}/messages", self.base_url);
 
+        let prepared = crate::media::prepare_for_inference(
+            context,
+            self.capabilities.supports_images,
+            self.image_resolver.clone(),
+            &self.client,
+        )
+        .await;
+        let context = &prepared;
         let messages = self.format_messages(context);
         let active = context.active_entries();
+        let image_count = active
+            .iter()
+            .flat_map(|e| e.parts.iter())
+            .filter(|p| matches!(p, ContentPart::Image { .. }))
+            .count();
         let system_entries: Vec<&ContextEntry> = active
             .iter()
             .filter(|e| e.role == ContextRole::System)
             .copied()
             .collect();
-        let system_prompt = system_entries
-            .first()
-            .map(|e| e.content.as_str())
-            .unwrap_or("");
+        let system_prompt = system_entries.first().map(|e| e.text()).unwrap_or_default();
 
         // Extended thinking requires max_tokens > budget_tokens because both
         // thinking tokens and response tokens count against max_tokens.
@@ -369,7 +400,7 @@ impl LLMCore for AnthropicCore {
             for entry in &system_entries {
                 let mut block = json!({
                     "type": "text",
-                    "text": entry.content,
+                    "text": entry.text(),
                 });
                 if !breakpoint_set && entry.category == ContextCategory::Tools {
                     block["cache_control"] = json!({ "type": "ephemeral" });
@@ -384,7 +415,7 @@ impl LLMCore for AnthropicCore {
         } else if !system_entries.is_empty() {
             let merged = system_entries
                 .iter()
-                .map(|e| e.content.as_str())
+                .map(|e| e.text())
                 .collect::<Vec<_>>()
                 .join("\n\n");
             json!(merged)
@@ -439,6 +470,7 @@ impl LLMCore for AnthropicCore {
         tracing::debug!(
             target: "agentos::llm::input",
             model = %self.model,
+            image_count,
             "LLM input body: {}",
             serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
         );
@@ -582,13 +614,26 @@ impl LLMCore for AnthropicCore {
         let start_time = Instant::now();
         let url = format!("{}/messages", self.base_url);
 
+        let prepared = crate::media::prepare_for_inference(
+            context,
+            self.capabilities.supports_images,
+            self.image_resolver.clone(),
+            &self.client,
+        )
+        .await;
+        let context = &prepared;
         let messages = self.format_messages(context);
         let active = context.active_entries();
+        let image_count = active
+            .iter()
+            .flat_map(|e| e.parts.iter())
+            .filter(|p| matches!(p, ContentPart::Image { .. }))
+            .count();
         let system_prompt = active
             .iter()
             .find(|e| e.role == ContextRole::System)
-            .map(|e| e.content.as_str())
-            .unwrap_or("");
+            .map(|e| e.text())
+            .unwrap_or_default();
 
         let (anthropic_tools, intent_by_tool) = Self::build_anthropic_tools(tools);
 
@@ -607,6 +652,7 @@ impl LLMCore for AnthropicCore {
         tracing::debug!(
             target: "agentos::llm::input",
             model = %self.model,
+            image_count,
             "LLM input body (stream): {}",
             serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
         );
@@ -847,7 +893,9 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         ctx.push(ContextEntry {
             role: ContextRole::System,
-            content: "System rules here.".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "System rules here.".to_string(),
+            }],
             metadata: None,
             timestamp: chrono::Utc::now(),
             importance: 0.5,
@@ -859,7 +907,9 @@ mod tests {
         });
         ctx.push(ContextEntry {
             role: ContextRole::User,
-            content: "Hello".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "Hello".to_string(),
+            }],
             metadata: None,
             timestamp: chrono::Utc::now(),
             importance: 0.5,
@@ -876,7 +926,48 @@ mod tests {
         // System prompt is separated in Anthropic
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");
-        assert_eq!(messages[0]["content"], "Hello");
+        let content = messages[0]["content"].as_array().expect("array content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Hello");
+    }
+
+    #[test]
+    fn anthropic_format_messages_includes_png_image_block() {
+        use base64::Engine;
+        let png = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+            .unwrap();
+        let data = base64::engine::general_purpose::STANDARD.encode(&png);
+        let mut ctx = ContextWindow::new(5);
+        ctx.push(ContextEntry {
+            role: ContextRole::User,
+            parts: vec![
+                ContentPart::Text {
+                    text: "Describe it".into(),
+                },
+                ContentPart::Image {
+                    mime: "image/png".into(),
+                    source: ImageSource::Base64 { data },
+                },
+            ],
+            metadata: None,
+            timestamp: chrono::Utc::now(),
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::History,
+            is_summary: false,
+        });
+
+        let adapter = AnthropicCore::new(SecretString::new("fake".into()), "claude".into());
+        let messages = adapter.format_messages(&ctx);
+        let content = messages[0]["content"].as_array().expect("array");
+        assert!(content.iter().any(|b| b["type"] == "image"));
+        let img = content.iter().find(|b| b["type"] == "image").unwrap();
+        assert_eq!(img["source"]["type"], "base64");
+        assert_eq!(img["source"]["media_type"], "image/png");
     }
 
     #[test]
@@ -955,6 +1046,7 @@ mod tests {
                 trust_tier: TrustTier::Core,
                 tags: None,
                 capability_tags: vec![],
+                group: String::new(),
             },
             capabilities_required: ToolCapabilities {
                 permissions: vec!["fs.user_data:r".to_string()],
@@ -979,6 +1071,7 @@ mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: Default::default(),
+            usage_hints: None,
         };
 
         let (tools, intent_map) =
@@ -993,7 +1086,9 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         ctx.push(ContextEntry {
             role: ContextRole::User,
-            content: "Read the file".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "Read the file".to_string(),
+            }],
             metadata: None,
             timestamp: chrono::Utc::now(),
             importance: 0.5,
@@ -1005,7 +1100,9 @@ mod tests {
         });
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "file contents here".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "file contents here".to_string(),
+            }],
             metadata: Some(ContextMetadata {
                 tool_name: Some("file-reader".to_string()),
                 tool_id: None,
@@ -1029,7 +1126,9 @@ mod tests {
         assert_eq!(messages.len(), 2);
         // First message is the user message
         assert_eq!(messages[0]["role"], "user");
-        assert_eq!(messages[0]["content"], "Read the file");
+        let first_content = messages[0]["content"].as_array().expect("array content");
+        assert_eq!(first_content[0]["type"], "text");
+        assert_eq!(first_content[0]["text"], "Read the file");
         // Second is the tool result batch (user role with content blocks)
         assert_eq!(messages[1]["role"], "user");
         let content = messages[1]["content"].as_array().unwrap();
@@ -1044,7 +1143,9 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "status: ok".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "status: ok".to_string(),
+            }],
             metadata: None,
             timestamp: chrono::Utc::now(),
             importance: 0.5,
@@ -1073,7 +1174,9 @@ mod tests {
         // Two consecutive native tool results should be batched into one user message
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "result A".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "result A".to_string(),
+            }],
             metadata: Some(ContextMetadata {
                 tool_name: Some("tool-a".to_string()),
                 tool_id: None,
@@ -1092,7 +1195,9 @@ mod tests {
         });
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "result B".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "result B".to_string(),
+            }],
             metadata: Some(ContextMetadata {
                 tool_name: Some("tool-b".to_string()),
                 tool_id: None,
@@ -1129,7 +1234,9 @@ mod tests {
         // consecutive user messages (Anthropic rejects that).
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "native result".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "native result".to_string(),
+            }],
             metadata: Some(ContextMetadata {
                 tool_name: Some("tool-a".to_string()),
                 tool_id: None,
@@ -1148,7 +1255,9 @@ mod tests {
         });
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "legacy result".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "legacy result".to_string(),
+            }],
             metadata: None,
             timestamp: chrono::Utc::now(),
             importance: 0.5,

@@ -70,7 +70,7 @@ pub struct ToolExecutionContext {
 
 All built-in tools ship as `trust_tier = "core"` manifests in `tools/core/`. They are compiled into the kernel as Rust code — no external binary or WASM module is loaded.
 
-The kernel registers **78 built-in tools** spanning twelve domains (including 17 KMC capability tools): file I/O, memory (semantic / episodic / archival / procedural / blocks), scratchpad knowledge graph, multi-agent coordination, task management, system & hardware (HAL), data & utilities, agent introspection, user notifications, and the network family. Use the `agent-manual` tool with `{"section": "tools"}` to enumerate them at runtime; `{"section": "tool-detail", "name": "<tool>"}` returns the full input schema for any tool.
+The kernel registers **127 built-in tools** spanning sixteen domains (including 17 KMC capability tools): file I/O, memory (semantic / episodic / archival / procedural / blocks), scratchpad knowledge graph, multi-agent coordination, task management, system & hardware (HAL), data & utilities, agent introspection, user notifications, network family, agent inbox, schedule inspection, tool discovery, and host introspection. Use the `list-tools` tool to enumerate all tools at runtime, `search-tools` for keyword search, and `describe-tool` for the full input schema of any individual tool.
 
 ### `file-reader`
 
@@ -1075,9 +1075,76 @@ Tools loaded from `.wasm` modules run inside the Wasmtime runtime:
 
 ---
 
+## Agent Inbox Tools
+
+Six tools for reading and managing the agent's async notification inbox. Notifications are written by the kernel when scheduled tasks fire, sub-agents complete, timer events trigger, or other kernel events occur. Agent-to-agent direct messages are kept in a separate inbox (same tool family, different DB).
+
+| Tool | Description | Permissions |
+|---|---|---|
+| `agent-inbox-list` | List unread and recent notifications with title and kind | `agent.inbox:r` |
+| `agent-inbox-read` | Mark a notification as read and return its full body | `agent.inbox:r` |
+| `agent-inbox-dismiss` | Permanently delete a notification from the inbox | `agent.inbox:rw` |
+| `agent-messages-list` | List unread messages from other agents, grouped by sender | `agent.message:r` |
+| `agent-messages-read` | Mark an agent-to-agent message as read and return its body | `agent.message:r` |
+| `agent-messages-dismiss` | Delete an agent-to-agent message from the inbox | `agent.message:rw` |
+
+The agent's system prompt includes a compact awareness segment when either inbox is non-empty:
+
+```
+## Notifications
+Unread notifications: 3
+Unread messages from: planner (2), researcher (1)
+
+Use the `agent-inbox-list` tool to view notifications, `agent-messages-list` to view messages.
+```
+
+The segment renders nothing when both inboxes are empty — zero prompt overhead for idle agents. See [[28-Agent Inbox and Notifications]] for the full system design.
+
+---
+
+## Schedule Inspection Tools
+
+Four tools for agents to introspect their own scheduled tasks and run history.
+
+| Tool | Description |
+|---|---|
+| `list-my-schedules` | List all cron, once, and timer schedules owned by this agent |
+| `get-schedule-runs` | Retrieve per-fire run history for a specific schedule ID |
+| `get-task-logs` | Fetch execution logs for a task spawned by a schedule |
+| `schedule-once` | Schedule a task to run exactly once at a specified ISO-8601 time |
+
+---
+
+## Tool Discovery and Pagination
+
+Four tools for agents to navigate the full 127-tool inventory without overloading the system prompt. The system prompt delivers a compact tiered manual; use these tools to go deeper.
+
+| Tool | Description |
+|---|---|
+| `list-tools` | List tools by category or tag; supports pagination via `page`/`page_size` |
+| `search-tools` | Full-text and fuzzy search across tool names, descriptions, and tags |
+| `describe-tool` | Return the complete input schema and usage hints for a named tool |
+| `tool-result-page` | Retrieve a specific page from a paginated tool result set |
+
+---
+
+## Host Introspection Tools
+
+Four HAL-backed tools for Linux host introspection. All are read-only and degrade gracefully on non-Linux hosts with a `platform_unsupported` error. Results include a `sandbox` envelope noting that `shell-exec` runs in a Bubblewrap PID namespace, so process listings from `shell-exec` reflect the sandboxed view, not the host.
+
+| Tool | Description | Permissions |
+|---|---|---|
+| `network-sockets` | List open TCP/UDP sockets from `/proc/net/{tcp,udp}`; maps inodes to PIDs | `hardware.network:r` |
+| `system-mounts` | Enumerate mounted filesystems from `/proc/mounts` with `statvfs` capacity | `hardware.storage:r` |
+| `system-open-files` | Walk per-process `/proc/<pid>/fd` to list open file descriptors | `hardware.sensors:r` |
+| `system-services` | List and query systemd service units via D-Bus (read-only: list, status, logs) | `hardware.sensors:r` |
+
+---
+
 ## Related
 
 - [[17-WASM Tools Development]] — Writing custom WASM and native Rust tools
 - [[Architecture Overview]] — Kernel intent flow and capability token system
 - [[04-CLI Reference Complete]] — Full CLI command reference
+- [[28-Agent Inbox and Notifications]] — Agent inbox and message inbox system design
 - [[Security Reference]] — Capability tokens, PermissionSet, vault

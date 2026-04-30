@@ -3,7 +3,7 @@ title: AgentOS Handbook Index
 tags:
   - docs
   - handbook
-date: 2026-03-17
+date: 2026-04-30
 status: complete
 ---
 
@@ -20,10 +20,10 @@ status: complete
 | 01 | [[01-Introduction and Philosophy]] | What AgentOS is, core principles, the Linux analogy — LLMs as CPU, tools as programs, intent as syscall |
 | 02 | [[02-Installation and First Run]] | Prerequisites, building from source, configuration, first kernel boot |
 | 03 | [[03-Architecture Overview]] | System architecture, crate dependency graph, the intent flow from CLI to tool execution |
-| 04 | [[04-CLI Reference Complete]] | All 36 `agentos` command groups with flags, arguments, and examples — includes `team`, `skill`, `mcp` (attach/detach/status), `a2a`, `provider`, `plugin`, `onboard`, `doctor`, `config`, `init`, plus `start`, `stop`, `scratchpad`, `healthz`, `log`, `notifications`, `channel`, and `web` |
+| 04 | [[04-CLI Reference Complete]] | All 38 `agentos` command groups with flags, arguments, and examples — includes `team`, `skill`, `mcp` (attach/detach/oauth-store/a2a-*), `a2a` (card/discover/delegate/tasks), `workspace`, `provider`, `plugin`, `onboard`, `doctor`, `config`, `init`, plus `start`, `stop`, `scratchpad`, `healthz`, `log`, `notifications`, `channel`, and `web` |
 | 05 | [[05-Agent Management]] | Agent lifecycle, messaging, groups, identity keys, agent registry, multi-agent coordination (sub-agents, teams) |
 | 06 | [[06-Task System]] | Task routing, lifecycle states, background tasks, scheduled tasks, sub-agent tasks (parent_task_id, spawn_depth, team coordinator), checkpointing & resume |
-| 07 | [[07-Tool System]] | All 61 built-in tools — file I/O, memory tiers, scratchpad knowledge graph, multi-agent coordination (spawn/await/verify/poll/cancel), web-search, HAL device tools, manifests, trust tiers, signing |
+| 07 | [[07-Tool System]] | All 127 built-in tools across 16 domains — file I/O, memory tiers, scratchpad, multi-agent coordination, task management, HAL device tools, agent inbox (6 tools), schedule inspection (4), tool discovery/pagination (4), host introspection (4), manifests, trust tiers, signing |
 | 08 | [[08-Security Model]] | 7 defense layers, capability tokens, permission enforcement, injection scanner, risk levels, hooks (`AuditHook`, `ApprovalHook`) |
 | 09 | [[09-Secrets and Vault]] | AES-256-GCM encrypted vault, secret scopes, rotation, lockdown mode, OAuth credential storage |
 | 10 | [[10-Memory System]] | 4 memory tiers, automatic extraction, consolidation, context budget management |
@@ -31,7 +31,7 @@ status: complete
 | 12 | [[12-Event System]] | Event types, subscriptions, filter predicates, event-triggered tasks, throttle policy |
 | 13 | [[13-Cost Tracking]] | Per-agent token costs, budget enforcement, model pricing table, cost CLI |
 | 14 | [[14-Audit Log]] | 110 event types across 25 categories — task lifecycle, MCP, OAuth, containers, IoT device twins, checkpoint recovery, append-only SQLite chain, Merkle verification, export, snapshots |
-| 15 | [[15-LLM Configuration]] | Built-in adapters (Ollama, OpenAI, Anthropic, Gemini, Mock) plus the 20+ provider catalog (Mistral, XAI, Cohere, Cerebras, Moonshot, NVIDIA, Hyperbolic, Azure, …) |
+| 15 | [[15-LLM Configuration]] | Four native adapters (Ollama, OpenAI, Anthropic, Gemini) plus the 20-entry provider catalog (DeepSeek, Groq, Mistral, xAI, Cohere, Cerebras, OpenRouter, Together, Fireworks, NVIDIA, Hyperbolic, Azure, and more) — connecting, env vars, FallbackAdapter, RetryPolicy, CircuitBreaker |
 | 16 | [[16-Configuration Reference]] | Every config key in `config/default.toml` with type, default value, and description |
 | 17 | [[17-WASM Tools Development]] | WASM execution protocol, Rust and Python examples, `#[tool]` SDK macro |
 | 18 | [[18-Advanced Operations]] | HAL (16 drivers incl. audio, bluetooth, webcam, printer, display, raw USB, GPU, MQTT, Home Assistant), device twins & safety engine, consent store, resource locks, snapshots, escalation, identity |
@@ -44,6 +44,7 @@ status: complete
 | 25 | [[25-API Authentication and Keys]] | API key lifecycle (create, scope, expire, revoke), HMAC validation internals, WebSocket auth, CSRF middleware, security best practices |
 | 26 | [[26-Channel Adapters]] | All 10 bidirectional messaging adapters — Discord, Telegram, Slack, Matrix, Mattermost, Teams, LINE, WhatsApp, Email, Webhook — pairing manager, health monitor, retry with backoff |
 | 27 | [[27-Kernel Mediated Capabilities]] | 5 managed capability domains (env, storage, proc, net, build) with 17 bridge tools — policy engine, dynamic grants, 7-layer SSRF defense, structured output parsing, per-agent isolation |
+| 28 | [[28-Agent Inbox and Notifications]] | Agent async notification inbox + agent-to-agent message inbox — SQLite persistence, idempotent writes, capacity-based eviction, system prompt segment design, 6 tools |
 
 ---
 
@@ -55,7 +56,7 @@ status: complete
 
 **Operator running a deployment?** See [[04-CLI Reference Complete]], [[16-Configuration Reference]], and [[19-Troubleshooting and FAQ]].
 
-**Developer building agents?** See [[05-Agent Management]] (including multi-agent coordination and teams), [[06-Task System]], [[07-Tool System]], [[17-WASM Tools Development]], [[21-User Notifications and Channels]], [[22-MCP Integration]], and [[26-Channel Adapters]].
+**Developer building agents?** See [[05-Agent Management]] (including multi-agent coordination and teams), [[06-Task System]], [[07-Tool System]], [[17-WASM Tools Development]], [[21-User Notifications and Channels]], [[22-MCP Integration]], [[26-Channel Adapters]], and [[28-Agent Inbox and Notifications]].
 
 **Testing and evaluating AgentOS?** See [[20-LLM Agent Testing]].
 
@@ -95,3 +96,4 @@ status: complete
 | WebSocket | [[24-WebSocket Guide]] | [[23-REST API Reference]], [[12-Event System]], [[21-User Notifications and Channels]] |
 | API Keys | [[25-API Authentication and Keys]] | [[23-REST API Reference]], [[08-Security Model]], [[09-Secrets and Vault]] |
 | Channel Adapters | [[26-Channel Adapters]] | [[21-User Notifications and Channels]], [[23-REST API Reference]], [[08-Security Model]], [[09-Secrets and Vault]] |
+| Agent Inbox | [[28-Agent Inbox and Notifications]] | [[07-Tool System]], [[06-Task System]], [[12-Event System]], [[21-User Notifications and Channels]] |

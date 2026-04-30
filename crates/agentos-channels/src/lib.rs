@@ -10,6 +10,7 @@ pub mod retry;
 pub mod slack;
 pub mod teams;
 pub mod telegram;
+pub mod telegram_format;
 pub mod types;
 pub mod webhook;
 pub mod whatsapp;

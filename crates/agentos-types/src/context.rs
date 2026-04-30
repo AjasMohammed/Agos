@@ -1,6 +1,33 @@
 use crate::ids::*;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
+
+/// Anthropic-style guidance: ~1500 tokens per image for budget estimation (v1 constant).
+pub const ESTIMATED_TOKENS_PER_IMAGE: usize = 1500;
+
+/// A segment of a context entry — text or an image reference/inline data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    Image { mime: String, source: ImageSource },
+}
+
+/// How image bytes are provided to adapters.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ImageSource {
+    Base64 {
+        data: String,
+    },
+    Url {
+        url: String,
+    },
+    /// Resolved at adapter boundary via ImageResolver (agentos-llm).
+    FileRef {
+        file_id: String,
+    },
+}
 
 /// Strategy for handling context window overflow.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -34,10 +61,10 @@ pub struct ContextWindow {
 }
 
 /// A single entry in the context window.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ContextEntry {
     pub role: ContextRole,
-    pub content: String,
+    pub parts: Vec<ContentPart>,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub metadata: Option<ContextMetadata>,
     /// Importance score from 0.0 (evictable) to 1.0 (critical). Defaults to 0.5.
@@ -61,6 +88,136 @@ pub struct ContextEntry {
     /// `role == System` so that they do not accumulate without bound.
     #[serde(default)]
     pub is_summary: bool,
+}
+
+#[derive(Deserialize)]
+struct ContextEntryDe {
+    role: ContextRole,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    parts: Option<Vec<ContentPart>>,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    metadata: Option<ContextMetadata>,
+    #[serde(default = "default_importance")]
+    importance: f32,
+    #[serde(default)]
+    pinned: bool,
+    #[serde(default)]
+    reference_count: u32,
+    #[serde(default)]
+    partition: ContextPartition,
+    #[serde(default)]
+    category: ContextCategory,
+    #[serde(default)]
+    is_summary: bool,
+}
+
+impl From<ContextEntryDe> for ContextEntry {
+    fn from(d: ContextEntryDe) -> Self {
+        let parts = if let Some(ref p) = d.parts {
+            if !p.is_empty() {
+                p.clone()
+            } else if let Some(c) = d.content.clone() {
+                vec![ContentPart::Text { text: c }]
+            } else {
+                vec![]
+            }
+        } else if let Some(c) = d.content.clone() {
+            vec![ContentPart::Text { text: c }]
+        } else {
+            vec![]
+        };
+        Self {
+            role: d.role,
+            parts,
+            timestamp: d.timestamp,
+            metadata: d.metadata,
+            importance: d.importance,
+            pinned: d.pinned,
+            reference_count: d.reference_count,
+            partition: d.partition,
+            category: d.category,
+            is_summary: d.is_summary,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ContextEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        ContextEntryDe::deserialize(deserializer).map(Into::into)
+    }
+}
+
+impl ContextEntry {
+    /// Concatenate all text segments (images excluded).
+    pub fn text(&self) -> String {
+        let mut s = String::new();
+        for p in &self.parts {
+            if let ContentPart::Text { text } = p {
+                s.push_str(text);
+            }
+        }
+        s
+    }
+
+    /// Single text-only entry (common case).
+    pub fn from_text(role: ContextRole, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            parts: vec![ContentPart::Text {
+                text: content.into(),
+            }],
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: default_importance(),
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::default(),
+            category: ContextCategory::default(),
+            is_summary: false,
+        }
+    }
+
+    pub fn has_images(&self) -> bool {
+        self.parts
+            .iter()
+            .any(|p| matches!(p, ContentPart::Image { .. }))
+    }
+
+    /// Append to the last text part or push a new text part.
+    pub fn push_text(&mut self, chunk: &str) {
+        if chunk.is_empty() {
+            return;
+        }
+        match self.parts.last_mut() {
+            Some(ContentPart::Text { text }) => text.push_str(chunk),
+            _ => self.parts.push(ContentPart::Text {
+                text: chunk.to_string(),
+            }),
+        }
+    }
+
+    /// Token estimate for this entry (text via chars/ratio; each image ≈ [`ESTIMATED_TOKENS_PER_IMAGE`]).
+    pub fn estimated_tokens(&self, chars_per_token: f32) -> usize {
+        let ratio = chars_per_token.clamp(0.5, 16.0);
+        let mut n = 0usize;
+        for p in &self.parts {
+            match p {
+                ContentPart::Text { text } => {
+                    n += (text.chars().count() as f32 / ratio) as usize + 1;
+                }
+                ContentPart::Image { .. } => {
+                    n += ESTIMATED_TOKENS_PER_IMAGE;
+                }
+            }
+        }
+        n
+    }
 }
 
 fn default_importance() -> f32 {
@@ -215,7 +372,7 @@ pub enum ContextRole {
 }
 
 /// Optional metadata attached to a context entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextMetadata {
     pub tool_name: Option<String>,
     pub tool_id: Option<ToolID>,
@@ -265,18 +422,19 @@ impl ContextWindow {
         let mut i = 0;
         while removed < count && i < self.entries.len() {
             let e = &self.entries[i];
-            if e.role != ContextRole::System && !e.pinned {
+            if e.role != ContextRole::System && !e.pinned && !e.has_images() {
                 let label = match e.role {
                     ContextRole::User => "User",
                     ContextRole::Assistant => "Assistant",
                     ContextRole::ToolResult => "ToolResult",
                     ContextRole::System => unreachable!(),
                 };
+                let body = e.text();
                 // Use char-boundary-safe truncation to avoid panics on multi-byte UTF-8
-                let snippet = if e.content.chars().count() > 150 {
-                    format!("{}...", e.content.chars().take(150).collect::<String>())
+                let snippet = if body.chars().count() > 150 {
+                    format!("{}...", body.chars().take(150).collect::<String>())
                 } else {
-                    e.content.clone()
+                    body
                 };
                 summarized_parts.push(format!("[{label}]: {snippet}"));
                 self.entries.remove(i);
@@ -293,25 +451,18 @@ impl ContextWindow {
                 .position(|e| e.role != ContextRole::System)
                 .unwrap_or(self.entries.len());
 
-            self.entries.insert(
-                insert_pos,
-                ContextEntry {
-                    role: ContextRole::System,
-                    content: format!(
-                        "[TOKEN BUDGET SUMMARY — {} messages compressed]\n{}",
-                        summarized_parts.len(),
-                        summarized_parts.join("\n")
-                    ),
-                    timestamp: chrono::Utc::now(),
-                    metadata: None,
-                    importance: 0.3,
-                    pinned: false,
-                    reference_count: 0,
-                    partition: ContextPartition::Active,
-                    category: ContextCategory::History,
-                    is_summary: true,
-                },
+            let mut summary_entry = ContextEntry::from_text(
+                ContextRole::System,
+                format!(
+                    "[TOKEN BUDGET SUMMARY — {} messages compressed]\n{}",
+                    summarized_parts.len(),
+                    summarized_parts.join("\n")
+                ),
             );
+            summary_entry.importance = 0.3;
+            summary_entry.category = ContextCategory::History;
+            summary_entry.is_summary = true;
+            self.entries.insert(insert_pos, summary_entry);
         }
     }
 
@@ -324,7 +475,7 @@ impl ContextWindow {
         let mut i = 0;
         while extracted.len() < count && i < self.entries.len() {
             let e = &self.entries[i];
-            if e.role != ContextRole::System && !e.pinned && !e.is_summary {
+            if e.role != ContextRole::System && !e.pinned && !e.is_summary && !e.has_images() {
                 extracted.push(self.entries.remove(i));
             } else {
                 i += 1;
@@ -343,24 +494,17 @@ impl ContextWindow {
             .position(|e| e.role != ContextRole::System)
             .unwrap_or(self.entries.len());
 
-        self.entries.insert(
-            insert_pos,
-            ContextEntry {
-                role: ContextRole::System,
-                content: format!(
-                    "[SUMMARY — {} messages compressed]\n{}",
-                    compressed_count, content
-                ),
-                timestamp: chrono::Utc::now(),
-                metadata: None,
-                importance: 0.3,
-                pinned: false,
-                reference_count: 0,
-                partition: ContextPartition::Active,
-                category: ContextCategory::History,
-                is_summary: true,
-            },
+        let mut summary_e = ContextEntry::from_text(
+            ContextRole::System,
+            format!(
+                "[SUMMARY — {} messages compressed]\n{}",
+                compressed_count, content
+            ),
         );
+        summary_e.importance = 0.3;
+        summary_e.category = ContextCategory::History;
+        summary_e.is_summary = true;
+        self.entries.insert(insert_pos, summary_e);
     }
 
     /// Sentinel prefix used to identify context-loss notice entries.
@@ -376,9 +520,9 @@ impl ContextWindow {
         let cumulative = if let Some(idx) = self
             .entries
             .iter()
-            .position(|e| e.content.starts_with(Self::CONTEXT_NOTICE_PREFIX))
+            .position(|e| e.text().starts_with(Self::CONTEXT_NOTICE_PREFIX))
         {
-            let existing = &self.entries[idx].content;
+            let existing = self.entries[idx].text();
             let prev_count: usize = existing
                 .strip_prefix(Self::CONTEXT_NOTICE_PREFIX)
                 .and_then(|s| s.split_whitespace().next())
@@ -403,21 +547,11 @@ impl ContextWindow {
             .position(|e| e.role != ContextRole::System || e.is_summary)
             .unwrap_or(self.entries.len());
 
-        self.entries.insert(
-            insert_pos,
-            ContextEntry {
-                role: ContextRole::System,
-                content: notice_content,
-                timestamp: chrono::Utc::now(),
-                metadata: None,
-                importance: 0.9,
-                pinned: true,
-                reference_count: 0,
-                partition: ContextPartition::Active,
-                category: ContextCategory::System,
-                is_summary: false,
-            },
-        );
+        let mut notice_e = ContextEntry::from_text(ContextRole::System, notice_content);
+        notice_e.importance = 0.9;
+        notice_e.pinned = true;
+        notice_e.category = ContextCategory::System;
+        self.entries.insert(insert_pos, notice_e);
     }
 
     /// Increment `reference_count` on entries linked to the given tool call IDs.
@@ -495,7 +629,10 @@ impl ContextWindow {
                     let mut removed = 0;
                     let mut i = 0;
                     while removed < to_summarize && i < self.entries.len() {
-                        if self.entries[i].role != ContextRole::System || self.entries[i].is_summary
+                        let entry_has_images = self.entries[i].has_images();
+                        if (self.entries[i].role != ContextRole::System
+                            || self.entries[i].is_summary)
+                            && !entry_has_images
                         {
                             let e = self.entries.remove(i);
                             let label = if e.is_summary {
@@ -508,11 +645,11 @@ impl ContextWindow {
                                     ContextRole::System => "System",
                                 }
                             };
-                            // Use char-boundary-safe truncation to avoid panics on multi-byte UTF-8
-                            let snippet = if e.content.chars().count() > 200 {
-                                format!("{}...", e.content.chars().take(200).collect::<String>())
+                            let body = e.text();
+                            let snippet = if body.chars().count() > 200 {
+                                format!("{}...", body.chars().take(200).collect::<String>())
                             } else {
-                                e.content
+                                body
                             };
                             summarized_parts.push(format!("[{label}]: {snippet}"));
                             removed += 1;
@@ -521,34 +658,24 @@ impl ContextWindow {
                         }
                     }
 
-                    // Insert the new summary immediately after all non-evictable System entries
-                    // (i.e., after real System entries but before any remaining summaries or
-                    // non-system entries). This ensures chronological ordering of summaries.
                     let insert_pos = self
                         .entries
                         .iter()
                         .position(|e| e.role != ContextRole::System || e.is_summary)
                         .unwrap_or(self.entries.len());
 
-                    self.entries.insert(
-                        insert_pos,
-                        ContextEntry {
-                            role: ContextRole::System,
-                            content: format!(
-                                "[CONTEXT SUMMARY - {} earlier messages condensed]\n{}",
-                                summarized_parts.len(),
-                                summarized_parts.join("\n")
-                            ),
-                            timestamp: chrono::Utc::now(),
-                            metadata: None,
-                            importance: 0.3,
-                            pinned: false,
-                            reference_count: 0,
-                            partition: ContextPartition::default(),
-                            category: ContextCategory::History,
-                            is_summary: true,
-                        },
+                    let mut sum_e = ContextEntry::from_text(
+                        ContextRole::System,
+                        format!(
+                            "[CONTEXT SUMMARY - {} earlier messages condensed]\n{}",
+                            summarized_parts.len(),
+                            summarized_parts.join("\n")
+                        ),
                     );
+                    sum_e.importance = 0.3;
+                    sum_e.category = ContextCategory::History;
+                    sum_e.is_summary = true;
+                    self.entries.insert(insert_pos, sum_e);
                 }
                 OverflowStrategy::SlidingWindow => {
                     // Keep system entries + most recent entries, drop the middle
@@ -614,18 +741,11 @@ impl ContextWindow {
         importance: f32,
         pinned: bool,
     ) {
-        self.push(ContextEntry {
-            role,
-            content,
-            timestamp: chrono::Utc::now(),
-            metadata: None,
-            importance,
-            pinned,
-            reference_count: 0,
-            partition: ContextPartition::Active,
-            category,
-            is_summary: false,
-        });
+        let mut e = ContextEntry::from_text(role, content);
+        e.importance = importance;
+        e.pinned = pinned;
+        e.category = category;
+        self.push(e);
     }
 
     /// Semantic eviction: compute a composite score per entry and evict the lowest.
@@ -742,7 +862,7 @@ impl ContextWindow {
         self.entries
             .iter()
             .filter(|e| e.partition == ContextPartition::Active)
-            .map(|e| (e.content.chars().count() as f32 / ratio) as usize + 1)
+            .map(|e| e.estimated_tokens(ratio))
             .sum()
     }
 
@@ -752,7 +872,7 @@ impl ContextWindow {
         let mut map: HashMap<ContextCategory, usize> = HashMap::new();
         for entry in &self.entries {
             if entry.partition == ContextPartition::Active {
-                let tokens = (entry.content.chars().count() as f32 / ratio) as usize + 1;
+                let tokens = entry.estimated_tokens(ratio);
                 *map.entry(entry.category).or_default() += tokens;
             }
         }
@@ -842,18 +962,7 @@ mod tests {
     use super::*;
 
     fn make_entry(role: ContextRole, content: &str) -> ContextEntry {
-        ContextEntry {
-            role,
-            content: content.to_string(),
-            timestamp: chrono::Utc::now(),
-            metadata: None,
-            importance: default_importance(),
-            pinned: false,
-            reference_count: 0,
-            partition: ContextPartition::default(),
-            category: ContextCategory::default(),
-            is_summary: false,
-        }
+        ContextEntry::from_text(role, content)
     }
 
     fn make_entry_with_importance(
@@ -862,18 +971,10 @@ mod tests {
         importance: f32,
         pinned: bool,
     ) -> ContextEntry {
-        ContextEntry {
-            role,
-            content: content.to_string(),
-            timestamp: chrono::Utc::now(),
-            metadata: None,
-            importance,
-            pinned,
-            reference_count: 0,
-            partition: ContextPartition::default(),
-            category: ContextCategory::default(),
-            is_summary: false,
-        }
+        let mut e = ContextEntry::from_text(role, content);
+        e.importance = importance;
+        e.pinned = pinned;
+        e
     }
 
     #[test]
@@ -885,9 +986,9 @@ mod tests {
         // At capacity — next push should evict oldest non-system entry ("Hello")
         ctx.push(make_entry(ContextRole::User, "Next message"));
         assert_eq!(ctx.entries.len(), 3);
-        assert_eq!(ctx.entries[0].content, "You are an agent."); // system preserved
-        assert_eq!(ctx.entries[1].content, "Hi!"); // second non-system kept
-        assert_eq!(ctx.entries[2].content, "Next message"); // newest pushed
+        assert_eq!(ctx.entries[0].text(), "You are an agent."); // system preserved
+        assert_eq!(ctx.entries[1].text(), "Hi!"); // second non-system kept
+        assert_eq!(ctx.entries[2].text(), "Next message"); // newest pushed
     }
 
     #[test]
@@ -902,10 +1003,10 @@ mod tests {
         ctx.push(make_entry(ContextRole::Assistant, "Resp2"));
 
         assert!(ctx.entries.len() <= 4);
-        assert_eq!(ctx.entries[0].content, "System"); // system preserved
-        assert_eq!(ctx.entries.last().unwrap().content, "Resp2"); // newest
-                                                                  // Middle old entries should be dropped
-        assert!(!ctx.entries.iter().any(|e| e.content == "Msg1"));
+        assert_eq!(ctx.entries[0].text(), "System"); // system preserved
+        assert_eq!(ctx.entries.last().unwrap().text(), "Resp2"); // newest
+                                                                 // Middle old entries should be dropped
+        assert!(!ctx.entries.iter().any(|e| e.text() == "Msg1"));
     }
 
     #[test]
@@ -923,9 +1024,9 @@ mod tests {
         let has_summary = ctx
             .entries
             .iter()
-            .any(|e| e.content.contains("CONTEXT SUMMARY"));
+            .any(|e| e.text().contains("CONTEXT SUMMARY"));
         assert!(has_summary, "Expected a summary entry after overflow");
-        assert_eq!(ctx.entries.last().unwrap().content, "Resp2");
+        assert_eq!(ctx.entries.last().unwrap().text(), "Resp2");
     }
 
     #[test]
@@ -970,10 +1071,10 @@ mod tests {
         ));
 
         assert_eq!(ctx.entries.len(), 3);
-        assert!(ctx.entries.iter().any(|e| e.content == "System prompt"));
-        assert!(ctx.entries.iter().any(|e| e.content == "Important task"));
-        assert!(ctx.entries.iter().any(|e| e.content == "New response"));
-        assert!(!ctx.entries.iter().any(|e| e.content == "Old result"));
+        assert!(ctx.entries.iter().any(|e| e.text() == "System prompt"));
+        assert!(ctx.entries.iter().any(|e| e.text() == "Important task"));
+        assert!(ctx.entries.iter().any(|e| e.text() == "New response"));
+        assert!(!ctx.entries.iter().any(|e| e.text() == "Old result"));
     }
 
     #[test]
@@ -1011,11 +1112,11 @@ mod tests {
         assert!(!ctx
             .entries
             .iter()
-            .any(|e| e.content == "Low importance result"));
+            .any(|e| e.text() == "Low importance result"));
         assert!(ctx
             .entries
             .iter()
-            .any(|e| e.content == "High importance result"));
+            .any(|e| e.text() == "High importance result"));
     }
 
     #[test]
@@ -1028,8 +1129,11 @@ mod tests {
         // Manually push a summary entry (simulating what Summarize strategy creates)
         ctx.entries.push(ContextEntry {
             role: ContextRole::System,
-            content: "[CONTEXT SUMMARY - 2 earlier messages condensed]\nUser: hi\nAssistant: hello"
-                .to_string(),
+            parts: vec![ContentPart::Text {
+                text:
+                    "[CONTEXT SUMMARY - 2 earlier messages condensed]\nUser: hi\nAssistant: hello"
+                        .to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.3,
@@ -1047,10 +1151,7 @@ mod tests {
 
         assert_eq!(ctx.entries.len(), 3);
         // Real system prompt must be preserved
-        assert!(ctx
-            .entries
-            .iter()
-            .any(|e| e.content == "Real system prompt"));
+        assert!(ctx.entries.iter().any(|e| e.text() == "Real system prompt"));
         // Summary should have been evicted
         assert!(!ctx.entries.iter().any(|e| e.is_summary));
     }
@@ -1077,7 +1178,9 @@ mod tests {
         let mut ctx = ContextWindow::new(10);
         ctx.push(ContextEntry {
             role: ContextRole::System,
-            content: "abcdefgh".to_string(), // 8 chars
+            parts: vec![ContentPart::Text {
+                text: "abcdefgh".to_string(),
+            }], // 8 chars
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1089,7 +1192,9 @@ mod tests {
         });
         ctx.push(ContextEntry {
             role: ContextRole::User,
-            content: "abcdefghijkl".to_string(), // 12 chars
+            parts: vec![ContentPart::Text {
+                text: "abcdefghijkl".to_string(),
+            }], // 12 chars
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1129,7 +1234,9 @@ mod tests {
         // Push a system entry: 8 chars → 8/4 + 1 = 3 tokens
         ctx.push(ContextEntry {
             role: ContextRole::System,
-            content: "abcdefgh".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "abcdefgh".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1184,7 +1291,9 @@ mod tests {
         let mut window = ContextWindow::new(100);
         window.push(ContextEntry {
             role: ContextRole::System,
-            content: "system prompt".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "system prompt".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1196,7 +1305,9 @@ mod tests {
         });
         window.push(ContextEntry {
             role: ContextRole::User,
-            content: "pinned task".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "pinned task".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.95,
@@ -1209,7 +1320,9 @@ mod tests {
         for i in 0..3 {
             window.push(ContextEntry {
                 role: ContextRole::Assistant,
-                content: format!("response {}", i),
+                parts: vec![ContentPart::Text {
+                    text: format!("response {}", i),
+                }],
                 timestamp: chrono::Utc::now(),
                 metadata: None,
                 importance: 0.5,
@@ -1223,10 +1336,10 @@ mod tests {
         assert_eq!(window.entries.len(), 5);
         let extracted = window.extract_compressible(2);
         assert_eq!(extracted.len(), 2);
-        assert_eq!(extracted[0].content, "response 0");
-        assert_eq!(extracted[1].content, "response 1");
+        assert_eq!(extracted[0].text(), "response 0");
+        assert_eq!(extracted[1].text(), "response 1");
         assert_eq!(window.entries.len(), 3);
-        assert_eq!(window.entries[2].content, "response 2");
+        assert_eq!(window.entries[2].text(), "response 2");
     }
 
     #[test]
@@ -1234,7 +1347,9 @@ mod tests {
         let mut window = ContextWindow::new(100);
         window.push(ContextEntry {
             role: ContextRole::System,
-            content: "sys".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "sys".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1246,7 +1361,9 @@ mod tests {
         });
         window.push(ContextEntry {
             role: ContextRole::User,
-            content: "pinned".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "pinned".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1266,7 +1383,9 @@ mod tests {
         let mut window = ContextWindow::new(100);
         window.push(ContextEntry {
             role: ContextRole::System,
-            content: "system prompt".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "system prompt".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1278,7 +1397,9 @@ mod tests {
         });
         window.push(ContextEntry {
             role: ContextRole::User,
-            content: "user msg".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "user msg".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,
@@ -1298,8 +1419,8 @@ mod tests {
         assert_eq!(summary.category, ContextCategory::History);
         assert!((summary.importance - 0.3).abs() < f32::EPSILON);
         assert!(!summary.pinned);
-        assert!(summary.content.contains("LLM-generated summary"));
-        assert!(summary.content.contains("3 messages"));
+        assert!(summary.text().contains("LLM-generated summary"));
+        assert!(summary.text().contains("3 messages"));
     }
 
     #[test]
@@ -1307,7 +1428,9 @@ mod tests {
         let mut window = ContextWindow::new(100);
         window.push(ContextEntry {
             role: ContextRole::System,
-            content: "system".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "system".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1333,7 +1456,9 @@ mod tests {
         let mut window = ContextWindow::new(100);
         window.push(ContextEntry {
             role: ContextRole::System,
-            content: "system prompt".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "system prompt".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1348,9 +1473,9 @@ mod tests {
 
         assert_eq!(window.entries.len(), 2);
         let notice = &window.entries[1];
-        assert!(notice.content.starts_with("[CONTEXT NOTE]"));
-        assert!(notice.content.contains("5"));
-        assert!(notice.content.contains("memory-read"));
+        assert!(notice.text().starts_with("[CONTEXT NOTE]"));
+        assert!(notice.text().contains("5"));
+        assert!(notice.text().contains("memory-read"));
         assert!(notice.pinned);
         assert!((notice.importance - 0.9).abs() < f32::EPSILON);
         assert_eq!(notice.category, ContextCategory::System);
@@ -1362,7 +1487,9 @@ mod tests {
         let mut window = ContextWindow::new(100);
         window.push(ContextEntry {
             role: ContextRole::System,
-            content: "system prompt".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "system prompt".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1381,9 +1508,9 @@ mod tests {
         let notice = &window.entries[1];
         // Cumulative: 3 + 8 = 11
         assert!(
-            notice.content.contains("11"),
+            notice.text().contains("11"),
             "Should show cumulative count 11, got: {}",
-            notice.content
+            notice.text()
         );
     }
 
@@ -1392,7 +1519,7 @@ mod tests {
         let mut window = ContextWindow::new(100);
         window.push(ContextEntry {
             role: ContextRole::Assistant,
-            content: "I'll read that file.".to_string(),
+            parts: vec![ContentPart::Text { text: "I'll read that file.".to_string() }],
             timestamp: chrono::Utc::now(),
             metadata: Some(ContextMetadata {
                 tool_name: None,
@@ -1413,7 +1540,9 @@ mod tests {
         });
         window.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "file contents here".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "file contents here".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: Some(ContextMetadata {
                 tool_name: Some("file-reader".to_string()),
@@ -1432,7 +1561,9 @@ mod tests {
         });
         window.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "other result".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "other result".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: Some(ContextMetadata {
                 tool_name: Some("shell-exec".to_string()),
@@ -1471,7 +1602,9 @@ mod tests {
         let mut window = ContextWindow::with_strategy(4, OverflowStrategy::SemanticEviction);
         window.push(ContextEntry {
             role: ContextRole::System,
-            content: "sys".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "sys".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1483,7 +1616,9 @@ mod tests {
         });
         window.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "referenced result".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "referenced result".to_string(),
+            }],
             timestamp: chrono::Utc::now() - chrono::Duration::minutes(10),
             metadata: None,
             importance: 0.5,
@@ -1495,7 +1630,9 @@ mod tests {
         });
         window.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "unreferenced result".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "unreferenced result".to_string(),
+            }],
             timestamp: chrono::Utc::now() - chrono::Duration::minutes(5),
             metadata: None,
             importance: 0.5,
@@ -1508,7 +1645,9 @@ mod tests {
         assert_eq!(window.entries.len(), 3);
         window.push(ContextEntry {
             role: ContextRole::Assistant,
-            content: "filler".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "filler".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.4,
@@ -1520,7 +1659,9 @@ mod tests {
         });
         window.push(ContextEntry {
             role: ContextRole::User,
-            content: "new entry".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "new entry".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,
@@ -1530,10 +1671,9 @@ mod tests {
             category: ContextCategory::History,
             is_summary: false,
         });
-        let remaining_contents: Vec<&str> =
-            window.entries.iter().map(|e| e.content.as_str()).collect();
+        let remaining_contents: Vec<String> = window.entries.iter().map(|e| e.text()).collect();
         assert!(
-            remaining_contents.contains(&"referenced result"),
+            remaining_contents.iter().any(|s| s == "referenced result"),
             "Referenced entry should survive eviction. Remaining: {:?}",
             remaining_contents
         );
@@ -1565,7 +1705,9 @@ mod tests {
         let mut window = ContextWindow::new(100);
         window.push(ContextEntry {
             role: ContextRole::System,
-            content: "system".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "system".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1582,7 +1724,9 @@ mod tests {
                 } else {
                     ContextRole::Assistant
                 },
-                content: format!("message {}", i),
+                parts: vec![ContentPart::Text {
+                    text: format!("message {}", i),
+                }],
                 timestamp: chrono::Utc::now(),
                 metadata: None,
                 importance: 0.5,
@@ -1612,9 +1756,107 @@ mod tests {
         // Verify ordering: system, notice, summary, msg3, msg4
         assert_eq!(window.entries[0].role, ContextRole::System);
         assert!(!window.entries[0].is_summary);
-        assert!(window.entries[1].content.starts_with("[CONTEXT NOTE]"));
+        assert!(window.entries[1].text().starts_with("[CONTEXT NOTE]"));
         assert!(window.entries[2].is_summary);
-        assert_eq!(window.entries[3].content, "message 3");
-        assert_eq!(window.entries[4].content, "message 4");
+        assert_eq!(window.entries[3].text(), "message 3");
+        assert_eq!(window.entries[4].text(), "message 4");
+    }
+
+    #[test]
+    fn compress_oldest_skips_image_entries() {
+        let mut ctx = ContextWindow::new(50);
+        ctx.push(ContextEntry::from_text(ContextRole::System, "sys"));
+        let mut with_img = ContextEntry::from_text(ContextRole::User, "caption");
+        with_img.parts.push(ContentPart::Image {
+            mime: "image/png".into(),
+            source: ImageSource::Base64 {
+                data: "Zm9v".into(),
+            },
+        });
+        ctx.push(with_img);
+        ctx.push(ContextEntry::from_text(
+            ContextRole::User,
+            "compressible plain text",
+        ));
+
+        ctx.compress_oldest(5);
+
+        assert!(
+            ctx.entries.iter().any(|e| e.has_images()),
+            "image entry must survive compression"
+        );
+    }
+
+    #[test]
+    fn context_entry_serde_old_content_shape() {
+        let json = r#"{"role":"user","content":"hello","timestamp":"2020-01-01T00:00:00Z","importance":0.5,"pinned":false,"reference_count":0,"partition":"active","category":"history","is_summary":false}"#;
+        let e: ContextEntry = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(e.parts.len(), 1);
+        assert_eq!(
+            e.parts[0],
+            ContentPart::Text {
+                text: "hello".into()
+            }
+        );
+    }
+
+    #[test]
+    fn context_entry_serde_new_parts_shape() {
+        let json = r#"{"role":"user","parts":[{"kind":"text","text":"hi"}],"timestamp":"2020-01-01T00:00:00Z","importance":0.5,"pinned":false,"reference_count":0,"partition":"active","category":"history","is_summary":false}"#;
+        let e: ContextEntry = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(e.text(), "hi");
+    }
+
+    #[test]
+    fn context_entry_round_trip_with_image() {
+        let e = ContextEntry {
+            role: ContextRole::User,
+            parts: vec![
+                ContentPart::Text { text: "x".into() },
+                ContentPart::Image {
+                    mime: "image/png".into(),
+                    source: ImageSource::Base64 {
+                        data: "Zm9v".into(),
+                    },
+                },
+            ],
+            timestamp: chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::Task,
+            is_summary: false,
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        let back: ContextEntry = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, e);
+    }
+
+    #[test]
+    fn token_estimator_image_part() {
+        let e = ContextEntry {
+            role: ContextRole::User,
+            parts: vec![
+                ContentPart::Text { text: "hi".into() },
+                ContentPart::Image {
+                    mime: "image/png".into(),
+                    source: ImageSource::Base64 { data: "x".into() },
+                },
+            ],
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::Task,
+            is_summary: false,
+        };
+        // "hi" / 4 + 1 = 2, + 1500 image
+        assert_eq!(e.estimated_tokens(4.0), 1502);
     }
 }

@@ -11,6 +11,7 @@ pub mod hook;
 pub mod ids;
 pub mod intent;
 pub mod notification;
+pub mod path;
 pub mod plugin;
 pub mod registry_query;
 pub mod role;
@@ -18,6 +19,7 @@ pub mod schedule;
 pub mod secret;
 pub mod task;
 pub mod tool;
+pub use path::{reject_traversal, PathError};
 pub use schedule::*;
 pub mod agent_message;
 pub mod skill;
@@ -31,8 +33,8 @@ pub use capability::{
 };
 pub use channel::{ChannelKind, RegisteredChannel};
 pub use context::{
-    ContextCategory, ContextEntry, ContextMetadata, ContextPartition, ContextRole, ContextSlice,
-    ContextWindow, OverflowStrategy, SubAgentResult, TokenBudget,
+    ContentPart, ContextCategory, ContextEntry, ContextMetadata, ContextPartition, ContextRole,
+    ContextSlice, ContextWindow, ImageSource, OverflowStrategy, SubAgentResult, TokenBudget,
 };
 pub use error::AgentOSError;
 pub use event::{
@@ -69,7 +71,7 @@ pub use task::{
 };
 pub use tool::{
     ExecutorType, FallbackRule, RegisteredTool, RiskClass, ToolExecutor, ToolManifest, ToolSandbox,
-    ToolStatus, TrustTier,
+    ToolStatus, TrustTier, UsageHints,
 };
 pub mod task_trace;
 pub use task_trace::{

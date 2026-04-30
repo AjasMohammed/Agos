@@ -1,4 +1,4 @@
-use agentos_types::{ContextCategory, ContextEntry, ContextPartition, ContextRole, TaskID};
+use agentos_types::{ContentPart, ContextCategory, ContextEntry, ContextPartition, ContextRole, TaskID};
 use std::sync::Arc;
 
 const ROLLING_SUMMARY_PREFIX: &str = "[ROLLING TASK SUMMARY]";
@@ -129,7 +129,9 @@ impl ContextCompactor {
             insert_pos,
             ContextEntry {
                 role: ContextRole::System,
-                content: format!("{ROLLING_SUMMARY_PREFIX}\n{rolling_summary}"),
+                parts: vec![ContentPart::Text {
+                    text: format!("{ROLLING_SUMMARY_PREFIX}\n{rolling_summary}"),
+                }],
                 timestamp: chrono::Utc::now(),
                 metadata: None,
                 importance: 0.45,
@@ -138,7 +140,6 @@ impl ContextCompactor {
                 partition: ContextPartition::Active,
                 category: ContextCategory::History,
                 is_summary: true,
-                attachments: vec![],
             },
         );
         window.upsert_context_notice(extracted.len());
@@ -165,10 +166,10 @@ impl ContextCompactor {
         let idx = window
             .entries
             .iter()
-            .position(|entry| entry.content.starts_with(ROLLING_SUMMARY_PREFIX))?;
+            .position(|entry| entry.text().starts_with(ROLLING_SUMMARY_PREFIX))?;
         let entry = window.entries.remove(idx);
         entry
-            .content
+            .text()
             .strip_prefix(ROLLING_SUMMARY_PREFIX)
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -201,7 +202,7 @@ impl ContextCompactor {
                 ContextRole::System => continue,
             };
             let compact = entry
-                .content
+                .text()
                 .split_whitespace()
                 .take(32)
                 .collect::<Vec<_>>()
@@ -232,7 +233,9 @@ mod tests {
     fn entry(role: ContextRole, content: &str) -> ContextEntry {
         ContextEntry {
             role,
-            content: content.to_string(),
+            parts: vec![ContentPart::Text {
+                text: content.to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,
@@ -241,7 +244,6 @@ mod tests {
             partition: ContextPartition::Active,
             category: ContextCategory::History,
             is_summary: false,
-            attachments: vec![],
         }
     }
 

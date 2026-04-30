@@ -2897,7 +2897,9 @@ impl Kernel {
                     &task.id,
                     ContextEntry {
                         role: ContextRole::Assistant,
-                        content: inference.text.clone(),
+                        parts: vec![ContentPart::Text {
+                            text: inference.text.clone(),
+                        }],
                         timestamp: chrono::Utc::now(),
                         metadata: Some(ContextMetadata {
                             tool_name: None,
@@ -4587,7 +4589,9 @@ impl Kernel {
                                 &task.id,
                                 agentos_types::ContextEntry {
                                     role: agentos_types::ContextRole::System,
-                                    content: reprompt.to_string(),
+                                    parts: vec![agentos_types::ContentPart::Text {
+                                        text: reprompt.to_string(),
+                                    }],
                                     timestamp: chrono::Utc::now(),
                                     metadata: None,
                                     importance: 0.9,
@@ -5030,7 +5034,7 @@ impl Kernel {
 
         for entry in recent_entries {
             // Take first 200 chars to avoid processing huge entries
-            let snippet: String = entry.content.chars().take(200).collect();
+            let snippet: String = entry.text().chars().take(200).collect();
             for word in snippet.split_whitespace() {
                 let clean: String = word
                     .chars()
@@ -5113,9 +5117,11 @@ fn scrub_meta_tool_results(history: &mut [ContextEntry]) {
                     if META_TOOLS.contains(&name.as_str()) {
                         let is_latest = latest.get(name.as_str()).copied() == Some(i);
                         if !is_latest {
-                            entry.content =
-                                r#"{"replaced":"Stale result — superseded by a newer call."}"#
-                                    .to_string();
+                            entry.parts = vec![ContentPart::Text {
+                                text:
+                                    r#"{"replaced":"Stale result — superseded by a newer call."}"#
+                                        .to_string(),
+                            }];
                         }
                     }
                 }
@@ -5418,10 +5424,12 @@ mod tests {
 
     // ── extract_topic_keywords tests ──────────────────────────────────────
 
-    fn make_context_entry(role: ContextRole, content: &str) -> ContextEntry {
+    fn make_context_entry(role: ContextRole, text: &str) -> ContextEntry {
         ContextEntry {
             role,
-            content: content.to_string(),
+            parts: vec![ContentPart::Text {
+                text: text.to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,

@@ -1,4 +1,4 @@
-use agentos_types::{PluginManifest, ToolID, TrustTier};
+use agentos_types::{reject_traversal, PluginManifest, ToolID, TrustTier};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -164,7 +164,7 @@ impl PluginRegistry {
         // Validate plugin ID: must be non-empty, kebab-case, no path traversal.
         let id = &manifest.id;
         if id.is_empty()
-            || id.contains("..")
+            || reject_traversal(id).is_err()
             || id.contains('/')
             || id.contains('\\')
             || !id

@@ -5,6 +5,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::CookieJar;
 use minijinja::context;
 use serde::Deserialize;
+use zeroize::Zeroizing;
 
 /// Optional query param used by the list page to surface a just-created endpoint
 /// secret in a one-shot banner. The secret is NEVER stored — it only lives in the
@@ -23,10 +24,10 @@ pub struct CreateWebhookForm {
     pub debounce_seconds: Option<u64>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct FlashSecret {
     created_id: String,
-    created_secret: String,
+    created_secret: Zeroizing<String>,
     rotated_from: String,
 }
 
@@ -79,7 +80,8 @@ async fn render_list(
     let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);
     // One-shot banner: pair the just-created ID with its plaintext secret.
     let created_id = flash.created_id;
-    let created_secret = flash.created_secret;
+    // Deref Zeroizing<String> → String for template rendering.
+    let created_secret = (*flash.created_secret).clone();
     let rotated_from = flash.rotated_from;
     let created_inbound_url = if created_id.is_empty() {
         String::new()
@@ -117,7 +119,7 @@ pub async fn list(
         state,
         FlashSecret {
             created_id: query.created_id.unwrap_or_default(),
-            created_secret: String::new(),
+            created_secret: Zeroizing::new(String::new()),
             rotated_from: query.rotated_from.unwrap_or_default(),
         },
         jar,
@@ -166,7 +168,7 @@ pub async fn create(
                 State(state),
                 FlashSecret {
                     created_id: meta.id.to_string(),
-                    created_secret: secret,
+                    created_secret: Zeroizing::new(secret),
                     rotated_from: String::new(),
                 },
                 jar,
@@ -236,7 +238,7 @@ pub async fn rotate(
         State(state),
         FlashSecret {
             created_id: endpoint_id.to_string(),
-            created_secret: secret,
+            created_secret: Zeroizing::new(secret),
             rotated_from: id,
         },
         jar,

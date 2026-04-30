@@ -11,6 +11,51 @@ use tokio::sync::RwLock;
 /// Live-refreshable tool catalogue shared between AgentManualTool and the kernel.
 pub type SharedToolSummaries = Arc<RwLock<Vec<ToolSummary>>>;
 
+/// Snapshot of one connected channel — used by the manual to filter sections
+/// to only what the user has actually connected.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectedChannel {
+    /// Display name (e.g. "telegram-main").
+    pub name: String,
+    /// Platform kind (e.g. "telegram", "slack"). Drives `channel-<kind>` section gating.
+    pub kind: String,
+}
+
+/// Live-refreshable list of connected channels. Updated by the kernel from
+/// `UserChannelRegistry` on register/deregister so the manual reflects
+/// reality without holding a direct registry reference.
+pub type SharedConnectedChannels = Arc<RwLock<Vec<ConnectedChannel>>>;
+
+/// Capitalize the first character of a kind string for display.
+fn cap_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Description for the "channels" entry in the index, tailored to what's
+/// actually connected. When `None` (no registry), uses the legacy text.
+fn channels_index_description(connected: Option<&[ConnectedChannel]>) -> String {
+    match connected {
+        None => "Bidirectional channel adapters (Discord, Telegram, Slack, Matrix, …)".into(),
+        Some([]) => {
+            "No channels currently connected. Operator may run 'agentos channel connect <kind>'."
+                .into()
+        }
+        Some(list) => {
+            let mut kinds: Vec<&str> = list.iter().map(|c| c.kind.as_str()).collect();
+            kinds.sort();
+            kinds.dedup();
+            format!(
+                "Connected channels ({}). See system prompt '## Channels' for IDs.",
+                kinds.join(", ")
+            )
+        }
+    }
+}
+
 /// Which section of the agent manual to query.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -40,6 +85,10 @@ pub enum ManualSection {
     Containers,
     Webhooks,
     Capabilities,
+    Scheduling,
+    /// Telegram channel-specific feature reference (markdown, inline keyboards,
+    /// length limits, etc.). Loaded on demand to avoid bloating the system prompt.
+    ChannelTelegram,
 }
 
 impl ManualSection {
@@ -73,6 +122,8 @@ impl ManualSection {
             "containers" => Some(Self::Containers),
             "webhooks" => Some(Self::Webhooks),
             "capabilities" | "kmc" => Some(Self::Capabilities),
+            "scheduling" | "schedule" | "timers" => Some(Self::Scheduling),
+            "channel-telegram" | "telegram" => Some(Self::ChannelTelegram),
             _ => None,
         }
     }
@@ -105,6 +156,8 @@ impl ManualSection {
             "containers",
             "webhooks",
             "capabilities",
+            "scheduling",
+            "channel-telegram",
         ]
     }
 }
@@ -130,11 +183,17 @@ pub struct ToolSummary {
     pub tags: Vec<String>,
     /// Risk class from manifest (e.g. "readonly_scoped", "exec_capable").
     pub risk_class: String,
+    /// Hints for the LLM on when to use this tool and what to avoid.
+    pub usage_hints: Option<agentos_types::UsageHints>,
 }
 
 /// The agent-manual tool. Provides queryable OS documentation.
 pub struct AgentManualTool {
     tool_summaries: SharedToolSummaries,
+    /// Optional. When present, the manual filters channel content to only
+    /// what is connected. When `None` (e.g. tests, embedded usage), the manual
+    /// shows the full static catalogue — preserves backward compatibility.
+    connected_channels: Option<SharedConnectedChannels>,
 }
 
 impl AgentManualTool {
@@ -233,6 +292,19 @@ impl AgentManualTool {
         if name.starts_with("hal-") || name.starts_with("device-") {
             return "hal".into();
         }
+        if name.starts_with("schedule-")
+            || name == "set-timer"
+            || name == "cancel-timer"
+            || name == "list-timers"
+            || name == "list-my-schedules"
+            || name == "get-schedule-runs"
+            || name == "get-task-logs"
+        {
+            return "scheduling".into();
+        }
+        if name == "notify-user" || name == "ask-user" {
+            return "notifications".into();
+        }
         if capability_tags.iter().any(|t| t == "memory") {
             return "memory".into();
         }
@@ -260,6 +332,15 @@ impl AgentManualTool {
             tags.push("meta".into());
             return tags;
         }
+        if name.starts_with("schedule-")
+            || name == "set-timer"
+            || name == "cancel-timer"
+            || name == "list-timers"
+            || name == "list-my-schedules"
+            || name == "get-schedule-runs"
+        {
+            tags.push("scheduling".into());
+        }
         if permissions.iter().any(|p| p.starts_with("network")) {
             tags.push("network".into());
         }
@@ -281,12 +362,35 @@ impl AgentManualTool {
     }
 
     pub fn new(tool_summaries: SharedToolSummaries) -> Self {
-        Self { tool_summaries }
+        Self {
+            tool_summaries,
+            connected_channels: None,
+        }
+    }
+
+    /// Construct with both tool summaries and the live connected-channels snapshot.
+    pub fn new_with_channels(
+        tool_summaries: SharedToolSummaries,
+        connected_channels: SharedConnectedChannels,
+    ) -> Self {
+        Self {
+            tool_summaries,
+            connected_channels: Some(connected_channels),
+        }
     }
 
     /// Convenience constructor for tests and one-off static lists.
     pub fn from_static(summaries: Vec<ToolSummary>) -> Self {
         Self::new(Arc::new(RwLock::new(summaries)))
+    }
+
+    /// Snapshot the connected channels, returning empty list if none configured.
+    /// Held briefly — reads under lock, drops before any awaits.
+    async fn snapshot_channels(&self) -> Option<Vec<ConnectedChannel>> {
+        match &self.connected_channels {
+            Some(arc) => Some(arc.read().await.clone()),
+            None => None,
+        }
     }
 
     fn schema_type_string(schema: &serde_json::Value) -> String {
@@ -508,12 +612,43 @@ impl AgentManualTool {
                     category,
                     tags,
                     risk_class,
+                    usage_hints: t.manifest.usage_hints.clone(),
                 }
             })
             .collect()
     }
 
-    fn section_index(&self) -> Result<serde_json::Value, AgentOSError> {
+    fn section_index(
+        &self,
+        connected: Option<&[ConnectedChannel]>,
+    ) -> Result<serde_json::Value, AgentOSError> {
+        // Build the dynamic per-channel suffix. When `connected` is Some, only
+        // expose `channel-<kind>` index entries for kinds the user has actually
+        // wired up. When None (legacy/test path) keep the static behaviour.
+        let mut dyn_sections: Vec<serde_json::Value> = Vec::new();
+        let supported_kinds: &[&str] = &["telegram"]; // extend as more sections are added
+        if let Some(channels) = connected {
+            let kinds: std::collections::HashSet<&str> =
+                channels.iter().map(|c| c.kind.as_str()).collect();
+            for kind in supported_kinds {
+                if kinds.contains(kind) {
+                    dyn_sections.push(serde_json::json!({
+                        "name": format!("channel-{kind}"),
+                        "description": format!(
+                            "{} channel features (markdown, limits, interactivity). Load when sending to {}.",
+                            cap_first(kind), kind
+                        )
+                    }));
+                }
+            }
+        } else {
+            // Backward compat: list all per-kind sections statically.
+            dyn_sections.push(serde_json::json!({
+                "name": "channel-telegram",
+                "description": "Telegram-specific features: markdown rendering, inline keyboards, length limits, best practices."
+            }));
+        }
+
         Ok(serde_json::json!({
             "section": "index",
             "description": "AgentOS Manual — query any section for detailed documentation.",
@@ -533,7 +668,7 @@ impl AgentManualTool {
                 {"name": "suggest", "description": "Find tools by intent — pass a 'query' string describing what you want to do"},
                 {"name": "coordination", "description": "Multi-agent coordination: spawn sub-agents, await results, verify outputs, run teams"},
                 {"name": "scratchpad", "description": "Obsidian-style markdown scratchpad: pages, wikilinks, backlink graph"},
-                {"name": "channels", "description": "Bidirectional channel adapters (Discord, Telegram, Slack, Matrix, …)"},
+                {"name": "channels", "description": channels_index_description(connected)},
                 {"name": "mcp", "description": "Model Context Protocol: import external tools, expose AgentOS tools, OAuth, A2A"},
                 {"name": "hal", "description": "Hardware Abstraction Layer drivers and the device approval workflow"},
                 {"name": "plugins", "description": "Plugin lifecycle: discover, enable, disable, signature verification"},
@@ -541,8 +676,10 @@ impl AgentManualTool {
                 {"name": "notifications", "description": "Notify the operator and ask interactive questions via notify-user / ask-user"},
                 {"name": "containers", "description": "Provision short-lived containers for isolated tool execution"},
                 {"name": "webhooks", "description": "Inbound webhook endpoints that turn external HTTP calls into events"},
-                {"name": "capabilities", "description": "Kernel-Mediated Capabilities (KMC): managed environments, storage zones, processes, networking, and builds"}
+                {"name": "capabilities", "description": "Kernel-Mediated Capabilities (KMC): managed environments, storage zones, processes, networking, and builds"},
+                {"name": "scheduling", "description": "Schedule deferred tasks: schedule-once / set-timer / list-my-schedules + notify-user for fired-time delivery"}
             ],
+            "channel_sections": dyn_sections,
             "usage": "Call agent-manual with {\"section\": \"<name>\"} to get details. For tool-detail, also pass {\"name\": \"<tool-name>\"}."
         }))
     }
@@ -637,6 +774,7 @@ impl AgentManualTool {
             "risk_class": tool.risk_class,
             "capability_tags": tool.capability_tags,
             "input_schema_docs": input_schema_docs,
+            "usage_hints": tool.usage_hints,
         });
         if verbose {
             result["input_schema"] = tool.input_schema.clone().unwrap_or(serde_json::Value::Null);
@@ -1371,23 +1509,120 @@ impl AgentManualTool {
         }))
     }
 
-    fn section_channels(&self) -> Result<serde_json::Value, AgentOSError> {
+    fn section_channels(
+        &self,
+        connected: Option<&[ConnectedChannel]>,
+    ) -> Result<serde_json::Value, AgentOSError> {
+        let catalog: [(&str, &str, &str, &str, Option<&str>); 10] = [
+            ("discord", "WebSocket gateway", "bot token", "in/out", None),
+            (
+                "telegram",
+                "long-poll or webhook",
+                "bot token",
+                "in/out",
+                Some("channel-telegram"),
+            ),
+            (
+                "slack",
+                "REST polling + Events API",
+                "bot token",
+                "in/out",
+                None,
+            ),
+            ("matrix", "HTTP /sync", "access token", "in/out", None),
+            (
+                "mattermost",
+                "REST + WebSocket",
+                "personal access token",
+                "in/out",
+                None,
+            ),
+            (
+                "teams",
+                "Incoming Webhook (out) + agentos-web webhook (in)",
+                "webhook secret",
+                "in/out",
+                None,
+            ),
+            (
+                "line",
+                "Reply API + HMAC webhook",
+                "channel secret + access token",
+                "in/out",
+                None,
+            ),
+            ("whatsapp", "Cloud API", "system user token", "in/out", None),
+            ("email", "SMTP via lettre", "username/password", "out", None),
+            (
+                "webhook",
+                "HMAC-signed POST",
+                "shared secret",
+                "in/out",
+                None,
+            ),
+        ];
+
+        let adapters: Vec<serde_json::Value> = match connected {
+            None => catalog
+                .iter()
+                .map(|(name, transport, auth, direction, feature)| {
+                    let mut obj = serde_json::json!({
+                        "name": name,
+                        "transport": transport,
+                        "auth": auth,
+                        "direction": direction,
+                    });
+                    if let Some(f) = feature {
+                        obj["feature_section"] = serde_json::Value::String((*f).to_string());
+                    }
+                    obj
+                })
+                .collect(),
+            Some(list) => {
+                let mut by_kind: std::collections::HashMap<&str, Vec<&str>> =
+                    std::collections::HashMap::new();
+                for c in list {
+                    by_kind
+                        .entry(c.kind.as_str())
+                        .or_default()
+                        .push(c.name.as_str());
+                }
+                let mut out: Vec<serde_json::Value> = Vec::new();
+                for (name, transport, auth, direction, feature) in &catalog {
+                    if let Some(instances) = by_kind.get(name) {
+                        let mut obj = serde_json::json!({
+                            "name": name,
+                            "transport": transport,
+                            "auth": auth,
+                            "direction": direction,
+                            "instances": instances,
+                        });
+                        if let Some(f) = feature {
+                            obj["feature_section"] = serde_json::Value::String((*f).to_string());
+                        }
+                        out.push(obj);
+                    }
+                }
+                out
+            }
+        };
+
+        let summary = match connected {
+            Some([]) => {
+                "No channels are currently connected. Operator must run 'agentos channel connect <kind>' (e.g. telegram) before this agent can send messages externally.".to_string()
+            }
+            Some(list) => format!(
+                "Channels carry messages to/from external systems. {} channel(s) connected — see system prompt '## Channels' for names. Use `channel-send` to target one. Per-platform features: load `agent-manual section=channel-<kind>`.",
+                list.len()
+            ),
+            None => "Channels carry messages between agents and humans on external systems (chat platforms, email, push, webhooks). Outbound goes via 'channel-send' with a channel name/id; inbound is delivered to agents subscribed to ChannelEvents.".to_string(),
+        };
+
         Ok(serde_json::json!({
             "section": "channels",
             "title": "Bidirectional Channels",
-            "summary": "Channels carry messages between agents and humans on external systems (chat platforms, email, push, webhooks). Outbound goes via 'notify-user' with a channel ID; inbound is delivered to agents subscribed to ChannelEvents.",
-            "adapters": [
-                {"name": "discord", "transport": "WebSocket gateway", "auth": "bot token", "direction": "in/out"},
-                {"name": "telegram", "transport": "long-poll or webhook", "auth": "bot token", "direction": "in/out"},
-                {"name": "slack", "transport": "REST polling + Events API", "auth": "bot token", "direction": "in/out"},
-                {"name": "matrix", "transport": "HTTP /sync", "auth": "access token", "direction": "in/out"},
-                {"name": "mattermost", "transport": "REST + WebSocket", "auth": "personal access token", "direction": "in/out"},
-                {"name": "teams", "transport": "Incoming Webhook (out) + agentos-web webhook (in)", "auth": "webhook secret", "direction": "in/out"},
-                {"name": "line", "transport": "Reply API + HMAC webhook", "auth": "channel secret + access token", "direction": "in/out"},
-                {"name": "whatsapp", "transport": "Cloud API", "auth": "system user token", "direction": "in/out"},
-                {"name": "email", "transport": "SMTP via lettre", "auth": "username/password", "direction": "out"},
-                {"name": "webhook", "transport": "HMAC-signed POST", "auth": "shared secret", "direction": "in/out"}
-            ],
+            "summary": summary,
+            "adapters": adapters,
             "subsections": [
                 {
                     "title": "Pair a channel",
@@ -1404,7 +1639,82 @@ impl AgentManualTool {
                 {
                     "title": "Health & retry",
                     "content": "ChannelHealthMonitor periodically pings each adapter and exposes a HealthStatus. Failed deliveries are retried with exponential backoff."
+                },
+                {
+                    "title": "Per-channel features",
+                    "content": "Each platform supports different formatting and interaction primitives. Load the relevant section on demand: 'agent-manual section=channel-telegram' for Telegram-specific features (markdown rendering, inline keyboards, length caps). Future per-channel sections (slack, discord, matrix) follow the same pattern."
                 }
+            ]
+        }))
+    }
+
+    fn section_channel_telegram(
+        &self,
+        connected: Option<&[ConnectedChannel]>,
+    ) -> Result<serde_json::Value, AgentOSError> {
+        // Reject when registry is wired and Telegram is not connected. Stops
+        // the agent from loading 800 tokens of docs for a feature it can't use.
+        if let Some(list) = connected {
+            if !list.iter().any(|c| c.kind == "telegram") {
+                return Ok(serde_json::json!({
+                    "section": "channel-telegram",
+                    "error": "no_telegram_channel_connected",
+                    "message": "No Telegram channel is currently connected. Operator must run 'agentos channel connect telegram' before Telegram-specific features apply.",
+                    "available": list
+                        .iter()
+                        .map(|c| serde_json::json!({"name": c.name, "kind": c.kind}))
+                        .collect::<Vec<_>>(),
+                }));
+            }
+        }
+
+        Ok(serde_json::json!({
+            "section": "channel-telegram",
+            "title": "Telegram channel features",
+            "summary": "Reference for the Telegram adapter. Outbound text is rendered as Telegram HTML automatically — agents can write standard markdown and it will render. Plain text remains safe (entities are escaped first).",
+            "rendering": {
+                "default_parse_mode": "HTML",
+                "behavior": "AgentOS converts the body to Telegram HTML before sending: HTML-escapes <, >, & first, then renders **bold**, *italic*/_italic_, ~~strike~~, `code`, ```fenced code```, [label](url). On HTML parse errors the adapter retries the same segment as plain text — agents do NOT need to escape anything."
+            },
+            "supported_markdown": [
+                {"syntax": "**text**", "renders": "<b>text</b> (bold)"},
+                {"syntax": "*text* or _text_", "renders": "<i>text</i> (italic)"},
+                {"syntax": "~~text~~", "renders": "<s>text</s> (strikethrough)"},
+                {"syntax": "`code`", "renders": "<code>code</code> (inline code)"},
+                {"syntax": "```\ncode\n```", "renders": "<pre>code</pre> (fenced block)"},
+                {"syntax": "```rust\ncode\n```", "renders": "<pre><code class=\"language-rust\">…</code></pre> (highlighted block)"},
+                {"syntax": "[label](https://url)", "renders": "<a href=\"…\">label</a> (only http/https/tg/mailto schemes are linked; others are left as text)"}
+            ],
+            "limits": {
+                "max_message_chars": 4096,
+                "long_message_handling": "Bodies longer than ~3000 source chars are split across multiple sendMessage calls. Question payloads with options are NEVER split — they stay on one message so the inline keyboard remains valid.",
+                "callback_data": "≤ 64 bytes per inline button (callback_data); button label ≤ 64 chars."
+            },
+            "interactivity": [
+                {
+                    "title": "Inline keyboards (Question messages)",
+                    "content": "When a UserMessage of kind Question carries options, the Telegram adapter renders an inline keyboard with one button per option (2 buttons per row). Tapping a button sends the option text back as an inbound message — handle it like any chat reply."
+                },
+                {
+                    "title": "Replies",
+                    "content": "When a UserMessage has reply_to_external_id, the adapter sets reply_to_message_id on the final segment so Telegram threads the reply under the operator's message."
+                },
+                {
+                    "title": "Pairing",
+                    "content": "First inbound message in auto-discovery mode captures the chat_id for outbound delivery. Operator can also issue a 6-character pairing code via 'agentos channel pair' (10-min expiry)."
+                }
+            ],
+            "best_practices": [
+                "Write normal markdown — do NOT pre-escape characters. The adapter handles HTML escaping safely.",
+                "Use fenced code blocks for shell commands, file contents, JSON; they preserve whitespace and disable URL preview.",
+                "Keep messages concise — agents pay token cost for any text the operator quotes back.",
+                "For Question messages, supply 2-6 short options (≤ 64 chars each) so they fit on a phone screen.",
+                "URLs only link when scheme is http/https/tg/mailto — other schemes are returned as plain text for safety."
+            ],
+            "known_quirks": [
+                "Telegram silently strips unknown HTML tags. Use only the supported subset (b/i/u/s/code/pre/a/blockquote/tg-spoiler).",
+                "The adapter disables web-page preview by default; mention this is non-overridable in current code.",
+                "If the bot is removed from the chat or the chat_id has not yet been discovered, deliver() returns 'chat_id not yet discovered — send /start to the bot first'."
             ]
         }))
     }
@@ -1642,6 +1952,36 @@ impl AgentManualTool {
         }))
     }
 
+    fn section_scheduling(&self) -> Result<serde_json::Value, AgentOSError> {
+        Ok(serde_json::json!({
+            "section": "scheduling",
+            "title": "Scheduled Tasks & Timers",
+            "summary": "Defer work to a future moment. The kernel persists schedules in SQLite, fires them on time, and runs the supplied task_prompt on the calling agent (or a named target agent). Pair with notify-user to deliver a message at the fired time.",
+            "subsections": [
+                {
+                    "title": "schedule-once — one-shot at absolute or relative time",
+                    "content": "Inputs: {name, task_prompt, agent_name?, fire_at? | delay_secs?}. Use fire_at (ISO 8601 / RFC 3339, e.g. '2026-04-30T15:00:00Z') for an absolute moment, or delay_secs (1–86400, max 24 h) for a relative offset. Must be future, ≤30 days out. Permission: schedule.job:w."
+                },
+                {
+                    "title": "set-timer / cancel-timer / list-timers",
+                    "content": "Lightweight named timer (delay_secs 1–86400). set-timer {name, delay_secs, task_prompt?} arms; cancel-timer {name} disarms; list-timers enumerates active timers. Useful for short-horizon reminders or polling intervals."
+                },
+                {
+                    "title": "list-my-schedules / get-schedule-runs / get-task-logs",
+                    "content": "Self-inspection. list-my-schedules returns all schedules created by the calling agent. get-schedule-runs {schedule_id} returns per-fire run history (success, error, fired_at). get-task-logs {task_id} returns the executed task's log lines."
+                },
+                {
+                    "title": "Delivery patterns (notify the user at a specific time)",
+                    "content": "To notify the operator at time T: call schedule-once {name: 'remind-foo', fire_at: 'T', task_prompt: 'Use notify-user to send: <message>'}. The kernel fires at T, runs the prompt, and notify-user delivers via the operator inbox or paired channel. For recurring delivery, re-arm the schedule from inside the task_prompt itself, or chain set-timer."
+                },
+                {
+                    "title": "Common errors",
+                    "content": "fire_at must be future and within 30 days; delay_secs must be 1–86400; name must be unique per agent (1–128 chars); fire_at and delay_secs are mutually exclusive — pass exactly one."
+                }
+            ]
+        }))
+    }
+
     /// Suggest tools based on a free-text query, using keyword scoring.
     fn section_suggest(
         summaries: &[ToolSummary],
@@ -1767,8 +2107,13 @@ impl AgentTool for AgentManualTool {
             guard.clone()
         };
 
+        // Snapshot connected channels once so all filtering decisions in this
+        // call see a consistent view. `None` = no registry wired (tests/embed),
+        // fall back to the legacy static catalogue.
+        let channels_snapshot: Option<Vec<ConnectedChannel>> = self.snapshot_channels().await;
+
         match section {
-            ManualSection::Index => self.section_index(),
+            ManualSection::Index => self.section_index(channels_snapshot.as_deref()),
             ManualSection::Tools => {
                 let usage_scores =
                     Self::load_usage_scores_async(context.data_dir.clone(), context.agent_id).await;
@@ -1814,18 +2159,34 @@ impl AgentTool for AgentManualTool {
             ManualSection::Escalation => self.section_escalation(),
             ManualSection::Coordination => self.section_coordination(),
             ManualSection::Suggest => {
-                let query = payload
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        AgentOSError::SchemaValidation(
-                            "suggest section requires 'query' field".into(),
-                        )
-                    })?;
-                Self::section_suggest(&summaries, query)
+                // When `query` is missing, return a soft help payload instead
+                // of a schema error. Small models otherwise loop on the
+                // validation failure (observed with gemma4:31b-cloud — same
+                // bad call 8x in a row).
+                let query_opt = payload.get("query").and_then(|v| v.as_str());
+                match query_opt {
+                    Some(q) if !q.trim().is_empty() => Self::section_suggest(&summaries, q),
+                    _ => {
+                        let names: Vec<&str> =
+                            summaries.iter().take(20).map(|s| s.name.as_str()).collect();
+                        Ok(serde_json::json!({
+                            "section": "suggest",
+                            "query": null,
+                            "suggestions": [],
+                            "hint": "section=suggest needs a 'query' string describing what you want to do (e.g. {\"section\":\"suggest\",\"query\":\"read uploaded file\"}). Without a query, no scoring is possible.",
+                            "available_sections": [
+                                "tools","tool-detail","permissions","memory","events",
+                                "errors","agents","tasks","procedural","escalation",
+                                "coordination","scratchpad","channels","mcp","hal",
+                                "plugins","skills","notifications","capabilities"
+                            ],
+                            "tool_name_sample": names,
+                        }))
+                    }
+                }
             }
             ManualSection::Scratchpad => self.section_scratchpad(),
-            ManualSection::Channels => self.section_channels(),
+            ManualSection::Channels => self.section_channels(channels_snapshot.as_deref()),
             ManualSection::Mcp => self.section_mcp(),
             ManualSection::Hal => self.section_hal(),
             ManualSection::Plugins => self.section_plugins(),
@@ -1834,6 +2195,10 @@ impl AgentTool for AgentManualTool {
             ManualSection::Containers => self.section_containers(),
             ManualSection::Webhooks => self.section_webhooks(),
             ManualSection::Capabilities => self.section_capabilities(),
+            ManualSection::Scheduling => self.section_scheduling(),
+            ManualSection::ChannelTelegram => {
+                self.section_channel_telegram(channels_snapshot.as_deref())
+            }
         }
     }
 }
@@ -1896,13 +2261,148 @@ mod tests {
 
     #[test]
     fn test_all_names_count() {
-        assert_eq!(ManualSection::all_names().len(), 25);
+        assert_eq!(ManualSection::all_names().len(), 26);
     }
 
     #[test]
     fn test_summaries_from_registry_empty() {
         let summaries = AgentManualTool::summaries_from_registry(&[]);
         assert!(summaries.is_empty());
+    }
+
+    fn test_ctx() -> ToolExecutionContext {
+        ToolExecutionContext {
+            task_id: TaskID::new(),
+            agent_id: AgentID::new(),
+            data_dir: std::env::temp_dir(),
+            trace_id: TraceID::new(),
+            permissions: PermissionSet::new(),
+            vault: None,
+            hal: None,
+            file_lock_registry: None,
+            agent_registry: None,
+            task_registry: None,
+            escalation_query: None,
+            workspace_paths: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_index_skips_telegram_section_when_none_connected() {
+        let summaries = Arc::new(RwLock::new(Vec::<ToolSummary>::new()));
+        let channels: SharedConnectedChannels = Arc::new(RwLock::new(Vec::new()));
+        let tool = AgentManualTool::new_with_channels(summaries, channels);
+
+        let result = tool
+            .execute(serde_json::json!({"section": "index"}), test_ctx())
+            .await
+            .unwrap();
+        let names: Vec<String> = result["channel_sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            names.is_empty(),
+            "expected no per-channel sections in index, got {names:?}"
+        );
+        assert!(
+            result["sections"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["name"] == "channels"),
+            "channels entry should still be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_index_includes_channel_telegram_when_connected() {
+        let summaries = Arc::new(RwLock::new(Vec::<ToolSummary>::new()));
+        let channels: SharedConnectedChannels = Arc::new(RwLock::new(vec![ConnectedChannel {
+            name: "tg-main".into(),
+            kind: "telegram".into(),
+        }]));
+        let tool = AgentManualTool::new_with_channels(summaries, channels);
+
+        let result = tool
+            .execute(serde_json::json!({"section": "index"}), test_ctx())
+            .await
+            .unwrap();
+        let names: Vec<String> = result["channel_sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"channel-telegram".to_string()));
+    }
+
+    #[tokio::test]
+    async fn manual_channel_telegram_returns_error_when_not_connected() {
+        let summaries = Arc::new(RwLock::new(Vec::<ToolSummary>::new()));
+        let channels: SharedConnectedChannels = Arc::new(RwLock::new(Vec::new()));
+        let tool = AgentManualTool::new_with_channels(summaries, channels);
+
+        let result = tool
+            .execute(
+                serde_json::json!({"section": "channel-telegram"}),
+                test_ctx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["error"], "no_telegram_channel_connected");
+    }
+
+    #[tokio::test]
+    async fn manual_channel_telegram_returns_full_doc_when_connected() {
+        let summaries = Arc::new(RwLock::new(Vec::<ToolSummary>::new()));
+        let channels: SharedConnectedChannels = Arc::new(RwLock::new(vec![ConnectedChannel {
+            name: "tg-main".into(),
+            kind: "telegram".into(),
+        }]));
+        let tool = AgentManualTool::new_with_channels(summaries, channels);
+
+        let result = tool
+            .execute(
+                serde_json::json!({"section": "channel-telegram"}),
+                test_ctx(),
+            )
+            .await
+            .unwrap();
+        // Real doc has supported_markdown, no error field.
+        assert!(result.get("error").is_none());
+        assert!(result.get("supported_markdown").is_some());
+    }
+
+    #[tokio::test]
+    async fn manual_channels_section_filters_to_connected() {
+        let summaries = Arc::new(RwLock::new(Vec::<ToolSummary>::new()));
+        let channels: SharedConnectedChannels = Arc::new(RwLock::new(vec![ConnectedChannel {
+            name: "tg-main".into(),
+            kind: "telegram".into(),
+        }]));
+        let tool = AgentManualTool::new_with_channels(summaries, channels);
+
+        let result = tool
+            .execute(serde_json::json!({"section": "channels"}), test_ctx())
+            .await
+            .unwrap();
+        let adapter_names: Vec<String> = result["adapters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(adapter_names, vec!["telegram".to_string()]);
+        // Connected instance name surfaces under the adapter entry.
+        let instances = result["adapters"][0]["instances"].as_array().unwrap();
+        assert_eq!(instances[0].as_str().unwrap(), "tg-main");
     }
 
     fn make_test_summaries() -> Vec<ToolSummary> {
@@ -1918,6 +2418,7 @@ mod tests {
                 category: "core".into(),
                 tags: vec!["read".into(), "fs".into()],
                 risk_class: "readonly_scoped".into(),
+                usage_hints: None,
             },
             ToolSummary {
                 name: "http-client".into(),
@@ -1930,6 +2431,7 @@ mod tests {
                 category: "core".into(),
                 tags: vec!["network".into(), "write".into()],
                 risk_class: "readonly_external".into(),
+                usage_hints: None,
             },
         ]
     }
@@ -1937,7 +2439,7 @@ mod tests {
     #[test]
     fn test_section_index_has_all_sections() {
         let tool = AgentManualTool::from_static(vec![]);
-        let result = tool.section_index().unwrap();
+        let result = tool.section_index(None).unwrap();
         let sections = result["sections"].as_array().unwrap();
         assert_eq!(sections.len(), 24); // index is not listed in index
     }
@@ -2002,6 +2504,7 @@ mod tests {
             category: "core".into(),
             tags: vec!["read".into()],
             risk_class: "readonly_scoped".into(),
+            usage_hints: None,
         }];
 
         let result = AgentManualTool::section_tool_detail(&summaries, "file-reader", true).unwrap();

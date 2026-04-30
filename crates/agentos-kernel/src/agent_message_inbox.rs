@@ -1,11 +1,31 @@
+use agentos_storage::{Migrations, StoreHandle};
 use agentos_types::{AgentID, AgentMessageEntry, AgentMessageEntryID, AgentOSError};
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::params;
 use std::path::Path;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 const PURGE_BATCH: usize = 32;
+
+const MIGRATIONS: Migrations = &["CREATE TABLE IF NOT EXISTS agent_messages (
+        id               TEXT PRIMARY KEY,
+        from_agent_id    TEXT NOT NULL,
+        from_agent_name  TEXT NOT NULL,
+        to_agent_id      TEXT NOT NULL,
+        body             TEXT NOT NULL,
+        reply_to         TEXT,
+        created_at       TEXT NOT NULL,
+        expires_at       TEXT,
+        read             INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_am_to_read
+        ON agent_messages(to_agent_id, read);
+    CREATE INDEX IF NOT EXISTS idx_am_from
+        ON agent_messages(from_agent_id);
+    CREATE INDEX IF NOT EXISTS idx_am_created
+        ON agent_messages(created_at);
+    -- Partial index: most messages have no expiry.
+    CREATE INDEX IF NOT EXISTS idx_am_expires
+        ON agent_messages(expires_at) WHERE expires_at IS NOT NULL;"];
 
 /// SQLite-backed persistent store for agent-to-agent direct messages.
 ///
@@ -15,51 +35,52 @@ const PURGE_BATCH: usize = 32;
 ///
 /// ## Threading
 /// All public methods are `async` and must be awaited from an async context.
-/// `blocking_lock()` is only called inside `spawn_blocking` closures.
+/// `StoreHandle` dispatches all DB work to `spawn_blocking` — never blocking
+/// the Tokio runtime thread.
 pub struct AgentMessageInbox {
-    db: Arc<Mutex<Connection>>,
+    store: StoreHandle,
     pub max_per_agent: usize,
 }
 
 impl AgentMessageInbox {
     pub fn new(path: &Path, max_per_agent: usize) -> Result<Self, AgentOSError> {
-        let conn = Connection::open(path).map_err(|e| AgentOSError::KernelError {
+        let conn = rusqlite::Connection::open(path).map_err(|e| AgentOSError::KernelError {
             reason: format!("AgentMessageInbox: open failed at {}: {e}", path.display()),
         })?;
 
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
-            .map_err(|e| AgentOSError::KernelError {
-                reason: format!("AgentMessageInbox: PRAGMA failed: {e}"),
-            })?;
-
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS agent_messages (
-                id               TEXT PRIMARY KEY,
-                from_agent_id    TEXT NOT NULL,
-                from_agent_name  TEXT NOT NULL,
-                to_agent_id      TEXT NOT NULL,
-                body             TEXT NOT NULL,
-                reply_to         TEXT,
-                created_at       TEXT NOT NULL,
-                expires_at       TEXT,
-                read             INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_am_to_read
-                ON agent_messages(to_agent_id, read);
-            CREATE INDEX IF NOT EXISTS idx_am_from
-                ON agent_messages(from_agent_id);
-            CREATE INDEX IF NOT EXISTS idx_am_created
-                ON agent_messages(created_at);
-            -- Partial index: most messages have no expiry.
-            CREATE INDEX IF NOT EXISTS idx_am_expires
-                ON agent_messages(expires_at) WHERE expires_at IS NOT NULL;",
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA foreign_keys=ON;
+             PRAGMA busy_timeout=5000;
+             PRAGMA temp_store=MEMORY;",
         )
         .map_err(|e| AgentOSError::KernelError {
-            reason: format!("AgentMessageInbox: schema init failed: {e}"),
+            reason: format!("AgentMessageInbox: PRAGMA failed: {e}"),
         })?;
 
+        // Apply migrations inline (sync path).
+        for (idx, migration) in MIGRATIONS.iter().enumerate() {
+            let current_version: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .map_err(|e| AgentOSError::KernelError {
+                    reason: format!("AgentMessageInbox: user_version query failed: {e}"),
+                })?;
+            if (current_version as usize) <= idx {
+                conn.execute_batch(migration)
+                    .map_err(|e| AgentOSError::KernelError {
+                        reason: format!("AgentMessageInbox: migration {idx} failed: {e}"),
+                    })?;
+                let new_version = idx + 1;
+                conn.execute_batch(&format!("PRAGMA user_version = {new_version}"))
+                    .map_err(|e| AgentOSError::KernelError {
+                        reason: format!("AgentMessageInbox: set user_version failed: {e}"),
+                    })?;
+            }
+        }
+
         Ok(Self {
-            db: Arc::new(Mutex::new(conn)),
+            store: StoreHandle::from_conn(conn),
             max_per_agent,
         })
     }
@@ -67,54 +88,40 @@ impl AgentMessageInbox {
     /// Persist a new message. Returns `Ok(true)` on insert, `Ok(false)` if the
     /// primary key already exists (no duplicate created).
     pub async fn write(&self, entry: &AgentMessageEntry) -> Result<bool, AgentOSError> {
-        let db = self.db.clone();
         let entry = entry.clone();
         let max = self.max_per_agent;
 
-        tokio::task::spawn_blocking(move || {
-            let conn = db.blocking_lock();
+        self.store
+            .exec_mut(move |conn| {
+                let tx = conn.unchecked_transaction()?;
 
-            let tx = conn
-                .unchecked_transaction()
-                .map_err(|e| AgentOSError::KernelError {
-                    reason: format!("AgentMessageInbox: begin tx: {e}"),
-                })?;
-
-            let count: i64 = tx
-                .query_row(
+                let count: i64 = tx.query_row(
                     "SELECT COUNT(*) FROM agent_messages WHERE to_agent_id = ?1",
                     params![entry.to_agent_id.to_string()],
                     |r| r.get(0),
-                )
-                .map_err(|e| AgentOSError::KernelError {
-                    reason: format!("AgentMessageInbox: COUNT failed: {e}"),
-                })?;
+                )?;
 
-            if count as usize >= max {
-                let to_evict = (count - max as i64 + 1).max(1).min(PURGE_BATCH as i64);
-                tx.execute(
-                    "DELETE FROM agent_messages WHERE id IN (
-                         SELECT id FROM agent_messages
-                         WHERE to_agent_id = ?1
-                         ORDER BY read DESC, created_at ASC
-                         LIMIT ?2
-                     )",
-                    params![entry.to_agent_id.to_string(), to_evict],
-                )
-                .map_err(|e| {
-                    tracing::warn!(
-                        error = %e,
-                        to_agent_id = %entry.to_agent_id,
-                        "AgentMessageInbox: cap eviction failed"
-                    );
-                    AgentOSError::KernelError {
-                        reason: format!("AgentMessageInbox: eviction failed: {e}"),
+                if count as usize >= max {
+                    let to_evict = (count - max as i64 + 1).max(1).min(PURGE_BATCH as i64);
+                    if let Err(e) = tx.execute(
+                        "DELETE FROM agent_messages WHERE id IN (
+                             SELECT id FROM agent_messages
+                             WHERE to_agent_id = ?1
+                             ORDER BY read DESC, created_at ASC
+                             LIMIT ?2
+                         )",
+                        params![entry.to_agent_id.to_string(), to_evict],
+                    ) {
+                        tracing::warn!(
+                            error = %e,
+                            to_agent_id = %entry.to_agent_id,
+                            "AgentMessageInbox: cap eviction failed"
+                        );
+                        return Err(e);
                     }
-                })?;
-            }
+                }
 
-            let inserted = tx
-                .execute(
+                let inserted = tx.execute(
                     "INSERT OR IGNORE INTO agent_messages
                      (id, from_agent_id, from_agent_name, to_agent_id, body,
                       reply_to, created_at, expires_at, read)
@@ -130,21 +137,15 @@ impl AgentMessageInbox {
                         entry.expires_at.map(|d| d.to_rfc3339()),
                         if entry.read { 1i32 } else { 0i32 },
                     ],
-                )
-                .map_err(|e| AgentOSError::KernelError {
-                    reason: format!("AgentMessageInbox: insert failed: {e}"),
-                })?;
+                )?;
 
-            tx.commit().map_err(|e| AgentOSError::KernelError {
-                reason: format!("AgentMessageInbox: commit: {e}"),
-            })?;
-
-            Ok(inserted > 0)
-        })
-        .await
-        .map_err(|e| AgentOSError::KernelError {
-            reason: format!("AgentMessageInbox: spawn_blocking join: {e}"),
-        })?
+                tx.commit()?;
+                Ok(inserted > 0)
+            })
+            .await
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("AgentMessageInbox: write failed: {e}"),
+            })
     }
 
     /// Per-sender unread counts used by the `InboxPromptRenderer`.
@@ -155,11 +156,9 @@ impl AgentMessageInbox {
         &self,
         to_agent_id: AgentID,
     ) -> Result<Vec<(AgentID, String, u32)>, AgentOSError> {
-        let db = self.db.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = db.blocking_lock();
-            let mut stmt = conn
-                .prepare(
+        self.store
+            .exec(move |conn| {
+                let mut stmt = conn.prepare(
                     "SELECT from_agent_id,
                             MAX(from_agent_name) AS from_agent_name,
                             COUNT(*) AS c
@@ -167,61 +166,51 @@ impl AgentMessageInbox {
                       WHERE to_agent_id = ?1 AND read = 0
                       GROUP BY from_agent_id
                       ORDER BY c DESC, from_agent_name ASC",
-                )
-                .map_err(|e| AgentOSError::KernelError {
-                    reason: format!("AgentMessageInbox: prepare unread_by_sender: {e}"),
-                })?;
+                )?;
 
-            let rows = stmt
-                .query_map(params![to_agent_id.to_string()], |r| {
+                let rows = stmt.query_map(params![to_agent_id.to_string()], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, i64>(2)?,
                     ))
-                })
-                .map_err(|e| AgentOSError::KernelError {
-                    reason: format!("AgentMessageInbox: query unread_by_sender: {e}"),
                 })?;
 
-            let mut out = Vec::new();
-            for r in rows {
-                let (aid_str, name, c) = r.map_err(|e| AgentOSError::KernelError {
-                    reason: format!("AgentMessageInbox: row unread_by_sender: {e}"),
-                })?;
-                let agent_id: AgentID = aid_str.parse().map_err(|_| AgentOSError::KernelError {
-                    reason: format!("AgentMessageInbox: invalid agent_id: {aid_str}"),
-                })?;
-                out.push((agent_id, name, c.max(0) as u32));
-            }
-            Ok(out)
-        })
-        .await
-        .map_err(|e| AgentOSError::KernelError {
-            reason: format!("AgentMessageInbox: unread_by_sender join: {e}"),
-        })?
+                let mut out = Vec::new();
+                for r in rows {
+                    let (aid_str, name, c) = r?;
+                    let agent_id: AgentID = aid_str.parse().map_err(|_| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::fmt::Error),
+                        )
+                    })?;
+                    out.push((agent_id, name, c.max(0) as u32));
+                }
+                Ok(out)
+            })
+            .await
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("AgentMessageInbox: unread_by_sender failed: {e}"),
+            })
     }
 
     /// Total unread message count for an agent.
     pub async fn unread_count(&self, agent_id: AgentID) -> Result<u32, AgentOSError> {
-        let db = self.db.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = db.blocking_lock();
-            let c: i64 = conn
-                .query_row(
+        self.store
+            .exec(move |conn| {
+                let c: i64 = conn.query_row(
                     "SELECT COUNT(*) FROM agent_messages WHERE to_agent_id = ?1 AND read = 0",
                     params![agent_id.to_string()],
                     |r| r.get(0),
-                )
-                .map_err(|e| AgentOSError::KernelError {
-                    reason: format!("AgentMessageInbox: unread_count query failed: {e}"),
-                })?;
-            Ok(c.max(0) as u32)
-        })
-        .await
-        .map_err(|e| AgentOSError::KernelError {
-            reason: format!("AgentMessageInbox: unread_count join: {e}"),
-        })?
+                )?;
+                Ok(c.max(0) as u32)
+            })
+            .await
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("AgentMessageInbox: unread_count failed: {e}"),
+            })
     }
 
     /// List messages addressed to `agent_id`.
@@ -231,38 +220,31 @@ impl AgentMessageInbox {
         unread_only: bool,
         limit: u32,
     ) -> Result<Vec<AgentMessageEntry>, AgentOSError> {
-        let db = self.db.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = db.blocking_lock();
-            let sql = if unread_only {
-                "SELECT id, from_agent_id, from_agent_name, to_agent_id, body,
-                        reply_to, created_at, expires_at, read
-                   FROM agent_messages
-                  WHERE to_agent_id = ?1 AND read = 0
-                  ORDER BY created_at DESC
-                  LIMIT ?2"
-            } else {
-                "SELECT id, from_agent_id, from_agent_name, to_agent_id, body,
-                        reply_to, created_at, expires_at, read
-                   FROM agent_messages
-                  WHERE to_agent_id = ?1
-                  ORDER BY created_at DESC
-                  LIMIT ?2"
-            };
-            let mut stmt = conn.prepare(sql).map_err(|e| AgentOSError::KernelError {
-                reason: format!("AgentMessageInbox: prepare list: {e}"),
-            })?;
-            let rows = stmt
-                .query_map(params![agent_id.to_string(), limit as i64], map_row)
-                .map_err(|e| AgentOSError::KernelError {
-                    reason: format!("AgentMessageInbox: query list: {e}"),
-                })?;
-            collect_rows(rows)
-        })
-        .await
-        .map_err(|e| AgentOSError::KernelError {
-            reason: format!("AgentMessageInbox: list join: {e}"),
-        })?
+        self.store
+            .exec(move |conn| {
+                let sql = if unread_only {
+                    "SELECT id, from_agent_id, from_agent_name, to_agent_id, body,
+                            reply_to, created_at, expires_at, read
+                       FROM agent_messages
+                      WHERE to_agent_id = ?1 AND read = 0
+                      ORDER BY created_at DESC
+                      LIMIT ?2"
+                } else {
+                    "SELECT id, from_agent_id, from_agent_name, to_agent_id, body,
+                            reply_to, created_at, expires_at, read
+                       FROM agent_messages
+                      WHERE to_agent_id = ?1
+                      ORDER BY created_at DESC
+                      LIMIT ?2"
+                };
+                let mut stmt = conn.prepare(sql)?;
+                let rows = stmt.query_map(params![agent_id.to_string(), limit as i64], map_row)?;
+                collect_rows(rows)
+            })
+            .await
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("AgentMessageInbox: list failed: {e}"),
+            })
     }
 
     /// Fetch a single message by ID.
@@ -270,80 +252,58 @@ impl AgentMessageInbox {
         &self,
         id: AgentMessageEntryID,
     ) -> Result<Option<AgentMessageEntry>, AgentOSError> {
-        let db = self.db.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = db.blocking_lock();
-            let mut stmt = conn
-                .prepare(
+        self.store
+            .exec(move |conn| {
+                let mut stmt = conn.prepare(
                     "SELECT id, from_agent_id, from_agent_name, to_agent_id, body,
                             reply_to, created_at, expires_at, read
                        FROM agent_messages WHERE id = ?1",
-                )
-                .map_err(|e| AgentOSError::KernelError {
-                    reason: format!("AgentMessageInbox: prepare get: {e}"),
-                })?;
-            let mut rows = stmt
-                .query_map(params![id.to_string()], map_row)
-                .map_err(|e| AgentOSError::KernelError {
-                    reason: format!("AgentMessageInbox: query get: {e}"),
-                })?;
-            match rows.next() {
-                None => Ok(None),
-                Some(r) => r.map(Some).map_err(|e| AgentOSError::KernelError {
-                    reason: format!("AgentMessageInbox: row get: {e}"),
-                }),
-            }
-        })
-        .await
-        .map_err(|e| AgentOSError::KernelError {
-            reason: format!("AgentMessageInbox: get join: {e}"),
-        })?
+                )?;
+                let mut rows = stmt.query_map(params![id.to_string()], map_row)?;
+                match rows.next() {
+                    None => Ok(None),
+                    Some(r) => r.map(Some),
+                }
+            })
+            .await
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("AgentMessageInbox: get failed: {e}"),
+            })
     }
 
     /// Mark a message as read.
     pub async fn mark_read(&self, id: AgentMessageEntryID) -> Result<(), AgentOSError> {
-        let db = self.db.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = db.blocking_lock();
-            let n = conn
-                .execute(
+        self.store
+            .exec_mut(move |conn| {
+                let n = conn.execute(
                     "UPDATE agent_messages SET read = 1 WHERE id = ?1",
                     params![id.to_string()],
-                )
-                .map_err(|e| AgentOSError::KernelError {
-                    reason: format!("AgentMessageInbox: mark_read: {e}"),
-                })?;
-            if n == 0 {
-                return Err(AgentOSError::KernelError {
-                    reason: format!("AgentMessageInbox: entry {id} not found"),
-                });
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|e| AgentOSError::KernelError {
-            reason: format!("AgentMessageInbox: mark_read join: {e}"),
-        })?
+                )?;
+                if n == 0 {
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("AgentMessageInbox: mark_read failed for {id}: {e}"),
+            })
     }
 
     /// Delete a message.
     pub async fn dismiss(&self, id: AgentMessageEntryID) -> Result<(), AgentOSError> {
-        let db = self.db.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = db.blocking_lock();
-            conn.execute(
-                "DELETE FROM agent_messages WHERE id = ?1",
-                params![id.to_string()],
-            )
+        self.store
+            .exec_mut(move |conn| {
+                conn.execute(
+                    "DELETE FROM agent_messages WHERE id = ?1",
+                    params![id.to_string()],
+                )?;
+                Ok(())
+            })
+            .await
             .map_err(|e| AgentOSError::KernelError {
-                reason: format!("AgentMessageInbox: dismiss: {e}"),
-            })?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| AgentOSError::KernelError {
-            reason: format!("AgentMessageInbox: dismiss join: {e}"),
-        })?
+                reason: format!("AgentMessageInbox: dismiss failed: {e}"),
+            })
     }
 
     /// Delete TTL-expired rows and re-enforce the per-agent cap.
@@ -352,30 +312,27 @@ impl AgentMessageInbox {
     /// deleted. The cap sweep preserves unread entries first, then newest read
     /// entries. Oldest read entries are evicted first.
     pub async fn sweep_expired(&self) -> Result<u32, AgentOSError> {
-        let db = self.db.clone();
         let max_per_agent = self.max_per_agent as i64;
-        tokio::task::spawn_blocking(move || {
-            let conn = db.blocking_lock();
-            let now = Utc::now().to_rfc3339();
+        self.store
+            .exec_mut(move |conn| {
+                let now = Utc::now().to_rfc3339();
 
-            let ttl_deleted = conn
-                .execute(
-                    "DELETE FROM agent_messages
+                let ttl_deleted = conn
+                    .execute(
+                        "DELETE FROM agent_messages
                       WHERE expires_at IS NOT NULL AND expires_at < ?1",
-                    params![now],
-                )
-                .map_err(|e| {
-                    tracing::warn!(error = %e, "AgentMessageInbox: TTL sweep DELETE failed");
-                    AgentOSError::KernelError {
-                        reason: format!("AgentMessageInbox: TTL sweep: {e}"),
-                    }
-                })?;
+                        params![now],
+                    )
+                    .map_err(|e| {
+                        tracing::warn!(error = %e, "AgentMessageInbox: TTL sweep DELETE failed");
+                        e
+                    })?;
 
-            // Cap enforcement: keep unread first (read ASC), newest first within
-            // each tier (created_at DESC). Rows with rn > max are evicted.
-            let cap_deleted = conn
-                .execute(
-                    "DELETE FROM agent_messages
+                // Cap enforcement: keep unread first (read ASC), newest first within
+                // each tier (created_at DESC). Rows with rn > max are evicted.
+                let cap_deleted = conn
+                    .execute(
+                        "DELETE FROM agent_messages
                       WHERE id IN (
                           SELECT id FROM (
                               SELECT id,
@@ -387,21 +344,19 @@ impl AgentMessageInbox {
                           )
                           WHERE rn > ?1
                       )",
-                    params![max_per_agent],
-                )
-                .map_err(|e| {
-                    tracing::warn!(error = %e, "AgentMessageInbox: cap sweep DELETE failed");
-                    AgentOSError::KernelError {
-                        reason: format!("AgentMessageInbox: cap sweep: {e}"),
-                    }
-                })?;
+                        params![max_per_agent],
+                    )
+                    .map_err(|e| {
+                        tracing::warn!(error = %e, "AgentMessageInbox: cap sweep DELETE failed");
+                        e
+                    })?;
 
-            Ok((ttl_deleted + cap_deleted) as u32)
-        })
-        .await
-        .map_err(|e| AgentOSError::KernelError {
-            reason: format!("AgentMessageInbox: sweep join: {e}"),
-        })?
+                Ok((ttl_deleted + cap_deleted) as u32)
+            })
+            .await
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("AgentMessageInbox: sweep_expired failed: {e}"),
+            })
     }
 }
 
@@ -484,12 +439,10 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentMessageEntry> {
 
 fn collect_rows(
     rows: impl Iterator<Item = rusqlite::Result<AgentMessageEntry>>,
-) -> Result<Vec<AgentMessageEntry>, AgentOSError> {
+) -> rusqlite::Result<Vec<AgentMessageEntry>> {
     let mut out = Vec::new();
     for r in rows {
-        out.push(r.map_err(|e| AgentOSError::KernelError {
-            reason: format!("AgentMessageInbox: row decode: {e}"),
-        })?);
+        out.push(r?);
     }
     Ok(out)
 }

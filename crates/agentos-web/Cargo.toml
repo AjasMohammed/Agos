@@ -6,7 +6,9 @@ edition.workspace = true
 [dependencies]
 agentos-api = { path = "../agentos-api" }
 agentos-kernel = { path = "../agentos-kernel" }
+agentos-tools = { path = "../agentos-tools" }
 agentos-types = { path = "../agentos-types" }
+agentos-llm = { path = "../agentos-llm" }
 agentos-audit = { path = "../agentos-audit" }
 agentos-vault = { path = "../agentos-vault" }
 agentos-pipeline = { path = "../agentos-pipeline" }

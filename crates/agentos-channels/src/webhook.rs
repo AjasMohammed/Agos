@@ -1,5 +1,6 @@
 use crate::types::*;
 use crate::{ChannelAdapter, ChannelCapabilities, ChannelHealth};
+use agentos_http::{client, HttpProfile};
 use agentos_types::AgentOSError;
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
@@ -40,7 +41,7 @@ impl WebhookAdapter {
             target_url,
             secret: Zeroizing::new(secret),
             instance_id,
-            client: reqwest::Client::new(),
+            client: client(HttpProfile::Webhook),
         }
     }
 

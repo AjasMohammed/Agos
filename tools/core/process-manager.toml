@@ -6,6 +6,11 @@ description = "List running processes or terminate a process by PID via the Hard
 author      = "agentos-core"
 trust_tier  = "core"
 
+[manifest.usage_hints]
+use_for = ["Listing top memory hogs", "Checking if a specific process is running", "Killing a stuck process by PID"]
+prefer_over = ["shell-exec ps", "shell-exec top", "shell-exec kill"]
+quick_example = { action = "list", sort_by = "memory", limit = 10 }
+
 [capabilities_required]
 permissions = ["process.list:r", "process.kill:x"]
 
@@ -29,6 +34,39 @@ description = "list returns processes; kill terminates a process"
 type = "integer"
 minimum = 1
 description = "Target PID required when action=kill"
+
+[input_schema.properties.sort_by]
+type = "string"
+enum = ["memory", "cpu", "pid", "name", "start_time"]
+default = "memory"
+description = "Field to sort by"
+
+[input_schema.properties.order]
+type = "string"
+enum = ["desc", "asc"]
+default = "desc"
+description = "Sort order"
+
+[input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 500
+default = 50
+description = "Max number of processes to return"
+
+[input_schema.properties.name_contains]
+type = "string"
+description = "Filter by process name or command line (case-insensitive substring)"
+
+[input_schema.properties.min_memory_mb]
+type = "integer"
+minimum = 0
+description = "Minimum memory usage in MB"
+
+[input_schema.properties.min_cpu_percent]
+type = "number"
+minimum = 0
+description = "Minimum CPU usage percentage"
 
 [sandbox]
 network       = false

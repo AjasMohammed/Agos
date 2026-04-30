@@ -4,13 +4,13 @@ use crate::types::{
     OutboundMessage,
 };
 use crate::{ChannelAdapter, ChannelHealth};
+use agentos_http::{client, HttpProfile};
 use agentos_types::AgentOSError;
 use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
-use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -32,10 +32,7 @@ impl MattermostAdapter {
     ) -> Result<Self, agentos_types::AgentOSError> {
         crate::webhook::validate_server_base_url(&base_url, "mattermost")?;
         Ok(Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(15))
-                .build()
-                .expect("HTTP client build failed"),
+            client: client(HttpProfile::Outbound),
             base_url: base_url.trim_end_matches('/').to_string(),
             token: Zeroizing::new(token),
             default_channel_id,

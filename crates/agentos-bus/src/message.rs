@@ -1,6 +1,7 @@
 use agentos_audit::AuditEntry;
 use agentos_types::*;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 /// Messages sent over the bus. This is the top-level envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -585,15 +586,15 @@ pub enum KernelCommand {
         /// Human-readable provider name (e.g. "zomato", "github").
         provider: String,
         /// OAuth2 access token.
-        access_token: String,
+        access_token: Zeroizing<String>,
         /// OAuth2 refresh token (used to obtain new access tokens).
-        refresh_token: Option<String>,
+        refresh_token: Option<Zeroizing<String>>,
         /// OAuth2 token endpoint URL (e.g. "https://accounts.zomato.com/oauth/token").
         token_endpoint: String,
         /// OAuth2 client ID registered with the provider.
         client_id: String,
         /// OAuth2 client secret (for confidential clients).
-        client_secret: Option<String>,
+        client_secret: Option<Zeroizing<String>>,
         /// Scopes granted by this token (e.g. ["order:read", "order:write"]).
         #[serde(default)]
         scopes: Vec<String>,

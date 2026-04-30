@@ -60,3 +60,4 @@ define_id!(SubscriptionID);
 define_id!(NotificationID);
 define_id!(ChannelInstanceID);
 define_id!(WebhookEndpointID);
+define_id!(FileID);

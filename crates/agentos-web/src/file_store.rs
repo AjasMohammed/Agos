@@ -151,6 +151,35 @@ impl FileStore {
         Ok(files)
     }
 
+    /// Resolve by primary key only — used by the LLM image resolver after attachments
+    /// were validated at chat-ingest time (UUID acts as an unguessable capability).
+    pub fn get_file_by_id_unscoped(
+        &self,
+        id: &str,
+    ) -> Result<Option<UploadedFile>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, name, original_name, mime, size, path, tags, uploaded_at, scope
+             FROM uploaded_files WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], |row| {
+            Ok(UploadedFile {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                original_name: row.get(2)?,
+                mime: row.get(3)?,
+                size: row.get::<_, i64>(4)? as u64,
+                path: row.get(5)?,
+                tags: parse_tags(row.get::<_, String>(6)?),
+                uploaded_at: row.get(7)?,
+                scope: row
+                    .get::<_, String>(8)
+                    .unwrap_or_else(|_| "global".to_string()),
+            })
+        })?;
+        rows.next().transpose()
+    }
+
     pub fn get_file(
         &self,
         id: &str,

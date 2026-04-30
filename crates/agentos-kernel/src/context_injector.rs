@@ -1,6 +1,6 @@
 use crate::injection_scanner::ThreatLevel;
 use crate::kernel::Kernel;
-use crate::system_prompt::{self, SubAgentContext, SystemPromptContext};
+use crate::system_prompt::{self, ChannelHint, SubAgentContext, SystemPromptContext};
 use agentos_types::*;
 
 impl Kernel {
@@ -58,6 +58,24 @@ impl Kernel {
             spawn_depth: task.spawn_depth,
         });
 
+        // Tier-0 channel awareness: pull connected channels at task start so the
+        // agent always knows what's available. Skipped silently on registry
+        // errors — better to omit the block than fail the whole task.
+        let connected_channels: Vec<ChannelHint> = match self.channel_registry.list_active().await {
+            Ok(list) => list
+                .into_iter()
+                .filter(|c| c.active)
+                .map(|c| ChannelHint {
+                    name: c.display_name,
+                    kind: c.kind.to_string(),
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to list channels for system prompt; omitting block");
+                Vec::new()
+            }
+        };
+
         let system_prompt = system_prompt::build_system_prompt(&SystemPromptContext {
             agent_name,
             agent_description,
@@ -68,6 +86,7 @@ impl Kernel {
             // so the `<final>` enforcement convention does not apply.
             enforce_final_tag: false,
             timezone: system_prompt::local_timezone_str(),
+            connected_channels,
         });
 
         // We initialize context with empty string; Compiler injects the true system prompt
@@ -86,7 +105,9 @@ impl Kernel {
                     &task.id,
                     ContextEntry {
                         role: ContextRole::User,
-                        content: task.original_prompt.clone(),
+                        parts: vec![ContentPart::Text {
+                            text: task.original_prompt.clone(),
+                        }],
                         timestamp: chrono::Utc::now(),
                         metadata: None,
                         importance: 0.95,

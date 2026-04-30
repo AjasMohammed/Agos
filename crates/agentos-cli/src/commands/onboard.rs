@@ -306,7 +306,7 @@ mod tests {
         let config_path = tmp.path().join("config").join("default.toml");
         std::fs::write(&config_path, "this = [invalid toml").unwrap();
 
-        let original_dir = std::env::current_dir().unwrap();
+        let _original_dir = std::env::current_dir().unwrap();
         let provider = &PROVIDERS[0];
         let result = write_config_to(
             provider,

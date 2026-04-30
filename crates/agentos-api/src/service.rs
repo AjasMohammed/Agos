@@ -61,6 +61,9 @@ pub trait KernelService: Send + Sync {
 
     // ── Chat ────────────────────────────────────────────────────────────────
 
+    /// Whether the agent's active LLM adapter accepts image parts (vision).
+    async fn agent_supports_images(&self, agent_name: &str) -> Result<bool, ApiError>;
+
     async fn chat_send(&self, req: ChatRequest) -> Result<ChatResponse, ApiError>;
 
     /// Streaming chat: spawns inference and sends `ChatStreamEvent`s to the

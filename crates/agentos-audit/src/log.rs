@@ -185,6 +185,10 @@ pub enum AuditEventType {
     ChannelDisconnected,
     /// Emitted when a message is received from a user via an inbound channel.
     InboundMessageReceived,
+    /// Emitted when an agent successfully sends a message to a single connected
+    /// channel via the `channel-send` tool. Distinct from `NotificationSent`,
+    /// which fans out to all delivery adapters.
+    ChannelMessageSent,
 
     // Agent context memory
     /// Emitted when an agent's context memory is created, updated, rolled back, or cleared.

@@ -594,6 +594,7 @@ mod tests {
             executor: agentos_types::ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: agentos_types::RiskClass::ReadonlyScoped,
+            usage_hints: None,
         }
     }
 

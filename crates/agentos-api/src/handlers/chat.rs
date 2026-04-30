@@ -4,6 +4,7 @@
 //! and returns either a full response or an SSE stream in OpenAI format.
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Extension;
@@ -20,6 +21,8 @@ use crate::auth::AuthenticatedKey;
 use crate::error::ApiError;
 use crate::service::KernelService;
 use crate::types::ChatRequest;
+use agentos_llm::media::is_supported_image_mime;
+use agentos_types::{ContentPart, ImageSource};
 
 // ── OpenAI-format request/response types ────────────────────────────────────
 
@@ -38,7 +41,28 @@ pub struct OpenAIChatRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIMessage {
     pub role: String,
-    pub content: String,
+    pub content: OpenAIContent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OpenAIContent {
+    Text(String),
+    Parts(Vec<OpenAIContentPart>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OpenAIContentPart {
+    Text { text: String },
+    ImageUrl { image_url: OpenAIImageUrl },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAIImageUrl {
+    pub url: String,
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,18 +102,131 @@ fn parse_model(model: &str) -> String {
     }
 }
 
-/// Convert OpenAI messages to history pairs suitable for `ChatRequest`.
-///
-/// Returns `Err` if any message has an unrecognised role (only `user` and
-/// `assistant` are accepted — `system` and `tool` are not yet supported and
-/// must be rejected rather than silently dropped), or if two consecutive
-/// messages share the same role.
+fn openai_content_plain_text(content: &OpenAIContent) -> String {
+    match content {
+        OpenAIContent::Text(s) => s.clone(),
+        OpenAIContent::Parts(parts) => parts
+            .iter()
+            .filter_map(|p| match p {
+                OpenAIContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+fn parse_data_uri_image(url: &str) -> Result<(String, String), String> {
+    let rest = url
+        .strip_prefix("data:")
+        .ok_or_else(|| "invalid data URI".to_string())?;
+    let (meta, b64) = rest
+        .split_once(',')
+        .ok_or_else(|| "invalid data URI (no comma)".to_string())?;
+    let mime = meta
+        .split(';')
+        .next()
+        .unwrap_or("image/png")
+        .trim()
+        .to_ascii_lowercase();
+    if !is_supported_image_mime(&mime) {
+        return Err(format!("unsupported image MIME in data URI: {mime}"));
+    }
+    Ok((mime, b64.trim().to_string()))
+}
+
+fn openai_image_url_to_part(img: &OpenAIImageUrl) -> Result<ContentPart, String> {
+    let url = img.url.trim();
+    let lc = url.to_ascii_lowercase();
+    if lc.starts_with("data:image/") {
+        let (mime, data) = parse_data_uri_image(url)?;
+        return Ok(ContentPart::Image {
+            mime,
+            source: ImageSource::Base64 { data },
+        });
+    }
+    if lc.starts_with("https://") || lc.starts_with("http://") {
+        return Ok(ContentPart::Image {
+            mime: "image/jpeg".to_string(),
+            source: ImageSource::Url {
+                url: url.to_string(),
+            },
+        });
+    }
+    Err(format!(
+        "unsupported image_url scheme (allowed: data:image/...;base64,... or http(s)://): {}",
+        &url[..url.len().min(64)]
+    ))
+}
+
+fn openai_content_to_parts(content: &OpenAIContent) -> Result<Vec<ContentPart>, String> {
+    match content {
+        OpenAIContent::Text(s) => Ok(vec![ContentPart::Text { text: s.clone() }]),
+        OpenAIContent::Parts(parts) => {
+            let mut out = Vec::new();
+            for p in parts {
+                match p {
+                    OpenAIContentPart::Text { text } => {
+                        if !text.is_empty() {
+                            out.push(ContentPart::Text { text: text.clone() });
+                        }
+                    }
+                    OpenAIContentPart::ImageUrl { image_url } => {
+                        out.push(openai_image_url_to_part(image_url)?);
+                    }
+                }
+            }
+            if out.is_empty() {
+                return Err("message content produced no parts".into());
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn parts_concat_text(parts: &[ContentPart]) -> String {
+    parts
+        .iter()
+        .filter_map(|p| match p {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parts_contain_image(parts: &[ContentPart]) -> bool {
+    parts.iter().any(|p| matches!(p, ContentPart::Image { .. }))
+}
+
+fn estimate_openai_prompt_tokens(messages: &[OpenAIMessage]) -> u32 {
+    let mut n: u32 = 0;
+    let mut imgs: u32 = 0;
+    for m in messages {
+        match &m.content {
+            OpenAIContent::Text(s) => n = n.saturating_add((s.len() as u32).saturating_div(4)),
+            OpenAIContent::Parts(parts) => {
+                for p in parts {
+                    match p {
+                        OpenAIContentPart::Text { text } => {
+                            n = n.saturating_add((text.len() as u32).saturating_div(4));
+                        }
+                        OpenAIContentPart::ImageUrl { .. } => {
+                            imgs = imgs.saturating_add(1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    n.saturating_add(imgs.saturating_mul(1500))
+}
+
+/// Convert OpenAI messages to history pairs, plain-text user line, and typed parts for the last user turn.
+#[allow(clippy::type_complexity)]
 fn messages_to_history(
     messages: &[OpenAIMessage],
-) -> Result<(Vec<(String, String)>, String), String> {
-    // Reject unrecognised roles. System prompts and tool messages are not yet
-    // supported by the underlying ChatRequest; return an error rather than
-    // silently dropping them.
+) -> Result<(Vec<(String, String)>, String, Vec<ContentPart>), String> {
     for msg in messages {
         if msg.role != "user" && msg.role != "assistant" {
             return Err(format!(
@@ -99,8 +236,6 @@ fn messages_to_history(
         }
     }
 
-    // Reject consecutive same-role messages — they are structurally invalid and
-    // would silently drop content if we tried to pair them up.
     for window in messages.windows(2) {
         if window[0].role == window[1].role {
             return Err(format!(
@@ -110,27 +245,43 @@ fn messages_to_history(
         }
     }
 
-    let mut history = Vec::new();
-    let mut last_user_msg = String::new();
+    let Some(last_user_idx) = messages.iter().rposition(|m| m.role == "user") else {
+        return Err("No user message found in messages array".into());
+    };
 
-    // Collect pairs: (user, assistant) and extract the final user message.
-    let mut i = 0;
+    let mut history = Vec::new();
+    let mut i = 0usize;
     while i < messages.len() {
         let msg = &messages[i];
         if msg.role == "user" {
+            if i == last_user_idx {
+                i += 1;
+                continue;
+            }
             if i + 1 < messages.len() && messages[i + 1].role == "assistant" {
-                history.push((msg.content.clone(), messages[i + 1].content.clone()));
+                history.push((
+                    openai_content_plain_text(&msg.content),
+                    openai_content_plain_text(&messages[i + 1].content),
+                ));
                 i += 2;
                 continue;
-            } else {
-                // Final user message (no assistant reply yet)
-                last_user_msg = msg.content.clone();
             }
+            return Err(
+                "Each user message except the last must be followed by an assistant message".into(),
+            );
         }
         i += 1;
     }
 
-    Ok((history, last_user_msg))
+    let last = &messages[last_user_idx];
+    let parts = openai_content_to_parts(&last.content)?;
+    let user_plain = parts_concat_text(&parts);
+    let has_image = parts_contain_image(&parts);
+    if user_plain.trim().is_empty() && !has_image {
+        return Err("No user text or image content in the final user message".into());
+    }
+
+    Ok((history, user_plain, parts))
 }
 
 fn generate_id() -> String {
@@ -138,6 +289,31 @@ fn generate_id() -> String {
         "chatcmpl-{}",
         &uuid::Uuid::new_v4().to_string().replace('-', "")[..24]
     )
+}
+
+fn openai_vision_not_supported_response() -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": {
+                "message": "selected model does not support image input",
+                "type": "invalid_request_error",
+            }
+        })),
+    )
+        .into_response()
+}
+
+fn openai_request_to_chat(req: &OpenAIChatRequest) -> Result<ChatRequest, String> {
+    let agent_name = parse_model(&req.model);
+    let (history, user_message, parts) = messages_to_history(&req.messages)?;
+    Ok(ChatRequest {
+        session_id: String::new(),
+        agent_name,
+        message: user_message,
+        history,
+        parts,
+    })
 }
 
 // ── Handler ─────────────────────────────────────────────────────────────────
@@ -155,22 +331,14 @@ pub async fn completions(
 ) -> Result<axum::response::Response, ApiError> {
     require_permission(&key, "chat:w")?;
 
-    let agent_name = parse_model(&req.model);
-    let (history, user_message) =
-        messages_to_history(&req.messages).map_err(ApiError::BadRequest)?;
+    let chat_req = openai_request_to_chat(&req).map_err(ApiError::BadRequest)?;
 
-    if user_message.is_empty() {
-        return Err(ApiError::BadRequest(
-            "No user message found in messages array".into(),
-        ));
+    if parts_contain_image(&chat_req.parts) {
+        let ok = svc.agent_supports_images(&chat_req.agent_name).await?;
+        if !ok {
+            return Ok(openai_vision_not_supported_response());
+        }
     }
-
-    let chat_req = ChatRequest {
-        session_id: String::new(),
-        agent_name: agent_name.clone(),
-        message: user_message,
-        history,
-    };
 
     if req.stream {
         return stream_completions(svc, chat_req, req.model).await;
@@ -178,11 +346,7 @@ pub async fn completions(
 
     let response = svc.chat_send(chat_req).await?;
 
-    let prompt_tokens = req
-        .messages
-        .iter()
-        .map(|m| m.content.len() / 4) // rough estimate
-        .sum::<usize>() as u32;
+    let prompt_tokens = estimate_openai_prompt_tokens(&req.messages);
     let completion_tokens = (response.message.len() / 4) as u32;
 
     let reply = OpenAIChatResponse {
@@ -194,7 +358,7 @@ pub async fn completions(
             index: 0,
             message: OpenAIMessage {
                 role: "assistant".to_string(),
-                content: response.message,
+                content: OpenAIContent::Text(response.message),
             },
             finish_reason: "stop".to_string(),
         }],
@@ -219,7 +383,6 @@ async fn stream_completions(
     let id = generate_id();
     let created = Utc::now().timestamp();
 
-    // Spawn inference in the background so the SSE stream starts immediately.
     tokio::spawn(async move {
         if let Err(e) = svc.chat_stream(chat_req, tx.clone()).await {
             let _ = tx
@@ -234,7 +397,6 @@ async fn stream_completions(
         .map(move |event| {
             let chunk = match event {
                 agentos_kernel::ChatStreamEvent::Thinking { .. } => {
-                    // Emit an empty delta to signal the stream has started.
                     serde_json::json!({
                         "id": &id,
                         "object": "chat.completion.chunk",
@@ -291,8 +453,6 @@ async fn stream_completions(
                     })
                 }
                 agentos_kernel::ChatStreamEvent::Done { .. } => {
-                    // Text was already streamed via TextChunk events;
-                    // send a final chunk with finish_reason to close the stream.
                     serde_json::json!({
                         "id": &id,
                         "object": "chat.completion.chunk",
@@ -315,7 +475,6 @@ async fn stream_completions(
             let data = serde_json::to_string(&chunk).unwrap_or_default();
             Event::default().data(data)
         })
-        // Append the OpenAI-spec `[DONE]` sentinel after the channel closes.
         .chain(futures::stream::once(async {
             Event::default().data("[DONE]")
         }))
@@ -324,4 +483,126 @@ async fn stream_completions(
     Ok(Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response())
+}
+
+#[cfg(test)]
+mod multimodal_chat_tests {
+    use super::*;
+    #[test]
+    fn accepts_string_content_maps_to_parts() {
+        let msgs = vec![OpenAIMessage {
+            role: "user".to_string(),
+            content: OpenAIContent::Text("hi".to_string()),
+        }];
+        let (history, plain, parts) = messages_to_history(&msgs).expect("history");
+        assert!(history.is_empty());
+        assert_eq!(plain, "hi");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(
+            parts[0],
+            ContentPart::Text {
+                text: "hi".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_parts_array_text_only() {
+        let msgs = vec![OpenAIMessage {
+            role: "user".to_string(),
+            content: OpenAIContent::Parts(vec![OpenAIContentPart::Text {
+                text: "hello".into(),
+            }]),
+        }];
+        let (history, plain, _) = messages_to_history(&msgs).unwrap();
+        assert!(history.is_empty());
+        assert_eq!(plain, "hello");
+    }
+
+    #[test]
+    fn accepts_data_uri_image_part() {
+        let url =
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let msgs = vec![OpenAIMessage {
+            role: "user".to_string(),
+            content: OpenAIContent::Parts(vec![OpenAIContentPart::ImageUrl {
+                image_url: OpenAIImageUrl {
+                    url: url.into(),
+                    detail: None,
+                },
+            }]),
+        }];
+        let (_, _, parts) = messages_to_history(&msgs).unwrap();
+        assert!(parts.iter().any(|p| matches!(p, ContentPart::Image { .. })));
+    }
+
+    #[test]
+    fn accepts_https_image_url_placeholder_mime() {
+        let msgs = vec![OpenAIMessage {
+            role: "user".to_string(),
+            content: OpenAIContent::Parts(vec![OpenAIContentPart::ImageUrl {
+                image_url: OpenAIImageUrl {
+                    url: "https://example.com/cat.png".to_string(),
+                    detail: Some("auto".into()),
+                },
+            }]),
+        }];
+        let (_, _, parts) = messages_to_history(&msgs).unwrap();
+        let p = &parts[0];
+        let ContentPart::Image { mime, source } = p else {
+            panic!("expected image part");
+        };
+        assert_eq!(mime.as_str(), "image/jpeg");
+        match source {
+            ImageSource::Url { url } => assert!(url.ends_with("/cat.png")),
+            _ => panic!("expected url source"),
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_url_scheme_for_image() {
+        let msgs = vec![OpenAIMessage {
+            role: "user".to_string(),
+            content: OpenAIContent::Parts(vec![OpenAIContentPart::ImageUrl {
+                image_url: OpenAIImageUrl {
+                    url: "file:///etc/passwd".to_string(),
+                    detail: None,
+                },
+            }]),
+        }];
+        assert!(messages_to_history(&msgs).is_err());
+    }
+
+    #[test]
+    fn consecutive_roles_still_invalid_with_multimodal_parts() {
+        let msgs = vec![
+            OpenAIMessage {
+                role: "user".to_string(),
+                content: OpenAIContent::Text("a".into()),
+            },
+            OpenAIMessage {
+                role: "user".to_string(),
+                content: OpenAIContent::Text("b".into()),
+            },
+        ];
+        assert!(messages_to_history(&msgs).is_err());
+    }
+
+    #[test]
+    fn openai_estimate_counts_image_as_extra_tokens() {
+        let msgs = vec![OpenAIMessage {
+            role: "user".to_string(),
+            content: OpenAIContent::Parts(vec![
+                OpenAIContentPart::Text { text: "x".into() },
+                OpenAIContentPart::ImageUrl {
+                    image_url: OpenAIImageUrl {
+                        url: "https://example.com/i.png".into(),
+                        detail: None,
+                    },
+                },
+            ]),
+        }];
+        let n = estimate_openai_prompt_tokens(&msgs);
+        assert!(n >= 1500);
+    }
 }

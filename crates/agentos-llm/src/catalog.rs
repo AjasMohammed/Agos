@@ -13,6 +13,9 @@ pub struct CatalogEntry {
     pub default_model: String,
     #[serde(default)]
     pub models: Vec<String>,
+    /// Model IDs that accept OpenAI-style `image_url` parts (CustomCore / openai-compat).
+    #[serde(default)]
+    pub vision_models: Vec<String>,
 }
 
 /// Parsed provider catalog loaded from a TOML file.
@@ -134,6 +137,15 @@ impl ProviderCatalog {
                     .collect::<Vec<_>>()
                     .join(", ");
                 lines.push_str(&format!("models = [{}]\n", models_str));
+            }
+            if !entry.vision_models.is_empty() {
+                let vm_str = entry
+                    .vision_models
+                    .iter()
+                    .map(|m| format!("{:?}", m))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push_str(&format!("vision_models = [{}]\n", vm_str));
             }
             lines.push('\n');
         }

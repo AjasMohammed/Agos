@@ -4,6 +4,7 @@ use crate::chat_inflight::InFlightInference;
 use crate::handlers::files;
 use crate::state::AppState;
 use agentos_kernel::kernel::ChatStreamEvent;
+use agentos_types::ContentPart;
 use axum::extract::{Extension, Form, Path, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
@@ -57,6 +58,7 @@ fn spawn_streaming_inference(
     agent_name: String,
     history: Vec<(String, String)>,
     user_msg: String,
+    user_parts: Option<Vec<ContentPart>>,
     inflight_handle: Arc<InFlightInference>,
 ) {
     let mut total_len = 0;
@@ -84,7 +86,7 @@ fn spawn_streaming_inference(
         };
 
         let result = kernel
-            .chat_infer_streaming(&agent_name, &history, &user_msg, kernel_tx)
+            .chat_infer_streaming(&agent_name, &history, &user_msg, user_parts, kernel_tx)
             .await;
         let _ = forwarder.await;
 
@@ -148,27 +150,72 @@ fn spawn_streaming_inference(
     });
 }
 
-/// Build LLM user text: optional attached files, then @mentions, then message body.
+/// Build LLM user content: optional attached files, then @mentions, then message body.
+/// Returns display text for logging/history and optional multimodal parts for the kernel.
 async fn expand_user_message_for_llm(
     content: &str,
     file_ids: Option<&str>,
     state: &AppState,
     owner_principal: &str,
     session_id: Option<&str>,
-) -> String {
+    agent_name: &str,
+) -> (String, Option<Vec<ContentPart>>) {
+    let supports_images = {
+        let reg = state.kernel.agent_registry.read().await;
+        match reg.get_by_name(agent_name) {
+            Some(agent) => {
+                let aid = agent.id;
+                drop(reg);
+                state
+                    .kernel
+                    .active_llms
+                    .read()
+                    .await
+                    .get(&aid)
+                    .map(|llm| llm.supports_images())
+                    .unwrap_or(false)
+            }
+            None => false,
+        }
+    };
+
     let with_mentions =
         files::resolve_at_mentions(content, state, owner_principal, session_id).await;
-    let file_ctx = match file_ids {
+
+    let file_parts = match file_ids {
         Some(ids) if !ids.trim().is_empty() => {
-            files::resolve_file_ids_to_context(ids, state, owner_principal).await
+            files::resolve_file_ids_to_context(ids, state, owner_principal, supports_images).await
         }
-        _ => String::new(),
+        _ => Vec::new(),
     };
-    if file_ctx.is_empty() {
-        with_mentions
-    } else {
-        format!("{file_ctx}\n---\n{with_mentions}")
+
+    if file_parts.is_empty() {
+        return (with_mentions, None);
     }
+
+    let mut parts: Vec<ContentPart> = vec![ContentPart::Text {
+        text: with_mentions,
+    }];
+    parts.extend(file_parts);
+
+    let display = parts_display_for_chat_log(&parts);
+    (display, Some(parts))
+}
+
+fn parts_display_for_chat_log(parts: &[ContentPart]) -> String {
+    let mut s = String::new();
+    for p in parts {
+        match p {
+            ContentPart::Text { text } => s.push_str(text),
+            ContentPart::Image { .. } => {
+                if !s.is_empty() && !s.ends_with('\n') {
+                    s.push('\n');
+                }
+                s.push_str("[image attachment]\n");
+            }
+        }
+    }
+    s
 }
 
 /// GET /chat — session list + new session compose form.
@@ -273,16 +320,29 @@ pub async fn rename_session(
 pub async fn delete_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
     if uuid::Uuid::parse_str(&session_id).is_err() {
         return (StatusCode::BAD_REQUEST, "Invalid session ID").into_response();
     }
+    let is_htmx = headers.get("HX-Request").and_then(|v| v.to_str().ok()) == Some("true");
     let store = Arc::clone(&state.chat_store);
     let sid = session_id.clone();
     match tokio::task::spawn_blocking(move || store.delete_session(&sid)).await {
-        Ok(Ok(())) => Redirect::to("/chat").into_response(),
+        Ok(Ok(())) => {
+            if is_htmx {
+                StatusCode::OK.into_response()
+            } else {
+                Redirect::to("/chat").into_response()
+            }
+        }
         Ok(Err(rusqlite::Error::QueryReturnedNoRows)) => {
-            (StatusCode::NOT_FOUND, "Session not found").into_response()
+            if is_htmx {
+                // Already deleted (double-click) — row is already gone, treat as success.
+                StatusCode::OK.into_response()
+            } else {
+                (StatusCode::NOT_FOUND, "Session not found").into_response()
+            }
         }
         Ok(Err(e)) => {
             tracing::error!(session_id = %session_id, error = %e, "Failed to delete session");
@@ -470,8 +530,15 @@ pub async fn new_session(
 
     // Resolve @mentions and attached file IDs into LLM context.
     // The original message is what gets stored in the DB; the expanded version goes to inference.
-    let llm_message =
-        expand_user_message_for_llm(&message, file_ids_opt, &state, &principal, None).await;
+    let (llm_message, user_parts) = expand_user_message_for_llm(
+        &message,
+        file_ids_opt,
+        &state,
+        &principal,
+        None,
+        &agent_name,
+    )
+    .await;
 
     // Create session and persist the first user message atomically.
     let session_id = {
@@ -518,6 +585,7 @@ pub async fn new_session(
         agent_name.clone(),
         Vec::new(),
         llm_message,
+        user_parts,
         inflight,
     );
 
@@ -559,15 +627,6 @@ pub async fn send(
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
-    let llm_message = expand_user_message_for_llm(
-        &message,
-        file_ids_opt,
-        &state,
-        &principal,
-        Some(&session_id),
-    )
-    .await;
-
     let session = {
         let store = Arc::clone(&state.chat_store);
         let sid = session_id.clone();
@@ -577,6 +636,16 @@ pub async fn send(
             _ => return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response(),
         }
     };
+
+    let (llm_message, user_parts) = expand_user_message_for_llm(
+        &message,
+        file_ids_opt,
+        &state,
+        &principal,
+        Some(&session_id),
+        &session.agent_name,
+    )
+    .await;
 
     // Reserve the slot BEFORE persisting so two concurrent /send requests for the same
     // session cannot both kick off an inference or double-persist a user message.
@@ -618,8 +687,10 @@ pub async fn send(
                 &state,
                 &principal,
                 Some(&session_id),
+                &session.agent_name,
             )
             .await
+            .0
         } else {
             m.content
         };
@@ -660,6 +731,7 @@ pub async fn send(
         session.agent_name.clone(),
         history,
         llm_message,
+        user_parts,
         Arc::clone(&inflight),
     );
 

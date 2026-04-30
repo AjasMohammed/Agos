@@ -377,4 +377,44 @@ mod tests {
         assert_eq!(loaded.step_num, 2);
         assert_eq!(loaded.state_blob, vec![1, 2, 3]);
     }
+
+    #[test]
+    fn persisted_task_context_legacy_entry_content_field() {
+        use crate::context::PersistedTaskContext;
+
+        let json = r#"{
+            "window": {
+                "id": "550e8400-e29b-41d4-a716-446655440001",
+                "entries": [
+                    {
+                        "role": "User",
+                        "content": "checkpoint legacy blob",
+                        "timestamp": "2020-06-01T12:00:00Z",
+                        "metadata": null,
+                        "importance": 0.5,
+                        "pinned": false,
+                        "reference_count": 0,
+                        "partition": "Active",
+                        "category": "history",
+                        "is_summary": false
+                    }
+                ],
+                "max_entries": 80,
+                "overflow_strategy": "fifo_eviction",
+                "needs_checkpoint": false
+            },
+            "agent_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+            "injected_sub_agents": []
+        }"#;
+
+        let ctx: PersistedTaskContext =
+            serde_json::from_str(json).expect("legacy checkpoint payload");
+        assert_eq!(ctx.window.entries.len(), 1);
+        assert_eq!(
+            ctx.window.entries[0].parts,
+            vec![agentos_types::ContentPart::Text {
+                text: "checkpoint legacy blob".into(),
+            }]
+        );
+    }
 }

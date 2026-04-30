@@ -591,7 +591,9 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
                 &task_id,
                 ContextEntry {
                     role: ContextRole::User,
-                    content: prompt.to_string(),
+                    parts: vec![ContentPart::Text {
+                        text: prompt.to_string(),
+                    }],
                     timestamp: chrono::Utc::now(),
                     metadata: None,
                     importance: 0.9,

@@ -416,6 +416,7 @@ pub fn build_router(
         )
         .route("/doctor", axum::routing::get(doctor::page))
         .route("/manual", axum::routing::get(manual_page::page))
+        .route("/manual/view", axum::routing::get(manual_page::view))
         .route("/scratchpad", axum::routing::get(scratchpad::page))
         .route(
             "/agents/{name}/scratchpad",
