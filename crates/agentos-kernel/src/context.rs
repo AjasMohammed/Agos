@@ -409,10 +409,11 @@ impl ContextManager {
                     // global default, so an 8k local model triggers compaction
                     // at its own 80%, not the 200k global default's 80%.
                     let effective_budget = tc.token_budget_override.unwrap_or(self.token_budget);
-                    if effective_budget > 0 {
-                        let tokens = tc.window.estimated_tokens();
-                        let pct = tokens * 100 / effective_budget;
-
+                    let tokens = tc.window.estimated_tokens();
+                    if let Some(pct) = tokens
+                        .checked_mul(100)
+                        .and_then(|t| t.checked_div(effective_budget))
+                    {
                         if pct >= 80 {
                             let is_critical = pct >= 95;
                             let compress_count = if is_critical {

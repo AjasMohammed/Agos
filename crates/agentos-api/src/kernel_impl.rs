@@ -265,7 +265,7 @@ impl KernelService for Kernel {
         let offset = filter.offset.unwrap_or(0) as usize;
         let limit = filter.limit.unwrap_or(50) as usize;
 
-        filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        filtered.sort_by_key(|t| std::cmp::Reverse(t.created_at));
 
         let page: Vec<ApiTaskSummary> = filtered
             .into_iter()

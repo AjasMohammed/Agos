@@ -1220,7 +1220,7 @@ impl Kernel {
                     .iter()
                     .map(|((name, _), (ts, _))| (name.clone(), *ts))
                     .collect();
-                by_recency.sort_by(|a, b| b.1.cmp(&a.1));
+                by_recency.sort_by_key(|x| std::cmp::Reverse(x.1));
                 let mut seen = std::collections::HashSet::new();
                 by_recency
                     .into_iter()

@@ -66,7 +66,7 @@ pub async fn page(State(state): State<AppState>, jar: CookieJar) -> Response {
         }
     }
 
-    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.0));
     let messages = rows.into_iter().map(|(_, row)| row).collect::<Vec<_>>();
 
     let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);
