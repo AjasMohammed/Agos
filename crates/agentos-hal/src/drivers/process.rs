@@ -96,15 +96,15 @@ impl ProcessDriver {
         let order = opts.order.as_deref().unwrap_or("desc");
 
         match sort_by {
-            "memory" => processes.sort_by(|a, b| a.memory_mb.cmp(&b.memory_mb)),
+            "memory" => processes.sort_by_key(|p| p.memory_mb),
             "cpu" => processes.sort_by(|a, b| {
                 a.cpu_usage_percent
                     .partial_cmp(&b.cpu_usage_percent)
                     .unwrap_or(std::cmp::Ordering::Equal)
             }),
-            "pid" => processes.sort_by(|a, b| a.pid.cmp(&b.pid)),
+            "pid" => processes.sort_by_key(|p| p.pid),
             "name" => processes.sort_by(|a, b| a.name.cmp(&b.name)),
-            "start_time" => processes.sort_by(|a, b| a.start_time.cmp(&b.start_time)),
+            "start_time" => processes.sort_by_key(|p| p.start_time),
             _ => unreachable!("sort_by alias normalization failed"),
         }
 
