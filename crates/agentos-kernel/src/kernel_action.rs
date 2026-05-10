@@ -5,6 +5,13 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::time::Duration;
 
+/// Built-in delivery adapter kinds accepted as `notify-user` channel selectors.
+///
+/// These names are matched against `DeliveryAdapter::channel_id().as_str()` when
+/// no registered channel row exists for the selector. Must stay in lockstep with
+/// `DeliveryChannel::{CLI,WEB,WEBHOOK,DESKTOP,SLACK}` constants.
+const BUILTIN_DELIVERY_KINDS: &[&str] = &["cli", "web", "webhook", "desktop", "slack"];
+
 /// Actions that tools can request the kernel to perform on their behalf.
 ///
 /// Tools return a `_kernel_action` field in their result JSON to signal
@@ -46,10 +53,15 @@ pub(crate) enum KernelAction {
         label: String,
     },
     /// Fire-and-forget notification to the user inbox.
+    ///
+    /// `channels`: empty = fan out to all registered delivery adapters.
+    /// Non-empty = restrict to selected channels (matched by registered channel
+    /// display name, `ChannelInstanceID`, or channel kind/id like "telegram").
     NotifyUser {
         subject: String,
         body: String,
         priority: String,
+        channels: Vec<String>,
     },
     /// Blocking question to the user — task pauses until user responds.
     AskUser {
@@ -143,10 +155,10 @@ pub(crate) enum KernelAction {
     },
     /// List all pending in-memory timers.
     ListTimers,
-    /// Schedule a one-shot task at an absolute datetime (or a relative delay).
+    /// Schedule a one-shot action at an absolute datetime (or a relative delay).
     ScheduleOnce {
         name: String,
-        task_prompt: String,
+        action: agentos_types::schedule::OnceJobAction,
         agent_name: String,
         fire_at: chrono::DateTime<chrono::Utc>,
     },
@@ -156,6 +168,30 @@ pub(crate) enum KernelAction {
     },
     /// List all pending once-jobs.
     ListOnceJobs,
+    /// Query per-fire run history for a given schedule.
+    GetScheduleRuns {
+        schedule_id: String,
+        limit: u32,
+        state_filter: Option<String>,
+    },
+    /// Create a recurring cron schedule.
+    CreateSchedule {
+        name: String,
+        cron: String,
+        agent_name: String,
+        mode: String,
+        task_prompt: Option<String>,
+        notify_subject: Option<String>,
+        notify_body: Option<String>,
+        notify_priority: Option<String>,
+        tool: Option<String>,
+        tool_args: Option<serde_json::Value>,
+    },
+    /// Pause/resume/delete a schedule by name.
+    ControlSchedule {
+        action: String,
+        name: String,
+    },
     /// Send a message to a single connected channel by name or ID.
     /// Distinct from NotifyUser, which fans out to every registered delivery
     /// adapter. ChannelSend is targeted: agent picks one channel.
@@ -166,6 +202,26 @@ pub(crate) enum KernelAction {
         text: String,
         /// Optional thread/reply target (platform-specific).
         thread_id: Option<String>,
+    },
+    AgentInboxList {
+        limit: u32,
+        unread_only: bool,
+    },
+    AgentInboxRead {
+        id: String,
+    },
+    AgentInboxDismiss {
+        id: String,
+    },
+    AgentMessagesList {
+        limit: u32,
+        unread_only: bool,
+    },
+    AgentMessagesRead {
+        id: String,
+    },
+    AgentMessagesDismiss {
+        id: String,
     },
 }
 
@@ -211,6 +267,38 @@ impl KernelAction {
                 let to = value.get("to")?.as_str()?.to_string();
                 let content = value.get("content")?.as_str()?.to_string();
                 Some(Self::SendAgentMessage { to, content })
+            }
+            "agent_inbox_list" => {
+                let limit = value.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
+                let unread_only = value
+                    .get("unread_only")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                Some(Self::AgentInboxList { limit, unread_only })
+            }
+            "agent_inbox_read" => {
+                let id = value.get("id")?.as_str()?.to_string();
+                Some(Self::AgentInboxRead { id })
+            }
+            "agent_inbox_dismiss" => {
+                let id = value.get("id")?.as_str()?.to_string();
+                Some(Self::AgentInboxDismiss { id })
+            }
+            "agent_messages_list" => {
+                let limit = value.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
+                let unread_only = value
+                    .get("unread_only")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                Some(Self::AgentMessagesList { limit, unread_only })
+            }
+            "agent_messages_read" => {
+                let id = value.get("id")?.as_str()?.to_string();
+                Some(Self::AgentMessagesRead { id })
+            }
+            "agent_messages_dismiss" => {
+                let id = value.get("id")?.as_str()?.to_string();
+                Some(Self::AgentMessagesDismiss { id })
             }
             "escalate" => {
                 let reason_str = value
@@ -291,10 +379,28 @@ impl KernelAction {
                     .and_then(|v| v.as_str())
                     .unwrap_or("info")
                     .to_string();
+                let channels: Vec<String> = match value.get("channels") {
+                    Some(serde_json::Value::Array(arr)) => arr
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect(),
+                    Some(serde_json::Value::String(s)) => {
+                        let t = s.trim();
+                        if t.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![t.to_string()]
+                        }
+                    }
+                    _ => Vec::new(),
+                };
                 Some(Self::NotifyUser {
                     subject,
                     body,
                     priority,
+                    channels,
                 })
             }
             "channel_send" => {
@@ -523,8 +629,8 @@ impl KernelAction {
             }
             "list_timers" => Some(Self::ListTimers),
             "schedule_once" => {
+                use agentos_types::schedule::OnceJobAction;
                 let name = value.get("name")?.as_str()?.to_string();
-                let task_prompt = value.get("task_prompt")?.as_str()?.to_string();
                 let agent_name = value
                     .get("agent_name")
                     .and_then(|v| v.as_str())
@@ -539,9 +645,38 @@ impl KernelAction {
                         return None;
                     }
                 };
+                let mode = value.get("mode").and_then(|v| v.as_str()).unwrap_or("task");
+                let action = match mode {
+                    "notify" => {
+                        let subject = value.get("notify_subject")?.as_str()?.to_string();
+                        let body = value.get("notify_body")?.as_str()?.to_string();
+                        let priority = value
+                            .get("notify_priority")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("info")
+                            .to_string();
+                        OnceJobAction::NotifyUser {
+                            subject,
+                            body,
+                            priority,
+                        }
+                    }
+                    "tool" => {
+                        let tool = value.get("tool")?.as_str()?.to_string();
+                        let args = value
+                            .get("tool_args")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                        OnceJobAction::RunTool { tool, args }
+                    }
+                    _ => {
+                        let prompt = value.get("task_prompt")?.as_str()?.to_string();
+                        OnceJobAction::RunTask { prompt }
+                    }
+                };
                 Some(Self::ScheduleOnce {
                     name,
-                    task_prompt,
+                    action,
                     agent_name,
                     fire_at,
                 })
@@ -551,6 +686,69 @@ impl KernelAction {
                 Some(Self::CancelOnceJob { name })
             }
             "list_once_jobs" => Some(Self::ListOnceJobs),
+            "get_schedule_runs" => {
+                let schedule_id = value.get("schedule_id")?.as_str()?.to_string();
+                let limit = value
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(20)
+                    .clamp(1, 100) as u32;
+                let state_filter = value
+                    .get("state")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                Some(Self::GetScheduleRuns {
+                    schedule_id,
+                    limit,
+                    state_filter,
+                })
+            }
+            "create_schedule" => {
+                let name = value.get("name")?.as_str()?.to_string();
+                let cron = value.get("cron")?.as_str()?.to_string();
+                let agent_name = value
+                    .get("agent_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let mode = value
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("task")
+                    .to_string();
+                Some(Self::CreateSchedule {
+                    name,
+                    cron,
+                    agent_name,
+                    mode,
+                    task_prompt: value
+                        .get("task_prompt")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    notify_subject: value
+                        .get("notify_subject")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    notify_body: value
+                        .get("notify_body")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    notify_priority: value
+                        .get("notify_priority")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    tool: value
+                        .get("tool")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    tool_args: value.get("tool_args").cloned(),
+                })
+            }
+            "control_schedule" => {
+                let action = value.get("action")?.as_str()?.to_string();
+                let name = value.get("name")?.as_str()?.to_string();
+                Some(Self::ControlSchedule { action, name })
+            }
             other => {
                 tracing::warn!(action = %other, "Unknown _kernel_action, ignoring");
                 None
@@ -598,10 +796,23 @@ impl Kernel {
             KernelAction::SetTimer { .. } => "set_timer",
             KernelAction::CancelTimer { .. } => "cancel_timer",
             KernelAction::ListTimers => "list_timers",
-            KernelAction::ScheduleOnce { .. } => "schedule_once",
+            KernelAction::ScheduleOnce { action, .. } => match action {
+                agentos_types::schedule::OnceJobAction::RunTask { .. } => "schedule_once:task",
+                agentos_types::schedule::OnceJobAction::NotifyUser { .. } => "schedule_once:notify",
+                agentos_types::schedule::OnceJobAction::RunTool { .. } => "schedule_once:tool",
+            },
             KernelAction::CancelOnceJob { .. } => "cancel_once_job",
             KernelAction::ListOnceJobs => "list_once_jobs",
+            KernelAction::GetScheduleRuns { .. } => "get_schedule_runs",
+            KernelAction::CreateSchedule { .. } => "create_schedule",
+            KernelAction::ControlSchedule { .. } => "control_schedule",
             KernelAction::ChannelSend { .. } => "channel_send",
+            KernelAction::AgentInboxList { .. } => "agent_inbox_list",
+            KernelAction::AgentInboxRead { .. } => "agent_inbox_read",
+            KernelAction::AgentInboxDismiss { .. } => "agent_inbox_dismiss",
+            KernelAction::AgentMessagesList { .. } => "agent_messages_list",
+            KernelAction::AgentMessagesRead { .. } => "agent_messages_read",
+            KernelAction::AgentMessagesDismiss { .. } => "agent_messages_dismiss",
         };
 
         self.audit_log(agentos_audit::AuditEntry {
@@ -629,6 +840,24 @@ impl Kernel {
             KernelAction::SendAgentMessage { to, content } => {
                 self.execute_send_message(task, &to, &content, trace_id)
                     .await
+            }
+            KernelAction::AgentInboxList { limit, unread_only } => {
+                self.execute_agent_inbox_list(task, limit, unread_only)
+                    .await
+            }
+            KernelAction::AgentInboxRead { id } => self.execute_agent_inbox_read(task, &id).await,
+            KernelAction::AgentInboxDismiss { id } => {
+                self.execute_agent_inbox_dismiss(task, &id).await
+            }
+            KernelAction::AgentMessagesList { limit, unread_only } => {
+                self.execute_agent_messages_list(task, limit, unread_only)
+                    .await
+            }
+            KernelAction::AgentMessagesRead { id } => {
+                self.execute_agent_messages_read(task, &id).await
+            }
+            KernelAction::AgentMessagesDismiss { id } => {
+                self.execute_agent_messages_dismiss(task, &id).await
             }
             KernelAction::EscalateToHuman {
                 reason,
@@ -668,8 +897,9 @@ impl Kernel {
                 subject,
                 body,
                 priority,
+                channels,
             } => {
-                self.execute_notify_user(task, subject, body, priority, trace_id)
+                self.execute_notify_user(task, subject, body, priority, channels, trace_id)
                     .await
             }
             KernelAction::AskUser {
@@ -820,7 +1050,18 @@ impl Kernel {
                     .await;
 
                 let response = self
-                    .cmd_spawn_sub_agent(task.id, &agent, &prompt, &permissions, slice)
+                    .cmd_spawn_sub_agent(
+                        task.id,
+                        &agent,
+                        &prompt,
+                        &permissions,
+                        slice,
+                        // No `handoff_mode` here — caller provided an explicit slice
+                        // via `last_n` above, which always wins over the mode arg.
+                        None,
+                        // Inherit parent's allowlist (no per-call narrowing in this path).
+                        task.tool_categories.clone(),
+                    )
                     .await;
 
                 match response {
@@ -1186,15 +1427,53 @@ impl Kernel {
             KernelAction::ListTimers => self.execute_list_timers(task).await,
             KernelAction::ScheduleOnce {
                 name,
-                task_prompt,
+                action,
                 agent_name,
                 fire_at,
             } => {
-                self.execute_schedule_once(task, name, task_prompt, agent_name, fire_at)
+                self.execute_schedule_once(task, name, action, agent_name, fire_at)
                     .await
             }
             KernelAction::CancelOnceJob { name } => self.execute_cancel_once_job(task, name).await,
             KernelAction::ListOnceJobs => self.execute_list_once_jobs(task).await,
+            KernelAction::GetScheduleRuns {
+                schedule_id,
+                limit,
+                state_filter,
+            } => {
+                self.execute_get_schedule_runs(task, schedule_id, limit, state_filter)
+                    .await
+            }
+            KernelAction::CreateSchedule {
+                name,
+                cron,
+                agent_name,
+                mode,
+                task_prompt,
+                notify_subject,
+                notify_body,
+                notify_priority,
+                tool,
+                tool_args,
+            } => {
+                self.execute_create_schedule(
+                    task,
+                    name,
+                    cron,
+                    agent_name,
+                    mode,
+                    task_prompt,
+                    notify_subject,
+                    notify_body,
+                    notify_priority,
+                    tool,
+                    tool_args,
+                )
+                .await
+            }
+            KernelAction::ControlSchedule { action, name } => {
+                self.execute_control_schedule(task, action, name).await
+            }
             KernelAction::ChannelSend {
                 channel,
                 text,
@@ -1362,6 +1641,15 @@ impl Kernel {
                 };
             }
         }
+
+        self.agent_inbox_writer
+            .write_message(
+                task.agent_id,
+                from_name.clone(),
+                to_agent.id,
+                content.to_string(),
+            )
+            .await;
 
         match self.message_bus.send_direct(msg).await {
             Ok(_) => KernelActionResult {
@@ -1557,16 +1845,269 @@ impl Kernel {
         label: &str,
     ) -> KernelActionResult {
         match self.memory_blocks.delete(&task.agent_id, label) {
-            Ok(deleted) => KernelActionResult {
-                success: deleted,
-                result: serde_json::json!({
-                    "deleted": deleted,
-                    "label": label,
-                }),
+            Ok(true) => KernelActionResult {
+                success: true,
+                result: serde_json::json!({ "status": "deleted" }),
+            },
+            Ok(false) => KernelActionResult {
+                success: false,
+                result: serde_json::json!({ "error": "Block not found" }),
             },
             Err(e) => KernelActionResult {
                 success: false,
-                result: serde_json::json!({ "error": e.to_string() }),
+                result: serde_json::json!({ "error": format!("Failed to delete memory block: {}", e) }),
+            },
+        }
+    }
+
+    async fn execute_agent_inbox_list(
+        &self,
+        task: &AgentTask,
+        limit: u32,
+        unread_only: bool,
+    ) -> KernelActionResult {
+        match self
+            .agent_inbox
+            .list(task.agent_id, unread_only, limit)
+            .await
+        {
+            Ok(entries) => {
+                // Project to titles + metadata only — bodies are fetched on demand
+                // via agent-inbox-read so prompts and tool-result context stay lean.
+                let projected: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "id": e.id.to_string(),
+                            "kind": e.kind.as_str(),
+                            "title": e.title,
+                            "ref_id": e.ref_id,
+                            "created_at": e.created_at.to_rfc3339(),
+                            "read": e.read,
+                        })
+                    })
+                    .collect();
+                KernelActionResult {
+                    success: true,
+                    result: serde_json::json!({
+                        "entries": projected,
+                        "count": entries.len(),
+                    }),
+                }
+            }
+            Err(e) => KernelActionResult {
+                success: false,
+                result: serde_json::json!({ "error": format!("Failed to list inbox: {}", e) }),
+            },
+        }
+    }
+
+    async fn execute_agent_inbox_read(&self, task: &AgentTask, id: &str) -> KernelActionResult {
+        use std::str::FromStr;
+        let entry_id = match agentos_types::AgentInboxEntryID::from_str(id) {
+            Ok(id) => id,
+            Err(e) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({ "error": format!("Invalid ID: {}", e) }),
+                }
+            }
+        };
+        // Ownership check before any mutation: never reveal that an unrelated entry
+        // exists. Both "missing" and "wrong owner" return the same error.
+        let entry = match self.agent_inbox.get(entry_id).await {
+            Ok(Some(e)) if e.agent_id == task.agent_id => e,
+            Ok(_) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({ "error": "not found" }),
+                }
+            }
+            Err(e) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({ "error": format!("Failed to fetch: {}", e) }),
+                }
+            }
+        };
+        if let Err(e) = self.agent_inbox.mark_read(entry_id).await {
+            tracing::warn!(error = %e, %entry_id, "agent-inbox-read: mark_read failed");
+        }
+        KernelActionResult {
+            success: true,
+            result: serde_json::json!({
+                "id": entry.id.to_string(),
+                "kind": entry.kind.as_str(),
+                "title": entry.title,
+                "body": entry.body,
+                "ref_id": entry.ref_id,
+                "created_at": entry.created_at.to_rfc3339(),
+            }),
+        }
+    }
+
+    async fn execute_agent_inbox_dismiss(&self, task: &AgentTask, id: &str) -> KernelActionResult {
+        use std::str::FromStr;
+        let entry_id = match agentos_types::AgentInboxEntryID::from_str(id) {
+            Ok(id) => id,
+            Err(e) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({ "error": format!("Invalid ID: {}", e) }),
+                }
+            }
+        };
+        // Ownership check before deletion. Mirrors execute_agent_inbox_read so an
+        // attacker cannot dismiss another agent's notifications by guessing IDs.
+        match self.agent_inbox.get(entry_id).await {
+            Ok(Some(e)) if e.agent_id == task.agent_id => {}
+            Ok(_) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({ "error": "not found" }),
+                }
+            }
+            Err(e) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({ "error": format!("Failed to fetch: {}", e) }),
+                }
+            }
+        }
+        match self.agent_inbox.dismiss(entry_id).await {
+            Ok(()) => KernelActionResult {
+                success: true,
+                result: serde_json::json!({ "status": "dismissed", "id": entry_id.to_string() }),
+            },
+            Err(e) => KernelActionResult {
+                success: false,
+                result: serde_json::json!({ "error": format!("Failed to dismiss: {}", e) }),
+            },
+        }
+    }
+
+    async fn execute_agent_messages_list(
+        &self,
+        task: &AgentTask,
+        limit: u32,
+        unread_only: bool,
+    ) -> KernelActionResult {
+        match self
+            .agent_message_inbox
+            .list(task.agent_id, unread_only, limit)
+            .await
+        {
+            Ok(entries) => {
+                // Project: titles ("from") and metadata, omit body — fetched via
+                // agent-messages-read on demand.
+                let projected: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "id": m.id.to_string(),
+                            "from": m.from_agent_name,
+                            "from_agent_id": m.from_agent_id.to_string(),
+                            "reply_to": m.reply_to.map(|r| r.to_string()),
+                            "created_at": m.created_at.to_rfc3339(),
+                            "read": m.read,
+                        })
+                    })
+                    .collect();
+                KernelActionResult {
+                    success: true,
+                    result: serde_json::json!({
+                        "messages": projected,
+                        "count": entries.len(),
+                    }),
+                }
+            }
+            Err(e) => KernelActionResult {
+                success: false,
+                result: serde_json::json!({ "error": format!("Failed to list messages: {}", e) }),
+            },
+        }
+    }
+
+    async fn execute_agent_messages_read(&self, task: &AgentTask, id: &str) -> KernelActionResult {
+        use std::str::FromStr;
+        let entry_id = match agentos_types::AgentMessageEntryID::from_str(id) {
+            Ok(id) => id,
+            Err(e) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({ "error": format!("Invalid ID: {}", e) }),
+                }
+            }
+        };
+        let entry = match self.agent_message_inbox.get(entry_id).await {
+            Ok(Some(m)) if m.to_agent_id == task.agent_id => m,
+            Ok(_) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({ "error": "not found" }),
+                }
+            }
+            Err(e) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({ "error": format!("Failed to fetch: {}", e) }),
+                }
+            }
+        };
+        if let Err(e) = self.agent_message_inbox.mark_read(entry_id).await {
+            tracing::warn!(error = %e, %entry_id, "agent-messages-read: mark_read failed");
+        }
+        KernelActionResult {
+            success: true,
+            result: serde_json::json!({
+                "id": entry.id.to_string(),
+                "from": entry.from_agent_name,
+                "from_agent_id": entry.from_agent_id.to_string(),
+                "body": entry.body,
+                "reply_to": entry.reply_to.map(|r| r.to_string()),
+                "created_at": entry.created_at.to_rfc3339(),
+            }),
+        }
+    }
+
+    async fn execute_agent_messages_dismiss(
+        &self,
+        task: &AgentTask,
+        id: &str,
+    ) -> KernelActionResult {
+        use std::str::FromStr;
+        let entry_id = match agentos_types::AgentMessageEntryID::from_str(id) {
+            Ok(id) => id,
+            Err(e) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({ "error": format!("Invalid ID: {}", e) }),
+                }
+            }
+        };
+        match self.agent_message_inbox.get(entry_id).await {
+            Ok(Some(m)) if m.to_agent_id == task.agent_id => {}
+            Ok(_) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({ "error": "not found" }),
+                }
+            }
+            Err(e) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({ "error": format!("Failed to fetch: {}", e) }),
+                }
+            }
+        }
+        match self.agent_message_inbox.dismiss(entry_id).await {
+            Ok(()) => KernelActionResult {
+                success: true,
+                result: serde_json::json!({ "status": "dismissed", "id": entry_id.to_string() }),
+            },
+            Err(e) => KernelActionResult {
+                success: false,
+                result: serde_json::json!({ "error": format!("Failed to dismiss: {}", e) }),
             },
         }
     }
@@ -1581,6 +2122,7 @@ impl Kernel {
         subject: String,
         body: String,
         priority: String,
+        channels: Vec<String>,
         trace_id: TraceID,
     ) -> KernelActionResult {
         // Defense-in-depth permission check.
@@ -1611,6 +2153,103 @@ impl Kernel {
         let subject_prefixed = format!("[{agent_name}] {}", subject.as_str());
         let subject_line: String = subject_prefixed.chars().take(80).collect();
 
+        // Resolve `channels` selectors against the registered-channels list.
+        // Each selector may be a registered channel's display_name, its
+        // `ChannelInstanceID`, or a generic kind id (telegram/slack/cli/...).
+        let (instance_ids, channel_kinds, unmatched, available) = if channels.is_empty() {
+            (
+                std::collections::HashSet::new(),
+                std::collections::HashSet::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        } else {
+            let registered = match self.channel_registry.list_active().await {
+                Ok(list) => list,
+                Err(e) => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!("Failed to list channels: {e}")
+                        }),
+                    };
+                }
+            };
+            let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut kinds: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut unmatched: Vec<String> = Vec::new();
+            for sel in &channels {
+                let lc = sel.to_ascii_lowercase();
+                let mut matched = false;
+                // Try ChannelInstanceID match.
+                if let Some(c) = registered.iter().find(|c| c.id.to_string() == *sel) {
+                    ids.insert(c.id.to_string());
+                    matched = true;
+                }
+                // Try display_name match (case-sensitive — display names are user-set).
+                if !matched {
+                    let by_name: Vec<&agentos_types::RegisteredChannel> = registered
+                        .iter()
+                        .filter(|c| c.display_name == *sel)
+                        .collect();
+                    if !by_name.is_empty() {
+                        for c in &by_name {
+                            ids.insert(c.id.to_string());
+                        }
+                        matched = true;
+                    }
+                }
+                // Treat as kind id (telegram/slack/webhook/desktop/cli/web/ntfy/email/...)
+                // Also expands to all registered channels of that kind so adapters
+                // owned by `channel_manager` (Discord/WhatsApp/...) reachable via
+                // their instance_id receive the message.
+                if !matched {
+                    kinds.insert(lc.clone());
+                    let kind_matches: Vec<&agentos_types::RegisteredChannel> = registered
+                        .iter()
+                        .filter(|c| c.kind.to_string() == lc)
+                        .collect();
+                    if !kind_matches.is_empty() {
+                        for c in &kind_matches {
+                            ids.insert(c.id.to_string());
+                        }
+                        matched = true;
+                    } else if BUILTIN_DELIVERY_KINDS.contains(&lc.as_str()) {
+                        // Built-in adapter id (no registered-channel row required).
+                        matched = true;
+                    }
+                }
+                if !matched {
+                    unmatched.push(sel.clone());
+                }
+            }
+            let available: Vec<serde_json::Value> = registered
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "id": c.id.to_string(),
+                        "name": c.display_name,
+                        "kind": c.kind.to_string(),
+                    })
+                })
+                .collect();
+            (ids, kinds, unmatched, available)
+        };
+
+        if !unmatched.is_empty() {
+            return KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": format!(
+                        "notify-user: unknown channel selector(s): {}",
+                        unmatched.join(", ")
+                    ),
+                    "available_channels": available,
+                    "builtin_kinds": BUILTIN_DELIVERY_KINDS,
+                }),
+            };
+        }
+
         let msg = UserMessage {
             id: NotificationID::new(),
             from: NotificationSource::Agent(task.agent_id),
@@ -1632,7 +2271,15 @@ impl Kernel {
 
         let notification_id = msg.id;
 
-        match self.notification_router.deliver(msg).await {
+        let delivery = if channels.is_empty() {
+            self.notification_router.deliver(msg).await.map(|_| ())
+        } else {
+            self.notification_router
+                .deliver_filtered(msg, &instance_ids, &channel_kinds)
+                .await
+        };
+
+        match delivery {
             Ok(_) => {
                 self.audit_log(AuditEntry {
                     timestamp: Utc::now(),
@@ -1644,6 +2291,7 @@ impl Kernel {
                     details: serde_json::json!({
                         "notification_id": notification_id.to_string(),
                         "source": "notify-user tool",
+                        "channels": channels,
                     }),
                     severity: AuditSeverity::Info,
                     reversible: false,
@@ -1654,6 +2302,7 @@ impl Kernel {
                     result: serde_json::json!({
                         "status": "notification_sent",
                         "notification_id": notification_id.to_string(),
+                        "channels": channels,
                     }),
                 }
             }
@@ -2012,6 +2661,7 @@ impl Kernel {
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
+            tool_categories: None,
         };
 
         self.scheduler.register_external(child_task.clone()).await;
@@ -2824,7 +3474,14 @@ impl Kernel {
 
         match self
             .schedule_manager
-            .create_timer(name.clone(), delay_secs, resolved, action, None)
+            .create_timer_with_creator(
+                name.clone(),
+                delay_secs,
+                resolved,
+                action,
+                None,
+                task.agent_id,
+            )
             .await
         {
             Ok(id) => {
@@ -2918,7 +3575,7 @@ impl Kernel {
         &self,
         task: &AgentTask,
         name: String,
-        task_prompt: String,
+        action: agentos_types::schedule::OnceJobAction,
         agent_name: String,
         fire_at: chrono::DateTime<chrono::Utc>,
     ) -> KernelActionResult {
@@ -2938,9 +3595,10 @@ impl Kernel {
             agent_name
         };
 
+        let action_tag = action.tag();
         match self
             .schedule_manager
-            .create_once_job(name.clone(), fire_at, resolved, task_prompt)
+            .create_once_job_with_creator(name.clone(), fire_at, resolved, action, task.agent_id)
             .await
         {
             Ok(id) => {
@@ -2956,6 +3614,7 @@ impl Kernel {
                         "schedule_id": id.to_string(),
                         "fire_at": fire_at.to_rfc3339(),
                         "once": true,
+                        "action": action_tag,
                         "source": "agent_tool",
                     }),
                     severity: agentos_audit::AuditSeverity::Info,
@@ -2968,7 +3627,8 @@ impl Kernel {
                         "job_id": id.to_string(),
                         "job_name": name,
                         "fires_at": fire_at.to_rfc3339(),
-                        "message": format!("Once-job '{}' scheduled for {}", name, fire_at.to_rfc3339()),
+                        "action": action_tag,
+                        "message": format!("Once-job '{}' scheduled for {} ({})", name, fire_at.to_rfc3339(), action_tag),
                     }),
                 }
             }
@@ -3026,6 +3686,422 @@ impl Kernel {
         KernelActionResult {
             success: true,
             result: serde_json::json!({ "jobs": list, "count": list.len() }),
+        }
+    }
+
+    async fn execute_get_schedule_runs(
+        &self,
+        task: &AgentTask,
+        schedule_id_str: String,
+        limit: u32,
+        state_filter: Option<String>,
+    ) -> KernelActionResult {
+        // Resolve schedule_id from string. Accept either a UUID or a name.
+        let schedule_id = match schedule_id_str.parse::<ScheduleID>() {
+            Ok(id) => id,
+            Err(_) => match self.schedule_manager.get_by_name(&schedule_id_str).await {
+                Some(j) => j.id,
+                None => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!("Schedule '{}' not found (not a UUID or known name)", schedule_id_str),
+                            "error_kind": "not_found",
+                        }),
+                    };
+                }
+            },
+        };
+
+        // Ownership check: only the creator may inspect run history.
+        let creator = self.schedule_manager.creator_of(&schedule_id).await;
+        if creator != Some(task.agent_id) {
+            return KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": format!("Permission denied: schedule '{}' is not owned by the calling agent", schedule_id_str),
+                    "error_kind": "permission_denied",
+                }),
+            };
+        }
+
+        let store = match self.schedule_manager.store() {
+            Some(s) => s.clone(),
+            None => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": "Run-history store not configured on this kernel",
+                        "error_kind": "unavailable",
+                    }),
+                };
+            }
+        };
+
+        let runs = match store.list_runs_for_schedule(schedule_id, limit).await {
+            Ok(r) => r,
+            Err(e) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": e.to_string(),
+                        "error_kind": "store_error",
+                    }),
+                };
+            }
+        };
+
+        let filtered: Vec<&agentos_types::schedule::ScheduledRun> = match state_filter.as_deref() {
+            Some(s) => runs.iter().filter(|r| r.state.as_str() == s).collect(),
+            None => runs.iter().collect(),
+        };
+
+        let out: Vec<serde_json::Value> = filtered
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "run_id": r.run_id.to_string(),
+                    "schedule_id": r.parent_id.to_string(),
+                    "schedule_name": r.parent_name,
+                    "state": r.state.as_str(),
+                    "started_at": r.started_at.to_rfc3339(),
+                    "completed_at": r.completed_at.map(|t| t.to_rfc3339()),
+                    "task_id": r.task_id.map(|t| t.to_string()),
+                    "error": r.error,
+                    "delivered": r.delivered,
+                })
+            })
+            .collect();
+
+        KernelActionResult {
+            success: true,
+            result: serde_json::json!({
+                "runs": out,
+                "count": out.len(),
+                "schedule_id": schedule_id.to_string(),
+            }),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_create_schedule(
+        &self,
+        task: &AgentTask,
+        name: String,
+        cron: String,
+        agent_name: String,
+        mode: String,
+        task_prompt: Option<String>,
+        notify_subject: Option<String>,
+        notify_body: Option<String>,
+        notify_priority: Option<String>,
+        tool: Option<String>,
+        tool_args: Option<serde_json::Value>,
+    ) -> KernelActionResult {
+        use agentos_types::schedule::OnceJobAction;
+
+        let resolved = if let Ok(aid) = agent_name.parse::<AgentID>() {
+            let registry = self.agent_registry.read().await;
+            registry
+                .get_by_id(&aid)
+                .map(|a| a.name.clone())
+                .unwrap_or(agent_name)
+        } else if agent_name.is_empty() {
+            let registry = self.agent_registry.read().await;
+            registry
+                .get_by_id(&task.agent_id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| task.agent_id.to_string())
+        } else {
+            agent_name
+        };
+
+        // Build typed action. Anti-recursion guard for mode=tool is enforced
+        // here too (the tool-layer check is belt-and-suspenders; this is the
+        // authoritative gate, since a forged `_kernel_action` payload would
+        // otherwise bypass the tool entry point). Single source of truth in
+        // `agentos_types::schedule::BLOCKED_SCHEDULE_TOOL_NAMES`.
+        use agentos_types::schedule::BLOCKED_SCHEDULE_TOOL_NAMES;
+
+        let action = match mode.as_str() {
+            "notify" => {
+                let subject = match notify_subject {
+                    Some(v) if !v.is_empty() => v,
+                    _ => {
+                        return KernelActionResult {
+                            success: false,
+                            result: serde_json::json!({
+                                "error": "mode=notify requires notify_subject",
+                                "error_kind": "schema_validation",
+                            }),
+                        };
+                    }
+                };
+                let body = match notify_body {
+                    Some(v) if !v.is_empty() => v,
+                    _ => {
+                        return KernelActionResult {
+                            success: false,
+                            result: serde_json::json!({
+                                "error": "mode=notify requires notify_body",
+                                "error_kind": "schema_validation",
+                            }),
+                        };
+                    }
+                };
+                let priority = notify_priority.unwrap_or_else(|| "info".to_string());
+                OnceJobAction::NotifyUser {
+                    subject,
+                    body,
+                    priority,
+                }
+            }
+            "tool" => {
+                let tool_name = match tool {
+                    Some(v) if !v.is_empty() => v,
+                    _ => {
+                        return KernelActionResult {
+                            success: false,
+                            result: serde_json::json!({
+                                "error": "mode=tool requires tool",
+                                "error_kind": "schema_validation",
+                            }),
+                        };
+                    }
+                };
+                if BLOCKED_SCHEDULE_TOOL_NAMES.contains(&tool_name.as_str()) {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!(
+                                "Tool '{}' cannot be scheduled (anti-recursion guard)",
+                                tool_name
+                            ),
+                            "error_kind": "permission_denied",
+                        }),
+                    };
+                }
+                let args = tool_args.unwrap_or(serde_json::json!({}));
+                OnceJobAction::RunTool {
+                    tool: tool_name,
+                    args,
+                }
+            }
+            "task" | "" => match task_prompt {
+                Some(v) if !v.is_empty() => OnceJobAction::RunTask { prompt: v },
+                _ => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": "mode=task requires task_prompt",
+                            "error_kind": "schema_validation",
+                        }),
+                    };
+                }
+            },
+            other => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!(
+                            "Unknown mode '{}'. Must be one of [task, notify, tool].",
+                            other
+                        ),
+                        "error_kind": "schema_validation",
+                    }),
+                };
+            }
+        };
+
+        let action_tag = action.tag();
+        match self
+            .schedule_manager
+            .create_job_full(
+                name.clone(),
+                cron.clone(),
+                None,
+                resolved,
+                action,
+                vec![],
+                task.agent_id,
+            )
+            .await
+        {
+            Ok(id) => {
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::ScheduledJobCreated,
+                    agent_id: Some(task.agent_id),
+                    task_id: Some(task.id),
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "job_name": name,
+                        "schedule_id": id.to_string(),
+                        "cron": cron,
+                        "mode": mode,
+                        "action": action_tag,
+                        "once": false,
+                        "creator_agent_id": task.agent_id.to_string(),
+                        "source": "agent_tool",
+                    }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: true,
+                    rollback_ref: None,
+                });
+                KernelActionResult {
+                    success: true,
+                    result: serde_json::json!({
+                        "schedule_id": id.to_string(),
+                        "schedule_name": name,
+                        "mode": mode,
+                        "action": action_tag,
+                        "message": format!("Recurring schedule '{}' created ({})", name, action_tag),
+                    }),
+                }
+            }
+            Err(e) => KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": e.to_string(),
+                    "error_kind": "schema_validation",
+                }),
+            },
+        }
+    }
+
+    async fn execute_control_schedule(
+        &self,
+        task: &AgentTask,
+        action: String,
+        name: String,
+    ) -> KernelActionResult {
+        // Resolve target by name across all three kinds. Ownership is checked
+        // against the recorded `creator_agent_id` (the agent that called the
+        // tool), NOT the target `agent_name` field. This prevents agent A
+        // from losing access to its own schedule whenever it spawned a fan-out
+        // that targeted a different agent, and prevents agent B from
+        // controlling schedules it never created merely because the schedule
+        // happens to fire on B.
+        let caller = task.agent_id;
+
+        if let Some(job) = self.schedule_manager.get_by_name(&name).await {
+            let creator = self.schedule_manager.creator_of(&job.id).await;
+            if creator != Some(caller) {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Permission denied: schedule '{}' is not owned by the calling agent", name),
+                        "error_kind": "permission_denied",
+                    }),
+                };
+            }
+            let op = match action.as_str() {
+                "pause" => self.schedule_manager.pause(&job.id).await,
+                "resume" => self.schedule_manager.resume(&job.id).await,
+                "delete" => self.schedule_manager.delete(&job.id).await,
+                _ => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": "Unknown action",
+                            "error_kind": "schema_validation",
+                        }),
+                    };
+                }
+            };
+            return match op {
+                Ok(_) => KernelActionResult {
+                    success: true,
+                    result: serde_json::json!({"updated": true, "action": action, "name": name, "kind": "schedule"}),
+                },
+                Err(e) => KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": e.to_string(),
+                        "error_kind": "schema_validation",
+                    }),
+                },
+            };
+        }
+
+        // Once-jobs and timers do not support pause/resume. Surface a clear
+        // message instead of silently 404ing.
+        if let Some(job) = self.schedule_manager.get_once_job_by_name(&name).await {
+            let creator = self.schedule_manager.creator_of(&job.id).await;
+            if creator != Some(caller) {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Permission denied: once-job '{}' is not owned by the calling agent", name),
+                        "error_kind": "permission_denied",
+                    }),
+                };
+            }
+            if action != "delete" {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Once-jobs only support 'delete'; '{}' is not valid for one-shot schedules", action),
+                        "error_kind": "unsupported_action",
+                    }),
+                };
+            }
+            return match self.schedule_manager.cancel_once_job_by_name(&name).await {
+                Ok(_) => KernelActionResult {
+                    success: true,
+                    result: serde_json::json!({"updated": true, "action": action, "name": name, "kind": "once"}),
+                },
+                Err(e) => KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": e.to_string(),
+                        "error_kind": "schema_validation",
+                    }),
+                },
+            };
+        }
+        if let Some(timer) = self.schedule_manager.get_timer_by_name(&name).await {
+            let creator = self.schedule_manager.creator_of(&timer.id).await;
+            if creator != Some(caller) {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Permission denied: timer '{}' is not owned by the calling agent", name),
+                        "error_kind": "permission_denied",
+                    }),
+                };
+            }
+            if action != "delete" {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Timers only support 'delete'; '{}' is not valid for one-shot timers", action),
+                        "error_kind": "unsupported_action",
+                    }),
+                };
+            }
+            return match self.schedule_manager.cancel_timer_by_name(&name).await {
+                Ok(_) => KernelActionResult {
+                    success: true,
+                    result: serde_json::json!({"updated": true, "action": action, "name": name, "kind": "timer"}),
+                },
+                Err(e) => KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": e.to_string(),
+                        "error_kind": "schema_validation",
+                    }),
+                },
+            };
+        }
+
+        KernelActionResult {
+            success: false,
+            result: serde_json::json!({
+                "error": format!("No matching schedulable item found for '{}'", name),
+                "error_kind": "not_found",
+            }),
         }
     }
 

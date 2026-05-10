@@ -1,9 +1,11 @@
 pub mod agent;
+pub mod agent_inbox;
 pub mod agent_self;
 pub mod capability;
 pub mod channel;
 pub mod chat;
 pub mod context;
+pub mod delivery;
 pub mod error;
 pub mod event;
 pub mod fallback;
@@ -26,6 +28,7 @@ pub mod skill;
 
 // Re-export commonly used types at crate root
 pub use agent::{AgentProfile, AgentStatus, LLMProvider};
+pub use agent_inbox::{AgentInboxEntry, AgentInboxKind, AgentMessageEntry};
 pub use agent_message::{AgentMessage, MessageContent, MessageTarget};
 pub use agent_self::{AgentSelfView, BudgetSummary, SubscriptionSummary};
 pub use capability::{
@@ -34,7 +37,8 @@ pub use capability::{
 pub use channel::{ChannelKind, RegisteredChannel};
 pub use context::{
     ContentPart, ContextCategory, ContextEntry, ContextMetadata, ContextPartition, ContextRole,
-    ContextSlice, ContextWindow, ImageSource, OverflowStrategy, SubAgentResult, TokenBudget,
+    ContextSlice, ContextWindow, HandoffMode, ImageSource, OverflowStrategy, SubAgentResult,
+    TokenBudget,
 };
 pub use error::AgentOSError;
 pub use event::{

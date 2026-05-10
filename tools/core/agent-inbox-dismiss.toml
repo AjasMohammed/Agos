@@ -1,9 +1,12 @@
+tags = ["meta", "write"]
+
 [manifest]
 name        = "agent-inbox-dismiss"
 version     = "1.0.0"
 description = "Permanently delete an inbox notification. Use after reading and acting on the entry."
 author      = "agentos-core"
 trust_tier  = "core"
+risk_class  = "write_scoped"
 
 [capabilities_required]
 permissions = []

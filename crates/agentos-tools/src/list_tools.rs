@@ -47,13 +47,18 @@ impl AgentTool for ListToolsTool {
             AgentManualTool::load_usage_scores_async(context.data_dir.clone(), context.agent_id)
                 .await;
 
+        // Task-scoped allowlist: hide tools whose category is not in the
+        // active list. None = no restriction.
+        let allowlist = context.tool_categories.as_ref();
         let mut filtered: Vec<_> = summaries
             .iter()
             .filter(|s| {
+                let allow_ok = allowlist
+                    .is_none_or(|al| al.iter().any(|c| c.eq_ignore_ascii_case(&s.category)));
                 let cat_ok = category.is_none_or(|c| s.category.eq_ignore_ascii_case(c));
                 let tag_ok =
                     tag.is_none_or(|t| s.tags.iter().any(|tag| tag.eq_ignore_ascii_case(t)));
-                cat_ok && tag_ok
+                allow_ok && cat_ok && tag_ok
             })
             .collect();
 

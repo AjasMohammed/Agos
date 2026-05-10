@@ -11,6 +11,7 @@ impl Kernel {
         agent_name: String,
         prompt: String,
         detached: bool,
+        bounded: bool,
     ) -> Result<TaskID, AgentOSError> {
         // Reject duplicate background task names to keep name-based lookup unambiguous.
         if self.background_pool.get_by_name(&name).await.is_some() {
@@ -56,6 +57,15 @@ impl Kernel {
             )
             .map_err(|e| AgentOSError::VaultError(e.to_string()))?;
 
+        // Bounded tasks (schedule-fired RunTask, etc.) cap iterations to prevent
+        // small-model tool-call loops. Unbounded tasks (user-launched
+        // `agentos run-bg`) keep autonomous semantics.
+        let (autonomous, max_iterations) = if bounded {
+            (false, Some(10u32))
+        } else {
+            (true, None)
+        };
+
         let task = AgentTask {
             id: task_id,
             state: TaskState::Queued,
@@ -70,15 +80,16 @@ impl Kernel {
             history: Vec::new(),
             parent_task: None,
             reasoning_hints: None,
-            max_iterations: None,
+            max_iterations,
             trigger_source: None,
-            autonomous: true,
+            autonomous,
             parent_task_id: None,
             spawn_depth: 0,
             is_team_coordinator: false,
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
+            tool_categories: None,
         };
 
         self.background_pool
@@ -109,7 +120,7 @@ impl Kernel {
         detach: bool,
     ) -> KernelResponse {
         match self
-            .create_background_task(name.clone(), agent_name, task, detach)
+            .create_background_task(name.clone(), agent_name, task, detach, false)
             .await
         {
             Ok(id) => {

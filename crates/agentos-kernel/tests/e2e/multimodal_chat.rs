@@ -72,7 +72,7 @@ async fn chat_inference_sees_image_part_in_mock_snapshot() {
     ];
 
     let result = kernel
-        .chat_infer_with_tools("vision-agent", &[], "what is this?", Some(parts))
+        .chat_infer_with_tools("vision-agent", &[], "what is this?", Some(parts), None)
         .await
         .expect("chat with image");
 

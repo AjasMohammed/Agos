@@ -77,8 +77,22 @@ impl ProcessDriver {
 
         let total_matched = processes.len();
 
-        // Sort
-        let sort_by = opts.sort_by.as_deref().unwrap_or("memory");
+        // Sort. Accept common LLM aliases (`cpu_percent`, `memory_mb`, `mem`,
+        // etc.) so small models that hallucinate field names still succeed.
+        let sort_by_raw = opts.sort_by.as_deref().unwrap_or("memory");
+        let sort_by = match sort_by_raw {
+            "memory" | "mem" | "memory_mb" | "mem_mb" | "rss" => "memory",
+            "cpu" | "cpu_percent" | "cpu_usage" | "cpu_usage_percent" => "cpu",
+            "pid" => "pid",
+            "name" | "command" | "process" => "name",
+            "start_time" | "started" | "start" => "start_time",
+            other => {
+                return Err(AgentOSError::HalError(format!(
+                    "invalid sort_by: {}",
+                    other
+                )))
+            }
+        };
         let order = opts.order.as_deref().unwrap_or("desc");
 
         match sort_by {
@@ -91,12 +105,7 @@ impl ProcessDriver {
             "pid" => processes.sort_by(|a, b| a.pid.cmp(&b.pid)),
             "name" => processes.sort_by(|a, b| a.name.cmp(&b.name)),
             "start_time" => processes.sort_by(|a, b| a.start_time.cmp(&b.start_time)),
-            _ => {
-                return Err(AgentOSError::HalError(format!(
-                    "invalid sort_by: {}",
-                    sort_by
-                )))
-            }
+            _ => unreachable!("sort_by alias normalization failed"),
         }
 
         if order == "desc" {
@@ -215,7 +224,11 @@ mod tests {
     #[test]
     fn test_process_list_returns_self() {
         let driver = ProcessDriver::new();
-        let procs = driver.list_processes(ListOpts::default()).unwrap();
+        let opts = ListOpts {
+            limit: Some(500),
+            ..Default::default()
+        };
+        let procs = driver.list_processes(opts).unwrap();
         let self_pid = std::process::id();
         assert!(procs.processes.iter().any(|p| p.pid == self_pid));
     }
@@ -275,6 +288,30 @@ mod tests {
         };
         let res = driver.list_processes(opts);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_sort_by_aliases_accepted() {
+        let driver = ProcessDriver::new();
+        for alias in [
+            "cpu_percent",
+            "cpu_usage",
+            "memory_mb",
+            "mem",
+            "started",
+            "command",
+        ] {
+            let opts = ListOpts {
+                sort_by: Some(alias.into()),
+                limit: Some(1),
+                ..Default::default()
+            };
+            assert!(
+                driver.list_processes(opts).is_ok(),
+                "alias '{}' should be accepted",
+                alias
+            );
+        }
     }
 }
 

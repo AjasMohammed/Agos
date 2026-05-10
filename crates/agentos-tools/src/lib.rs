@@ -1,8 +1,14 @@
 pub mod a2a_tools;
 pub mod agent_call;
+pub mod agent_inbox_dismiss;
+pub mod agent_inbox_list;
+pub mod agent_inbox_read;
 pub mod agent_list;
 pub mod agent_manual;
 pub mod agent_message;
+pub mod agent_messages_dismiss;
+pub mod agent_messages_list;
+pub mod agent_messages_read;
 pub mod agent_self;
 pub mod archival_insert;
 pub mod archival_search;
@@ -35,6 +41,7 @@ pub mod file_move;
 pub mod file_reader;
 pub mod file_writer;
 pub mod hardware_info;
+pub mod host_package;
 pub mod http_client;
 pub mod kmc_tools;
 pub mod list_tools;
@@ -62,7 +69,9 @@ pub mod process_manager;
 pub mod raw_usb;
 pub mod runner;
 pub mod sanitize;
+pub mod schedule_control;
 pub mod schedule_once;
+pub mod schedule_recurring;
 pub mod scratch_delete;
 pub mod scratch_graph;
 pub mod scratch_links;
@@ -93,9 +102,18 @@ pub mod workspace;
 
 pub use a2a_tools::A2ADelegateTool;
 pub use agent_call::AgentCallTool;
+pub use agent_inbox_dismiss::AgentInboxDismissTool;
+pub use agent_inbox_list::AgentInboxListTool;
+pub use agent_inbox_read::AgentInboxReadTool;
 pub use agent_list::AgentListTool;
-pub use agent_manual::AgentManualTool;
+pub use agent_manual::{
+    install_section_embeddings, suggest_manual_sections, suggest_manual_sections_async,
+    AgentManualTool, ManualSection,
+};
 pub use agent_message::AgentMessageTool;
+pub use agent_messages_dismiss::AgentMessagesDismissTool;
+pub use agent_messages_list::AgentMessagesListTool;
+pub use agent_messages_read::AgentMessagesReadTool;
 pub use agent_self::AgentSelfTool;
 pub use archival_insert::ArchivalInsert;
 pub use archival_search::ArchivalSearch;
@@ -113,7 +131,7 @@ pub use episodic_list::EpisodicList;
 pub use factory::{
     build_single_tool, build_single_tool_with_model_cache,
     build_single_tool_with_model_cache_and_weight, tool_category, tool_category_with_weight,
-    ToolCategory,
+    ToolCategory, CHAT_DEFAULT_TOOL_NAMES, META_TOOL_NAMES,
 };
 pub use file_delete::FileDelete;
 pub use file_diff::FileDiff;
@@ -150,6 +168,8 @@ pub use procedure_search::ProcedureSearch;
 pub use process_manager::ProcessManagerTool;
 pub use raw_usb::RawUsbTool;
 pub use runner::ToolRunner;
+pub use schedule_control::ScheduleControlTool;
+pub use schedule_recurring::ScheduleRecurringTool;
 pub use scratch_delete::ScratchDeleteTool;
 pub use scratch_graph::ScratchGraphTool;
 pub use scratch_links::ScratchLinksTool;
@@ -204,6 +224,7 @@ mod tests {
             capability_dispatcher: None,
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tool_categories: None,
         };
 
         let result = tool.execute(payload, ctx).await.unwrap();
@@ -244,6 +265,7 @@ mod tests {
             capability_dispatcher: None,
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tool_categories: None,
         };
 
         let result = tool.execute(payload, ctx).await.unwrap();
@@ -287,6 +309,7 @@ mod tests {
             capability_dispatcher: None,
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tool_categories: None,
         }
     }
 
@@ -313,6 +336,7 @@ mod tests {
             capability_dispatcher: None,
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tool_categories: None,
         }
     }
 
@@ -1968,6 +1992,7 @@ mod tests {
                 category: "core".into(),
                 tags: vec!["read".into()],
                 risk_class: "readonly_scoped".into(),
+                usage_hints: None,
             },
             crate::agent_manual::ToolSummary {
                 name: "http-client".into(),
@@ -1980,6 +2005,7 @@ mod tests {
                 category: "core".into(),
                 tags: vec!["network".into()],
                 risk_class: "readonly_external".into(),
+                usage_hints: None,
             },
         ];
         let tool = crate::agent_manual::AgentManualTool::from_static(summaries);
@@ -2011,6 +2037,7 @@ mod tests {
             category: "core".into(),
             tags: vec!["read".into()],
             risk_class: "readonly_scoped".into(),
+            usage_hints: None,
         }];
         let tool = crate::agent_manual::AgentManualTool::from_static(summaries);
         let ctx = make_context(dir.path());
@@ -2080,12 +2107,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["section"], "memory");
-        let tiers = result["tiers"].as_array().unwrap();
-        assert_eq!(tiers.len(), 3);
-        let tier_names: Vec<&str> = tiers.iter().map(|t| t["tier"].as_str().unwrap()).collect();
-        assert!(tier_names.contains(&"semantic"));
-        assert!(tier_names.contains(&"episodic"));
-        assert!(tier_names.contains(&"procedural"));
+        // Empty registry → empty tools list with hint summary.
+        assert_eq!(result["tool_count"], 0);
+        assert!(result["tools"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2209,6 +2233,7 @@ mod tests {
                 category: "core".into(),
                 tags: vec!["read".into()],
                 risk_class: "readonly_scoped".into(),
+                usage_hints: None,
             },
         ])));
         let tools = runner.list_tools();

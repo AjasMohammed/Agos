@@ -206,6 +206,7 @@ mod tests {
             fallbacks: vec![],
             risk_class: Default::default(),
             usage_hints: None,
+            tags: vec![],
         };
         // name(11) + description(12) + overhead(100) = 123 chars → ceil(123/4) = 31
         let estimate = mock.estimate_tokens(&ctx, &[manifest]);

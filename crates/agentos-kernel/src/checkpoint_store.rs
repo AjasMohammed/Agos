@@ -212,6 +212,26 @@ impl CheckpointStore {
         .context("Checkpoint prune task failed")?
     }
 
+    /// Delete every checkpoint row owned by `agent_id`. Returns the number of rows removed.
+    pub async fn delete_for_agent(&self, agent_id: &AgentID) -> anyhow::Result<usize> {
+        let conn = self.conn.clone();
+        let agent_id = agent_id.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Checkpoint DB mutex poisoned"))?;
+            let deleted = guard
+                .execute(
+                    "DELETE FROM checkpoints WHERE agent_id = ?1",
+                    params![agent_id],
+                )
+                .context("Failed to delete checkpoints for agent")?;
+            Ok(deleted)
+        })
+        .await
+        .context("Checkpoint delete_for_agent task failed")?
+    }
+
     pub async fn delete_for_task(&self, task_id: &TaskID) -> anyhow::Result<()> {
         let conn = self.conn.clone();
         let task_id = task_id.to_string();

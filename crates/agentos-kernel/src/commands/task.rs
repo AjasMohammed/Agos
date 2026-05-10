@@ -123,6 +123,7 @@ impl Kernel {
             skip_checkpoint: no_checkpoint,
             thinking_level: effective_thinking_level,
             spawner_agent_id: None,
+            tool_categories: None,
         };
 
         self.scheduler.register_external(task.clone()).await;
@@ -395,6 +396,7 @@ impl Kernel {
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
+            tool_categories: None,
         };
 
         // Check for circular dependencies before enqueuing
@@ -537,6 +539,8 @@ impl Kernel {
             thinking_level: ThinkingLevel::Off,
             // Stored for future cross-task ownership queries (not yet used).
             spawner_agent_id: Some(spawner_task.agent_id),
+            // Sub-agents inherit parent's allowlist (no widening allowed in this path).
+            tool_categories: spawner_task.tool_categories.clone(),
         };
 
         let _ = self.scheduler.enqueue(child_task.clone()).await;
@@ -698,6 +702,7 @@ impl Kernel {
             skip_checkpoint: payload.task.skip_checkpoint,
             thinking_level: payload.task.thinking_level,
             spawner_agent_id: payload.task.spawner_agent_id,
+            tool_categories: payload.task.tool_categories,
         };
 
         // 6. Restore context window from checkpoint.

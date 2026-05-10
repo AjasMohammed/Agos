@@ -28,6 +28,8 @@ pub struct OpenAICore {
     pricing: ModelPricing,
     retry_policy: crate::retry::RetryPolicy,
     circuit_breaker: crate::retry::CircuitBreaker,
+    /// Per-instance in-flight cap for outbound requests.
+    concurrency: Arc<tokio::sync::Semaphore>,
     image_resolver: Arc<dyn ImageResolver>,
 }
 
@@ -79,6 +81,7 @@ impl OpenAICore {
             pricing,
             retry_policy: crate::retry::RetryPolicy::default(),
             circuit_breaker: crate::retry::CircuitBreaker::default(),
+            concurrency: crate::retry::default_concurrency_limiter(),
             image_resolver: Arc::new(NoopImageResolver),
         }
     }
@@ -220,12 +223,17 @@ impl OpenAICore {
             );
             intent_by_tool.insert(tool_name.to_string(), intent_type);
 
+            let parameters =
+                tool_helpers::normalize_tool_input_schema(manifest.input_schema.as_ref());
+            let strict = tool_helpers::is_openai_strict_compatible_schema(&parameters);
+
             openai_tools.push(json!({
                 "type": "function",
                 "function": {
                     "name": tool_name,
                     "description": manifest.manifest.description,
-                    "parameters": tool_helpers::normalize_tool_input_schema(manifest.input_schema.as_ref()),
+                    "parameters": parameters,
+                    "strict": strict,
                 }
             }));
         }
@@ -541,6 +549,7 @@ impl LLMCore for OpenAICore {
             "openai",
             &self.retry_policy,
             &self.circuit_breaker,
+            Some(&self.concurrency),
             || {
                 self.client
                     .post(&url)
@@ -1003,6 +1012,7 @@ mod tests {
             fallbacks: vec![],
             risk_class: Default::default(),
             usage_hints: None,
+            tags: vec![],
         }
     }
 

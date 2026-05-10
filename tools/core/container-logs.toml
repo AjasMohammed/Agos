@@ -1,3 +1,5 @@
+tags = ["read"]
+
 [manifest]
 name = "container-logs"
 version = "1.0.0"

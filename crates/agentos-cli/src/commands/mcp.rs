@@ -780,6 +780,7 @@ impl McpToolExecutor for ToolRunnerExecutor {
             capability_dispatcher: None,
             storage_zone_query: None,
             cancellation_token: CancellationToken::new(),
+            tool_categories: None,
         };
 
         self.runner

@@ -26,6 +26,8 @@ pub struct GeminiCore {
     pricing: ModelPricing,
     retry_policy: crate::retry::RetryPolicy,
     circuit_breaker: crate::retry::CircuitBreaker,
+    /// Per-instance in-flight cap for outbound requests.
+    concurrency: Arc<tokio::sync::Semaphore>,
     image_resolver: Arc<dyn ImageResolver>,
 }
 
@@ -70,6 +72,7 @@ impl GeminiCore {
             pricing,
             retry_policy: crate::retry::RetryPolicy::default(),
             circuit_breaker: crate::retry::CircuitBreaker::default(),
+            concurrency: crate::retry::default_concurrency_limiter(),
             image_resolver: Arc::new(NoopImageResolver),
         }
     }
@@ -361,6 +364,7 @@ impl LLMCore for GeminiCore {
             "gemini",
             &self.retry_policy,
             &self.circuit_breaker,
+            Some(&self.concurrency),
             || {
                 self.client
                     .post(&url)

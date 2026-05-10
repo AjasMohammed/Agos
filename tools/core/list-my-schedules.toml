@@ -1,3 +1,5 @@
+tags = ["meta", "read"]
+
 [manifest]
 name        = "list-my-schedules"
 version     = "1.0.0"

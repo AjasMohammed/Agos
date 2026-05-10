@@ -267,6 +267,96 @@ impl NotificationRouter {
         Ok(maybe_rx)
     }
 
+    /// Like `deliver`, but only fans out to adapters whose `adapter_instance_id`
+    /// is in `instance_ids` OR whose `channel_id` is in `channel_kinds`.
+    ///
+    /// Used by `notify-user` when the agent picks one or more specific channels.
+    /// Inbox persistence and rate-limit checks still run; non-matching adapters
+    /// are recorded as `Skipped` so the inbox view shows why each channel was
+    /// (or wasn't) used.
+    pub async fn deliver_filtered(
+        &self,
+        msg: UserMessage,
+        instance_ids: &std::collections::HashSet<String>,
+        channel_kinds: &std::collections::HashSet<String>,
+    ) -> Result<(), AgentOSError> {
+        self.check_rate_limit(&msg.from).await?;
+        self.inbox.write(&msg).await?;
+
+        let adapters = self.adapters.read().await;
+        for adapter in adapters.iter() {
+            let inst = adapter.adapter_instance_id();
+            let kind = adapter.channel_id().as_str().to_string();
+            let selected = inst
+                .as_ref()
+                .map(|i| instance_ids.contains(i))
+                .unwrap_or(false)
+                || channel_kinds.contains(&kind);
+            if !selected {
+                self.inbox
+                    .update_delivery_status(&msg.id, adapter.channel_id(), DeliveryStatus::Skipped)
+                    .await
+                    .ok();
+                continue;
+            }
+            if !adapter.is_available().await {
+                self.inbox
+                    .update_delivery_status(&msg.id, adapter.channel_id(), DeliveryStatus::Skipped)
+                    .await
+                    .ok();
+                continue;
+            }
+            match adapter.deliver(&msg).await {
+                Ok(()) => {
+                    let delivered_at = Utc::now();
+                    self.inbox
+                        .update_delivery_status(
+                            &msg.id,
+                            adapter.channel_id(),
+                            DeliveryStatus::Delivered { at: delivered_at },
+                        )
+                        .await
+                        .ok();
+                    let _ = self.audit.append(AuditEntry {
+                        timestamp: delivered_at,
+                        trace_id: TraceID::new(),
+                        event_type: AuditEventType::NotificationDelivered,
+                        agent_id: None,
+                        task_id: msg.task_id,
+                        tool_id: None,
+                        details: serde_json::json!({
+                            "notification_id": msg.id.to_string(),
+                            "channel": adapter.channel_id().to_string(),
+                            "filtered": true,
+                        }),
+                        severity: AuditSeverity::Info,
+                        reversible: false,
+                        rollback_ref: None,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        notification_id = %msg.id,
+                        channel = %adapter.channel_id(),
+                        error = %e,
+                        "Filtered notification delivery failed on channel"
+                    );
+                    self.inbox
+                        .update_delivery_status(
+                            &msg.id,
+                            adapter.channel_id(),
+                            DeliveryStatus::Failed {
+                                reason: e.0.clone(),
+                            },
+                        )
+                        .await
+                        .ok();
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Maximum length accepted for user response text (defence against oversized payloads).
     const MAX_RESPONSE_LEN: usize = 8192;
 

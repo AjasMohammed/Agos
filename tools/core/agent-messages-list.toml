@@ -1,9 +1,12 @@
+tags = ["meta", "read"]
+
 [manifest]
 name        = "agent-messages-list"
 version     = "1.0.0"
 description = "List direct messages addressed to this agent. Returns sender name, body, and timestamp."
 author      = "agentos-core"
 trust_tier  = "core"
+risk_class  = "readonly_scoped"
 
 [capabilities_required]
 permissions = []

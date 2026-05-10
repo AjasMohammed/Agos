@@ -1,0 +1,49 @@
+tags = ["exec", "system", "privileged"]
+# `risk_class` is a top-level field on `ToolManifest` (NOT inside [manifest]).
+# Placing it inside [manifest] silently defaults the outer field to
+# `readonly_scoped` and the privileged-executor gate in signing.rs will
+# reject the tool. See review finding C1.
+risk_class = "control_plane"
+
+[manifest]
+name = "host-package-install"
+version = "1.0.0"
+description = "Install a host OS package via system package manager (mandatory user approval, allowlisted, privileged executor)"
+author = "agentos-core"
+trust_tier = "core"
+
+[capabilities_required]
+permissions = [
+    "system.package:x",
+    "net.outbound:x",
+]
+
+[capabilities_provided]
+outputs = ["content.json"]
+
+[intent_schema]
+input = "HostPackageInstallIntent"
+output = "HostPackageInstallResult"
+
+[input_schema]
+required = ["package"]
+type = "object"
+
+[input_schema.properties.package]
+description = "Package name (must appear in [tools.host_package].allowlist)"
+type = "string"
+
+[input_schema.properties.version]
+description = "Version constraint (manager-specific syntax). Omit for latest available."
+type = "string"
+
+[sandbox]
+network = true
+fs_write = true
+gpu = false
+max_memory_mb = 512
+max_cpu_ms = 300000
+syscalls = []
+
+[executor]
+type = "privileged"

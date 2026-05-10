@@ -413,6 +413,7 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
             capability_dispatcher: None,
             storage_zone_query: None,
             cancellation_token: self.kernel.cancellation_token.child_token(),
+            tool_categories: None,
         };
 
         // Audit: tool execution started
@@ -785,6 +786,7 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
             capability_dispatcher: None,
             storage_zone_query: None,
             cancellation_token: self.cancellation_token.child_token(),
+            tool_categories: None,
         };
 
         // Audit: tool execution started

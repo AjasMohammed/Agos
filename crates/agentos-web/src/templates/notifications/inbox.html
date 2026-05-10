@@ -11,6 +11,8 @@
               class="outline secondary"
               hx-delete="/notifications/read"
               hx-confirm="Clear all read notifications?"
+              hx-target="#notification-list"
+              hx-swap="innerHTML"
               {% if notifications|length == 0 %}disabled{% endif %}>
         Clear read
       </button>

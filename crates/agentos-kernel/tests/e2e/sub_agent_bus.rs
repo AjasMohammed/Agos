@@ -59,6 +59,8 @@ async fn bus_spawn_sub_agent_then_await_after_child_completes() {
             prompt: "Child work unit".to_string(),
             requested_permissions: vec![],
             context_slice: None,
+            handoff_mode: None,
+            tool_categories: None,
         })
         .await
         .expect("SpawnSubAgent");

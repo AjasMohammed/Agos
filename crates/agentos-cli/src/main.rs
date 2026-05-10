@@ -775,6 +775,7 @@ async fn run_sandbox_exec(request_path: &str) -> anyhow::Result<()> {
         capability_dispatcher: None,
         storage_zone_query: None,
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        tool_categories: None,
     };
 
     let result = tool
@@ -888,9 +889,39 @@ async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
     println!("AgentOS is running. Use another terminal to run agentos commands.");
     println!("Press Ctrl+C to shutdown.");
 
-    kernel.run().await?;
+    // Run kernel supervisor in a child task so we can race signals against it.
+    // On SIGINT/SIGTERM we call `kernel.shutdown()` first, which writes the
+    // `KernelShutdown` audit entry and cancels the supervisor's cancellation
+    // token. Without this, signal-killed processes exit before any audit
+    // entry is written, breaking crash forensics.
+    let kernel_for_run = kernel.clone();
+    let mut kernel_handle = tokio::spawn(async move { kernel_for_run.run().await });
 
-    Ok(())
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Ctrl+C received, shutting down...");
+            kernel.shutdown();
+        }
+        _ = sigterm.recv() => {
+            tracing::info!("SIGTERM received, shutting down...");
+            kernel.shutdown();
+        }
+        res = &mut kernel_handle => {
+            return match res {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(e),
+                Err(join_err) => Err(anyhow::anyhow!("kernel run task panicked: {join_err}")),
+            };
+        }
+    }
+
+    // Wait for supervisor to finish writing its audit trail and clean up.
+    match kernel_handle.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(join_err) => Err(anyhow::anyhow!("kernel run task panicked: {join_err}")),
+    }
 }
 
 #[cfg(test)]

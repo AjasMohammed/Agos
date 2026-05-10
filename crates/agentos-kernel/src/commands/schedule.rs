@@ -49,9 +49,12 @@ impl Kernel {
         task_prompt: String,
         fire_at: chrono::DateTime<chrono::Utc>,
     ) -> KernelResponse {
+        let action = agentos_types::schedule::OnceJobAction::RunTask {
+            prompt: task_prompt,
+        };
         match self
             .schedule_manager
-            .create_once_job(name.clone(), fire_at, agent_name.clone(), task_prompt)
+            .create_once_job(name.clone(), fire_at, agent_name.clone(), action)
             .await
         {
             Ok(id) => {

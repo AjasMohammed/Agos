@@ -1,3 +1,5 @@
+tags = ["write"]
+
 [manifest]
 name = "container-destroy"
 version = "1.0.0"

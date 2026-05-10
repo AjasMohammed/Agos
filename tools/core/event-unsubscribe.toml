@@ -1,3 +1,5 @@
+tags = ["meta", "write"]
+
 [manifest]
 name        = "event-unsubscribe"
 version     = "1.0.0"

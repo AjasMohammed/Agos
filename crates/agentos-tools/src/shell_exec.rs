@@ -236,27 +236,46 @@ impl AgentTool for ShellExec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentos_types::ToolExecutionContext;
-    use std::path::PathBuf;
-    use tokio::sync::mpsc;
+    use crate::traits::ToolExecutionContext;
+    use agentos_types::{AgentID, PermissionSet, TaskID, TraceID};
     use tokio_util::sync::CancellationToken;
+
+    fn make_context(data_dir: std::path::PathBuf) -> ToolExecutionContext {
+        ToolExecutionContext {
+            data_dir,
+            task_id: TaskID::new(),
+            agent_id: AgentID::new(),
+            trace_id: TraceID::new(),
+            permissions: PermissionSet::new(),
+            vault: None,
+            hal: None,
+            file_lock_registry: None,
+            agent_registry: None,
+            task_registry: None,
+            escalation_query: None,
+            workspace_paths: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
+            cancellation_token: CancellationToken::new(),
+            tool_categories: None,
+        }
+    }
 
     #[tokio::test]
     async fn test_shell_exec_includes_sandbox_envelope() {
-        if which::which("bwrap").is_err() {
+        if std::process::Command::new("bwrap")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             println!("Skipping test: bwrap not installed");
             return;
         }
 
         let tool = ShellExec::new();
-        let (tx, _rx) = mpsc::channel(1);
         let temp_dir = tempfile::tempdir().unwrap();
-        let context = ToolExecutionContext {
-            agent_id: "test-agent".into(),
-            data_dir: temp_dir.path().to_path_buf(),
-            log_sender: tx,
-            cancellation_token: CancellationToken::new(),
-        };
+        let context = make_context(temp_dir.path().to_path_buf());
 
         let payload = serde_json::json!({
             "command": "echo hello",

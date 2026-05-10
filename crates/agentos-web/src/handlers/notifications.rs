@@ -196,7 +196,37 @@ pub async fn dismiss_notification(
 /// DELETE /notifications/read — clear all notifications that are already read.
 pub async fn clear_read_notifications(State(state): State<AppState>) -> Response {
     match state.service.clear_read_notifications().await {
-        Ok(_) => (StatusCode::OK, [("HX-Redirect", "/notifications")], "").into_response(),
+        Ok(_) => {
+            use agentos_api::types::NotificationFilter;
+
+            let filter = NotificationFilter {
+                unread_only: Some(false),
+                limit: Some(50),
+            };
+            let notifications = match state.service.list_notifications(filter).await {
+                Ok(msgs) => msgs,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to reload notifications after clearing read notifications");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Failed to reload notifications",
+                    )
+                        .into_response();
+                }
+            };
+            let notifs_ctx: Vec<_> = notifications
+                .iter()
+                .map(notification_summary_to_ctx)
+                .collect();
+            let ctx = context! {
+                notifications => notifs_ctx,
+            };
+            render(
+                &state.templates,
+                "notifications/_notification_list.html",
+                ctx,
+            )
+        }
         Err(e) => {
             tracing::error!(error = %e, "Failed to clear read notifications");
             (

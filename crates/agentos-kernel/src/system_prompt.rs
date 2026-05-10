@@ -78,10 +78,10 @@ pub struct SubAgentContext {
 /// Build the canonical AgentOS system prompt.
 ///
 /// This is the ONE system prompt placed at the top of every context window.
-/// It is designed to be compact (~1.5 KB) while giving agents full awareness
-/// of their identity, environment, tools, and coordination primitives.
+/// Renders to ~5–6 KB (≈ 1500 tokens). Tests cap the size at 6500 chars; the
+/// initial buffer is sized to fit the typical render without reallocation.
 pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
-    let mut prompt = String::with_capacity(2048);
+    let mut prompt = String::with_capacity(5120);
 
     // ── Identity ──────────────────────────────────────────────────
     write!(
@@ -169,26 +169,40 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
         "\n\n## Execution\n\
          - You run in iterations: respond \u{2192} tools execute \u{2192} results injected \u{2192} respond again.\n\
          - Plan before acting. Your task has an iteration limit — use iterations efficiently.\n\
-         - If a tool fails, read the error and adjust. Do not retry identically more than twice.\n\
+         - If a tool fails, read the error and adjust before retrying.\n\
          - Tool outputs > 256 KB are truncated ([TRUNCATED]). Request smaller data or paginate.\n\
-         - If a tool returns 'awaiting_approval', your task is paused for human review.",
+         - If a tool returns 'awaiting_approval', your task is paused for human review.\n\
+         - Priority when rules conflict: safety > task completion > correctness > efficiency.\n\
+         - Respond directly if the answer is factual and no external state is needed. \
+           Use tools for current state, files, side effects, or when uncertain about system state. \
+           Prefer fewer tool calls — batch or combine operations where possible.",
     );
 
-    // ── Host inspection ──────────────────────────────────────────
+    // ── User adaptation ──────────────────────────────────────────
     prompt.push_str(
-        "\n\n## Host Inspection — Tool Selection\n\
-         shell-exec runs inside a bwrap sandbox with isolated PID + network \
-         namespaces. Its `ps`, `top`, `netstat`, `lsof`, `mount`, `systemctl`, \
-         `df` reflect the sandbox container, NOT the host. For host inspection \
-         use these instead:\n\
-         - Processes      \u{2192} process-manager (sort_by, limit, name_contains)\n\
-         - Sockets/ports  \u{2192} network-sockets\n\
-         - Mounts/disks   \u{2192} system-mounts (or hardware-info for capacity only)\n\
-         - Open files     \u{2192} system-open-files\n\
-         - systemd units  \u{2192} system-services\n\
-         - Net interfaces \u{2192} network-monitor\n\
-         Use shell-exec only for transient compute (jq, awk on a string, \
-         running a script you wrote to /tmp), never for host introspection.",
+        "\n\n## User Adaptation\n\
+         Notice user behavior, preferences, style, goals, and needs. \
+         Adapt detail, pace, tone, proactivity, and tool use. \
+         Treat patterns as hypotheses; revise when evidence changes.",
+    );
+
+    // ── Tool result contract (anti-verify preamble) ──────────────
+    prompt.push_str(
+        "\n\n## Tool Result Contract\n\
+         No error = success. Never re-read to verify a write. Never send the same payload twice. \
+         If kernel returns `kernel_directive: STOP`, do not retry that tool; finalize from existing context. \
+         Two consecutive identical rejections end the task.",
+    );
+
+    // ── Host inspection (compact — full prose in `agent-manual section=hal`) ──
+    prompt.push_str(
+        "\n\n## Host Inspection\n\
+         shell-exec is sandboxed (isolated PID + network ns) — its ps/top/netstat \
+         reflect the sandbox, NOT the host. For host state use:\n\
+         - Processes \u{2192} process-manager · Sockets \u{2192} network-sockets\n\
+         - Mounts \u{2192} system-mounts · Open files \u{2192} system-open-files\n\
+         - systemd \u{2192} system-services · Net iface \u{2192} network-monitor\n\
+         shell-exec is for transient compute, not introspection.",
     );
 
     // ── Self-discovery ───────────────────────────────────────────
@@ -197,20 +211,35 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
          - `agent-self` \u{2014} your permissions, active tasks, capabilities, budget.\n\
          - `agent-manual` \u{2014} 26 documentation sections. Use {\"section\": \"index\"} for the full directory. \
          Key: tools, capabilities, scheduling, permissions, memory, coordination, events, commands, errors.\n\
-         - `agent-list` \u{2014} peer agents and their status.",
+         - `agent-list` \u{2014} peer agents and their status.\n\
+         - `list-tools(category=<name>|tag=<tag>|page=N)` \u{2014} paginated tool catalogue.\n\
+         - `search-tools(query=...)` \u{2014} keyword/tag search over all tools (use when L0 counts don't tell you which tool fits).\n\
+         - `describe-tool(name=...)` \u{2014} full schema + example for a specific tool.",
     );
 
-    // ── Memory (compact) ─────────────────────────────────────────
+    // ── Live information & refusal policy ────────────────────────
+    prompt.push_str(
+        "\n\n## Live Information\n\
+         For current/today/live data (news, prices, scores, election results, weather, public info) \
+         you MUST attempt a tool call before refusing. Pipeline:\n\
+         1. `web-search(query=...)` if visible in your tool list.\n\
+         2. Otherwise `search-tools(query=\"web search\")` \u{2192} `describe-tool(name=...)` \u{2192} call.\n\
+         Do NOT reply \"I have no internet access\" or \"I cannot fetch live data\" without trying. \
+         Refusing without a tool attempt is forbidden when search/fetch tools exist.",
+    );
+
+    // ── Memory (compact — full prose in `agent-manual section=memory`) ──
     prompt.push_str(
         "\n\n## Memory\n\
-         You manage your own long-term memory. Curate it — write what's reusable, prune what's stale.\n\
-         - **Context memory**: personal notebook, injected every task start. `context-memory-read` / `context-memory-update` (4096-token budget). Patterns, tool tips, reusable knowledge — not ephemeral task state.\n\
-         - **Semantic** (long-term, cross-task facts): `memory-write` / `memory-search` / `memory-read` / `memory-delete` (scope=semantic). `memory-stats` for size.\n\
-         - **Episodic** (task event log): auto-recorded on completion. Browse via `episodic-list`.\n\
-         - **Procedural** (how-to patterns): `procedure-search` before retrying a known task class; `procedure-create` after solving novel multi-step problems.\n\
-         - **Archival** (offload bulky data): `archival-insert` / `archival-search` for large content you don't need in working set.\n\
-         - **Memory blocks** (agent-scoped working memory): `memory-block-write` / `memory-block-read` / `memory-block-list` / `memory-block-delete` for structured short-term scratch.\n\
-         When to act: on new fact worth keeping → `memory-write`. Before novel task → `memory-search` + `procedure-search`. On contradicted/obsolete fact → `memory-delete`. Avoid hoarding: prune duplicates and stale entries.",
+         Persists across tasks. Read first when prior context may matter; \
+         write durable user facts, patterns, and novel solutions.\n\
+         - Read: `context-memory-read`, `memory-search`, `procedure-search` \
+         (call on \"last time\" / \"my X\" / \"remember\" cues).\n\
+         - Write: `memory-write` (facts), `context-memory-update` (stable \
+         user prefs), `procedure-create` (novel multi-step), \
+         `memory-delete` then rewrite (contradicted fact).\n\
+         Tiers: context · semantic · episodic (auto) · procedural · archival · blocks. \
+         See `agent-manual section=memory` for tier rules + examples.",
     );
 
     // ── Coordination ─────────────────────────────────────────────
@@ -219,7 +248,10 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
          - `spawn-agent` \u{2014} create a child task on another agent. `await-agents` \u{2014} collect results.\n\
          - `task-delegate` / `agent-message` \u{2014} delegate work or message peers.\n\
          - Child results are auto-injected into your context on completion.\n\
-         - Max spawn depth: 5. Plan agent hierarchies accordingly.",
+         - Max spawn depth: 5. Plan agent hierarchies accordingly.\n\
+         - Spawn when: work is parallelizable and each part needs >2 tool calls, or requires a specialist agent. \
+           Do not spawn for tasks you can complete in 1\u{2013}3 calls — each child agent consumes budget. \
+           Spawn narrow (specific prompt + tight scope), not broad.",
     );
 
     // ── Channels (only when at least one is connected) ───────────
@@ -249,7 +281,11 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
         "\n\n## Scheduling\n\
          Defer work to a future time: `schedule-once` (one-shot via fire_at ISO 8601 or delay_secs 1\u{2013}86400), \
          `set-timer` / `cancel-timer` / `list-timers`, `list-my-schedules`, `get-schedule-runs`. \
-         To notify the operator at time T, schedule-once with task_prompt invoking `notify-user`. \
+         **Pick the right mode for `schedule-once`:** \
+         use `mode=\"notify\"` with `notify_subject`/`notify_body` for a plain reminder (no LLM at fire time — fastest, cheapest, no loop risk); \
+         use `mode=\"tool\"` with `tool`/`tool_args` to invoke one tool with fixed args; \
+         only use `mode=\"task\"` (default) when fire-time reasoning is required. \
+         Do NOT use `mode=\"task\"` with a prompt that just says \"call notify-user\" — use `mode=\"notify\"` instead. \
          See `agent-manual` section \"scheduling\" for patterns.",
     );
 
@@ -389,9 +425,8 @@ mod tests {
         assert!(prompt.contains("maximum depth and cannot spawn further"));
     }
 
-    #[test]
-    fn test_all_sections_present() {
-        let prompt = build_system_prompt(&SystemPromptContext {
+    fn default_prompt() -> String {
+        build_system_prompt(&SystemPromptContext {
             agent_name: "test".into(),
             agent_description: String::new(),
             agent_roles: vec![],
@@ -400,10 +435,17 @@ mod tests {
             enforce_final_tag: false,
             timezone: String::new(),
             connected_channels: vec![],
-        });
+        })
+    }
+
+    #[test]
+    fn test_all_section_headers_present() {
+        let prompt = default_prompt();
         for section in &[
             "## Tools",
             "## Execution",
+            "## User Adaptation",
+            "## Tool Result Contract",
             "## Self-Discovery",
             "## Memory",
             "## Coordination",
@@ -414,6 +456,25 @@ mod tests {
         ] {
             assert!(prompt.contains(section), "Missing section: {section}");
         }
+    }
+
+    #[test]
+    fn test_critical_body_content_present() {
+        let prompt = default_prompt();
+        // Memory triggers — protect against silent deletion of READ/WRITE rules
+        assert!(prompt.contains("context-memory-read"), "memory READ");
+        assert!(prompt.contains("memory-search"), "memory search");
+        assert!(prompt.contains("memory-write"), "memory write");
+        assert!(prompt.contains("procedure-search"), "procedure search");
+        // Tool Result Contract — dedup rule + STOP directive
+        assert!(prompt.contains("payload twice"), "dedup rule");
+        assert!(prompt.contains("kernel_directive: STOP"), "STOP directive");
+        // Execution — priority stack + direct-response heuristic
+        assert!(prompt.contains("safety"), "priority stack");
+        assert!(prompt.contains("Respond directly"), "direct-response rule");
+        // Coordination — spawn-cost heuristic
+        assert!(prompt.contains("Spawn"), "spawn rule header");
+        assert!(prompt.contains("consumes budget"), "spawn cost");
     }
 
     #[test]
@@ -518,10 +579,12 @@ mod tests {
         assert!(prompt.contains("ch-4"));
         assert!(!prompt.contains("ch-5"));
         assert!(prompt.contains("3 more"));
-        // Block expansion stays well under the 5000-char prompt budget even
-        // with 8 channels listed (capped at 5 + overflow line).
+        // Stays well under budget even with 8 channels (capped at 5 + overflow line).
+        // 8 KB ceiling: trims (memory + host-inspection compaction)
+        // typically land prompts well under 5.5 KB. Headroom covers
+        // future additions while still catching unbounded growth.
         assert!(
-            prompt.len() < 5000,
+            prompt.len() < 8000,
             "Prompt too large: {} chars",
             prompt.len()
         );
@@ -542,10 +605,12 @@ mod tests {
                 spawn_depth: 1,
             }),
         });
-        // Even with all optional sections, the prompt should stay under 5000 chars
-        // (well within the 15% system budget of a typical 128k-token context window)
+        // Even with all optional sections, stays well under context budget (~1500 tokens).
+        // 8 KB ceiling: trims (memory + host-inspection compaction)
+        // typically land prompts well under 5.5 KB. Headroom covers
+        // future additions while still catching unbounded growth.
         assert!(
-            prompt.len() < 5000,
+            prompt.len() < 8000,
             "Prompt is too large: {} chars",
             prompt.len()
         );

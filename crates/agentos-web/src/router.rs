@@ -323,6 +323,7 @@ pub fn build_router(
             axum::routing::get(chat::export_session),
         )
         .route("/chat/{session_id}/send", axum::routing::post(chat::send))
+        .route("/chat/{session_id}/stop", axum::routing::post(chat::stop))
         .route(
             "/chat/{session_id}/stream",
             axum::routing::get(chat::message_stream),

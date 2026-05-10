@@ -254,14 +254,18 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
     // text.  For streaming chat the client does its own rendering; this
     // filter is used for stored messages and agent descriptions.
     env.add_filter("markdown", |value: String| -> minijinja::Value {
-        use pulldown_cmark::{html, Options, Parser};
+        use pulldown_cmark::{html, Event, Options, Parser, Tag};
 
         let mut options = Options::empty();
         options.insert(Options::ENABLE_TABLES);
         options.insert(Options::ENABLE_STRIKETHROUGH);
         options.insert(Options::ENABLE_TASKLISTS);
 
-        let parser = Parser::new_ext(&value, options);
+        let parser = Parser::new_ext(&value, options).filter_map(|event| match event {
+            Event::Html(raw) | Event::InlineHtml(raw) => Some(Event::Text(raw)),
+            Event::Start(Tag::HtmlBlock) | Event::End(pulldown_cmark::TagEnd::HtmlBlock) => None,
+            _ => Some(event),
+        });
         let mut out = String::new();
         html::push_html(&mut out, parser);
         // Mark the output safe so minijinja does not double-escape the HTML.

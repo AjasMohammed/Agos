@@ -1,7 +1,13 @@
 use crate::a2a_tools::A2ADelegateTool;
 use crate::agent_call::AgentCallTool;
+use crate::agent_inbox_dismiss::AgentInboxDismissTool;
+use crate::agent_inbox_list::AgentInboxListTool;
+use crate::agent_inbox_read::AgentInboxReadTool;
 use crate::agent_list::AgentListTool;
 use crate::agent_message::AgentMessageTool;
+use crate::agent_messages_dismiss::AgentMessagesDismissTool;
+use crate::agent_messages_list::AgentMessagesListTool;
+use crate::agent_messages_read::AgentMessagesReadTool;
 use crate::archival_insert::ArchivalInsert;
 use crate::archival_search::ArchivalSearch;
 use crate::ask_user::AskUserTool;
@@ -31,6 +37,7 @@ use crate::file_move::FileMove;
 use crate::file_reader::FileReader;
 use crate::file_writer::FileWriter;
 use crate::hardware_info::HardwareInfoTool;
+use crate::host_package::{resolve_escalator, EscalatorPolicy, HostPackageInstallTool};
 use crate::http_client::HttpClientTool;
 use crate::log_reader::LogReaderTool;
 use crate::memory_block_delete::MemoryBlockDeleteTool;
@@ -52,7 +59,9 @@ use crate::procedure_list::ProcedureList;
 use crate::procedure_search::ProcedureSearch;
 use crate::process_manager::ProcessManagerTool;
 use crate::raw_usb::RawUsbTool;
+use crate::schedule_control::ScheduleControlTool;
 use crate::schedule_once::{CancelOnceJobTool, ListOnceJobsTool, ScheduleOnceTool};
+use crate::schedule_recurring::ScheduleRecurringTool;
 use crate::set_timer::{CancelTimerTool, ListTimersTool, SetTimerTool};
 use crate::shell_exec::ShellExec;
 use crate::sys_monitor::SysMonitorTool;
@@ -188,6 +197,15 @@ impl ToolRunner {
         self.register(Box::new(ContextMemoryUpdateTool::new()));
         self.register(Box::new(DataParser::new()));
         self.register(Box::new(ShellExec::new()));
+        // host-package-install is registered with an empty allowlist + no
+        // escalator by default. Operator must opt in by setting
+        // [tools.host_package].enabled = true and rebuilding the runner with
+        // a real config. Until then any call returns an explanatory error.
+        self.register(Box::new(HostPackageInstallTool::new(
+            Vec::new(),
+            Vec::new(),
+            resolve_escalator(&EscalatorPolicy::None),
+        )));
         self.register(Box::new(AgentMessageTool::new()));
         self.register(Box::new(TaskDelegate::new()));
         self.register(Box::new(TaskSpawnAsyncTool::new()));
@@ -218,6 +236,12 @@ impl ToolRunner {
         self.register(Box::new(FileDiff::new()));
         self.register(Box::new(EscalationStatusTool::new()));
         self.register(Box::new(AgentListTool::new()));
+        self.register(Box::new(AgentInboxListTool::new()));
+        self.register(Box::new(AgentInboxReadTool::new()));
+        self.register(Box::new(AgentInboxDismissTool::new()));
+        self.register(Box::new(AgentMessagesListTool::new()));
+        self.register(Box::new(AgentMessagesReadTool::new()));
+        self.register(Box::new(AgentMessagesDismissTool::new()));
         self.register(Box::new(NotifyUserTool::new()));
         self.register(Box::new(ChannelSendTool::new()));
         self.register(Box::new(AskUserTool::new()));
@@ -240,6 +264,8 @@ impl ToolRunner {
         self.register(Box::new(CancelTimerTool::new()));
         self.register(Box::new(ListTimersTool::new()));
         self.register(Box::new(ScheduleOnceTool::new()));
+        self.register(Box::new(ScheduleRecurringTool::new()));
+        self.register(Box::new(ScheduleControlTool::new()));
         self.register(Box::new(CancelOnceJobTool::new()));
         self.register(Box::new(ListOnceJobsTool::new()));
 
@@ -442,6 +468,42 @@ impl ToolRunner {
         // Inject the shared file lock registry so file tools can coordinate
         // exclusive access across concurrent agents.
         context.file_lock_registry = Some(self.file_lock_registry.clone());
+
+        // Auto-correct `_` ↔ `-` typos before lookup. Small models often emit
+        // `describe_tool` for `describe-tool` (Python-naming bias). Re-resolve
+        // against the actual registry; only takes effect if the alternate
+        // spelling exists. Saves a wasted iteration for every typo.
+        let resolved_name: String = if !self.tools.contains_key(tool_name)
+            && !self
+                .dynamic_tools
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(tool_name)
+        {
+            let alternates = [tool_name.replace('_', "-"), tool_name.replace('-', "_")];
+            alternates
+                .into_iter()
+                .find(|alt| {
+                    alt != tool_name
+                        && (self.tools.contains_key(alt.as_str())
+                            || self
+                                .dynamic_tools
+                                .read()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .contains_key(alt.as_str()))
+                })
+                .unwrap_or_else(|| tool_name.to_string())
+        } else {
+            tool_name.to_string()
+        };
+        if resolved_name != tool_name {
+            tracing::info!(
+                requested = tool_name,
+                resolved = %resolved_name,
+                "Tool name auto-corrected from `_`/`-` typo"
+            );
+        }
+        let tool_name = resolved_name.as_str();
 
         // Check static tools first; fall back to dynamic (runtime-registered) tools.
         // The Arc clone releases the RwLock guard before any await point.

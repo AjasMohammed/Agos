@@ -75,6 +75,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             events: Default::default(),
             sandbox_policy: Default::default(),
             max_concurrent_sandbox_children: 4,
+            context_compaction: Default::default(),
         },
         routing: Default::default(),
         secrets: SecretsSettings {
@@ -107,6 +108,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             data_dir: temp_dir.path().join("data").to_string_lossy().to_string(),
             crl_path: None,
             workspace: Default::default(),
+            host_package: Default::default(),
         },
         bus: BusSettings {
             socket_path: temp_dir
@@ -307,8 +309,11 @@ impl TestHarness {
             other => LLMProvider::Custom(other.to_string()),
         };
 
+        // Skip health check: the harness immediately swaps in a mock LLM
+        // adapter after registration, so endpoint reachability of the
+        // initially built adapter is irrelevant.
         kernel
-            .api_connect_agent(
+            .api_connect_agent_with_options(
                 agent_name.clone(),
                 provider_enum,
                 model.to_string(),
@@ -317,6 +322,7 @@ impl TestHarness {
                 None,
                 None,
                 None,
+                true,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to connect agent: {}", e))?;
@@ -736,6 +742,7 @@ Your agent name is: {}"#,
             capability_dispatcher: None,
             storage_zone_query: None,
             cancellation_token: CancellationToken::new(),
+            tool_categories: None,
         };
 
         self.kernel

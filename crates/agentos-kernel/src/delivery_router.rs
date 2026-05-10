@@ -41,6 +41,7 @@ impl Kernel {
             let mut silent_run = run;
             silent_run.delivered = true;
             silent_run.delivered_at = Some(Utc::now());
+            silent_run.delivery_error = None;
             if let Err(e) = store.upsert_run(silent_run).await {
                 tracing::warn!(run_id = %run_id, error = %e, "DeliveryRouter: failed to mark Silent run as delivered");
             }
@@ -73,6 +74,7 @@ impl Kernel {
             Ok(()) => {
                 updated.delivered = true;
                 updated.delivered_at = Some(Utc::now());
+                updated.delivery_error = None;
                 self.emit_event(
                     EventType::ScheduledTaskDelivered,
                     EventSource::TaskScheduler,
@@ -125,7 +127,7 @@ impl Kernel {
                 .await
                 .map(|j| j.name)
                 .unwrap_or_else(|| run.parent_id.to_string()),
-            RunParentKind::OnceJob => self
+            RunParentKind::Once => self
                 .schedule_manager
                 .list_once_jobs()
                 .await
@@ -285,6 +287,7 @@ impl Kernel {
     }
 }
 
+#[allow(dead_code)]
 fn render_run_body(run: &ScheduledRun, parent_name: &str) -> String {
     let state_str = run.state.as_str();
     let result_str = run
@@ -306,6 +309,7 @@ fn render_run_body(run: &ScheduledRun, parent_name: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn parse_priority_str(s: &str) -> NotificationPriority {
     match s {
         "warning" => NotificationPriority::Warning,

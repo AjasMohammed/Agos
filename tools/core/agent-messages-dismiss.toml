@@ -1,9 +1,12 @@
+tags = ["meta", "write"]
+
 [manifest]
 name        = "agent-messages-dismiss"
 version     = "1.0.0"
 description = "Permanently delete a direct message. Use after the message has been acted on."
 author      = "agentos-core"
 trust_tier  = "core"
+risk_class  = "write_scoped"
 
 [capabilities_required]
 permissions = []

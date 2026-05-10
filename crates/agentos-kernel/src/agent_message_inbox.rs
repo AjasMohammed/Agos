@@ -306,6 +306,24 @@ impl AgentMessageInbox {
             })
     }
 
+    /// Delete every message belonging to `agent_id` (as either sender or recipient).
+    /// Returns the number of rows removed.
+    pub async fn delete_all_for_agent(&self, agent_id: AgentID) -> Result<u32, AgentOSError> {
+        self.store
+            .exec_mut(move |conn| {
+                let aid = agent_id.to_string();
+                let n = conn.execute(
+                    "DELETE FROM agent_messages WHERE to_agent_id = ?1 OR from_agent_id = ?1",
+                    params![aid],
+                )?;
+                Ok(n as u32)
+            })
+            .await
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("AgentMessageInbox: delete_all_for_agent failed: {e}"),
+            })
+    }
+
     /// Delete TTL-expired rows and re-enforce the per-agent cap.
     ///
     /// Called by `TimeoutChecker` every 10 minutes. Returns the number of rows

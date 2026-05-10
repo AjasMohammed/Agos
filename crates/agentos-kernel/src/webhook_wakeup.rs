@@ -132,6 +132,7 @@ impl WebhookWakeUp {
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
+            tool_categories: None,
         };
 
         self.kernel.scheduler.enqueue(task).await;

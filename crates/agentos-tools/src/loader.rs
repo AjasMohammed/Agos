@@ -58,3 +58,36 @@ pub fn load_all_manifests(dir: &Path) -> Result<Vec<LoadedManifest>, AgentOSErro
     }
     Ok(manifests)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentos_types::{ExecutorType, RiskClass, TrustTier};
+
+    /// Round-trip the shipped `tools/core/host-package-install.toml` manifest.
+    /// Catches the entire class of bug where `risk_class` (or any other
+    /// top-level `ToolManifest` field) is silently absorbed into a nested
+    /// section by serde because `deny_unknown_fields` is not set.
+    #[test]
+    fn host_package_install_manifest_parses_with_correct_top_level_fields() {
+        // Resolve workspace root: the test runs from
+        // crates/agentos-tools/, so ../../tools/core/host-package-install.toml.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/core/host-package-install.toml");
+        let loaded = load_manifest(&path).expect("manifest must parse and verify");
+
+        assert_eq!(loaded.manifest.manifest.name, "host-package-install");
+        assert_eq!(loaded.manifest.manifest.trust_tier, TrustTier::Core);
+        assert_eq!(
+            loaded.manifest.risk_class,
+            RiskClass::ControlPlane,
+            "risk_class MUST be at the top level of the TOML; if it is nested \
+             inside [manifest] serde silently defaults the outer field to \
+             ReadonlyScoped and the privileged-executor gate rejects the tool"
+        );
+        assert_eq!(
+            loaded.manifest.executor.executor_type,
+            ExecutorType::Privileged
+        );
+    }
+}

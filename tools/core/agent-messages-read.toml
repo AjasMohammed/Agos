@@ -1,9 +1,12 @@
+tags = ["meta", "read"]
+
 [manifest]
 name        = "agent-messages-read"
 version     = "1.0.0"
 description = "Read a single direct message by ID and mark it as read."
 author      = "agentos-core"
 trust_tier  = "core"
+risk_class  = "readonly_scoped"
 
 [capabilities_required]
 permissions = []

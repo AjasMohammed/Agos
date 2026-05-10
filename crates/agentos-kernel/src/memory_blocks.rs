@@ -181,6 +181,20 @@ impl MemoryBlockStore {
         Ok(deleted > 0)
     }
 
+    /// Delete every memory block belonging to `agent_id`. Returns the number of rows removed.
+    pub fn delete_all_for_agent(&self, agent_id: &AgentID) -> Result<usize, AgentOSError> {
+        let conn = self.db.lock().map_err(|_| {
+            AgentOSError::StorageError("Failed to lock memory blocks DB".to_string())
+        })?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM memory_blocks WHERE agent_id = ?1",
+                params![agent_id.as_uuid().to_string()],
+            )
+            .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+        Ok(deleted)
+    }
+
     pub fn blocks_for_context(&self, agent_id: &AgentID) -> Result<String, AgentOSError> {
         let blocks = self.list(agent_id)?;
         if blocks.is_empty() {

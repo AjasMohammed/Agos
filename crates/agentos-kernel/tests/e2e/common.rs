@@ -38,6 +38,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             events: Default::default(),
             sandbox_policy: Default::default(),
             max_concurrent_sandbox_children: 4,
+            context_compaction: Default::default(),
         },
         routing: Default::default(),
         secrets: SecretsSettings {
@@ -70,6 +71,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             data_dir: temp_dir.path().join("data").to_string_lossy().to_string(),
             crl_path: None,
             workspace: agentos_kernel::config::WorkspaceConfig::default(),
+            host_package: agentos_kernel::config::HostPackageSettings::default(),
         },
         bus: BusSettings {
             socket_path: temp_dir

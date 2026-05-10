@@ -22,6 +22,7 @@ fn make_context(data_dir: &Path) -> ToolExecutionContext {
         capability_dispatcher: None,
         storage_zone_query: None,
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        tool_categories: None,
     }
 }
 

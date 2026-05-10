@@ -160,6 +160,6 @@ mod tests {
             .list_open_files(serde_json::json!({ "pid": pid }))
             .unwrap();
         assert!(!res.files.is_empty());
-        assert!(res.files.iter().all(|f| f.pid == pid as u32));
+        assert!(res.files.iter().all(|f| f.pid == pid));
     }
 }

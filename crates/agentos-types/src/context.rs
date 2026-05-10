@@ -945,6 +945,94 @@ impl ContextSlice {
             label: label.into(),
         }
     }
+
+    /// Build a handoff slice for sub-agent spawn. Filters by allowed category
+    /// set (drops parent History by default) and caps at `max_entries`. Pinned
+    /// entries are always retained regardless of category match — the parent's
+    /// system prompt or sticky safety instructions still propagate.
+    ///
+    /// `mode` selects which categories are kept; see [`HandoffMode`].
+    pub fn for_handoff(
+        context: &ContextWindow,
+        mode: HandoffMode,
+        max_entries: usize,
+        label: impl Into<String>,
+    ) -> Self {
+        let label = label.into();
+        if matches!(mode, HandoffMode::None) {
+            return Self {
+                messages: Vec::new(),
+                label,
+            };
+        }
+        let allowed = mode.allowed_categories();
+        let mut filtered: Vec<&ContextEntry> = context
+            .entries
+            .iter()
+            .filter(|e| e.partition == ContextPartition::Active)
+            .filter(|e| e.pinned || allowed.contains(&e.category))
+            .collect();
+        // Keep the most recent `max_entries`. Pinned entries are kept on top
+        // of the cap by promoting them first; this prevents the cap from
+        // dropping the parent's system prompt while keeping conversation
+        // recency for History when included.
+        if filtered.len() > max_entries {
+            let pinned: Vec<&ContextEntry> =
+                filtered.iter().copied().filter(|e| e.pinned).collect();
+            let unpinned: Vec<&ContextEntry> =
+                filtered.iter().copied().filter(|e| !e.pinned).collect();
+            let unpinned_keep_start = unpinned
+                .len()
+                .saturating_sub(max_entries.saturating_sub(pinned.len()));
+            filtered = pinned;
+            filtered.extend_from_slice(&unpinned[unpinned_keep_start..]);
+        }
+        let messages: Vec<ContextEntry> = filtered.iter().map(|e| (*e).clone()).collect();
+        Self { messages, label }
+    }
+}
+
+/// Strategy for slicing a parent's context when spawning a sub-agent.
+///
+/// Controls which `ContextCategory` entries propagate. Pinned entries
+/// always cross the boundary regardless of mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HandoffMode {
+    /// No context propagated — child starts with only its own system prompt
+    /// and the spawn prompt. Smallest blast radius. Use for tool-use sub-agents
+    /// that must not see parent's reasoning.
+    #[default]
+    None,
+    /// Task category only — the parent's task description and user prompt.
+    /// Useful when child is asked to perform a focused subtask within the same
+    /// goal but should not see how the parent has been reasoning.
+    TaskOnly,
+    /// Task + Knowledge — propagates retrieved memories and the task. Skips
+    /// History (turn-by-turn assistant/tool messages) so the child does not
+    /// inherit thousands of tokens of parent conversation.
+    TaskAndKnowledge,
+    /// Everything (System + Tools + Knowledge + History + Task) — equivalent
+    /// to `last_n` with no filter. Use sparingly: doubles token spend per
+    /// child and risks parent context contamination.
+    Full,
+}
+
+impl HandoffMode {
+    pub fn allowed_categories(&self) -> &'static [ContextCategory] {
+        match self {
+            HandoffMode::None => &[],
+            HandoffMode::TaskOnly => &[ContextCategory::Task],
+            HandoffMode::TaskAndKnowledge => &[ContextCategory::Task, ContextCategory::Knowledge],
+            HandoffMode::Full => &[
+                ContextCategory::System,
+                ContextCategory::Tools,
+                ContextCategory::Knowledge,
+                ContextCategory::History,
+                ContextCategory::Task,
+            ],
+        }
+    }
 }
 
 /// The result of a completed sub-agent task, ready to be injected into the parent's context.
@@ -1789,7 +1877,7 @@ mod tests {
 
     #[test]
     fn context_entry_serde_old_content_shape() {
-        let json = r#"{"role":"user","content":"hello","timestamp":"2020-01-01T00:00:00Z","importance":0.5,"pinned":false,"reference_count":0,"partition":"active","category":"history","is_summary":false}"#;
+        let json = r#"{"role":"User","content":"hello","timestamp":"2020-01-01T00:00:00Z","importance":0.5,"pinned":false,"reference_count":0,"partition":"Active","category":"history","is_summary":false}"#;
         let e: ContextEntry = serde_json::from_str(json).expect("deserialize");
         assert_eq!(e.parts.len(), 1);
         assert_eq!(
@@ -1802,7 +1890,7 @@ mod tests {
 
     #[test]
     fn context_entry_serde_new_parts_shape() {
-        let json = r#"{"role":"user","parts":[{"kind":"text","text":"hi"}],"timestamp":"2020-01-01T00:00:00Z","importance":0.5,"pinned":false,"reference_count":0,"partition":"active","category":"history","is_summary":false}"#;
+        let json = r#"{"role":"User","parts":[{"kind":"text","text":"hi"}],"timestamp":"2020-01-01T00:00:00Z","importance":0.5,"pinned":false,"reference_count":0,"partition":"Active","category":"history","is_summary":false}"#;
         let e: ContextEntry = serde_json::from_str(json).expect("deserialize");
         assert_eq!(e.text(), "hi");
     }
@@ -1836,6 +1924,160 @@ mod tests {
         assert_eq!(back, e);
     }
 
+    fn make_categorized(
+        role: ContextRole,
+        text: &str,
+        cat: ContextCategory,
+        pinned: bool,
+    ) -> ContextEntry {
+        let mut e = ContextEntry::from_text(role, text);
+        e.category = cat;
+        e.pinned = pinned;
+        e.partition = ContextPartition::Active;
+        e
+    }
+
+    #[test]
+    fn handoff_mode_none_yields_empty_slice() {
+        let mut ctx = ContextWindow::new(10);
+        ctx.push(make_categorized(
+            ContextRole::User,
+            "task",
+            ContextCategory::Task,
+            false,
+        ));
+        let slice = ContextSlice::for_handoff(&ctx, HandoffMode::None, 64, "lbl");
+        assert!(slice.messages.is_empty());
+    }
+
+    #[test]
+    fn handoff_task_only_drops_history_and_knowledge() {
+        let mut ctx = ContextWindow::new(10);
+        ctx.push(make_categorized(
+            ContextRole::User,
+            "task!",
+            ContextCategory::Task,
+            false,
+        ));
+        ctx.push(make_categorized(
+            ContextRole::Assistant,
+            "ok",
+            ContextCategory::History,
+            false,
+        ));
+        ctx.push(make_categorized(
+            ContextRole::System,
+            "knowledge",
+            ContextCategory::Knowledge,
+            false,
+        ));
+        let slice = ContextSlice::for_handoff(&ctx, HandoffMode::TaskOnly, 64, "h");
+        assert_eq!(slice.messages.len(), 1);
+        assert_eq!(slice.messages[0].text(), "task!");
+    }
+
+    #[test]
+    fn handoff_task_and_knowledge_keeps_both() {
+        let mut ctx = ContextWindow::new(10);
+        ctx.push(make_categorized(
+            ContextRole::User,
+            "task!",
+            ContextCategory::Task,
+            false,
+        ));
+        ctx.push(make_categorized(
+            ContextRole::Assistant,
+            "history-msg",
+            ContextCategory::History,
+            false,
+        ));
+        ctx.push(make_categorized(
+            ContextRole::System,
+            "fact",
+            ContextCategory::Knowledge,
+            false,
+        ));
+        let slice = ContextSlice::for_handoff(&ctx, HandoffMode::TaskAndKnowledge, 64, "h");
+        let texts: Vec<String> = slice.messages.iter().map(|m| m.text()).collect();
+        assert!(texts.iter().any(|s| s == "task!"));
+        assert!(texts.iter().any(|s| s == "fact"));
+        assert!(!texts.iter().any(|s| s == "history-msg"));
+    }
+
+    #[test]
+    fn handoff_pinned_entries_always_propagate() {
+        let mut ctx = ContextWindow::new(10);
+        ctx.push(make_categorized(
+            ContextRole::System,
+            "system-pin",
+            ContextCategory::System,
+            true,
+        ));
+        ctx.push(make_categorized(
+            ContextRole::User,
+            "task!",
+            ContextCategory::Task,
+            false,
+        ));
+        // Even with TaskOnly the pinned System entry rides along.
+        let slice = ContextSlice::for_handoff(&ctx, HandoffMode::TaskOnly, 64, "h");
+        let texts: Vec<String> = slice.messages.iter().map(|m| m.text()).collect();
+        assert!(texts.iter().any(|s| s == "system-pin"));
+        assert!(texts.iter().any(|s| s == "task!"));
+    }
+
+    #[test]
+    fn handoff_full_keeps_everything() {
+        let mut ctx = ContextWindow::new(10);
+        ctx.push(make_categorized(
+            ContextRole::System,
+            "sys",
+            ContextCategory::System,
+            false,
+        ));
+        ctx.push(make_categorized(
+            ContextRole::User,
+            "task!",
+            ContextCategory::Task,
+            false,
+        ));
+        ctx.push(make_categorized(
+            ContextRole::Assistant,
+            "history",
+            ContextCategory::History,
+            false,
+        ));
+        let slice = ContextSlice::for_handoff(&ctx, HandoffMode::Full, 64, "h");
+        assert_eq!(slice.messages.len(), 3);
+    }
+
+    #[test]
+    fn handoff_caps_at_max_entries_keeping_recent_and_pinned() {
+        let mut ctx = ContextWindow::new(20);
+        // 1 pinned system entry, then 5 unpinned task entries.
+        ctx.push(make_categorized(
+            ContextRole::System,
+            "PIN",
+            ContextCategory::System,
+            true,
+        ));
+        for i in 0..5 {
+            ctx.push(make_categorized(
+                ContextRole::User,
+                &format!("t{i}"),
+                ContextCategory::Task,
+                false,
+            ));
+        }
+        // Cap at 3: must keep PIN + last 2 task entries.
+        let slice = ContextSlice::for_handoff(&ctx, HandoffMode::Full, 3, "h");
+        let texts: Vec<String> = slice.messages.iter().map(|m| m.text()).collect();
+        assert!(texts.iter().any(|s| s == "PIN"));
+        assert!(texts.iter().any(|s| s == "t4"));
+        assert!(texts.iter().any(|s| s == "t3"));
+        assert!(!texts.iter().any(|s| s == "t0"));
+    }
+
     #[test]
     fn token_estimator_image_part() {
         let e = ContextEntry {
@@ -1856,7 +2098,7 @@ mod tests {
             category: ContextCategory::Task,
             is_summary: false,
         };
-        // "hi" / 4 + 1 = 2, + 1500 image
-        assert_eq!(e.estimated_tokens(4.0), 1502);
+        // "hi" (2 chars) / 4 + 1 = 1, + 1500 image
+        assert_eq!(e.estimated_tokens(4.0), 1501);
     }
 }

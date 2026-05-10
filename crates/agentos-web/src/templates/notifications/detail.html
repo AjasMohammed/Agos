@@ -28,8 +28,8 @@
       </div>
     </header>
 
-    <div class="notification-body">
-      {{ notification.body | format_tool_data_html }}
+    <div class="notification-body markdown-content">
+      {{ notification.body | markdown }}
     </div>
 
     {% if notification.kind_tag == "question" and notification.requires_response %}

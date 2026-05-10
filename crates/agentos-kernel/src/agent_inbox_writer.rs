@@ -85,6 +85,7 @@ impl AgentInboxWriter {
         &self,
         agent_id: AgentID,
         subscription_id: String,
+        event_id: String,
         event_type: &str,
         event_payload: serde_json::Value,
     ) {
@@ -94,7 +95,7 @@ impl AgentInboxWriter {
             AgentInboxKind::Event,
             title,
             event_payload,
-            Some(subscription_id),
+            Some(format!("{subscription_id}:{event_id}")),
         )
         .await;
     }

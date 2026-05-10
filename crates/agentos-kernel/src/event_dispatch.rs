@@ -454,6 +454,16 @@ impl Kernel {
             let prompt = self.build_trigger_prompt(&event, sub).await;
             match self.create_triggered_task(sub, &prompt, &event).await {
                 Ok(task_id) => {
+                    self.agent_inbox_writer
+                        .write_event(
+                            sub.agent_id,
+                            sub.id.to_string(),
+                            event.id.to_string(),
+                            &format!("{:?}", event.event_type),
+                            event.payload.clone(),
+                        )
+                        .await;
+
                     self.audit_log(AuditEntry {
                         timestamp: chrono::Utc::now(),
                         trace_id: event.trace_id,
@@ -594,6 +604,7 @@ impl Kernel {
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
+            tool_categories: None,
         };
 
         self.scheduler.enqueue(task).await;

@@ -76,7 +76,7 @@ impl Kernel {
             }
         };
 
-        let system_prompt = system_prompt::build_system_prompt(&SystemPromptContext {
+        let mut system_prompt = system_prompt::build_system_prompt(&SystemPromptContext {
             agent_name,
             agent_description,
             agent_roles,
@@ -88,6 +88,13 @@ impl Kernel {
             timezone: system_prompt::local_timezone_str(),
             connected_channels,
         });
+        let inbox_segment = crate::agent_inbox_prompt::InboxPromptRenderer::new(
+            self.agent_inbox.clone(),
+            self.agent_message_inbox.clone(),
+        )
+        .render_segment(task.agent_id)
+        .await;
+        system_prompt.push_str(&inbox_segment);
 
         // We initialize context with empty string; Compiler injects the true system prompt
         // into the compiled ContextWindow at each iteration.
@@ -96,6 +103,22 @@ impl Kernel {
         self.context_manager
             .create_context(task.id, task.agent_id, "")
             .await;
+
+        // Override the per-task token budget with the LLM adapter's actual
+        // context window. Lets compaction + tool-result truncation track
+        // model size: an 8k local model triggers compaction at its 80%, a
+        // 200k Claude task at its own 80% — instead of one global threshold.
+        if let Some(adapter) = {
+            let active = self.active_llms.read().await;
+            active.get(&task.agent_id).cloned()
+        } {
+            let window = adapter.capabilities().context_window_tokens as usize;
+            if window > 0 {
+                self.context_manager
+                    .set_task_token_budget(&task.id, window)
+                    .await;
+            }
+        }
 
         // 2. Push the user's prompt into context (pinned — original task is always kept).
         // Guard against duplicates on task resume (escalation approval, checkpoint restore).

@@ -547,6 +547,55 @@ impl SemanticStore {
         .map_err(|e| AgentOSError::StorageError(format!("Delete task panicked: {}", e)))?
     }
 
+    /// Delete every semantic memory entry (and its chunks via CASCADE) for the given agent.
+    /// Returns the number of `semantic_memory` rows removed. Offloads to the blocking thread pool.
+    pub async fn delete_by_agent(&self, agent_id: &AgentID) -> Result<usize, AgentOSError> {
+        let db = self.conn.clone();
+        let agent_id_str = agent_id.as_uuid().to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError(
+                    "Failed to lock semantic db for delete_by_agent".to_string(),
+                )
+            })?;
+            let tx = conn.transaction().map_err(|e| {
+                AgentOSError::StorageError(format!(
+                    "Failed to begin delete_by_agent transaction: {}",
+                    e
+                ))
+            })?;
+            tx.execute(
+                "DELETE FROM semantic_chunks WHERE memory_id IN (SELECT id FROM semantic_memory WHERE agent_id = ?1)",
+                params![agent_id_str],
+            )
+            .map_err(|e| {
+                AgentOSError::StorageError(format!("Failed to delete chunks for agent: {}", e))
+            })?;
+            let deleted = tx
+                .execute(
+                    "DELETE FROM semantic_memory WHERE agent_id = ?1",
+                    params![agent_id_str],
+                )
+                .map_err(|e| {
+                    AgentOSError::StorageError(format!(
+                        "Failed to delete semantic entries for agent: {}",
+                        e
+                    ))
+                })?;
+            tx.commit().map_err(|e| {
+                AgentOSError::StorageError(format!(
+                    "Failed to commit delete_by_agent: {}",
+                    e
+                ))
+            })?;
+            Ok(deleted)
+        })
+        .await
+        .map_err(|e| {
+            AgentOSError::StorageError(format!("delete_by_agent task panicked: {}", e))
+        })?
+    }
+
     /// Delete memory entries older than `max_age` and return the number deleted.
     ///
     /// This is the archival sweep for Tier 3 persistent memory (Spec §11).

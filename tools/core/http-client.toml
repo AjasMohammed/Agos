@@ -1,3 +1,5 @@
+tags = ["exec", "network"]
+
 [manifest]
 name        = "http-client"
 version     = "1.0.0"

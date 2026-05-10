@@ -248,6 +248,27 @@
             errorRetries = 0;
             connect();
         }
+        // Pause when tab is hidden to avoid saturating connections from idle background tabs.
+        if (document.hidden) {
+            if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+            if (src) { src.close(); src = null; }
+        }
+    });
+
+    // Close SSE immediately when the user navigates away via a link click
+    // (fires before beforeunload, eliminating the stale connection during page transition).
+    document.addEventListener('click', function (e) {
+        var link = e.target.closest('a[href]');
+        if (!link) return;
+        if (e.defaultPrevented || e.button !== 0) return;
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        if (link.target && link.target !== '_self') return;
+        var url;
+        try { url = new URL(link.href, window.location.href); } catch (_) { return; }
+        if (url.origin !== window.location.origin) return;
+        // Same-origin navigation: immediately tear down the SSE.
+        if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+        if (src) { src.close(); src = null; }
     });
 
     window.addEventListener('beforeunload', function () {

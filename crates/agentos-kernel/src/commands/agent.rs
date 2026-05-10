@@ -188,7 +188,8 @@ impl Kernel {
                         Arc::new(
                             CustomCore::new(sec, effective_model, url.clone())
                                 .with_vision_models(catalog_entry.vision_models.clone())
-                                .with_image_resolver(image_resolver.clone()),
+                                .with_image_resolver(image_resolver.clone())
+                                .with_catalog_overrides(&catalog_entry),
                         ),
                         Some(url),
                     ))
@@ -824,6 +825,7 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         skip_checkpoint: false,
                         thinking_level: ThinkingLevel::Off,
                         spawner_agent_id: None,
+                        tool_categories: None,
                     };
                     self.scheduler.enqueue(onboarding_task).await;
                     onboarding_task_id_opt = Some(onboarding_task_id);
@@ -965,6 +967,170 @@ Once you have explored, briefly summarise what you found and confirm you are rea
         .await;
 
         KernelResponse::Success { data: None }
+    }
+
+    /// Permanently remove an agent from the ecosystem.
+    ///
+    /// Unlike `cmd_disconnect_agent` which only marks the agent Offline (preserving the
+    /// profile + pubkey so reconnect reuses the UUID), this wipes every persisted slice
+    /// of agent state:
+    ///   - registry profile (so re-adding triggers a fresh UUID + onboarding task)
+    ///   - message-bus pubkey (so the old key cannot be replayed)
+    ///   - active LLM adapter, rate-limit slot, cost tracker entry, event subscriptions
+    ///   - episodic / semantic / procedural memory rows
+    ///   - memory blocks, scratchpad pages, agent inbox, agent message inbox
+    ///   - checkpoints, schedules created by the agent
+    ///
+    /// Intentionally preserved:
+    ///   - vault secrets (so API keys keyed by `<name>_<provider>_api_key` survive
+    ///     re-onboarding) — use `secret revoke` to remove these explicitly.
+    ///   - audit log (append-only by design).
+    pub(crate) async fn cmd_remove_agent(&self, agent_id: AgentID) -> KernelResponse {
+        let agent_name = {
+            let registry = self.agent_registry.read().await;
+            match registry.get_by_id(&agent_id) {
+                Some(p) => p.name.clone(),
+                None => {
+                    return KernelResponse::Error {
+                        message: format!("Agent '{}' not found", agent_id),
+                    }
+                }
+            }
+        };
+
+        // Evict live runtime state (mirrors disconnect, but applies whether online or offline).
+        self.active_llms.write().await.remove(&agent_id);
+        self.per_agent_rate_limiter.lock().await.remove(&agent_name);
+        self.cost_tracker.unregister_agent(&agent_id).await;
+        let agent_subs = self.event_bus.list_subscriptions_for_agent(&agent_id).await;
+        for sub in &agent_subs {
+            self.event_bus.unsubscribe(&sub.id).await;
+        }
+
+        // Wipe persisted slices. Each call returns a count for the audit summary; failures
+        // are logged but non-fatal so a corrupt store cannot pin an agent in the registry.
+        let mut wipe = serde_json::Map::new();
+
+        match self.episodic_memory.delete_by_agent(&agent_id).await {
+            Ok(n) => {
+                wipe.insert("episodic".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: episodic wipe failed")
+            }
+        }
+        match self.semantic_memory.delete_by_agent(&agent_id).await {
+            Ok(n) => {
+                wipe.insert("semantic".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: semantic wipe failed")
+            }
+        }
+        match self.procedural_memory.delete_by_agent(&agent_id).await {
+            Ok(n) => {
+                wipe.insert("procedural".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: procedural wipe failed")
+            }
+        }
+        match self.memory_blocks.delete_all_for_agent(&agent_id) {
+            Ok(n) => {
+                wipe.insert("memory_blocks".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: memory_blocks wipe failed")
+            }
+        }
+        match self.agent_inbox.delete_all_for_agent(agent_id).await {
+            Ok(n) => {
+                wipe.insert("agent_inbox".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: agent_inbox wipe failed")
+            }
+        }
+        match self
+            .agent_message_inbox
+            .delete_all_for_agent(agent_id)
+            .await
+        {
+            Ok(n) => {
+                wipe.insert("agent_messages".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: agent_messages wipe failed")
+            }
+        }
+        match self
+            .scratchpad_store
+            .delete_all_for_agent(&agent_id.to_string())
+            .await
+        {
+            Ok(n) => {
+                wipe.insert("scratchpad_pages".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: scratchpad wipe failed")
+            }
+        }
+        match self.checkpoint_store.delete_for_agent(&agent_id).await {
+            Ok(n) => {
+                wipe.insert("checkpoints".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: checkpoint wipe failed")
+            }
+        }
+        let schedules_removed = self.schedule_manager.delete_all_for_creator(agent_id).await;
+        wipe.insert("schedules".into(), serde_json::json!(schedules_removed));
+
+        // Drop the pubkey BEFORE removing the registry profile so a concurrent reconnect
+        // sees an empty pubkey slot and proceeds along the new-agent path.
+        self.message_bus.deregister_pubkey(&agent_id).await;
+
+        {
+            let mut registry = self.agent_registry.write().await;
+            registry.remove(&agent_id);
+        }
+
+        self.audit_log(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: agentos_audit::AuditEventType::AgentRemoved,
+            agent_id: Some(agent_id),
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({
+                "agent_name": agent_name,
+                "wipe_summary": wipe,
+            }),
+            severity: agentos_audit::AuditSeverity::Security,
+            reversible: false,
+            rollback_ref: None,
+        });
+
+        self.emit_event(
+            EventType::AgentRemoved,
+            EventSource::AgentLifecycle,
+            EventSeverity::Info,
+            serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "agent_name": agent_name,
+                "wipe_summary": wipe,
+            }),
+            0,
+        )
+        .await;
+
+        KernelResponse::Success {
+            data: Some(serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "agent_name": agent_name,
+                "wipe_summary": wipe,
+            })),
+        }
     }
 
     /// Change the LLM endpoint URL for a connected agent. The new LLMCore is built
@@ -1153,7 +1319,7 @@ Once you have explored, briefly summarise what you found and confirm you are rea
             id: MessageID::new(),
             from: from_agent.id,
             to: agentos_types::MessageTarget::Direct(to_agent.id),
-            content: agentos_types::MessageContent::Text(content),
+            content: agentos_types::MessageContent::Text(content.clone()),
             reply_to: None,
             timestamp: now,
             trace_id: TraceID::new(),
@@ -1175,6 +1341,10 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                 };
             }
         }
+
+        self.agent_inbox_writer
+            .write_message(from_agent.id, from_name.clone(), to_agent.id, content)
+            .await;
 
         match self.message_bus.send_direct(msg).await {
             Ok(_) => KernelResponse::Success { data: None },

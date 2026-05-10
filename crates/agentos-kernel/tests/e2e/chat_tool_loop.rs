@@ -12,6 +12,18 @@ fn tool_call_response(tool: &str) -> MockResponse {
     }])
 }
 
+/// Helper: same as `tool_call_response` but with a unique payload per call.
+/// Used to bypass the dedup-streak circuit breaker when intentionally driving
+/// the chat loop to its `max_tool_iterations` cap.
+fn tool_call_response_with_payload(tool: &str, payload: serde_json::Value) -> MockResponse {
+    MockResponse::text("Let me look that up.").with_tool_calls(vec![InferenceToolCall {
+        id: Some(format!("call_{tool}")),
+        tool_name: tool.to_string(),
+        intent_type: "query".to_string(),
+        payload,
+    }])
+}
+
 /// Plain response with no tool call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
@@ -25,7 +37,7 @@ async fn test_chat_no_tool_call() {
     .await;
 
     let result = kernel
-        .chat_infer_with_tools("chat-test-agent", &[], "Hi there", None)
+        .chat_infer_with_tools("chat-test-agent", &[], "Hi there", None, None)
         .await
         .expect("chat_infer_with_tools failed");
 
@@ -56,7 +68,13 @@ async fn test_chat_tool_call_detected_and_executed() {
     .await;
 
     let result = kernel
-        .chat_infer_with_tools("chat-test-agent", &[], "What tools are available?", None)
+        .chat_infer_with_tools(
+            "chat-test-agent",
+            &[],
+            "What tools are available?",
+            None,
+            None,
+        )
         .await
         .expect("chat_infer_with_tools failed");
 
@@ -83,22 +101,43 @@ async fn test_chat_tool_call_detected_and_executed() {
     handle.await.unwrap();
 }
 
-/// Loop stops at CHAT_MAX_TOOL_ITERATIONS (10) when the LLM keeps returning tool calls.
+/// Loop stops at the configured `max_tool_iterations` cap when the LLM keeps
+/// returning tool calls. Each iteration uses a unique tool name + payload so
+/// the per-(tool, error) and dedup circuit breakers don't fire — this test
+/// exercises the iteration cap itself, not the defensive guards.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn test_chat_max_iterations() {
     let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
 
-    // Provide 10 tool call responses; the 10th triggers the iteration cap.
-    let responses = vec![tool_call_response("loop-tool"); 10];
+    // 25 unique tool names + payloads cover the default cap (25) regardless
+    // of how the kernel config is constructed by the test harness.
+    let responses: Vec<MockResponse> = (0..25)
+        .map(|i| {
+            tool_call_response_with_payload(
+                &format!("loop-tool-{i}"),
+                serde_json::json!({"iter": i}),
+            )
+        })
+        .collect();
     common::register_mock_agent_with_responses(&kernel, "chat-test-agent", responses).await;
 
     let result = kernel
-        .chat_infer_with_tools("chat-test-agent", &[], "Loop forever please", None)
+        .chat_infer_with_tools("chat-test-agent", &[], "Loop forever please", None, None)
         .await
         .expect("chat_infer_with_tools failed");
 
-    assert_eq!(result.iterations, 10, "must stop at exactly 10 iterations");
+    // Test config doesn't set `max_tool_iterations`, so the kernel falls back
+    // to `CHAT_MAX_TOOL_ITERATIONS_FALLBACK` (25).
+    let cap: u32 = if kernel.config.chat.max_tool_iterations == 0 {
+        25
+    } else {
+        kernel.config.chat.max_tool_iterations
+    };
+    assert_eq!(
+        result.iterations, cap,
+        "must stop at exactly the configured cap"
+    );
     assert!(
         result
             .answer
@@ -106,11 +145,11 @@ async fn test_chat_max_iterations() {
         "expected warning in answer, got: {}",
         result.answer
     );
-    // 9 tool calls are executed (iterations 1-9); iteration 10 hits the cap before tool exec.
+    // (cap - 1) tool calls are executed; the final iteration hits the cap before tool exec.
     assert_eq!(
-        result.tool_calls.len(),
-        9,
-        "expected 9 executed tool calls before cap"
+        result.tool_calls.len() as u32,
+        cap - 1,
+        "expected (cap - 1) executed tool calls before cap"
     );
 
     kernel.shutdown();
@@ -134,7 +173,7 @@ async fn test_chat_tool_error_injected_and_llm_retries() {
     .await;
 
     let result = kernel
-        .chat_infer_with_tools("chat-test-agent", &[], "Try a failing tool", None)
+        .chat_infer_with_tools("chat-test-agent", &[], "Try a failing tool", None, None)
         .await
         .expect("chat_infer_with_tools failed");
 

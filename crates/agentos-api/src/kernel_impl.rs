@@ -397,7 +397,13 @@ impl KernelService for Kernel {
         let history: Vec<(String, String)> = req.history;
         let user_parts = (!req.parts.is_empty()).then_some(req.parts.clone());
         let result = self
-            .chat_infer_with_tools(&req.agent_name, &history, &req.message, user_parts)
+            .chat_infer_with_tools(
+                &req.agent_name,
+                &history,
+                &req.message,
+                user_parts,
+                Some(&req.session_id),
+            )
             .await
             .map_err(ApiError::Internal)?;
 
@@ -434,7 +440,13 @@ impl KernelService for Kernel {
         let history: Vec<(String, String)> = req.history;
         let user_parts = (!req.parts.is_empty()).then_some(req.parts.clone());
         let result = self
-            .chat_infer_with_tools(&req.agent_name, &history, &req.message, user_parts)
+            .chat_infer_with_tools(
+                &req.agent_name,
+                &history,
+                &req.message,
+                user_parts,
+                Some(&req.session_id),
+            )
             .await
             .map_err(ApiError::Internal)?;
 

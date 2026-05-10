@@ -595,6 +595,7 @@ mod tests {
             fallbacks: vec![],
             risk_class: agentos_types::RiskClass::ReadonlyScoped,
             usage_hints: None,
+            tags: vec![],
         }
     }
 

@@ -253,6 +253,6 @@ mod tests {
             .iter()
             .find(|s| s.local_addr.contains(&port.to_string()))
             .unwrap();
-        assert_eq!(our_socket.pid, Some(std::process::id() as u32));
+        assert_eq!(our_socket.pid, Some(std::process::id()));
     }
 }

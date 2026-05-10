@@ -199,14 +199,22 @@ impl Hook for ApprovalHook {
             );
         }
 
-        // NOTE: This abort surfaces as a ToolExecutionFailed error in the task's context.
-        // The task continues running — it does not pause. The LLM sees the error and can
-        // decide to retry or stop. Full task-pause-on-approval is tracked for a future
-        // enhancement (requires scheduler integration in the hook).
+        // Install a oneshot resolution channel so the awaiting
+        // `task_executor` can be woken when the human resolves the
+        // escalation. Without this, the abort would always surface as a
+        // tool failure — see ACF Phase 4 plan.
+        self.escalations.prepare_resolution(escalation_id).await;
+
+        // The reason string is a structured tag — `task_executor`
+        // greps for the `approval_pending:<id>` prefix so it can
+        // decide to park on the resolution channel rather than
+        // surfacing a hard tool failure. Anything before the colon
+        // matters; the trailing human prose is for logs only.
         HookResult::Abort(format!(
-            "Tool '{}' requires human approval (escalation ID: {}). \
-             Run: agentos escalation resolve {} --decision approve",
-            tool_name, escalation_id, escalation_id
+            "approval_pending:{escalation_id}: tool '{tool_name}' requires human \
+             approval (escalation ID {escalation_id}). \
+             Reply `/approve {escalation_id}` on a paired channel or run \
+             `agentos escalation resolve {escalation_id} --decision approve`."
         ))
     }
 }

@@ -170,7 +170,11 @@
 
     function renderAllMarkdown(root) {
         var scope = root || document;
-        var nodes = scope.querySelectorAll(".markdown-content");
+        var nodes = [];
+        if (scope.matches && scope.matches(".markdown-content")) {
+            nodes.push(scope);
+        }
+        nodes = nodes.concat(Array.from(scope.querySelectorAll(".markdown-content")));
         for (var i = 0; i < nodes.length; i++) {
             renderMarkdownInto(nodes[i]);
         }
@@ -193,6 +197,7 @@
         var metaEl = container.querySelector('[data-role="chat-stream-meta"]');
         var tokenEl = container.querySelector('[data-role="chat-stream-tokens"]');
         var costEl = container.querySelector('[data-role="chat-stream-cost"]');
+        var stopBtn = container.querySelector('[data-role="chat-stream-stop"]');
         var copyBtn = container.querySelector('[data-role="chat-stream-copy"]');
         var msgList    = document.getElementById("chat-messages-list");
 
@@ -201,8 +206,38 @@
         var currentTextEl = null;
         var hasContent    = false;
 
-        function scrollToBottom() {
-            if (msgList) msgList.scrollTop = msgList.scrollHeight;
+        var renderQueued = false;
+        var pendingHighlightRoot = null;
+        var shouldFollowStream = true;
+
+        function isNearBottom() {
+            if (!msgList) return true;
+            return msgList.scrollHeight - msgList.scrollTop - msgList.clientHeight < 96;
+        }
+
+        function scrollToBottom(force) {
+            if (!msgList) return;
+            if (force || shouldFollowStream || isNearBottom()) {
+                msgList.scrollTop = msgList.scrollHeight;
+            }
+        }
+
+        function queueRender(root) {
+            if (root) pendingHighlightRoot = root;
+            if (renderQueued) return;
+            renderQueued = true;
+            window.requestAnimationFrame(function () {
+                renderQueued = false;
+                if (currentTextEl) {
+                    currentTextEl.innerHTML = renderMarkdown(currentTextEl.dataset.rawMarkdown || "");
+                    pendingHighlightRoot = currentTextEl;
+                }
+                if (pendingHighlightRoot) {
+                    highlightCode(pendingHighlightRoot);
+                    pendingHighlightRoot = null;
+                }
+                scrollToBottom();
+            });
         }
 
         function showResponseIfNeeded() {
@@ -287,11 +322,70 @@
 
         var pendingToolCards = {}; // tool_name → most recently appended running card
 
+        function setStopDisabled(label) {
+            if (!stopBtn) return;
+            stopBtn.disabled = true;
+            if (label) stopBtn.textContent = label;
+        }
+
+        if (stopBtn) {
+            stopBtn.addEventListener("click", function () {
+                if (stopBtn.disabled) return;
+                var url = stopBtn.dataset.stopUrl;
+                if (!url) return;
+                stopBtn.disabled = true;
+                stopBtn.textContent = "Stopping...";
+                var meta = document.querySelector('meta[name="csrf-token"]');
+                fetch(url, {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: meta && meta.content ? { "X-CSRF-Token": meta.content } : {}
+                }).catch(function () {
+                    stopBtn.disabled = false;
+                    stopBtn.textContent = "Stop";
+                });
+            });
+        }
+
+        function textSegments() {
+            return contentEl ? Array.from(contentEl.querySelectorAll(".chat-text-segment")) : [];
+        }
+
+        function accumulatedText() {
+            return textSegments()
+                .map(function (el) { return el.dataset.rawMarkdown || el.innerText || ""; })
+                .join("")
+                .trim();
+        }
+
+        function renderFinalAnswer(answer) {
+            if (!contentEl || !answer) return;
+
+            var existing = accumulatedText();
+            if (existing === answer.trim()) {
+                textSegments().forEach(function (el) {
+                    el.innerHTML = renderMarkdown(el.dataset.rawMarkdown || "");
+                    highlightCode(el);
+                });
+                scrollToBottom(true);
+                return;
+            }
+
+            textSegments().forEach(function (el) { el.remove(); });
+            currentTextEl = newTextSegment();
+            currentTextEl.dataset.rawMarkdown = answer;
+            currentTextEl.innerHTML = renderMarkdown(answer);
+            highlightCode(currentTextEl);
+            scrollToBottom(true);
+        }
+
         var es = new EventSource("/chat/" + encodeURIComponent(sessionId) + "/stream");
 
         es.addEventListener("chat-stream", function (e) {
             var d = parseEventData(e.data);
             if (!d || !d.type) return;
+
+            shouldFollowStream = isNearBottom();
 
             switch (d.type) {
                 case "thinking":
@@ -306,8 +400,8 @@
                     }
                     currentTextEl.dataset.rawMarkdown =
                         (currentTextEl.dataset.rawMarkdown || "") + (d.text || "");
-                    currentTextEl.innerHTML = renderMarkdown(currentTextEl.dataset.rawMarkdown);
-                    highlightCode(currentTextEl);
+                    currentTextEl.textContent = currentTextEl.dataset.rawMarkdown;
+                    queueRender(currentTextEl);
                     break;
 
                 case "tool-start": {
@@ -343,13 +437,11 @@
                 case "done":
                     if (!hasContent && d.answer) {
                         showResponseIfNeeded();
-                        currentTextEl = newTextSegment();
-                        currentTextEl.dataset.rawMarkdown = d.answer;
-                        currentTextEl.innerHTML = renderMarkdown(d.answer);
-                        highlightCode(currentTextEl);
                     }
+                    renderFinalAnswer(d.answer || "");
                     updateMeta(d.tokens_used || 0, d.cost_usd || 0);
                     updateSessionTotals(d.tokens_used || 0, d.cost_usd || 0);
+                    setStopDisabled(d.iterations === 0 ? "Stopped" : "Done");
                     es.close();
                     finalize();
                     break;
@@ -361,6 +453,7 @@
                         '<p style="color:var(--pico-color-red-500)">' +
                         escapeHtml("Error: " + (d.message || "Unknown error")) + "</p>";
                     currentTextEl = null;
+                    setStopDisabled("Stopped");
                     es.close();
                     finalize();
                     break;
@@ -378,6 +471,7 @@
             container.removeAttribute("data-role");
             if (thinking) thinking.remove();
             if (contentEl) contentEl.classList.remove("chat-streaming");
+            setStopDisabled();
             if (copyBtn) {
                 copyBtn.onclick = function () {
                     var text = Array.from(container.querySelectorAll(".chat-text-segment"))
@@ -393,14 +487,42 @@
             es.close();
             finalize();
         };
+
+        if (msgList && msgList.dataset.followListenerAttached !== "1") {
+            msgList.dataset.followListenerAttached = "1";
+            msgList.addEventListener("scroll", function () {
+                shouldFollowStream = isNearBottom();
+            }, { passive: true });
+        }
     }
 
     function attachAllStreams(root) {
         var scope = root || document;
-        var targets = scope.querySelectorAll('[data-role="chat-stream-target"]:not([data-stream-attached="1"])');
+        var targets = [];
+        if (scope.matches && scope.matches('[data-role="chat-stream-target"]:not([data-stream-attached="1"])')) {
+            targets.push(scope);
+        }
+        targets = targets.concat(Array.from(scope.querySelectorAll('[data-role="chat-stream-target"]:not([data-stream-attached="1"])')));
         for (var i = 0; i < targets.length; i++) {
             attachStream(targets[i]);
         }
+    }
+
+    function observeDynamicChat() {
+        var list = document.getElementById("chat-messages-list");
+        if (!list || typeof MutationObserver === "undefined" || list.dataset.streamObserverAttached === "1") {
+            return;
+        }
+        list.dataset.streamObserverAttached = "1";
+        new MutationObserver(function (mutations) {
+            mutations.forEach(function (mutation) {
+                mutation.addedNodes.forEach(function (node) {
+                    if (!node || node.nodeType !== 1) return;
+                    renderAllMarkdown(node);
+                    attachAllStreams(node);
+                });
+            });
+        }).observe(list, { childList: true, subtree: true });
     }
 
     function onReady(fn) {
@@ -414,11 +536,20 @@
     onReady(function () {
         renderAllMarkdown(document);
         attachAllStreams(document);
+        observeDynamicChat();
     });
 
     document.body.addEventListener("htmx:afterSwap", function (event) {
         var target = event && event.detail && event.detail.target ? event.detail.target : document;
         renderAllMarkdown(target);
         attachAllStreams(target);
+        observeDynamicChat();
+    });
+
+    document.body.addEventListener("htmx:afterSettle", function (event) {
+        var target = event && event.detail && event.detail.target ? event.detail.target : document;
+        renderAllMarkdown(target);
+        attachAllStreams(target);
+        observeDynamicChat();
     });
 }());

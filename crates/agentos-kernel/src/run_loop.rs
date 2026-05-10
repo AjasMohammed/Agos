@@ -104,6 +104,98 @@ fn task_name_seed(name: &str) -> u64 {
 }
 
 impl Kernel {
+    /// Re-read `[tools.host_package]` from the config file on disk and push
+    /// the fresh allowlist + manager priority list into the live
+    /// `HostPackagePolicy` handle. Called from the `ConfigWatcher` reload
+    /// arm so revocations and additions take effect on the next tool call
+    /// — without this the privileged tool would keep running against the
+    /// boot-time snapshot until the kernel restarts.
+    ///
+    /// Allowlist + managers are swapped atomically (single `RwLock` write)
+    /// so an in-flight `host-package-install` cannot observe a torn view
+    /// where the allowlist is fresh but the managers list is stale.
+    ///
+    /// Failures are logged but never propagated; a malformed config file
+    /// must not crash the kernel. The previous policy stays in effect.
+    pub(crate) async fn reload_host_package_policy(&self) {
+        let config = match crate::config::load_config(&self.config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    path = %self.config_path.display(),
+                    "Config reload: failed to re-parse config file; \
+                     keeping previous host-package-install policy"
+                );
+                let _ = self.audit.append(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id: agentos_types::TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::KernelConfigChanged,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "subsystem": "host_package",
+                        "outcome": "reload_failed",
+                        "error": e.to_string(),
+                    }),
+                    severity: agentos_audit::AuditSeverity::Error,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                return;
+            }
+        };
+        let hp = &config.tools.host_package;
+        let prev = self
+            .host_package_policy
+            .replace(hp.allowlist.clone(), hp.managers.clone())
+            .await;
+
+        // Compute a by-name diff so the audit entry tells operators
+        // exactly which packages were added or removed (review finding
+        // I3). Set semantics intentionally — duplicates collapse.
+        use std::collections::HashSet;
+        let prev_set: HashSet<&String> = prev.allowlist.iter().collect();
+        let new_set: HashSet<&String> = hp.allowlist.iter().collect();
+        let added: Vec<String> = new_set
+            .difference(&prev_set)
+            .map(|s| (*s).clone())
+            .collect();
+        let removed: Vec<String> = prev_set
+            .difference(&new_set)
+            .map(|s| (*s).clone())
+            .collect();
+
+        tracing::info!(
+            prev_allowlist_size = prev.allowlist.len(),
+            new_allowlist_size = hp.allowlist.len(),
+            added = ?added,
+            removed = ?removed,
+            "host-package-install policy hot-reloaded"
+        );
+        let _ = self.audit.append(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: agentos_types::TraceID::new(),
+            event_type: agentos_audit::AuditEventType::KernelConfigChanged,
+            agent_id: None,
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({
+                "subsystem": "host_package",
+                "outcome": "reload_ok",
+                "allowlist_size": hp.allowlist.len(),
+                "managers_size": hp.managers.len(),
+                "added_packages": added,
+                "removed_packages": removed,
+                "enabled": hp.enabled,
+            }),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
+    }
+
     /// Spawn a kernel subsystem task into the JoinSet, returning its AbortHandle for ID tracking.
     fn spawn_task(
         join_set: &mut JoinSet<TaskKind>,
@@ -255,6 +347,16 @@ impl Kernel {
 
                                 // Sweep expired vault proxy tokens (Spec §3)
                                 kernel.vault.sweep_expired_proxy_tokens().await;
+
+                                // Sweep expired agent inbox items
+                                if let Err(e) = kernel.agent_inbox.sweep_expired().await {
+                                    tracing::warn!(error = %e, "Agent inbox sweep failed");
+                                }
+
+                                // Sweep expired agent messages
+                                if let Err(e) = kernel.agent_message_inbox.sweep_expired().await {
+                                    tracing::warn!(error = %e, "Agent message inbox sweep failed");
+                                }
 
                                 // Sweep expired escalations — auto-deny (Spec §12)
                                 let expired_escalations = kernel.escalation_manager.sweep_expired().await;
@@ -528,6 +630,17 @@ impl Kernel {
                                     // Evict terminal background tasks older than 1 hour to
                                     // prevent unbounded pool growth for long-running kernels.
                                     kernel.background_pool.evict_terminal(3600).await;
+
+                                    // Drop chat-session dedup caches untouched for >24h.
+                                    let evicted = kernel
+                                        .sweep_chat_session_dedup(Duration::from_secs(24 * 3600))
+                                        .await;
+                                    if evicted > 0 {
+                                        tracing::info!(
+                                            evicted,
+                                            "Pruned {evicted} idle chat-session dedup caches"
+                                        );
+                                    }
 
                                     // Prune old audit log entries if a rotation limit is set
                                     let max_entries = kernel.config.audit.max_audit_entries;
@@ -882,7 +995,15 @@ impl Kernel {
                 // know a config change occurred without restarting the kernel.
                 Some(()) = reload_rx.recv() => {
                     while reload_rx.try_recv().is_ok() {}
-                    tracing::info!("Config file changed on disk (restart kernel to apply changes)");
+                    tracing::info!("Config file changed on disk");
+
+                    // Hot-reload the `[tools.host_package]` allowlist + manager
+                    // list. Revocations take effect on the next tool call —
+                    // critical for a privileged tool where leaving a stale
+                    // allowlist in place after the operator removes a package
+                    // would be a security gap.
+                    self.reload_host_package_policy().await;
+
                     // Fire ConfigReloaded hook — lets hooks (audit, metrics) observe the change.
                     self.hook_registry
                         .fire(&agentos_types::HookEvent::ConfigReloaded)
@@ -1388,6 +1509,7 @@ impl Kernel {
                     Err(msg) => agentos_bus::KernelResponse::Error { message: msg },
                 }
             }
+            KernelCommand::RemoveAgent { agent_id } => self.cmd_remove_agent(agent_id).await,
             KernelCommand::RunTask {
                 agent_name,
                 prompt,
@@ -1898,6 +2020,11 @@ impl Kernel {
             KernelCommand::SetProviderUrl { name, url } => {
                 self.cmd_set_provider_url(name, url).await
             }
+            KernelCommand::AddProvider { entry_json } => self.cmd_add_provider(entry_json).await,
+            KernelCommand::RemoveProvider { name } => self.cmd_remove_provider(name).await,
+            KernelCommand::ProbeProviderModels { name } => {
+                self.cmd_probe_provider_models(name).await
+            }
 
             // Sub-agent coordination
             KernelCommand::SpawnSubAgent {
@@ -1906,6 +2033,8 @@ impl Kernel {
                 prompt,
                 requested_permissions,
                 context_slice,
+                handoff_mode,
+                tool_categories,
             } => {
                 self.cmd_spawn_sub_agent(
                     parent_task_id,
@@ -1913,6 +2042,8 @@ impl Kernel {
                     &prompt,
                     &requested_permissions,
                     context_slice,
+                    handoff_mode,
+                    tool_categories,
                 )
                 .await
             }
@@ -1994,56 +2125,199 @@ impl Kernel {
 
             let due_jobs = self.schedule_manager.check_due_jobs().await;
             for job in due_jobs {
-                tracing::info!(job_name = %job.name, "Firing scheduled job");
+                use agentos_types::schedule::{
+                    OnceJobAction, RunParentKind, RunState, ScheduledRun,
+                };
+                use agentos_types::{
+                    NotificationID, NotificationPriority, NotificationSource, RunID, UserMessage,
+                    UserMessageKind,
+                };
 
+                let action_tag = job.action.tag();
+                tracing::info!(job_name = %job.name, action = %action_tag, "Firing scheduled job");
+
+                let trace_id = agentos_types::TraceID::new();
                 self.audit_log(agentos_audit::AuditEntry {
                     timestamp: chrono::Utc::now(),
-                    trace_id: agentos_types::TraceID::new(),
+                    trace_id,
                     event_type: agentos_audit::AuditEventType::ScheduledJobFired,
                     agent_id: None,
                     task_id: None,
                     tool_id: None,
-                    details: serde_json::json!({ "job_name": job.name }),
+                    details: serde_json::json!({
+                        "job_name": job.name,
+                        "action": action_tag,
+                        "once": false,
+                    }),
                     severity: agentos_audit::AuditSeverity::Info,
                     reversible: false,
                     rollback_ref: None,
                 });
 
-                match self
-                    .create_background_task(
-                        job.name.clone(),
-                        job.agent_name.clone(),
-                        job.task_prompt.clone(),
-                        true,
-                    )
-                    .await
-                {
-                    Ok(task_id) => {
-                        // Link the spawned task to the scheduled job so that
-                        // complete_task_success can emit ScheduledTaskCompleted.
-                        self.background_pool
-                            .set_scheduled_job(&task_id, job.id)
-                            .await;
+                // Open a run record up-front so `get-schedule-runs` returns
+                // history even for synchronous fires. Updated below per
+                // action outcome.
+                let run_id = RunID::new();
+                let run_started = chrono::Utc::now();
+                let mk_run = |state: RunState,
+                              task_id: Option<agentos_types::TaskID>,
+                              error: Option<String>,
+                              completed_at: Option<chrono::DateTime<chrono::Utc>>|
+                 -> ScheduledRun {
+                    ScheduledRun {
+                        run_id,
+                        parent_kind: RunParentKind::Schedule,
+                        parent_id: job.id,
+                        parent_name: Some(job.name.clone()),
+                        creator_agent_id: job.creator_agent_id,
+                        task_id,
+                        state,
+                        started_at: run_started,
+                        completed_at,
+                        result: None,
+                        error,
+                        tool_calls: vec![],
+                        delivery: job.delivery.clone(),
+                        delivered: false,
+                        delivered_at: None,
+                        delivery_error: None,
+                        delivery_depth: None,
                     }
-                    Err(agentos_types::AgentOSError::AgentNotFound(_)) => {
-                        tracing::warn!(
-                            job_name = %job.name,
-                            agent_name = %job.agent_name,
-                            "Scheduled job target agent not found"
-                        );
-                        self.schedule_manager
-                            .emit_task_missed(&job, "target agent not registered")
-                            .await;
+                };
+
+                match job.action.clone() {
+                    OnceJobAction::RunTask { prompt } => {
+                        match self
+                            .create_background_task(
+                                job.name.clone(),
+                                job.agent_name.clone(),
+                                prompt,
+                                true,
+                                true,
+                            )
+                            .await
+                        {
+                            Ok(task_id) => {
+                                // Link the spawned task to the scheduled job so that
+                                // complete_task_success can emit ScheduledTaskCompleted.
+                                self.background_pool
+                                    .set_scheduled_job(&task_id, job.id)
+                                    .await;
+                                // Race-free: track in-memory FIRST so completion
+                                // never races the SQLite upsert.
+                                self.schedule_manager
+                                    .track_pending_run(task_id, run_id)
+                                    .await;
+                                if let Some(store) = self.schedule_manager.store() {
+                                    let run = mk_run(RunState::Running, Some(task_id), None, None);
+                                    if let Err(e) = store.upsert_run(run).await {
+                                        tracing::warn!(error = %e, "Failed to persist running ScheduledRun");
+                                    }
+                                }
+                            }
+                            Err(agentos_types::AgentOSError::AgentNotFound(_)) => {
+                                tracing::warn!(
+                                    job_name = %job.name,
+                                    agent_name = %job.agent_name,
+                                    "Scheduled job target agent not found"
+                                );
+                                self.schedule_manager
+                                    .emit_task_missed(&job, "target agent not registered")
+                                    .await;
+                                if let Some(store) = self.schedule_manager.store() {
+                                    let now = chrono::Utc::now();
+                                    let run = mk_run(
+                                        RunState::Missed,
+                                        None,
+                                        Some("target agent not registered".into()),
+                                        Some(now),
+                                    );
+                                    let _ = store.upsert_run(run).await;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    job_name = %job.name,
+                                    error = %e,
+                                    "Scheduled job failed to launch"
+                                );
+                                self.schedule_manager
+                                    .emit_task_failed(&job, &e.to_string())
+                                    .await;
+                                if let Some(store) = self.schedule_manager.store() {
+                                    let now = chrono::Utc::now();
+                                    let run = mk_run(
+                                        RunState::Failed,
+                                        None,
+                                        Some(e.to_string()),
+                                        Some(now),
+                                    );
+                                    let _ = store.upsert_run(run).await;
+                                }
+                            }
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!(
-                            job_name = %job.name,
-                            error = %e,
-                            "Scheduled job failed to launch"
-                        );
-                        self.schedule_manager
-                            .emit_task_failed(&job, &e.to_string())
+                    OnceJobAction::NotifyUser {
+                        subject,
+                        body,
+                        priority: priority_str,
+                    } => {
+                        let priority = match priority_str.as_str() {
+                            "warning" => NotificationPriority::Warning,
+                            "urgent" => NotificationPriority::Urgent,
+                            "critical" => NotificationPriority::Critical,
+                            _ => NotificationPriority::Info,
+                        };
+                        let msg = UserMessage {
+                            id: NotificationID::new(),
+                            from: NotificationSource::Kernel,
+                            task_id: None,
+                            trace_id,
+                            kind: UserMessageKind::Notification,
+                            priority,
+                            subject,
+                            body,
+                            interaction: None,
+                            delivery_status: std::collections::HashMap::new(),
+                            response: None,
+                            created_at: chrono::Utc::now(),
+                            expires_at: None,
+                            read: false,
+                            thread_id: None,
+                            reply_to_external_id: None,
+                        };
+                        let now = chrono::Utc::now();
+                        if let Err(e) = self.notification_router.deliver(msg).await {
+                            tracing::warn!(job_name = %job.name, error = %e, "Cron notification delivery failed");
+                            self.schedule_manager
+                                .emit_task_failed(&job, &e.to_string())
+                                .await;
+                            if let Some(store) = self.schedule_manager.store() {
+                                let run =
+                                    mk_run(RunState::Failed, None, Some(e.to_string()), Some(now));
+                                if store.upsert_run(run).await.is_ok() {
+                                    self.dispatch_scheduled_delivery(run_id).await;
+                                }
+                            }
+                        } else if let Some(store) = self.schedule_manager.store() {
+                            let run = mk_run(RunState::Complete, None, None, Some(now));
+                            if store.upsert_run(run).await.is_ok() {
+                                self.dispatch_scheduled_delivery(run_id).await;
+                            }
+                        }
+                    }
+                    OnceJobAction::RunTool { tool, args } => {
+                        self.fire_scheduled_tool(job.agent_name.clone(), tool, args, trace_id)
                             .await;
+                        // Tool fires synchronously in `fire_scheduled_tool`; record
+                        // a Complete run + dispatch its DeliveryMode.
+                        if let Some(store) = self.schedule_manager.store() {
+                            let run =
+                                mk_run(RunState::Complete, None, None, Some(chrono::Utc::now()));
+                            if store.upsert_run(run).await.is_ok() {
+                                self.dispatch_scheduled_delivery(run_id).await;
+                            }
+                        }
                     }
                 }
             }
@@ -2058,29 +2332,173 @@ impl Kernel {
             // Fire due once-jobs.
             let due_once = self.schedule_manager.check_due_once_jobs().await;
             for job in due_once {
-                tracing::info!(job_name = %job.name, "Firing once-job");
+                use agentos_types::schedule::{
+                    OnceJobAction, RunParentKind, RunState, ScheduledRun,
+                };
+                use agentos_types::{
+                    NotificationID, NotificationPriority, NotificationSource, RunID, UserMessage,
+                    UserMessageKind,
+                };
+                let trace_id = agentos_types::TraceID::new();
+                tracing::info!(job_name = %job.name, action = %job.action.tag(), "Firing once-job");
                 self.audit_log(agentos_audit::AuditEntry {
                     timestamp: chrono::Utc::now(),
-                    trace_id: agentos_types::TraceID::new(),
+                    trace_id,
                     event_type: agentos_audit::AuditEventType::ScheduledJobFired,
                     agent_id: None,
                     task_id: None,
                     tool_id: None,
-                    details: serde_json::json!({ "job_name": job.name, "once": true }),
+                    details: serde_json::json!({
+                        "job_name": job.name,
+                        "once": true,
+                        "action": job.action.tag(),
+                    }),
                     severity: agentos_audit::AuditSeverity::Info,
                     reversible: false,
                     rollback_ref: None,
                 });
-                if let Err(e) = self
-                    .create_background_task(
-                        job.name.clone(),
-                        job.agent_name.clone(),
-                        job.task_prompt.clone(),
-                        false,
-                    )
-                    .await
-                {
-                    tracing::warn!(job_name = %job.name, error = %e, "Once-job failed to launch");
+
+                let run_id = RunID::new();
+                let run_started = chrono::Utc::now();
+                let job_creator = job.creator_agent_id;
+                let job_id = job.id;
+                let job_name = job.name.clone();
+                let job_delivery = job.delivery.clone();
+                let mk_once_run = |state: RunState,
+                                   task_id: Option<agentos_types::TaskID>,
+                                   error: Option<String>,
+                                   completed_at: Option<chrono::DateTime<chrono::Utc>>|
+                 -> ScheduledRun {
+                    ScheduledRun {
+                        run_id,
+                        parent_kind: RunParentKind::Once,
+                        parent_id: job_id,
+                        parent_name: Some(job_name.clone()),
+                        creator_agent_id: job_creator,
+                        task_id,
+                        state,
+                        started_at: run_started,
+                        completed_at,
+                        result: None,
+                        error,
+                        tool_calls: vec![],
+                        delivery: job_delivery.clone(),
+                        delivered: false,
+                        delivered_at: None,
+                        delivery_error: None,
+                        delivery_depth: None,
+                    }
+                };
+
+                match job.action.clone() {
+                    OnceJobAction::RunTask { prompt } => {
+                        match self
+                            .create_background_task(
+                                job.name.clone(),
+                                job.agent_name.clone(),
+                                prompt,
+                                false,
+                                true,
+                            )
+                            .await
+                        {
+                            Ok(task_id) => {
+                                self.background_pool
+                                    .set_scheduled_job(&task_id, job.id)
+                                    .await;
+                                self.schedule_manager
+                                    .track_pending_run(task_id, run_id)
+                                    .await;
+                                if let Some(store) = self.schedule_manager.store() {
+                                    let run =
+                                        mk_once_run(RunState::Running, Some(task_id), None, None);
+                                    if let Err(e) = store.upsert_run(run).await {
+                                        tracing::warn!(error = %e, "Failed to persist Running once-job run");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(job_name = %job.name, error = %e, "Once-job task launch failed");
+                                if let Some(store) = self.schedule_manager.store() {
+                                    let now = chrono::Utc::now();
+                                    let run = mk_once_run(
+                                        RunState::Failed,
+                                        None,
+                                        Some(e.to_string()),
+                                        Some(now),
+                                    );
+                                    if store.upsert_run(run).await.is_ok() {
+                                        self.dispatch_scheduled_delivery(run_id).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    OnceJobAction::NotifyUser {
+                        subject,
+                        body,
+                        priority: priority_str,
+                    } => {
+                        let priority = match priority_str.as_str() {
+                            "warning" => NotificationPriority::Warning,
+                            "urgent" => NotificationPriority::Urgent,
+                            "critical" => NotificationPriority::Critical,
+                            _ => NotificationPriority::Info,
+                        };
+                        let msg = UserMessage {
+                            id: NotificationID::new(),
+                            from: NotificationSource::Kernel,
+                            task_id: None,
+                            trace_id,
+                            kind: UserMessageKind::Notification,
+                            priority,
+                            subject,
+                            body,
+                            interaction: None,
+                            delivery_status: std::collections::HashMap::new(),
+                            response: None,
+                            created_at: chrono::Utc::now(),
+                            expires_at: None,
+                            read: false,
+                            thread_id: None,
+                            reply_to_external_id: None,
+                        };
+                        let now = chrono::Utc::now();
+                        if let Err(e) = self.notification_router.deliver(msg).await {
+                            tracing::warn!(job_name = %job.name, error = %e, "Once-job notification delivery failed");
+                            if let Some(store) = self.schedule_manager.store() {
+                                let run = mk_once_run(
+                                    RunState::Failed,
+                                    None,
+                                    Some(e.to_string()),
+                                    Some(now),
+                                );
+                                if store.upsert_run(run).await.is_ok() {
+                                    self.dispatch_scheduled_delivery(run_id).await;
+                                }
+                            }
+                        } else if let Some(store) = self.schedule_manager.store() {
+                            let run = mk_once_run(RunState::Complete, None, None, Some(now));
+                            if store.upsert_run(run).await.is_ok() {
+                                self.dispatch_scheduled_delivery(run_id).await;
+                            }
+                        }
+                    }
+                    OnceJobAction::RunTool { tool, args } => {
+                        self.fire_scheduled_tool(job.agent_name.clone(), tool, args, trace_id)
+                            .await;
+                        if let Some(store) = self.schedule_manager.store() {
+                            let run = mk_once_run(
+                                RunState::Complete,
+                                None,
+                                None,
+                                Some(chrono::Utc::now()),
+                            );
+                            if store.upsert_run(run).await.is_ok() {
+                                self.dispatch_scheduled_delivery(run_id).await;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2088,9 +2506,9 @@ impl Kernel {
 
     /// Dispatch a fired timer action: deliver notification and/or launch a background task.
     async fn fire_timer(&self, timer: agentos_types::schedule::TimerEntry) {
-        use agentos_types::schedule::TimerAction;
+        use agentos_types::schedule::{RunParentKind, RunState, ScheduledRun, TimerAction};
         use agentos_types::{
-            NotificationID, NotificationPriority, NotificationSource, TraceID, UserMessage,
+            NotificationID, NotificationPriority, NotificationSource, RunID, TraceID, UserMessage,
             UserMessageKind,
         };
         use std::collections::HashMap;
@@ -2112,6 +2530,41 @@ impl Kernel {
             reversible: false,
             rollback_ref: None,
         });
+
+        // Open a ScheduledRun for this timer fire so delivery + audit have a
+        // backing record (Timers are evicted from memory immediately after
+        // fire; the run is the only durable trace).
+        let run_id = RunID::new();
+        let run_started = chrono::Utc::now();
+        let timer_id = timer.id;
+        let timer_name = timer.name.clone();
+        let timer_creator = timer.creator_agent_id;
+        let timer_delivery = timer.delivery.clone();
+        let mk_timer_run = |state: RunState,
+                            task_id: Option<agentos_types::TaskID>,
+                            error: Option<String>,
+                            completed_at: Option<chrono::DateTime<chrono::Utc>>|
+         -> ScheduledRun {
+            ScheduledRun {
+                run_id,
+                parent_kind: RunParentKind::Timer,
+                parent_id: timer_id,
+                parent_name: Some(timer_name.clone()),
+                creator_agent_id: timer_creator,
+                task_id,
+                state,
+                started_at: run_started,
+                completed_at,
+                result: None,
+                error,
+                tool_calls: vec![],
+                delivery: timer_delivery.clone(),
+                delivered: false,
+                delivered_at: None,
+                delivery_error: None,
+                delivery_depth: None,
+            }
+        };
 
         let deliver_notification = |subject: String, body: String, priority_str: String| {
             let priority = match priority_str.as_str() {
@@ -2147,6 +2600,7 @@ impl Kernel {
                 priority,
             } => {
                 let msg = deliver_notification(subject, body, priority);
+                let now = chrono::Utc::now();
                 if let Err(e) = self.notification_router.deliver(msg).await {
                     tracing::warn!(timer_name = %timer.name, error = %e, "Timer notification delivery failed");
                     self.audit_log(agentos_audit::AuditEntry {
@@ -2161,31 +2615,69 @@ impl Kernel {
                         reversible: false,
                         rollback_ref: None,
                     });
+                    if let Some(store) = self.schedule_manager.store() {
+                        let run =
+                            mk_timer_run(RunState::Failed, None, Some(e.to_string()), Some(now));
+                        if store.upsert_run(run).await.is_ok() {
+                            self.dispatch_scheduled_delivery(run_id).await;
+                        }
+                    }
+                } else if let Some(store) = self.schedule_manager.store() {
+                    let run = mk_timer_run(RunState::Complete, None, None, Some(now));
+                    if store.upsert_run(run).await.is_ok() {
+                        self.dispatch_scheduled_delivery(run_id).await;
+                    }
                 }
             }
             TimerAction::RunTask { prompt } => {
-                if let Err(e) = self
+                match self
                     .create_background_task(
                         timer.name.clone(),
                         timer.agent_name.clone(),
                         prompt,
                         false,
+                        true,
                     )
                     .await
                 {
-                    tracing::warn!(timer_name = %timer.name, error = %e, "Timer task launch failed");
-                    self.audit_log(agentos_audit::AuditEntry {
-                        timestamp: chrono::Utc::now(),
-                        trace_id,
-                        event_type: agentos_audit::AuditEventType::TimerActionFailed,
-                        agent_id: None,
-                        task_id: None,
-                        tool_id: None,
-                        details: serde_json::json!({ "timer_name": timer.name, "action": "run_task", "error": e.to_string() }),
-                        severity: agentos_audit::AuditSeverity::Warn,
-                        reversible: false,
-                        rollback_ref: None,
-                    });
+                    Ok(task_id) => {
+                        self.schedule_manager
+                            .track_pending_run(task_id, run_id)
+                            .await;
+                        if let Some(store) = self.schedule_manager.store() {
+                            let run = mk_timer_run(RunState::Running, Some(task_id), None, None);
+                            if let Err(e) = store.upsert_run(run).await {
+                                tracing::warn!(error = %e, "Failed to persist Running timer run");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(timer_name = %timer.name, error = %e, "Timer task launch failed");
+                        self.audit_log(agentos_audit::AuditEntry {
+                            timestamp: chrono::Utc::now(),
+                            trace_id,
+                            event_type: agentos_audit::AuditEventType::TimerActionFailed,
+                            agent_id: None,
+                            task_id: None,
+                            tool_id: None,
+                            details: serde_json::json!({ "timer_name": timer.name, "action": "run_task", "error": e.to_string() }),
+                            severity: agentos_audit::AuditSeverity::Warn,
+                            reversible: false,
+                            rollback_ref: None,
+                        });
+                        if let Some(store) = self.schedule_manager.store() {
+                            let now = chrono::Utc::now();
+                            let run = mk_timer_run(
+                                RunState::Failed,
+                                None,
+                                Some(e.to_string()),
+                                Some(now),
+                            );
+                            if store.upsert_run(run).await.is_ok() {
+                                self.dispatch_scheduled_delivery(run_id).await;
+                            }
+                        }
+                    }
                 }
             }
             TimerAction::RunTaskAndNotify {
@@ -2216,6 +2708,7 @@ impl Kernel {
                         timer.agent_name.clone(),
                         prompt,
                         false,
+                        true,
                     )
                     .await
                 {
@@ -2233,6 +2726,150 @@ impl Kernel {
                         rollback_ref: None,
                     });
                 }
+            }
+            TimerAction::RunTool { tool, args } => {
+                self.fire_scheduled_tool(timer.agent_name.clone(), tool, args, trace_id)
+                    .await;
+                if let Some(store) = self.schedule_manager.store() {
+                    let run =
+                        mk_timer_run(RunState::Complete, None, None, Some(chrono::Utc::now()));
+                    if store.upsert_run(run).await.is_ok() {
+                        self.dispatch_scheduled_delivery(run_id).await;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Synthesize a `ToolExecutionContext` and run a single tool by name on
+    /// behalf of the scheduling agent. Returns the tool result or an error.
+    async fn execute_scheduled_tool(
+        &self,
+        agent_name: String,
+        tool_name: String,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, agentos_types::AgentOSError> {
+        use agentos_tools::traits::ToolExecutionContext;
+        use agentos_types::{AgentOSError, TaskID, TraceID};
+
+        if crate::schedule_action_policy::args_exceed_size_cap(&args) {
+            return Err(AgentOSError::SchemaValidation(format!(
+                "tool_args exceeds {} byte cap",
+                crate::schedule_action_policy::MAX_TOOL_ARGS_BYTES
+            )));
+        }
+
+        let agent = {
+            let registry = self.agent_registry.read().await;
+            registry
+                .get_by_name(&agent_name)
+                .ok_or_else(|| AgentOSError::AgentNotFound(agent_name.clone()))?
+                .clone()
+        };
+
+        let permissions = {
+            let registry = self.agent_registry.read().await;
+            registry.compute_effective_permissions(&agent.id)
+        };
+
+        let exec_ctx = ToolExecutionContext {
+            data_dir: self.data_dir.clone(),
+            task_id: TaskID::new(),
+            agent_id: agent.id,
+            trace_id: TraceID::new(),
+            permissions,
+            vault: None,
+            hal: Some(self.hal.clone()),
+            file_lock_registry: None,
+            agent_registry: None,
+            task_registry: None,
+            escalation_query: None,
+            workspace_paths: self.workspace_paths.clone(),
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
+            cancellation_token: self.cancellation_token.child_token(),
+            tool_categories: None,
+        };
+
+        self.tool_runner.execute(&tool_name, args, exec_ctx).await
+    }
+
+    /// Fire a scheduled `RunTool` action: invoke the tool with a synthetic
+    /// per-fire capability scoped to the scheduling agent. No LLM in the loop.
+    pub(crate) async fn fire_scheduled_tool(
+        &self,
+        agent_name: String,
+        tool_name: String,
+        args: serde_json::Value,
+        trace_id: agentos_types::TraceID,
+    ) {
+        // Defense in depth: re-check the tool name against the schedule denylist
+        // even though Phase 4 validates at schedule time.
+        if crate::schedule_action_policy::is_tool_blocked_for_schedule(&tool_name) {
+            tracing::warn!(
+                tool = %tool_name,
+                "Scheduled run_tool rejected — tool is on the schedule denylist"
+            );
+            self.audit_log(agentos_audit::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id,
+                event_type: agentos_audit::AuditEventType::ScheduledToolFailed,
+                agent_id: None,
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({
+                    "tool": tool_name,
+                    "agent_name": agent_name,
+                    "error": "tool blocked from scheduling",
+                }),
+                severity: agentos_audit::AuditSeverity::Warn,
+                reversible: false,
+                rollback_ref: None,
+            });
+            return;
+        }
+
+        match self
+            .execute_scheduled_tool(agent_name.clone(), tool_name.clone(), args)
+            .await
+        {
+            Ok(result) => {
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id,
+                    event_type: agentos_audit::AuditEventType::ScheduledToolFired,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "tool": tool_name,
+                        "agent_name": agent_name,
+                        "result_preview": result.to_string().chars().take(512).collect::<String>(),
+                    }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(tool = %tool_name, error = %e, "Scheduled run_tool failed");
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id,
+                    event_type: agentos_audit::AuditEventType::ScheduledToolFailed,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "tool": tool_name,
+                        "agent_name": agent_name,
+                        "error": e.to_string(),
+                    }),
+                    severity: agentos_audit::AuditSeverity::Warn,
+                    reversible: false,
+                    rollback_ref: None,
+                });
             }
         }
     }

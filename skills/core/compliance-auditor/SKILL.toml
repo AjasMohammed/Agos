@@ -16,11 +16,11 @@ default_provider = "anthropic"
 default_model = "claude-sonnet-4-6"
 
 [tools]
-required = ["audit-query", "audit-verify", "notify-user", "memory-write"]
-optional = ["http-client"]
+required = ["file-reader", "shell-exec", "notify-user", "memory-write"]
+optional = []
 
 [permissions]
-required = ["audit:read", "notification:write", "memory:write"]
+required = ["fs.user_data:rw", "process.exec:x", "user.notify:w", "memory.episodic:w", "memory.semantic:w"]
 
 [budget]
 max_cost_per_run = 0.50

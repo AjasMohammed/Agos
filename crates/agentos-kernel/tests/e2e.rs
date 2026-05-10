@@ -23,3 +23,6 @@ mod chat_tool_loop;
 
 #[path = "e2e/multimodal_chat.rs"]
 mod multimodal_chat;
+
+#[path = "e2e/chat_manifest_selection.rs"]
+mod chat_manifest_selection;

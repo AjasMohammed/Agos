@@ -72,6 +72,7 @@ pub struct ViewQuery {
     pub tag: Option<String>,
     pub verbose: Option<bool>,
     pub raw: Option<bool>,
+    pub server: Option<String>,
 }
 
 /// HTMX partial — runs the agent-manual tool with the requested section
@@ -105,6 +106,9 @@ pub async fn view(State(state): State<AppState>, Query(q): Query<ViewQuery>) -> 
     if let Some(verbose) = q.verbose {
         payload.insert("verbose".into(), serde_json::Value::Bool(verbose));
     }
+    if let Some(server) = q.server.as_ref() {
+        payload.insert("server".into(), serde_json::Value::String(server.clone()));
+    }
 
     let manual = AgentManualTool::new_with_channels(
         state.kernel.tool_summaries.clone(),
@@ -128,6 +132,7 @@ pub async fn view(State(state): State<AppState>, Query(q): Query<ViewQuery>) -> 
         capability_dispatcher: None,
         storage_zone_query: None,
         cancellation_token: CancellationToken::new(),
+        tool_categories: None,
     };
 
     let result = manual

@@ -16,11 +16,11 @@ default_provider = "anthropic"
 default_model = "claude-haiku-4-5"
 
 [tools]
-required = ["file-reader", "audit-query", "notify-user"]
-optional = ["shell-exec"]
+required = ["file-reader", "shell-exec", "notify-user"]
+optional = []
 
 [permissions]
-required = ["file:read", "audit:read", "notification:write"]
+required = ["fs.user_data:rw", "process.exec:x", "user.notify:w"]
 
 [budget]
 max_cost_per_run = 0.10

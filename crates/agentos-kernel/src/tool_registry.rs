@@ -164,6 +164,14 @@ impl ToolRegistry {
     }
 
     /// Load all tool manifests with CRL enforcement.
+    ///
+    /// `trust_tier = "core"` is reserved for distribution-trusted manifests
+    /// shipped under `core_dir`. A user-dir manifest declaring `trust_tier =
+    /// "core"` is rejected with `ToolBlocked` to prevent privilege-tier
+    /// laundering — without this gate, dropping a TOML file into
+    /// `tools/user/` would skip the Ed25519 signature check that protects
+    /// `Verified`/`Community` tiers, and would also satisfy the privileged-
+    /// executor gate in `signing::verify_manifest`.
     pub fn load_from_dirs_with_crl(
         core_dir: &Path,
         user_dir: &Path,
@@ -171,7 +179,7 @@ impl ToolRegistry {
     ) -> Result<Self, AgentOSError> {
         let mut registry = Self::with_crl(crl);
 
-        for dir in [core_dir, user_dir] {
+        for (dir, is_core) in [(core_dir, true), (user_dir, false)] {
             if !dir.exists() {
                 continue;
             }
@@ -184,6 +192,16 @@ impl ToolRegistry {
                         "Skipping manifest because corresponding kernel feature is disabled"
                     );
                     continue;
+                }
+                if !is_core && loaded.manifest.manifest.trust_tier == agentos_types::TrustTier::Core
+                {
+                    tracing::error!(
+                        tool = %name,
+                        path = %loaded.manifest_dir.display(),
+                        "Rejecting user-dir manifest that claims trust_tier = core; \
+                         core tier is reserved for distribution-shipped manifests"
+                    );
+                    return Err(AgentOSError::ToolBlocked { name });
                 }
                 registry.register(loaded.manifest.clone())?;
                 registry.loaded.push(loaded);
@@ -285,6 +303,7 @@ impl ToolRegistry {
             let cat = agentos_tools::agent_manual::AgentManualTool::infer_tool_category(
                 &tool.manifest.manifest.name,
                 &tool.manifest.manifest.capability_tags,
+                tool.manifest.manifest.tags.as_deref(),
             );
             *counts.entry(cat).or_insert(0) += 1;
         }
@@ -439,6 +458,7 @@ mod tests {
             fallbacks: vec![],
             risk_class: Default::default(),
             usage_hints: None,
+            tags: vec![],
         }
     }
 
@@ -479,6 +499,7 @@ mod tests {
             fallbacks: vec![],
             risk_class: Default::default(),
             usage_hints: None,
+            tags: vec![],
         }
     }
 

@@ -19,7 +19,7 @@ required = ["shell-exec", "file-writer"]
 optional = ["data-parser", "memory-write"]
 
 [permissions]
-required = ["shell:exec", "file:write", "network:read"]
+required = ["process.exec:x", "fs.user_data:rw", "network.outbound:x", "memory.semantic:w", "memory.episodic:w"]
 
 [budget]
 max_cost_per_run = 1.00

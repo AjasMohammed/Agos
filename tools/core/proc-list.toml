@@ -1,3 +1,5 @@
+tags = ["read", "meta"]
+
 [manifest]
 name = "proc-list"
 version = "1.0.0"

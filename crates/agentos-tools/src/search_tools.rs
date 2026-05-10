@@ -54,7 +54,7 @@ impl AgentTool for SearchToolsTool {
     async fn execute(
         &self,
         payload: serde_json::Value,
-        _context: ToolExecutionContext,
+        context: ToolExecutionContext,
     ) -> Result<serde_json::Value, AgentOSError> {
         let query = payload
             .get("query")
@@ -72,8 +72,14 @@ impl AgentTool for SearchToolsTool {
 
         let query_lower = query.to_lowercase();
 
+        // Task-scoped allowlist: hide tools whose category is not in the
+        // active list. None = no restriction.
+        let allowlist = context.tool_categories.as_ref();
         let mut scored: Vec<(i32, &str, &str)> = summaries
             .iter()
+            .filter(|s| {
+                allowlist.is_none_or(|al| al.iter().any(|c| c.eq_ignore_ascii_case(&s.category)))
+            })
             .map(|s| {
                 let score = Self::score_tool(&s.name, &s.description, &s.tags, &query_lower);
                 (score, s.name.as_str(), s.description.as_str())

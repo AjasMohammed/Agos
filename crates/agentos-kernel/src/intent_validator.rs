@@ -1,13 +1,23 @@
 use crate::kernel::Kernel;
 use crate::tool_call::ParsedToolCall;
 use agentos_types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::RwLock;
+
+/// Number of consecutive coherence rejections of the same tool that trigger
+/// a forced final-synthesis pass (no-tools inference + user-visible nudge).
+pub const REJECT_FORCE_END_THRESHOLD: u32 = 2;
 
 /// Tracks per-task tool call history for semantic coherence analysis.
 pub struct IntentValidator {
     /// Per-task history of tool calls (tool_name, intent_type, payload hash).
     task_history: RwLock<HashMap<TaskID, Vec<ToolCallRecord>>>,
+    /// Per-task per-tool-name count of `Rejected` coherence outcomes. Used to
+    /// force task end when small models keep ignoring `kernel_directive: STOP`.
+    reject_counts: RwLock<HashMap<TaskID, HashMap<String, u32>>>,
+    /// Tasks scheduled for a forced final-synthesis pass on their next iteration.
+    /// Drained by `take_force_end_turn`.
+    force_end_turn: RwLock<HashSet<TaskID>>,
 }
 
 #[derive(Debug, Clone)]
@@ -22,6 +32,8 @@ impl IntentValidator {
     pub fn new() -> Self {
         Self {
             task_history: RwLock::new(HashMap::new()),
+            reject_counts: RwLock::new(HashMap::new()),
+            force_end_turn: RwLock::new(HashSet::new()),
         }
     }
 
@@ -41,9 +53,42 @@ impl IntentValidator {
             .push(record);
     }
 
+    /// Increment the rejection counter for `tool_name` on `task_id` and return
+    /// the new value. Used to detect models that keep retrying the same denied
+    /// tool after the kernel pushed a `kernel_directive: STOP` instruction.
+    pub async fn increment_reject_count(&self, task_id: &TaskID, tool_name: &str) -> u32 {
+        let mut guard = self.reject_counts.write().await;
+        let task_counts = guard.entry(*task_id).or_default();
+        let counter = task_counts.entry(tool_name.to_string()).or_insert(0);
+        *counter += 1;
+        *counter
+    }
+
+    /// Mark this task for a forced final-synthesis pass (no-tools inference)
+    /// at the start of its next iteration.
+    pub async fn mark_force_end_turn(&self, task_id: &TaskID) {
+        self.force_end_turn.write().await.insert(*task_id);
+    }
+
+    /// Atomically check and clear the force-end flag for this task. Returns
+    /// `true` once after `mark_force_end_turn` was set, then `false` until
+    /// re-set.
+    pub async fn take_force_end_turn(&self, task_id: &TaskID) -> bool {
+        self.force_end_turn.write().await.remove(task_id)
+    }
+
     /// Clean up history when a task completes.
+    ///
+    /// The three maps are cleared sequentially, not atomically. Callers must
+    /// guarantee no concurrent `record_tool_call`, `increment_reject_count`,
+    /// or `mark_force_end_turn` for `task_id` is in flight — otherwise an
+    /// orphan entry could be re-inserted into one map while the others are
+    /// already cleared. The kernel's per-task execution is single-threaded so
+    /// this invariant holds in practice.
     pub async fn remove_task(&self, task_id: &TaskID) {
         self.task_history.write().await.remove(task_id);
+        self.reject_counts.write().await.remove(task_id);
+        self.force_end_turn.write().await.remove(task_id);
     }
 
     /// Perform semantic coherence checks on a tool call.
@@ -88,7 +133,14 @@ impl Default for IntentValidator {
     }
 }
 
-/// Check for looping: same tool + same payload 3+ consecutive times.
+/// Check for looping: same tool + same payload N+ consecutive times.
+///
+/// `consecutive_same` counts prior matching history entries; the current
+/// call is the (consecutive_same + 1)th identical invocation. Threshold
+/// of `>= 2` therefore rejects on the 3rd identical call. Small models
+/// (e.g. gemma4:31b-cloud) routinely retry an identical tool call after
+/// a soft denial — letting that loop continue burns tokens without
+/// changing the outcome, so we hard-abort.
 fn check_intent_loop(
     records: &[ToolCallRecord],
     tool_call: &ParsedToolCall,
@@ -100,7 +152,22 @@ fn check_intent_loop(
         .take_while(|r| r.tool_name == tool_call.tool_name && r.payload_hash == current_hash)
         .count();
 
-    if consecutive_same >= 3 {
+    // Idempotent read-style intents (Read/Query/Observe) are not hard-rejected on
+    // identical repetition — re-polling the same resource is sometimes legitimate
+    // (e.g. waiting for a file to appear). They still surface as Suspicious so the
+    // audit log captures the pattern. Mutating/messaging/delegating intents have
+    // observable side effects and a 3rd identical call almost always indicates a
+    // small-model loop, so they are hard-rejected.
+    let read_only = matches!(
+        tool_call.intent_type,
+        IntentType::Read
+            | IntentType::Query
+            | IntentType::Observe
+            | IntentType::Subscribe
+            | IntentType::Unsubscribe
+    );
+
+    if consecutive_same >= 2 && !read_only {
         return Some(IntentCoherenceResult::Rejected {
             reason: format!(
                 "Looping detected: tool '{}' called {} consecutive times with identical payload",
@@ -110,14 +177,14 @@ fn check_intent_loop(
         });
     }
 
-    if consecutive_same >= 2 {
+    if consecutive_same >= 1 {
         return Some(IntentCoherenceResult::Suspicious {
             reason: format!(
                 "Potential loop: tool '{}' called {} consecutive times with identical payload",
                 tool_call.tool_name,
                 consecutive_same + 1
             ),
-            confidence: 0.7,
+            confidence: 0.6,
         });
     }
 
@@ -354,6 +421,7 @@ mod tests {
             skip_checkpoint: false,
             thinking_level: Default::default(),
             spawner_agent_id: None,
+            tool_categories: None,
         }
     }
 
@@ -371,13 +439,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_intent_loop_detection() {
+    async fn test_intent_loop_detection_rejects_repeated_writes() {
         let validator = IntentValidator::new();
         let task = make_task();
         let call = make_tool_call(
-            "file-reader",
-            IntentType::Read,
-            serde_json::json!({"path": "/test"}),
+            "file-writer",
+            IntentType::Write,
+            serde_json::json!({"path": "/test", "content": "x"}),
         );
 
         // Record 3 identical calls
@@ -387,6 +455,109 @@ mod tests {
 
         let result = validator.validate_coherence(&task, &call).await;
         assert!(matches!(result, IntentCoherenceResult::Rejected { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_intent_loop_read_only_stays_suspicious() {
+        // Read/Query/Observe/Subscribe/Unsubscribe intents are idempotent —
+        // re-polling the same resource is sometimes legitimate. Surface as
+        // Suspicious for audit but do not hard-reject. Locked per-variant so
+        // a future refactor of the `matches!` arm cannot silently drop one.
+        let read_only_variants = [
+            IntentType::Read,
+            IntentType::Query,
+            IntentType::Observe,
+            IntentType::Subscribe,
+            IntentType::Unsubscribe,
+        ];
+
+        for intent in read_only_variants {
+            let validator = IntentValidator::new();
+            let task = make_task();
+            let call = make_tool_call("some-tool", intent, serde_json::json!({"path": "/test"}));
+
+            for _ in 0..5 {
+                validator.record_tool_call(&task.id, &call).await;
+            }
+
+            let result = validator.validate_coherence(&task, &call).await;
+            assert!(
+                matches!(result, IntentCoherenceResult::Suspicious { .. }),
+                "read-only intent {intent:?} must not hard-reject, got {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_intent_loop_mutating_variants_hard_reject() {
+        // Side-effecting intents (Write/Execute/Message/Broadcast/Delegate/
+        // Escalate) must hard-reject on the 3rd identical call — small models
+        // routinely retry these after soft denial and burn tokens.
+        let mutating_variants = [
+            IntentType::Write,
+            IntentType::Execute,
+            IntentType::Message,
+            IntentType::Broadcast,
+            IntentType::Delegate,
+            IntentType::Escalate,
+        ];
+
+        for intent in mutating_variants {
+            let validator = IntentValidator::new();
+            let task = make_task();
+            let call = make_tool_call("some-tool", intent, serde_json::json!({"target": "x"}));
+
+            // 2 prior identical entries — current call is the 3rd.
+            validator.record_tool_call(&task.id, &call).await;
+            validator.record_tool_call(&task.id, &call).await;
+
+            let result = validator.validate_coherence(&task, &call).await;
+            assert!(
+                matches!(result, IntentCoherenceResult::Rejected { .. }),
+                "mutating intent {intent:?} must hard-reject on 3rd identical call, got {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_intent_loop_rejects_on_third_identical_call() {
+        let validator = IntentValidator::new();
+        let task = make_task();
+        let call = make_tool_call(
+            "agent-message",
+            IntentType::Message,
+            serde_json::json!({"to": "ghost", "body": "hi"}),
+        );
+
+        // 2 prior identical history entries — current is the 3rd identical call.
+        validator.record_tool_call(&task.id, &call).await;
+        validator.record_tool_call(&task.id, &call).await;
+
+        let result = validator.validate_coherence(&task, &call).await;
+        assert!(
+            matches!(result, IntentCoherenceResult::Rejected { .. }),
+            "3rd identical call must be rejected, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_intent_loop_suspicious_on_second_identical_call() {
+        let validator = IntentValidator::new();
+        let task = make_task();
+        let call = make_tool_call(
+            "agent-message",
+            IntentType::Message,
+            serde_json::json!({"to": "ghost", "body": "hi"}),
+        );
+
+        // 1 prior identical entry — current is the 2nd identical call.
+        validator.record_tool_call(&task.id, &call).await;
+
+        let result = validator.validate_coherence(&task, &call).await;
+        assert!(
+            matches!(result, IntentCoherenceResult::Suspicious { .. }),
+            "2nd identical call must be suspicious, got {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -466,5 +637,39 @@ mod tests {
         validator.remove_task(&task.id).await;
 
         assert!(validator.task_history.read().await.get(&task.id).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_increment_reject_count_per_tool() {
+        let validator = IntentValidator::new();
+        let task = make_task();
+
+        assert_eq!(validator.increment_reject_count(&task.id, "echo").await, 1);
+        assert_eq!(validator.increment_reject_count(&task.id, "echo").await, 2);
+        assert_eq!(validator.increment_reject_count(&task.id, "other").await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_take_force_end_turn_consumes_flag() {
+        let validator = IntentValidator::new();
+        let task = make_task();
+
+        assert!(!validator.take_force_end_turn(&task.id).await);
+        validator.mark_force_end_turn(&task.id).await;
+        assert!(validator.take_force_end_turn(&task.id).await);
+        assert!(!validator.take_force_end_turn(&task.id).await);
+    }
+
+    #[tokio::test]
+    async fn test_remove_task_clears_reject_state() {
+        let validator = IntentValidator::new();
+        let task = make_task();
+
+        validator.increment_reject_count(&task.id, "echo").await;
+        validator.mark_force_end_turn(&task.id).await;
+        validator.remove_task(&task.id).await;
+
+        assert!(validator.reject_counts.read().await.get(&task.id).is_none());
+        assert!(!validator.force_end_turn.read().await.contains(&task.id));
     }
 }

@@ -29,6 +29,8 @@ pub struct AnthropicCore {
     pricing: ModelPricing,
     retry_policy: crate::retry::RetryPolicy,
     circuit_breaker: crate::retry::CircuitBreaker,
+    /// Per-instance in-flight cap for outbound requests.
+    concurrency: Arc<tokio::sync::Semaphore>,
     image_resolver: Arc<dyn ImageResolver>,
 }
 
@@ -84,6 +86,7 @@ impl AnthropicCore {
             pricing,
             retry_policy: crate::retry::RetryPolicy::default(),
             circuit_breaker: crate::retry::CircuitBreaker::default(),
+            concurrency: crate::retry::default_concurrency_limiter(),
             image_resolver: Arc::new(NoopImageResolver),
         }
     }
@@ -314,6 +317,37 @@ impl AnthropicCore {
     }
 }
 
+/// Attach `cache_control: {type: ephemeral}` to the *last* content block of a
+/// message envelope. Anthropic accepts string or array `content`. For string
+/// content the message is rewritten as a single-element text array so the
+/// cache marker can ride on it.
+fn attach_cache_control_to_last_block(message: &mut Value) {
+    let Some(obj) = message.as_object_mut() else {
+        return;
+    };
+    match obj.get_mut("content") {
+        Some(Value::Array(blocks)) => {
+            if let Some(last) = blocks.last_mut() {
+                if let Some(block_obj) = last.as_object_mut() {
+                    block_obj.insert("cache_control".into(), json!({ "type": "ephemeral" }));
+                }
+            }
+        }
+        Some(Value::String(s)) => {
+            let text = std::mem::take(s);
+            obj.insert(
+                "content".into(),
+                json!([{
+                    "type": "text",
+                    "text": text,
+                    "cache_control": { "type": "ephemeral" },
+                }]),
+            );
+        }
+        _ => {}
+    }
+}
+
 #[async_trait]
 impl LLMCore for AnthropicCore {
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
@@ -358,7 +392,7 @@ impl LLMCore for AnthropicCore {
         )
         .await;
         let context = &prepared;
-        let messages = self.format_messages(context);
+        let mut messages = self.format_messages(context);
         let active = context.active_entries();
         let image_count = active
             .iter()
@@ -423,6 +457,16 @@ impl LLMCore for AnthropicCore {
             json!(system_prompt)
         };
 
+        // Prompt caching breakpoint #3: stable conversation prefix. Mark the
+        // *next-to-last* message so the prior turn's content hits cache on the
+        // following request, while the new turn (which inevitably differs) is
+        // free to grow without invalidating the cache. Anthropic supports up
+        // to 4 breakpoints; we use #1 system, #2 tools (set below), #3 here.
+        if options.enable_prompt_caching && messages.len() >= 2 {
+            let idx = messages.len() - 2;
+            attach_cache_control_to_last_block(&mut messages[idx]);
+        }
+
         let mut body = json!({
             "model": self.model,
             "max_tokens": max_tokens,
@@ -441,7 +485,17 @@ impl LLMCore for AnthropicCore {
         }
 
         if !anthropic_tools.is_empty() {
-            body["tools"] = Value::Array(anthropic_tools);
+            // Prompt caching breakpoint #2: tools array. Marking the last tool
+            // definition with `cache_control` caches the entire tools block as a
+            // unit. Whenever the tool registry changes the cache invalidates;
+            // otherwise every multi-turn request reads tools from cache.
+            let mut tools_array = anthropic_tools;
+            if options.enable_prompt_caching {
+                if let Some(last) = tools_array.last_mut() {
+                    last["cache_control"] = json!({ "type": "ephemeral" });
+                }
+            }
+            body["tools"] = Value::Array(tools_array);
             // Apply tool_choice override (Anthropic format).
             match &options.tool_choice {
                 Some(ToolChoice::Required) => {
@@ -480,6 +534,7 @@ impl LLMCore for AnthropicCore {
             "anthropic",
             &self.retry_policy,
             &self.circuit_breaker,
+            Some(&self.concurrency),
             || {
                 let mut req = self
                     .client
@@ -622,7 +677,7 @@ impl LLMCore for AnthropicCore {
         )
         .await;
         let context = &prepared;
-        let messages = self.format_messages(context);
+        let mut messages = self.format_messages(context);
         let active = context.active_entries();
         let image_count = active
             .iter()
@@ -637,15 +692,38 @@ impl LLMCore for AnthropicCore {
 
         let (anthropic_tools, intent_by_tool) = Self::build_anthropic_tools(tools);
 
+        // Streaming path applies the same prompt-caching breakpoints used by
+        // the non-streaming path: system block, last tool, and conversation
+        // prefix (next-to-last message). The streaming trait method does not
+        // receive `InferenceOptions`, so caching is always on for Anthropic
+        // streams — matches the kernel's policy of always-on Anthropic caching.
+        let system_value = if !system_prompt.is_empty() {
+            json!([{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": { "type": "ephemeral" },
+            }])
+        } else {
+            Value::Null
+        };
+        if messages.len() >= 2 {
+            let idx = messages.len() - 2;
+            attach_cache_control_to_last_block(&mut messages[idx]);
+        }
+
         let mut body = json!({
             "model": self.model,
             "max_tokens": self.max_tokens,
-            "system": system_prompt,
+            "system": system_value,
             "messages": messages,
             "stream": true,
         });
         if !anthropic_tools.is_empty() {
-            body["tools"] = Value::Array(anthropic_tools);
+            let mut tools_array = anthropic_tools;
+            if let Some(last) = tools_array.last_mut() {
+                last["cache_control"] = json!({ "type": "ephemeral" });
+            }
+            body["tools"] = Value::Array(tools_array);
             body["tool_choice"] = json!({"type": "auto"});
         }
 
@@ -1072,6 +1150,7 @@ mod tests {
             fallbacks: vec![],
             risk_class: Default::default(),
             usage_hints: None,
+            tags: vec![],
         };
 
         let (tools, intent_map) =
@@ -1279,6 +1358,35 @@ mod tests {
         assert_eq!(content[0]["type"], "tool_result");
         assert_eq!(content[1]["type"], "text");
         assert_eq!(content[1]["text"], "Tool Result:\nlegacy result");
+    }
+
+    #[test]
+    fn test_attach_cache_control_to_array_content() {
+        let mut msg = json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "hello" },
+                { "type": "text", "text": "world" }
+            ]
+        });
+        attach_cache_control_to_last_block(&mut msg);
+        let blocks = msg["content"].as_array().unwrap();
+        assert!(blocks[0].get("cache_control").is_none());
+        assert_eq!(blocks[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn test_attach_cache_control_to_string_content_rewrites_to_array() {
+        let mut msg = json!({
+            "role": "user",
+            "content": "hello"
+        });
+        attach_cache_control_to_last_block(&mut msg);
+        let blocks = msg["content"].as_array().expect("rewritten to array");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "hello");
+        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
     }
 
     /// Test the stop reason mapping used in infer_with_tools.

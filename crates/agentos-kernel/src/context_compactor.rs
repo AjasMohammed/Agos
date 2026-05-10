@@ -1,8 +1,18 @@
-use agentos_types::{ContentPart, ContextCategory, ContextEntry, ContextPartition, ContextRole, TaskID};
+use agentos_types::{
+    ContentPart, ContextCategory, ContextEntry, ContextPartition, ContextRole, TaskID,
+};
 use std::sync::Arc;
+use std::time::Duration;
 
 const ROLLING_SUMMARY_PREFIX: &str = "[ROLLING TASK SUMMARY]";
 const LLM_INPUT_MAX_CHARS: usize = 8_000;
+
+/// Hard upper bound on how long the compactor will block on a single
+/// LLM summarization round. Without this guard a rate-limited or hung
+/// model can stall the iteration loop on its full inference timeout
+/// (often 60s+). On expiry the extractive heuristic still runs so the
+/// rolling summary is always produced (review R1 finding #3).
+const LLM_SUMMARIZATION_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct CompactionOutcome {
     pub compressed_entries: usize,
@@ -78,14 +88,13 @@ impl ContextCompactor {
 
         let (fresh_summary, llm_summarized) = match llm {
             Some(adapter) => {
-                match crate::context::ContextManager::summarize_entries_llm(
+                let llm_call = crate::context::ContextManager::summarize_entries_llm(
                     &extracted,
                     adapter.as_ref(),
                     LLM_INPUT_MAX_CHARS,
-                )
-                .await
-                {
-                    Ok((summary, _)) => {
+                );
+                match tokio::time::timeout(LLM_SUMMARIZATION_TIMEOUT, llm_call).await {
+                    Ok(Ok((summary, _))) => {
                         let trimmed = if summary.chars().count() > self.max_summary_chars {
                             let mut t: String =
                                 summary.chars().take(self.max_summary_chars).collect();
@@ -96,11 +105,22 @@ impl ContextCompactor {
                         };
                         (trimmed, true)
                     }
-                    Err(err) => {
+                    Ok(Err(err)) => {
                         tracing::warn!(
                             task_id = %task_id,
                             error = %err,
                             "LLM-based context compaction failed; falling back to extractive heuristic"
+                        );
+                        (
+                            Self::summarize_entries(&extracted, self.max_summary_chars),
+                            false,
+                        )
+                    }
+                    Err(_elapsed) => {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            timeout_secs = LLM_SUMMARIZATION_TIMEOUT.as_secs(),
+                            "LLM-based context compaction timed out; falling back to extractive heuristic"
                         );
                         (
                             Self::summarize_entries(&extracted, self.max_summary_chars),

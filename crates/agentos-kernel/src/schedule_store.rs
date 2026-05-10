@@ -6,7 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-const LATEST_MIGRATION_VERSION: i64 = 4;
+const LATEST_MIGRATION_VERSION: i64 = 6;
 
 /// Persistent storage for schedule primitives (`ScheduledJob`, `OnceJob`,
 /// `TimerEntry`) and per-fire `ScheduledRun` records.
@@ -65,6 +65,8 @@ impl ScheduleStore {
                 .context("Serialize schedule permissions")?;
             let delivery_json =
                 serde_json::to_string(&job.delivery).context("Serialize schedule delivery")?;
+            let action_json =
+                serde_json::to_string(&job.action).context("Serialize schedule action")?;
             let creator_id = job
                 .creator_agent_id
                 .map(|id| id.to_string())
@@ -75,8 +77,8 @@ impl ScheduleStore {
                         id, name, cron_expression, timezone, agent_name,
                         task_prompt, permissions_json, state, created_at,
                         last_run_at, next_run_at, run_count, max_retries, retry_count,
-                        creator_agent_id, delivery_mode_json
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                        creator_agent_id, delivery_mode_json, action_json
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                     ON CONFLICT(id) DO UPDATE SET
                         name = excluded.name,
                         cron_expression = excluded.cron_expression,
@@ -91,14 +93,20 @@ impl ScheduleStore {
                         max_retries = excluded.max_retries,
                         retry_count = excluded.retry_count,
                         creator_agent_id = excluded.creator_agent_id,
-                        delivery_mode_json = excluded.delivery_mode_json",
+                        delivery_mode_json = excluded.delivery_mode_json,
+                        action_json = excluded.action_json",
                     params![
                         job.id.to_string(),
                         job.name,
                         job.cron_expression,
                         job.timezone,
                         job.agent_name,
-                        job.task_prompt,
+                        // Recompute the legacy `task_prompt` shadow on every
+                        // write so it cannot drift from the source-of-truth
+                        // `action` field. Without this, callers that mutate
+                        // `job.action` but forget to update `job.task_prompt`
+                        // produce rows where the two disagree (review R1 #5).
+                        agentos_types::ScheduledJob::shadow_task_prompt(&job.action),
                         permissions_json,
                         schedule_state_str(&job.state),
                         job.created_at.to_rfc3339(),
@@ -109,6 +117,7 @@ impl ScheduleStore {
                         i64::from(job.retry_count),
                         creator_id,
                         delivery_json,
+                        action_json,
                     ],
                 )
                 .context("Failed to upsert schedule row")?;
@@ -149,7 +158,8 @@ impl ScheduleStore {
                     "SELECT id, name, cron_expression, timezone, agent_name,
                             task_prompt, permissions_json, state, created_at,
                             last_run_at, next_run_at, run_count, max_retries,
-                            retry_count, creator_agent_id, delivery_mode_json
+                            retry_count, creator_agent_id, delivery_mode_json,
+                            action_json
                      FROM schedules",
                 )
                 .context("Failed to prepare schedule list query")?;
@@ -176,6 +186,8 @@ impl ScheduleStore {
                 .map_err(|_| anyhow!("Schedule DB mutex poisoned"))?;
             let delivery_json =
                 serde_json::to_string(&job.delivery).context("Serialize once-job delivery")?;
+            let action_json =
+                serde_json::to_string(&job.action).context("Serialize once-job action")?;
             let creator_id = job
                 .creator_agent_id
                 .map(|id| id.to_string())
@@ -184,8 +196,8 @@ impl ScheduleStore {
                 .execute(
                     "INSERT INTO once_jobs (
                         id, name, agent_name, task_prompt, fire_at,
-                        created_at, state, creator_agent_id, delivery_mode_json
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                        created_at, state, creator_agent_id, delivery_mode_json, action_json
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                     ON CONFLICT(id) DO UPDATE SET
                         name = excluded.name,
                         agent_name = excluded.agent_name,
@@ -193,17 +205,24 @@ impl ScheduleStore {
                         fire_at = excluded.fire_at,
                         state = excluded.state,
                         creator_agent_id = excluded.creator_agent_id,
-                        delivery_mode_json = excluded.delivery_mode_json",
+                        delivery_mode_json = excluded.delivery_mode_json,
+                        action_json = excluded.action_json",
                     params![
                         job.id.to_string(),
                         job.name,
                         job.agent_name,
-                        job.task_prompt,
+                        // Same shadow-recompute discipline as
+                        // `upsert_schedule` — the source of truth is
+                        // `job.action`; `task_prompt` is a derived
+                        // legacy mirror that must be kept in sync at
+                        // write time (review R1 #5).
+                        agentos_types::OnceJob::shadow_task_prompt(&job.action),
                         job.fire_at.to_rfc3339(),
                         job.created_at.to_rfc3339(),
                         once_state_str(&job.state),
                         creator_id,
                         delivery_json,
+                        action_json,
                     ],
                 )
                 .context("Failed to upsert once-job row")?;
@@ -242,7 +261,8 @@ impl ScheduleStore {
             let mut stmt = guard
                 .prepare(
                     "SELECT id, name, agent_name, task_prompt, fire_at,
-                            created_at, state, creator_agent_id, delivery_mode_json
+                            created_at, state, creator_agent_id, delivery_mode_json,
+                            action_json
                      FROM once_jobs",
                 )
                 .context("Failed to prepare once-job list query")?;
@@ -439,6 +459,43 @@ impl ScheduleStore {
         .context("Run read task failed")?
     }
 
+    /// Find the most-recent `Running` run for a given task. Used by the task
+    /// completion path to transition the run to Complete/Failed without scanning
+    /// all runs for a schedule.
+    pub async fn find_running_run_for_task(
+        &self,
+        task_id: TaskID,
+    ) -> anyhow::Result<Option<ScheduledRun>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Option<ScheduledRun>> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Schedule DB mutex poisoned"))?;
+            let mut stmt = guard
+                .prepare(
+                    "SELECT run_id, parent_kind, parent_id, creator_agent_id, task_id,
+                            state, started_at, completed_at, result_json, error,
+                            tool_calls_json, delivered, delivered_at, delivery_error,
+                            delivery_depth, delivery_mode_json, parent_name
+                     FROM scheduled_runs
+                     WHERE task_id = ?1 AND state = 'running'
+                     ORDER BY started_at DESC
+                     LIMIT 1",
+                )
+                .context("Failed to prepare running-run query")?;
+            let mut rows = stmt
+                .query_map(params![task_id.to_string()], Self::decode_run_row)
+                .context("Failed to query running runs")?;
+            match rows.next() {
+                Some(Ok(r)) => Ok(Some(r)),
+                Some(Err(e)) => Err(anyhow!("Failed to decode running-run row: {}", e)),
+                None => Ok(None),
+            }
+        })
+        .await
+        .context("Running-run lookup task failed")?
+    }
+
     pub async fn list_runs_for_schedule(
         &self,
         parent_id: ScheduleID,
@@ -513,6 +570,39 @@ impl ScheduleStore {
         })
         .await
         .context("Run list task failed")?
+    }
+
+    /// Mark `Running` runs whose `started_at` is older than `max_age` as
+    /// `Failed` with a "kernel restart / orphaned" error. Called on kernel
+    /// boot to clean up runs that never transitioned because the kernel
+    /// crashed or shut down mid-execution. Without this, zombie Running rows
+    /// accumulate forever (they cannot be pruned by `prune_runs_older_than`,
+    /// which excludes rows with NULL `completed_at`).
+    pub async fn mark_orphaned_runs_failed(
+        &self,
+        max_age: chrono::Duration,
+    ) -> anyhow::Result<usize> {
+        let conn = self.conn.clone();
+        let cutoff = (chrono::Utc::now() - max_age).to_rfc3339();
+        let now = chrono::Utc::now().to_rfc3339();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Schedule DB mutex poisoned"))?;
+            let updated = guard
+                .execute(
+                    "UPDATE scheduled_runs
+                     SET state = 'failed',
+                         completed_at = ?1,
+                         error = COALESCE(error, 'kernel restart: run was orphaned')
+                     WHERE state = 'running' AND started_at < ?2",
+                    params![now, cutoff],
+                )
+                .context("Failed to mark orphaned runs as failed")?;
+            Ok(updated)
+        })
+        .await
+        .context("Orphaned-run sweep task failed")?
     }
 
     /// Delete `scheduled_runs` rows whose `completed_at` is older than
@@ -707,6 +797,38 @@ impl ScheduleStore {
             .context("Failed to run schedule schema migration v4")?;
         }
 
+        if version < 5 {
+            // Add action_json to schedules + once_jobs so the typed
+            // OnceJobAction (RunTask / NotifyUser / RunTool) round-trips through
+            // SQLite. Existing rows default to NULL; the decoder reconstructs
+            // RunTask from the legacy task_prompt column when action_json is
+            // absent (forward-compat with v4 snapshots).
+            conn.execute_batch(
+                "ALTER TABLE schedules ADD COLUMN action_json TEXT;
+                 ALTER TABLE once_jobs ADD COLUMN action_json TEXT;
+
+                 INSERT INTO schedule_meta(key, value)
+                 VALUES ('schema_version', '5')
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+            )
+            .context("Failed to run schedule schema migration v5")?;
+        }
+
+        if version < 6 {
+            // Drop the long-deprecated `output_destination` column on
+            // `schedules`. Never read or written by current code paths;
+            // retained only for v1→v2 upgrade compat. SQLite supports
+            // ALTER TABLE DROP COLUMN since 3.35 (March 2021).
+            conn.execute_batch(
+                "ALTER TABLE schedules DROP COLUMN output_destination;
+
+                 INSERT INTO schedule_meta(key, value)
+                 VALUES ('schema_version', '6')
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+            )
+            .context("Failed to run schedule schema migration v6")?;
+        }
+
         Ok(())
     }
 
@@ -715,6 +837,7 @@ impl ScheduleStore {
         //       5=task_prompt 6=permissions_json 7=state 8=created_at
         //       9=last_run_at 10=next_run_at 11=run_count 12=max_retries
         //       13=retry_count 14=creator_agent_id 15=delivery_mode_json
+        //       16=action_json (v5+, NULL on legacy rows)
         let id = parse_id::<ScheduleID>(row.get::<_, String>(0)?, "id").map_err(to_sql_error)?;
         let timezone: Option<String> = row.get(3)?;
         let permissions_json: String = row.get(6)?;
@@ -735,6 +858,16 @@ impl ScheduleStore {
         } else {
             serde_json::from_str(&delivery_json).map_err(|e| to_sql_error(anyhow!(e)))?
         };
+        let task_prompt: String = row.get(5)?;
+        let action_json: Option<String> = row.get(16)?;
+        let action = match action_json {
+            Some(s) if !s.is_empty() => {
+                serde_json::from_str(&s).map_err(|e| to_sql_error(anyhow!(e)))?
+            }
+            _ => agentos_types::schedule::OnceJobAction::RunTask {
+                prompt: task_prompt.clone(),
+            },
+        };
         Ok(ScheduledJob {
             id,
             name: row.get(1)?,
@@ -742,7 +875,8 @@ impl ScheduleStore {
             timezone,
             creator_agent_id,
             agent_name: row.get(4)?,
-            task_prompt: row.get(5)?,
+            action,
+            task_prompt,
             permissions,
             state,
             created_at: parse_ts(row.get::<_, String>(8)?, "created_at").map_err(to_sql_error)?,
@@ -753,6 +887,10 @@ impl ScheduleStore {
             run_count: row.get::<_, i64>(11)? as u64,
             max_retries: row.get::<_, i64>(12)? as u32,
             retry_count: row.get::<_, i64>(13)? as u32,
+            // Legacy schema has no `output_destination` column; default
+            // to None for back-compat. New schedules use the explicit
+            // setter on the in-memory job.
+            output_destination: None,
             delivery,
         })
     }
@@ -760,6 +898,7 @@ impl ScheduleStore {
     fn decode_once_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OnceJob> {
         // cols: 0=id 1=name 2=agent_name 3=task_prompt 4=fire_at
         //       5=created_at 6=state 7=creator_agent_id 8=delivery_mode_json
+        //       9=action_json (v5+, NULL on legacy rows)
         let id = parse_id::<ScheduleID>(row.get::<_, String>(0)?, "id").map_err(to_sql_error)?;
         let state_str: String = row.get(6)?;
         let state = once_state_from_str(&state_str)
@@ -776,12 +915,23 @@ impl ScheduleStore {
         } else {
             serde_json::from_str(&delivery_json).map_err(|e| to_sql_error(anyhow!(e)))?
         };
+        let task_prompt: String = row.get(3)?;
+        let action_json: Option<String> = row.get(9)?;
+        let action = match action_json {
+            Some(s) if !s.is_empty() => {
+                serde_json::from_str(&s).map_err(|e| to_sql_error(anyhow!(e)))?
+            }
+            _ => agentos_types::schedule::OnceJobAction::RunTask {
+                prompt: task_prompt.clone(),
+            },
+        };
         Ok(OnceJob {
             id,
             name: row.get(1)?,
             creator_agent_id,
             agent_name: row.get(2)?,
-            task_prompt: row.get(3)?,
+            action,
+            task_prompt,
             fire_at: parse_ts(row.get::<_, String>(4)?, "fire_at").map_err(to_sql_error)?,
             created_at: parse_ts(row.get::<_, String>(5)?, "created_at").map_err(to_sql_error)?,
             state,
@@ -995,6 +1145,10 @@ mod tests {
             max_retries: 3,
             retry_count: 0,
             creator_agent_id: None,
+            action: agentos_types::schedule::OnceJobAction::RunTask {
+                prompt: "summarize".into(),
+            },
+            output_destination: None,
             delivery: Default::default(),
         };
         store.upsert_schedule(job.clone()).await.unwrap();
@@ -1019,6 +1173,9 @@ mod tests {
             creator_agent_id: None,
             agent_name: "runner".into(),
             task_prompt: "ping".into(),
+            action: agentos_types::schedule::OnceJobAction::RunTask {
+                prompt: "ping".into(),
+            },
             fire_at: chrono::Utc::now() + chrono::Duration::minutes(5),
             created_at: chrono::Utc::now(),
             state: OnceJobState::Pending,
@@ -1221,6 +1378,10 @@ mod tests {
             max_retries: 3,
             retry_count: 0,
             creator_agent_id: None,
+            action: agentos_types::schedule::OnceJobAction::RunTask {
+                prompt: "hello".into(),
+            },
+            output_destination: None,
             delivery: Default::default(),
         };
         store.upsert_schedule(job.clone()).await.unwrap();

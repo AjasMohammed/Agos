@@ -70,6 +70,7 @@ fn make_blocked_manifest() -> ToolManifest {
         fallbacks: vec![],
         risk_class: Default::default(),
         usage_hints: None,
+        tags: vec![],
     }
 }
 
@@ -110,6 +111,7 @@ fn make_community_manifest_with_sig(pubkey_hex: &str, sig_hex: &str) -> ToolMani
         fallbacks: vec![],
         risk_class: Default::default(),
         usage_hints: None,
+        tags: vec![],
     }
 }
 

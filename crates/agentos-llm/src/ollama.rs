@@ -25,6 +25,8 @@ pub struct OllamaCore {
     pricing: ModelPricing,
     retry_policy: crate::retry::RetryPolicy,
     circuit_breaker: crate::retry::CircuitBreaker,
+    /// Per-instance in-flight cap for outbound requests.
+    concurrency: Arc<tokio::sync::Semaphore>,
     image_resolver: Arc<dyn ImageResolver>,
     /// Model IDs that accept `images: [...]` on user messages (e.g. `llava`). Empty → no vision.
     vision_models: Vec<String>,
@@ -81,6 +83,7 @@ impl OllamaCore {
             pricing,
             retry_policy: crate::retry::RetryPolicy::default(),
             circuit_breaker: crate::retry::CircuitBreaker::default(),
+            concurrency: crate::retry::default_concurrency_limiter(),
             image_resolver: Arc::new(NoopImageResolver),
             vision_models: Vec::new(),
         }
@@ -278,6 +281,7 @@ impl OllamaCore {
             "ollama",
             &self.retry_policy,
             &self.circuit_breaker,
+            Some(&self.concurrency),
             || self.client.post(&url).json(&request),
         )
         .await?;
@@ -516,6 +520,43 @@ impl OllamaCore {
     }
 }
 
+/// Translate raw Ollama HTTP error responses into actionable messages.
+///
+/// `gemma4:31b-cloud` and other Ollama Cloud models return 403 with a
+/// `subscription`/`upgrade` body when the user is on the free tier. The default
+/// `API Error 403: {...json...}` message buries that signal, so onboarding
+/// prompts surface a generic "Task failed" without telling the user that the
+/// model itself is paywalled. This helper detects the pattern and returns a
+/// short, copy-pasteable hint.
+fn classify_api_error(status: reqwest::StatusCode, body: &str) -> String {
+    let body_lc = body.to_ascii_lowercase();
+    if status.as_u16() == 403 && (body_lc.contains("subscription") || body_lc.contains("upgrade")) {
+        return format!(
+            "Ollama Cloud model requires a paid subscription. \
+             Either subscribe at https://ollama.com/upgrade, \
+             switch to a local model in `agentos config set llm.model <name>`, \
+             or pick another provider. (raw: {})",
+            body
+        );
+    }
+    if status.as_u16() == 401 {
+        return format!(
+            "Ollama rejected the request as unauthenticated. \
+             Verify the API key / host setting in `config/default.toml`. (raw: {})",
+            body
+        );
+    }
+    if status.as_u16() == 404 && body_lc.contains("model") {
+        return format!(
+            "Ollama reports the model is not installed. \
+             Run `ollama pull <model>` or pick an installed model with \
+             `agentos config set llm.model <name>`. (raw: {})",
+            body
+        );
+    }
+    format!("API Error {}: {}", status, body)
+}
+
 // --- Ollama REST API types (private) ---
 
 #[derive(Debug, Serialize)]
@@ -695,10 +736,7 @@ impl LLMCore for OllamaCore {
                 function: OllamaRequestToolFunction {
                     name: t.manifest.name.clone(),
                     description: t.manifest.description.clone(),
-                    parameters: t
-                        .input_schema
-                        .clone()
-                        .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}})),
+                    parameters: tool_helpers::normalize_tool_input_schema(t.input_schema.as_ref()),
                 },
             })
             .collect();
@@ -817,9 +855,29 @@ impl LLMCore for OllamaCore {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            // Diagnostic: Ollama 400 on tool schema → dump tool list to /tmp
+            // so we can pinpoint the malformed schema (often from MCP servers).
+            if body.contains("tool schema") || body.contains("not of type") {
+                let dump = serde_json::json!({
+                    "model": request.model,
+                    "tool_count": request.tools.len(),
+                    "tools": request.tools.iter().map(|t| serde_json::json!({
+                        "name": t.function.name,
+                        "parameters": t.function.parameters,
+                    })).collect::<Vec<_>>(),
+                });
+                let path = format!(
+                    "/tmp/agentos-ollama-bad-tools-{}.json",
+                    chrono::Utc::now().timestamp()
+                );
+                if let Ok(s) = serde_json::to_string_pretty(&dump) {
+                    let _ = std::fs::write(&path, s);
+                    tracing::error!(path = %path, "Dumped offending Ollama tool list");
+                }
+            }
             let err = AgentOSError::LLMError {
                 provider: "ollama".to_string(),
-                reason: format!("API Error {}: {}", status, body),
+                reason: classify_api_error(status, &body),
             };
             let _ = tx.send(InferenceEvent::Error(err.to_string())).await;
             return Err(err);
@@ -968,10 +1026,7 @@ impl LLMCore for OllamaCore {
                 function: OllamaRequestToolFunction {
                     name: t.manifest.name.clone(),
                     description: t.manifest.description.clone(),
-                    parameters: t
-                        .input_schema
-                        .clone()
-                        .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}})),
+                    parameters: tool_helpers::normalize_tool_input_schema(t.input_schema.as_ref()),
                 },
             })
             .collect();
@@ -1010,9 +1065,29 @@ impl LLMCore for OllamaCore {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            // Diagnostic: Ollama 400 on tool schema → dump tool list to /tmp
+            // so we can pinpoint the malformed schema (often from MCP servers).
+            if body.contains("tool schema") || body.contains("not of type") {
+                let dump = serde_json::json!({
+                    "model": request.model,
+                    "tool_count": request.tools.len(),
+                    "tools": request.tools.iter().map(|t| serde_json::json!({
+                        "name": t.function.name,
+                        "parameters": t.function.parameters,
+                    })).collect::<Vec<_>>(),
+                });
+                let path = format!(
+                    "/tmp/agentos-ollama-bad-tools-{}.json",
+                    chrono::Utc::now().timestamp()
+                );
+                if let Ok(s) = serde_json::to_string_pretty(&dump) {
+                    let _ = std::fs::write(&path, s);
+                    tracing::error!(path = %path, "Dumped offending Ollama tool list");
+                }
+            }
             let err = AgentOSError::LLMError {
                 provider: "ollama".to_string(),
-                reason: format!("API Error {}: {}", status, body),
+                reason: classify_api_error(status, &body),
             };
             let _ = tx.send(InferenceEvent::Error(err.to_string())).await;
             return Err(err);
@@ -1152,6 +1227,45 @@ impl LLMCore for OllamaCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_classify_api_error_subscription() {
+        let body = r#"{"error":"this model requires a subscription, upgrade for access: https://ollama.com/upgrade"}"#;
+        let msg = classify_api_error(reqwest::StatusCode::FORBIDDEN, body);
+        assert!(msg.contains("paid subscription"));
+        assert!(msg.contains("ollama.com/upgrade"));
+    }
+
+    #[test]
+    fn test_classify_api_error_unauth() {
+        let msg = classify_api_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "{\"error\":\"bad token\"}",
+        );
+        assert!(msg.contains("unauthenticated"));
+    }
+
+    #[test]
+    fn test_classify_api_error_model_missing() {
+        let body = r#"{"error":"model 'foo' not found, try pulling it first"}"#;
+        let msg = classify_api_error(reqwest::StatusCode::NOT_FOUND, body);
+        assert!(msg.contains("not installed"));
+    }
+
+    #[test]
+    fn test_classify_api_error_falls_back_to_raw() {
+        let msg = classify_api_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom");
+        assert!(msg.starts_with("API Error 500"));
+        assert!(msg.contains("boom"));
+    }
+
+    #[test]
+    fn test_classify_api_error_403_without_subscription_falls_back() {
+        // 403 without a subscription / upgrade hint should not be rewritten —
+        // we only want to translate the specific Ollama Cloud paywall pattern.
+        let msg = classify_api_error(reqwest::StatusCode::FORBIDDEN, "{\"error\":\"forbidden\"}");
+        assert!(msg.starts_with("API Error 403"));
+    }
 
     #[test]
     fn test_context_to_messages_conversion() {

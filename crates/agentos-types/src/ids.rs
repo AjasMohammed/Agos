@@ -61,3 +61,5 @@ define_id!(NotificationID);
 define_id!(ChannelInstanceID);
 define_id!(WebhookEndpointID);
 define_id!(FileID);
+define_id!(AgentInboxEntryID);
+define_id!(AgentMessageEntryID);

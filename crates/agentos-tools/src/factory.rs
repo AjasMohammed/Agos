@@ -19,6 +19,7 @@ const STATELESS_TOOL_NAMES: &[&str] = &[
     "datetime",
     "think",
     "file-reader",
+    "user-file-reader",
     "file-writer",
     "file-editor",
     "file-glob",
@@ -78,6 +79,7 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "task-status",
     "task-list",
     "shell-exec",
+    "host-package-install",
     "escalation-status",
     "notify-user",
     "channel-send",
@@ -114,11 +116,40 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "cancel-timer",
     "list-timers",
     "schedule-once",
+    "schedule-recurring",
+    "schedule-control",
     "cancel-once-job",
     "list-once-jobs",
+    // Agent inbox + agent-to-agent message inboxes — kernel-context, mutate
+    // SQLite state owned by the kernel; never sandboxed.
+    "agent-inbox-list",
+    "agent-inbox-read",
+    "agent-inbox-dismiss",
+    "agent-messages-list",
+    "agent-messages-read",
+    "agent-messages-dismiss",
 ];
 
 const SPECIAL_CONTEXT_TOOL_NAMES: &[&str] = &["agent-manual", "agent-self"];
+
+/// Discovery / introspection tools whose calls should NOT be replayed into the
+/// LLM history on subsequent chat turns. They are scaffolding the model uses
+/// to find real tools; replaying them just refloods the context with
+/// already-explored manuals. Real action tool calls (e.g. `gmail_send`,
+/// `shell-exec`) are replayed so the model remembers what it has done.
+///
+/// Also used by the kernel-side meta-tool streak guard to detect
+/// tool-discovery loops: a streak of 4+ consecutive iterations where
+/// every call is one of these names triggers an abort.
+pub const META_TOOL_NAMES: &[&str] = &[
+    "agent-manual",
+    "agent-self",
+    "search-tools",
+    "describe-tool",
+    "list-tools",
+    "tool-detail",
+    "tool-info",
+];
 
 /// Default tool inventory exposed inline to the LLM in the chat (webui) flow.
 ///
@@ -131,6 +162,9 @@ pub const CHAT_DEFAULT_TOOL_NAMES: &[&str] = &[
     "agent-manual",
     "agent-self",
     "agent-list",
+    "list-tools",
+    "search-tools",
+    "describe-tool",
     // Filesystem
     "file-reader",
     "file-writer",
@@ -150,6 +184,9 @@ pub const CHAT_DEFAULT_TOOL_NAMES: &[&str] = &[
     "procedure-search",
     "context-memory-read",
     "context-memory-update",
+    // Network — basic web access so chat agents can fetch live info.
+    "web-search",
+    "web-fetch",
     // Utility
     "datetime",
     "think",
@@ -158,8 +195,30 @@ pub const CHAT_DEFAULT_TOOL_NAMES: &[&str] = &[
     "notify-user",
     "ask-user",
     "agent-message",
+    "schedule-recurring",
+    "schedule-control",
+    "list-my-schedules",
+    "get-schedule-runs",
+    // Agent inbox — async callbacks (scheduled tasks, sub-agents, events)
+    "agent-inbox-list",
+    "agent-inbox-read",
+    "agent-inbox-dismiss",
+    // Agent direct messages
+    "agent-messages-list",
+    "agent-messages-read",
+    "agent-messages-dismiss",
     // Shell (sandboxed)
     "shell-exec",
+    // Host introspection — system_prompt.rs steers the LLM toward these as
+    // alternatives to running `ps`/`netstat`/`mount`/`systemctl` inside the
+    // shell-exec sandbox (which sees an isolated PID + network namespace).
+    "process-manager",
+    "network-monitor",
+    "network-sockets",
+    "system-mounts",
+    "system-open-files",
+    "system-services",
+    "hardware-info",
 ];
 
 /// True if `name` is part of the default chat tool inventory.
@@ -548,6 +607,30 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let result = build_single_tool("nonexistent", tmp.path()).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_host_introspection_tools_in_chat_default() {
+        // The system prompt's "Host Inspection — Tool Selection" block tells
+        // the LLM to call these tools instead of `shell-exec ps/netstat/...`.
+        // They must be in CHAT_DEFAULT_TOOL_NAMES, otherwise the chat agent
+        // gets `Tool not found` and falls back to the sandboxed shell whose
+        // PID/network namespaces hide the host.
+        for name in [
+            "process-manager",
+            "network-monitor",
+            "network-sockets",
+            "system-mounts",
+            "system-open-files",
+            "system-services",
+            "hardware-info",
+        ] {
+            assert!(
+                is_chat_default_tool(name),
+                "host introspection tool '{}' must be in CHAT_DEFAULT_TOOL_NAMES",
+                name
+            );
+        }
     }
 
     #[test]

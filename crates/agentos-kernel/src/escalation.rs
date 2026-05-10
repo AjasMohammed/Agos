@@ -4,7 +4,16 @@ use agentos_types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, RwLock};
+
+/// Outcome delivered on the approval resolution channel for a pending
+/// escalation. Used by the task executor to decide whether to retry the
+/// tool call (Approved) or surface a denial to the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionOutcome {
+    Approved,
+    Denied,
+}
 
 /// What should happen automatically when an escalation expires without human resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +66,19 @@ fn default_metadata() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }
 
+/// Notification sink invoked when a new escalation is created. Implementations
+/// fan an escalation out to a destination such as paired DM channels, an
+/// HTTP webhook, or any other operator-reachable transport.
+///
+/// Sinks are best-effort — failures are logged but do not block escalation
+/// creation. Each sink runs in its own `tokio::spawn` to keep the create
+/// path non-blocking.
+#[async_trait::async_trait]
+pub trait BroadcastSink: Send + Sync {
+    async fn broadcast(&self, escalation: &PendingEscalation);
+    fn name(&self) -> &'static str;
+}
+
 /// Manages escalation requests from agents to human operators.
 ///
 /// Stores pending escalations in memory (optionally backed by SQLite persistence).
@@ -73,6 +95,22 @@ pub struct EscalationManager {
     notify_url: RwLock<Option<String>>,
     /// Optional persistence backend for escalation durability across restarts.
     state_store: Option<Arc<KernelStateStore>>,
+    /// Out-of-band notification sinks (channels, push, etc.) invoked in
+    /// parallel with the legacy `notify_url` webhook on every new
+    /// escalation. Sinks are added at kernel boot via [`add_sink`].
+    broadcast_sinks: RwLock<Vec<Arc<dyn BroadcastSink>>>,
+    /// Pending oneshot senders for in-flight escalations awaiting human
+    /// resolution. `ApprovalHook` calls [`prepare_resolution`] to install
+    /// a pair, [`resolve`] consumes the sender to wake the waiting task,
+    /// and the matching receiver is taken by `task_executor` (via
+    /// [`take_resolution_receiver`]) so it can `.await` the outcome.
+    /// Cleared on resolve / sweeper-expiry, so the map is bounded by
+    /// the in-flight escalation count.
+    pending_resolution_tx: RwLock<HashMap<u64, oneshot::Sender<ResolutionOutcome>>>,
+    /// Receivers waiting for pickup by `task_executor`. Stored here so
+    /// the receiver lifetime is decoupled from the hook fire path —
+    /// hooks are sync-and-fire-and-forget; the awaiting happens later.
+    pending_resolution_rx: RwLock<HashMap<u64, oneshot::Receiver<ResolutionOutcome>>>,
 }
 
 impl EscalationManager {
@@ -87,7 +125,50 @@ impl EscalationManager {
             timeout_secs: DEFAULT_ESCALATION_TIMEOUT_SECS,
             notify_url: RwLock::new(None),
             state_store,
+            broadcast_sinks: RwLock::new(Vec::new()),
+            pending_resolution_tx: RwLock::new(HashMap::new()),
+            pending_resolution_rx: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Install a oneshot resolution channel for `escalation_id`. Returns
+    /// nothing — the sender stays inside the manager so [`resolve`] can
+    /// consume it; the receiver is parked under the same key for later
+    /// pickup via [`take_resolution_receiver`].
+    ///
+    /// Idempotent on duplicate calls: the second call replaces the prior
+    /// pair (which is fine because the old receiver was unobserved).
+    pub async fn prepare_resolution(&self, escalation_id: u64) {
+        let (tx, rx) = oneshot::channel();
+        self.pending_resolution_tx
+            .write()
+            .await
+            .insert(escalation_id, tx);
+        self.pending_resolution_rx
+            .write()
+            .await
+            .insert(escalation_id, rx);
+    }
+
+    /// Take the receiver for `escalation_id` so the caller can `.await`
+    /// the human resolution. Returns `None` if no resolution channel was
+    /// installed for this id (e.g. escalation created without a waiter,
+    /// or already taken by a competing executor).
+    pub async fn take_resolution_receiver(
+        &self,
+        escalation_id: u64,
+    ) -> Option<oneshot::Receiver<ResolutionOutcome>> {
+        self.pending_resolution_rx
+            .write()
+            .await
+            .remove(&escalation_id)
+    }
+
+    /// Register a broadcast sink. Sinks are invoked (concurrently) on every
+    /// new escalation. Order of registration is preserved but not guaranteed
+    /// to be the order of execution. Safe to call after kernel boot.
+    pub async fn add_sink(&self, sink: Arc<dyn BroadcastSink>) {
+        self.broadcast_sinks.write().await.push(sink);
     }
 
     async fn persist_escalation(&self, escalation: PendingEscalation) {
@@ -149,6 +230,78 @@ impl EscalationManager {
         trace_id: TraceID,
         auto_action: Option<AutoAction>,
     ) -> u64 {
+        let (id, _rx) = self
+            .create_escalation_internal(
+                task_id,
+                agent_id,
+                reason,
+                context_summary,
+                decision_point,
+                options,
+                urgency,
+                blocking,
+                trace_id,
+                auto_action,
+                false,
+            )
+            .await;
+        id
+    }
+
+    /// Create a new escalation and atomically install a resolution
+    /// channel before any broadcast sinks fan out. Use this when the
+    /// caller intends to park on the resolution receiver — the atomic
+    /// install closes the race in which a fast user resolution
+    /// (delivered via a sink that ran before the caller could call
+    /// [`prepare_resolution`]) would silently drop the wake.
+    ///
+    /// Returns `(id, Some(rx))` on success. If the per-task escalation
+    /// cap is hit, returns `(u64::MAX, None)` and the caller must abort.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_escalation_with_resolution(
+        &self,
+        task_id: TaskID,
+        agent_id: AgentID,
+        reason: EscalationReason,
+        context_summary: String,
+        decision_point: String,
+        options: Vec<String>,
+        urgency: String,
+        blocking: bool,
+        trace_id: TraceID,
+        auto_action: Option<AutoAction>,
+    ) -> (u64, Option<oneshot::Receiver<ResolutionOutcome>>) {
+        self.create_escalation_internal(
+            task_id,
+            agent_id,
+            reason,
+            context_summary,
+            decision_point,
+            options,
+            urgency,
+            blocking,
+            trace_id,
+            auto_action,
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_escalation_internal(
+        &self,
+        task_id: TaskID,
+        agent_id: AgentID,
+        reason: EscalationReason,
+        context_summary: String,
+        decision_point: String,
+        options: Vec<String>,
+        urgency: String,
+        blocking: bool,
+        trace_id: TraceID,
+        auto_action: Option<AutoAction>,
+        install_resolution: bool,
+    ) -> (u64, Option<oneshot::Receiver<ResolutionOutcome>>) {
         // Acquire the write lock once so the cap check and push are atomic,
         // preventing a TOCTOU race where two concurrent callers both pass the check.
         let mut escalations = self.escalations.write().await;
@@ -163,7 +316,7 @@ impl EscalationManager {
                 max = MAX_ESCALATIONS_PER_TASK,
                 "Escalation cap reached for task — suppressing new escalation"
             );
-            return u64::MAX;
+            return (u64::MAX, None);
         }
 
         let mut next_id = self.next_id.write().await;
@@ -197,13 +350,57 @@ impl EscalationManager {
 
         escalations.push(escalation.clone());
         drop(escalations);
-        self.persist_escalation(escalation).await;
+
+        // Install the resolution channel BEFORE dispatching sinks/webhooks
+        // so a fast user resolve cannot land before the sender exists.
+        let receiver = if install_resolution {
+            let (tx, rx) = oneshot::channel();
+            self.pending_resolution_tx.write().await.insert(id, tx);
+            Some(rx)
+        } else {
+            None
+        };
+
+        self.persist_escalation(escalation.clone()).await;
         tracing::info!(
             escalation_id = id,
             task_id = %task_id,
             expires_at = %expires_at.to_rfc3339(),
             "New escalation created"
         );
+
+        // Fan out to registered BroadcastSinks (channels, push, etc.).
+        // Each sink runs in its own task — failures are best-effort and
+        // never block escalation creation. The legacy `notify_url`
+        // webhook below is intentionally kept as a separate path so
+        // existing deployments are unaffected.
+        //
+        // Each sink invocation is bounded by `SINK_BROADCAST_TIMEOUT` so a
+        // misbehaving adapter (hung HTTP, unresponsive WebSocket) cannot
+        // leak detached tasks across kernel uptime — without this guard,
+        // every new escalation would spawn one more leaked task forever
+        // (R3 finding I3).
+        {
+            const SINK_BROADCAST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+            let sinks = self.broadcast_sinks.read().await.clone();
+            for sink in sinks {
+                let esc = escalation.clone();
+                tokio::spawn(async move {
+                    let sink_name = sink.name();
+                    if tokio::time::timeout(SINK_BROADCAST_TIMEOUT, sink.broadcast(&esc))
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            sink = sink_name,
+                            escalation_id = esc.id,
+                            timeout_secs = SINK_BROADCAST_TIMEOUT.as_secs(),
+                            "BroadcastSink timed out; dropping the broadcast"
+                        );
+                    }
+                });
+            }
+        }
 
         // Fire-and-forget webhook notification if configured.
         // The URL is validated before use to prevent SSRF attacks.
@@ -240,7 +437,7 @@ impl EscalationManager {
             }
         }
 
-        id
+        (id, receiver)
     }
 
     /// List all pending (unresolved) escalations.
@@ -276,7 +473,7 @@ impl EscalationManager {
         let mut escalations = self.escalations.write().await;
         let result = if let Some(esc) = escalations.iter_mut().find(|e| e.id == id && !e.resolved) {
             esc.resolved = true;
-            esc.resolution = Some(resolution);
+            esc.resolution = Some(resolution.clone());
             esc.resolved_at = Some(chrono::Utc::now());
             let task_id = esc.task_id;
             let agent_id = esc.agent_id;
@@ -295,6 +492,27 @@ impl EscalationManager {
 
         if let Some(escalation) = to_persist {
             self.persist_escalation(escalation).await;
+        }
+
+        // Wake the awaiting task_executor (if any). The receiver is
+        // taken by `take_resolution_receiver` BEFORE the executor parks
+        // on it, so a missing sender here just means nobody installed a
+        // resolution channel for this escalation (e.g. escalation came
+        // from a non-blocking source like CLI `agentos escalation
+        // create`).
+        if result.is_some() {
+            let outcome = if resolution == "approved" {
+                ResolutionOutcome::Approved
+            } else {
+                ResolutionOutcome::Denied
+            };
+            if let Some(tx) = self.pending_resolution_tx.write().await.remove(&id) {
+                // `Err(_)` here means the receiver was already dropped,
+                // which is fine — the awaiter cancelled or timed out.
+                let _ = tx.send(outcome);
+            }
+            // Clear any orphan receiver so the map doesn't leak.
+            self.pending_resolution_rx.write().await.remove(&id);
         }
 
         result
@@ -406,6 +624,25 @@ impl EscalationManager {
 
         for escalation in to_persist {
             self.persist_escalation(escalation).await;
+        }
+
+        // Wake any awaiting task_executor on expiry — they would
+        // otherwise sit on the receiver until their own timeout fires.
+        // Soft-approve maps to Approved, hard-deny maps to Denied. Errors
+        // (receiver already dropped) are ignored.
+        {
+            let mut tx_map = self.pending_resolution_tx.write().await;
+            let mut rx_map = self.pending_resolution_rx.write().await;
+            for (id, _, _, _, auto_action) in &expired {
+                let outcome = match auto_action {
+                    AutoAction::Approve => ResolutionOutcome::Approved,
+                    AutoAction::Deny => ResolutionOutcome::Denied,
+                };
+                if let Some(tx) = tx_map.remove(id) {
+                    let _ = tx.send(outcome);
+                }
+                rx_map.remove(id);
+            }
         }
 
         expired
@@ -633,6 +870,343 @@ mod tests {
         assert!(pending[0].blocking);
     }
 
+    /// Mock sink that records every broadcast call. Used by the
+    /// integration tests below to verify that `EscalationManager`
+    /// fans new escalations out to every registered sink, that the
+    /// 30s timeout wrap (R3 finding I3) does not interfere with
+    /// well-behaved sinks, and that resolved/idempotent paths do not
+    /// emit duplicates.
+    struct RecordingSink {
+        seen: Arc<tokio::sync::Mutex<Vec<u64>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BroadcastSink for RecordingSink {
+        async fn broadcast(&self, escalation: &PendingEscalation) {
+            self.seen.lock().await.push(escalation.id);
+        }
+        fn name(&self) -> &'static str {
+            "test-recording"
+        }
+    }
+
+    /// Sink that hangs forever — verifies that the timeout wrap added
+    /// in R3 finding I3 actually bounds the detached spawn.
+    struct HangingSink;
+
+    #[async_trait::async_trait]
+    impl BroadcastSink for HangingSink {
+        async fn broadcast(&self, _escalation: &PendingEscalation) {
+            std::future::pending::<()>().await;
+        }
+        fn name(&self) -> &'static str {
+            "test-hanging"
+        }
+    }
+
+    #[tokio::test]
+    async fn create_escalation_fans_out_to_registered_sinks() {
+        let manager = EscalationManager::new();
+        let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        manager
+            .add_sink(Arc::new(RecordingSink { seen: seen.clone() }))
+            .await;
+
+        let id = manager
+            .create_escalation(
+                TaskID::new(),
+                AgentID::new(),
+                EscalationReason::AuthorizationRequired,
+                "ctx".into(),
+                "decision".into(),
+                vec!["yes".into(), "no".into()],
+                "high".into(),
+                true,
+                TraceID::new(),
+                None,
+            )
+            .await;
+        assert_ne!(id, u64::MAX);
+
+        // Sinks run in spawned tasks — give them a moment to land.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let recorded = seen.lock().await.clone();
+        assert_eq!(
+            recorded,
+            vec![id],
+            "sink should observe exactly one broadcast"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_escalation_does_not_block_on_hanging_sink() {
+        let manager = EscalationManager::new();
+        manager.add_sink(Arc::new(HangingSink)).await;
+
+        let start = std::time::Instant::now();
+        let _ = manager
+            .create_escalation(
+                TaskID::new(),
+                AgentID::new(),
+                EscalationReason::AuthorizationRequired,
+                "ctx".into(),
+                "decision".into(),
+                vec![],
+                "high".into(),
+                true,
+                TraceID::new(),
+                None,
+            )
+            .await;
+        // Even with a sink that hangs forever, create_escalation must
+        // return promptly because broadcasts are detached spawns.
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "create_escalation took {:?} (sink fan-out is supposed to be detached)",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_wakes_pending_resolution_receiver_with_approved() {
+        let manager = Arc::new(EscalationManager::new());
+        let id = manager
+            .create_escalation(
+                TaskID::new(),
+                AgentID::new(),
+                EscalationReason::AuthorizationRequired,
+                "summary".into(),
+                "decision".into(),
+                vec![],
+                "high".into(),
+                true,
+                TraceID::new(),
+                None,
+            )
+            .await;
+        manager.prepare_resolution(id).await;
+
+        // The receiver belongs to whoever calls `take_resolution_receiver` first.
+        let rx = manager.take_resolution_receiver(id).await.expect("rx");
+
+        // Spawn the resolve concurrently so we exercise the wake path.
+        let mgr = Arc::clone(&manager);
+        let waker = tokio::spawn(async move { mgr.resolve(id, "approved".into()).await });
+        let outcome = rx.await.expect("sender not dropped");
+        assert!(matches!(outcome, ResolutionOutcome::Approved));
+        let resolved = waker.await.unwrap();
+        assert!(resolved.is_some());
+    }
+
+    #[tokio::test]
+    async fn resolve_wakes_with_denied_for_non_approved_resolution() {
+        let manager = Arc::new(EscalationManager::new());
+        let id = manager
+            .create_escalation(
+                TaskID::new(),
+                AgentID::new(),
+                EscalationReason::AuthorizationRequired,
+                "summary".into(),
+                "decision".into(),
+                vec![],
+                "high".into(),
+                true,
+                TraceID::new(),
+                None,
+            )
+            .await;
+        manager.prepare_resolution(id).await;
+        let rx = manager.take_resolution_receiver(id).await.unwrap();
+        manager.resolve(id, "denied".into()).await;
+        let outcome = rx.await.unwrap();
+        assert!(matches!(outcome, ResolutionOutcome::Denied));
+    }
+
+    #[tokio::test]
+    async fn sweep_expired_wakes_with_auto_action_outcome() {
+        // Manager with zero timeout so create + sweep round-trip is instant.
+        let manager = EscalationManager {
+            escalations: RwLock::new(Vec::new()),
+            next_id: RwLock::new(1),
+            timeout_secs: 0,
+            notify_url: RwLock::new(None),
+            state_store: None,
+            broadcast_sinks: RwLock::new(Vec::new()),
+            pending_resolution_tx: RwLock::new(HashMap::new()),
+            pending_resolution_rx: RwLock::new(HashMap::new()),
+        };
+        let id = manager
+            .create_escalation(
+                TaskID::new(),
+                AgentID::new(),
+                EscalationReason::AuthorizationRequired,
+                "summary".into(),
+                "decision".into(),
+                vec![],
+                "high".into(),
+                true,
+                TraceID::new(),
+                Some(AutoAction::Deny),
+            )
+            .await;
+        manager.prepare_resolution(id).await;
+        let rx = manager.take_resolution_receiver(id).await.unwrap();
+        let expired = manager.sweep_expired().await;
+        assert_eq!(expired.len(), 1);
+        let outcome = rx.await.unwrap();
+        assert!(matches!(outcome, ResolutionOutcome::Denied));
+    }
+
+    #[tokio::test]
+    async fn take_resolution_receiver_returns_none_when_not_prepared() {
+        let manager = EscalationManager::new();
+        assert!(manager.take_resolution_receiver(999).await.is_none());
+    }
+
+    /// End-to-end shape test for the watchdog user-gate. Mirrors the
+    /// 3-way `tokio::select!` in `task_executor.rs` (long-running
+    /// future vs resolution receiver vs grace timer). Verifies that
+    /// an Approved resolution wakes ahead of the grace timer, an
+    /// Abort wakes before the slow future, and a slow future without
+    /// resolution falls through to grace. This protects against
+    /// future regressions that would silently desync the gate from
+    /// the resolution channel.
+    // Watchdog user-gate select! shape tests. Real wall-clock with
+    // millisecond durations — same control flow as the production
+    // 120s/60s timers, just compressed for fast unit testing. The
+    // tokio test-util `time::pause` API is unavailable on this build,
+    // so we use realistic-but-tiny waits (≤10 ms).
+    #[tokio::test]
+    async fn user_gate_resolves_approved_ahead_of_grace_and_inference() {
+        let manager = Arc::new(EscalationManager::new());
+        let (id, rx) = manager
+            .create_escalation_with_resolution(
+                TaskID::new(),
+                AgentID::new(),
+                EscalationReason::Other("long_running_inference".into()),
+                "summary".into(),
+                "decision".into(),
+                vec!["Continue".into(), "Abort".into()],
+                "high".into(),
+                true,
+                TraceID::new(),
+                Some(AutoAction::Deny),
+            )
+            .await;
+        let rx = rx.expect("rx installed");
+
+        let slow_inference = tokio::time::sleep(std::time::Duration::from_secs(5));
+        let grace = tokio::time::sleep(std::time::Duration::from_secs(2));
+        tokio::pin!(slow_inference);
+        tokio::pin!(grace);
+
+        let mgr = Arc::clone(&manager);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            mgr.resolve(id, "approved".into()).await
+        });
+
+        let outcome: Result<ResolutionOutcome, &'static str> = tokio::select! {
+            biased;
+            _ = &mut slow_inference => Err("slow_inference stole the gate"),
+            r = rx => r.map_err(|_| "rx dropped"),
+            _ = &mut grace => Err("grace stole the gate"),
+        };
+        assert_eq!(outcome.unwrap(), ResolutionOutcome::Approved);
+    }
+
+    #[tokio::test]
+    async fn user_gate_abort_wakes_before_inference() {
+        let manager = Arc::new(EscalationManager::new());
+        let (id, rx) = manager
+            .create_escalation_with_resolution(
+                TaskID::new(),
+                AgentID::new(),
+                EscalationReason::Other("long_running_inference".into()),
+                "summary".into(),
+                "decision".into(),
+                vec![],
+                "high".into(),
+                true,
+                TraceID::new(),
+                Some(AutoAction::Deny),
+            )
+            .await;
+        let rx = rx.expect("rx installed");
+        let slow_inference = tokio::time::sleep(std::time::Duration::from_secs(5));
+        let grace = tokio::time::sleep(std::time::Duration::from_secs(2));
+        tokio::pin!(slow_inference);
+        tokio::pin!(grace);
+
+        let mgr = Arc::clone(&manager);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            mgr.resolve(id, "denied".into()).await
+        });
+
+        let outcome: ResolutionOutcome = tokio::select! {
+            biased;
+            _ = &mut slow_inference => panic!("inference should not finish"),
+            r = rx => r.expect("sender delivered"),
+            _ = &mut grace => panic!("grace should not fire"),
+        };
+        assert_eq!(outcome, ResolutionOutcome::Denied);
+    }
+
+    #[tokio::test]
+    async fn user_gate_grace_falls_through_when_no_resolution() {
+        let slow_inference = tokio::time::sleep(std::time::Duration::from_secs(5));
+        let grace = tokio::time::sleep(std::time::Duration::from_millis(200));
+        tokio::pin!(slow_inference);
+        tokio::pin!(grace);
+
+        let fired_grace: bool = tokio::select! {
+            biased;
+            _ = &mut slow_inference => false,
+            _ = &mut grace => true,
+        };
+        assert!(
+            fired_grace,
+            "grace timer must fire when no resolution arrives"
+        );
+    }
+
+    /// Race regression: a `resolve()` that lands the instant the
+    /// escalation is created (before the caller even awaits the
+    /// receiver) must still wake the awaiter. Closes the window where
+    /// `create_escalation` returned but `prepare_resolution` had not
+    /// yet been called — fixed by
+    /// `create_escalation_with_resolution`, which installs the
+    /// oneshot pair atomically before any broadcasts/webhooks fire.
+    #[tokio::test]
+    async fn create_with_resolution_survives_immediate_resolve() {
+        let manager = Arc::new(EscalationManager::new());
+        let (id, rx) = manager
+            .create_escalation_with_resolution(
+                TaskID::new(),
+                AgentID::new(),
+                EscalationReason::AuthorizationRequired,
+                "summary".into(),
+                "decision".into(),
+                vec![],
+                "high".into(),
+                true,
+                TraceID::new(),
+                None,
+            )
+            .await;
+        let rx = rx.expect("receiver installed atomically");
+
+        // Resolve immediately; awaiter has not yet polled rx.
+        let resolved = manager.resolve(id, "approved".into()).await;
+        assert!(resolved.is_some(), "resolve found the escalation");
+
+        // Awaiter must still observe the wake — proves the sender was
+        // installed before any external resolver could race in.
+        let outcome = rx.await.expect("sender delivered");
+        assert!(matches!(outcome, ResolutionOutcome::Approved));
+    }
+
     #[tokio::test]
     async fn test_resolve_escalation() {
         let manager = EscalationManager::new();
@@ -707,6 +1281,9 @@ mod tests {
             timeout_secs: 0, // expire immediately
             notify_url: RwLock::new(None),
             state_store: None,
+            broadcast_sinks: RwLock::new(Vec::new()),
+            pending_resolution_tx: RwLock::new(HashMap::new()),
+            pending_resolution_rx: RwLock::new(HashMap::new()),
         };
 
         let task_id = TaskID::new();
@@ -750,6 +1327,9 @@ mod tests {
             timeout_secs: 0, // expire immediately
             notify_url: RwLock::new(None),
             state_store: None,
+            broadcast_sinks: RwLock::new(Vec::new()),
+            pending_resolution_tx: RwLock::new(HashMap::new()),
+            pending_resolution_rx: RwLock::new(HashMap::new()),
         };
 
         let task_id = TaskID::new();

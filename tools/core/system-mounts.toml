@@ -1,3 +1,5 @@
+tags = ["meta", "read", "fs"]
+
 [manifest]
 name        = "system-mounts"
 version     = "1.0.0"
@@ -16,6 +18,10 @@ permissions = ["system.mounts:r"]
 
 [capabilities_provided]
 outputs = ["content.structured"]
+
+[intent_schema]
+input  = "SystemMountsIntent"
+output = "SystemMountsResult"
 
 [input_schema]
 type = "object"

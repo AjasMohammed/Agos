@@ -512,6 +512,34 @@ impl EpisodicStore {
         .map_err(|e| AgentOSError::StorageError(format!("Delete task panicked: {}", e)))?
     }
 
+    /// Delete every episodic event for the given agent. Returns the number of rows removed.
+    /// Offloads to the blocking thread pool.
+    pub async fn delete_by_agent(&self, agent_id: &AgentID) -> Result<usize, AgentOSError> {
+        let db = self.db.clone();
+        let agent_id_str = agent_id.as_uuid().to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError(
+                    "Failed to lock episodic db for delete_by_agent".to_string(),
+                )
+            })?;
+            let deleted = conn
+                .execute(
+                    "DELETE FROM episodic_events WHERE agent_id = ?1",
+                    params![agent_id_str],
+                )
+                .map_err(|e| {
+                    AgentOSError::StorageError(format!(
+                        "Failed to delete episodes for agent: {}",
+                        e
+                    ))
+                })?;
+            Ok(deleted)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("delete_by_agent task panicked: {}", e)))?
+    }
+
     /// Count episodic events, optionally scoped to an agent. Offloads to blocking thread pool.
     pub async fn count(&self, agent_id: Option<&AgentID>) -> Result<usize, AgentOSError> {
         let db = self.db.clone();

@@ -420,7 +420,7 @@ And here is the rest of the response."#;
         };
         let json = serde_json::to_string(&opts).unwrap();
         let deserialized: InferenceOptions = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.stream, true);
+        assert!(deserialized.stream);
         assert_eq!(deserialized.max_tokens, Some(4096));
         assert_eq!(deserialized.seed, Some(42));
         assert!(deserialized.json_mode);

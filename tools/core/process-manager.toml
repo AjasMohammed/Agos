@@ -1,3 +1,5 @@
+tags = ["meta", "read"]
+
 [manifest]
 name        = "process-manager"
 version     = "1.0.0"

@@ -1,3 +1,5 @@
+tags = ["meta", "read"]
+
 [manifest]
 name        = "system-services"
 version     = "1.0.0"
@@ -16,6 +18,10 @@ permissions = ["system.services:r"]
 
 [capabilities_provided]
 outputs = ["content.structured"]
+
+[intent_schema]
+input  = "SystemServicesIntent"
+output = "SystemServicesResult"
 
 [input_schema]
 type = "object"

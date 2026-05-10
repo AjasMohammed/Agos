@@ -19,7 +19,7 @@ required = ["web-fetch", "memory-write"]
 optional = ["http-client", "data-parser"]
 
 [permissions]
-required = ["network:read", "memory:write"]
+required = ["network.outbound:x", "memory.semantic:w", "memory.episodic:w"]
 
 [budget]
 max_cost_per_run = 2.00

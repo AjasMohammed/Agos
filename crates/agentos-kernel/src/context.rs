@@ -16,6 +16,12 @@ struct TaskContext {
     /// Prevents `setup_task_context` from pushing a duplicate prompt when a task is
     /// resumed after escalation or checkpoint restore.
     prompt_pushed: bool,
+    /// Per-task token budget override. When set, takes precedence over the
+    /// `ContextManager::token_budget` for tool-result truncation and compaction
+    /// threshold decisions. Populated from the LLM adapter's
+    /// `capabilities.context_window_tokens` at task setup so an 8k local model
+    /// gets aggressive truncation while a 200k Claude task does not.
+    token_budget_override: Option<usize>,
 }
 
 /// Serializable snapshot of a task's context, persisted by the checkpoint store.
@@ -130,9 +136,44 @@ impl ContextManager {
                 agent_id,
                 injected_sub_agents: HashSet::new(),
                 prompt_pushed: false,
+                token_budget_override: None,
             },
         );
         context_id
+    }
+
+    /// Build a `ContextSlice` for sub-agent handoff by filtering the parent
+    /// task's active window through `mode`. Returns `None` if the parent task
+    /// is unknown or the mode is `None`. Caller passes the resulting slice to
+    /// `seed_from_slice` on the child's task id.
+    pub async fn build_handoff_slice(
+        &self,
+        parent_task_id: &TaskID,
+        mode: HandoffMode,
+        max_entries: usize,
+    ) -> Option<ContextSlice> {
+        if matches!(mode, HandoffMode::None) {
+            return None;
+        }
+        let tasks = self.tasks.read().await;
+        let tc = tasks.get(parent_task_id)?;
+        Some(ContextSlice::for_handoff(
+            &tc.window,
+            mode,
+            max_entries,
+            format!("handoff:{:?}", mode),
+        ))
+    }
+
+    /// Set the per-task token budget override. The kernel calls this at task
+    /// setup with the LLM adapter's `capabilities.context_window_tokens` so
+    /// per-task compaction thresholds and tool-result truncation track the
+    /// actual model context size. No-op if the task is not registered.
+    pub async fn set_task_token_budget(&self, task_id: &TaskID, budget: usize) {
+        let mut tasks = self.tasks.write().await;
+        if let Some(tc) = tasks.get_mut(task_id) {
+            tc.token_budget_override = Some(budget);
+        }
     }
 
     /// Seed a task's context window from a `ContextSlice` passed by a parent agent.
@@ -153,6 +194,7 @@ impl ContextManager {
             agent_id,
             injected_sub_agents: HashSet::new(),
             prompt_pushed: false,
+            token_budget_override: None,
         });
         for entry in &slice.messages {
             tc.window.push(entry.clone());
@@ -263,7 +305,7 @@ impl ContextManager {
 
     /// Attempt LLM-generated summarization. Returns `Ok((summary_text, inference_result))`
     /// on success, `Err` on any failure (no adapter, LLM error, empty response).
-    async fn summarize_entries_llm(
+    pub(crate) async fn summarize_entries_llm(
         entries: &[ContextEntry],
         llm: &dyn agentos_llm::LLMCore,
         max_input_chars: usize,
@@ -363,9 +405,13 @@ impl ContextManager {
                 Some(tc) => {
                     tc.window.push(entry);
 
-                    if self.token_budget > 0 {
+                    // Prefer the per-task override (model-specific) over the
+                    // global default, so an 8k local model triggers compaction
+                    // at its own 80%, not the 200k global default's 80%.
+                    let effective_budget = tc.token_budget_override.unwrap_or(self.token_budget);
+                    if effective_budget > 0 {
                         let tokens = tc.window.estimated_tokens();
-                        let pct = tokens * 100 / self.token_budget;
+                        let pct = tokens * 100 / effective_budget;
 
                         if pct >= 80 {
                             let is_critical = pct >= 95;
@@ -397,7 +443,7 @@ impl ContextManager {
                                     tracing::info!(
                                         task_id = %task_id,
                                         tokens,
-                                        budget = self.token_budget,
+                                        budget = effective_budget,
                                         "Context at {}% token budget — compressed (concat)",
                                         pct
                                     );
@@ -415,7 +461,7 @@ impl ContextManager {
                                         tracing::info!(
                                             task_id = %task_id,
                                             tokens,
-                                            budget = self.token_budget,
+                                            budget = effective_budget,
                                             extracted = extracted.len(),
                                             "Context at {}% token budget — attempting LLM summarization",
                                             pct
@@ -510,16 +556,15 @@ impl ContextManager {
 
     /// Check if the token budget is fully exhausted (100%) for a task.
     pub async fn is_budget_exhausted(&self, task_id: &TaskID) -> bool {
-        if self.token_budget == 0 {
+        let tasks = self.tasks.read().await;
+        let Some(tc) = tasks.get(task_id) else {
+            return false;
+        };
+        let effective_budget = tc.token_budget_override.unwrap_or(self.token_budget);
+        if effective_budget == 0 {
             return false;
         }
-        let tasks = self.tasks.read().await;
-        if let Some(tc) = tasks.get(task_id) {
-            let estimated = tc.window.estimated_tokens();
-            estimated >= self.token_budget
-        } else {
-            false
-        }
+        tc.window.estimated_tokens() >= effective_budget
     }
 
     /// Get the entry count for a task's context window.
@@ -574,7 +619,26 @@ impl ContextManager {
         use agentos_tools::sanitize;
 
         let sanitized = sanitize::sanitize_tool_output(tool_name, result);
-        let content = sanitize::truncate_if_needed(&sanitized, sanitize::DEFAULT_MAX_OUTPUT_CHARS);
+        // Token-aware truncation: cap any single tool output at ~25% of the
+        // task's token budget (≈ `effective_budget / 2` chars at 4 chars/token),
+        // bounded above by the static 50k-char ceiling. For an 8k-window
+        // local model this is ~4k chars; for a 200k Claude window it stays
+        // at the 50k ceiling. Prevents one fat tool result from blowing
+        // the window on small models. Per-task override (set from the LLM
+        // adapter's capabilities) takes precedence over the global budget.
+        let effective_budget = {
+            let tasks = self.tasks.read().await;
+            tasks
+                .get(task_id)
+                .and_then(|tc| tc.token_budget_override)
+                .unwrap_or(self.token_budget)
+        };
+        let dynamic_cap = if effective_budget > 0 {
+            (effective_budget / 2).min(sanitize::DEFAULT_MAX_OUTPUT_CHARS)
+        } else {
+            sanitize::DEFAULT_MAX_OUTPUT_CHARS
+        };
+        let content = sanitize::truncate_if_needed(&sanitized, dynamic_cap);
 
         let is_error = result.get("error").is_some();
         let importance = if is_error { 0.8 } else { 0.5 };

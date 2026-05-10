@@ -428,6 +428,7 @@ impl Kernel {
                 // Default to ExecCapable (requires approval) rather than ReadonlyExternal.
                 risk_class: agentos_types::RiskClass::ExecCapable,
                 usage_hints: None,
+                tags: vec![],
             };
 
             // Register into ToolRegistry so the LLM sees it.

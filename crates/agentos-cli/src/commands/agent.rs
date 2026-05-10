@@ -71,6 +71,17 @@ pub enum AgentCommands {
         /// Agent name to disconnect
         name: String,
     },
+    /// Permanently remove an agent: deletes the profile, memory, scratchpad,
+    /// inboxes, checkpoints, and any schedules it created. Vault secrets and
+    /// the audit log are preserved. Re-adding the agent triggers a fresh
+    /// onboarding task.
+    Remove {
+        /// Agent name to remove
+        name: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
     /// Send a message to an agent
     Message {
         /// Sender agent name
@@ -310,6 +321,52 @@ pub async fn handle(client: &mut BusClient, command: AgentCommands) -> anyhow::R
                 .await?;
             match response {
                 KernelResponse::Success { .. } => println!("✅ Agent '{}' disconnected", name),
+                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
+                _ => eprintln!("❌ Unexpected response"),
+            }
+        }
+        AgentCommands::Remove { name, yes } => {
+            let list_resp = client.send_command(KernelCommand::ListAgents).await?;
+            let agent_id = match list_resp {
+                KernelResponse::AgentList(agents) => {
+                    agents.into_iter().find(|a| a.name == name).map(|a| a.id)
+                }
+                _ => anyhow::bail!("Failed to list agents"),
+            };
+            let Some(agent_id) = agent_id else {
+                anyhow::bail!("Agent '{}' not found", name);
+            };
+
+            if !yes {
+                use std::io::{self, Write};
+                print!(
+                    "⚠️  This will permanently delete agent '{}' and all of its memory,\n\
+                     scratchpad pages, inbox entries, checkpoints, and schedules.\n\
+                     Vault secrets and the audit log are preserved.\n\
+                     Type the agent name to confirm: ",
+                    name
+                );
+                io::stdout().flush().ok();
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if input.trim() != name {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            }
+
+            let response = client
+                .send_command(KernelCommand::RemoveAgent { agent_id })
+                .await?;
+            match response {
+                KernelResponse::Success { data } => {
+                    println!("✅ Agent '{}' removed", name);
+                    if let Some(d) = data {
+                        if let Some(summary) = d.get("wipe_summary") {
+                            println!("   wiped: {}", summary);
+                        }
+                    }
+                }
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
                 _ => eprintln!("❌ Unexpected response"),
             }

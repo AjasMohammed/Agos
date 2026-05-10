@@ -1,9 +1,12 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
 /// A single provider entry from the `providers.toml` catalog.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// All "override" fields are optional; absent values fall back to OpenAI-compatible
+/// defaults so existing catalog files continue to parse without modification.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct CatalogEntry {
     pub name: String,
     pub display_name: String,
@@ -16,6 +19,66 @@ pub struct CatalogEntry {
     /// Model IDs that accept OpenAI-style `image_url` parts (CustomCore / openai-compat).
     #[serde(default)]
     pub vision_models: Vec<String>,
+
+    // ---- Capability overrides (apply to all models for this provider) ----
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_images: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_tool_calling: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_streaming: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_prompt_caching: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_json_mode: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_thinking: Option<bool>,
+
+    // ---- Auth / endpoint overrides ----
+    /// HTTP header used for auth. Defaults to `Authorization`. Use `api-key`
+    /// for Azure-style providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_header: Option<String>,
+    /// Prefix prepended to the API key in the auth header. Defaults to
+    /// `"Bearer "`. Use `""` for providers that pass the bare key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_prefix: Option<String>,
+    /// Chat completions path appended to `base_url`. Default `/chat/completions`.
+    /// May include query string (e.g. `?api-version=2024-08-01`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_path: Option<String>,
+    /// Models list path appended to `base_url`. Default `/models`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models_path: Option<String>,
+
+    /// Static extra headers attached to every request (e.g. tenancy IDs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_headers: Option<HashMap<String, String>>,
+
+    /// Permit a private/loopback/link-local `base_url`. Required for legitimate
+    /// local providers (lmstudio, ollama, vllm). Catalog validation rejects
+    /// private addresses unless this is `Some(true)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_private_hosts: Option<bool>,
+}
+
+impl CatalogEntry {
+    pub fn auth_header_name(&self) -> &str {
+        self.auth_header.as_deref().unwrap_or("Authorization")
+    }
+    pub fn auth_header_prefix(&self) -> &str {
+        self.auth_prefix.as_deref().unwrap_or("Bearer ")
+    }
+    pub fn chat_path_or_default(&self) -> &str {
+        self.chat_path.as_deref().unwrap_or("/chat/completions")
+    }
+    pub fn models_path_or_default(&self) -> &str {
+        self.models_path.as_deref().unwrap_or("/models")
+    }
 }
 
 /// Parsed provider catalog loaded from a TOML file.
@@ -36,12 +99,14 @@ struct CatalogFile {
 }
 
 impl ProviderCatalog {
-    /// Parse a catalog from a TOML string.
+    /// Parse a catalog from a TOML string. Keys are normalised to lowercase so
+    /// `lookup`, `set_models`, `remove`, etc. all hit a single canonical entry
+    /// regardless of how the user cased the `name = "…"` field.
     pub fn parse(toml_str: &str) -> Result<Self, toml::de::Error> {
         let file: CatalogFile = toml::from_str(toml_str)?;
         let mut providers = HashMap::new();
         for entry in file.provider {
-            providers.insert(entry.name.clone(), entry);
+            providers.insert(entry.name.to_lowercase(), entry);
         }
         Ok(Self { providers })
     }
@@ -115,6 +180,40 @@ impl ProviderCatalog {
         }
     }
 
+    /// Insert or replace a provider entry. Returns `true` when an existing
+    /// entry was replaced, `false` when this is a fresh insert.
+    pub fn upsert(&mut self, entry: CatalogEntry) -> bool {
+        let key = entry.name.to_lowercase();
+        let existed = self.providers.contains_key(&key) || self.providers.contains_key(&entry.name);
+        // Drop any case-variant duplicates first.
+        self.providers.remove(&entry.name);
+        self.providers.insert(key, entry);
+        existed
+    }
+
+    /// Remove a provider by name. Returns the removed entry if present.
+    pub fn remove(&mut self, name: &str) -> Option<CatalogEntry> {
+        let key = name.to_lowercase();
+        self.providers
+            .remove(&key)
+            .or_else(|| self.providers.remove(name))
+    }
+
+    /// Replace the `models` array of an existing entry. Used by the
+    /// `/models` auto-probe. Returns `true` on success.
+    pub fn set_models(&mut self, name: &str, models: Vec<String>) -> bool {
+        let key = name.to_lowercase();
+        if let Some(entry) = self.providers.get_mut(&key) {
+            entry.models = models;
+            true
+        } else if let Some(entry) = self.providers.get_mut(name) {
+            entry.models = models;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Serialize the catalog back to TOML and write it to `path`.
     pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), String> {
         let mut lines = String::new();
@@ -147,9 +246,71 @@ impl ProviderCatalog {
                     .join(", ");
                 lines.push_str(&format!("vision_models = [{}]\n", vm_str));
             }
+            // Optional capability + auth + path overrides.
+            if let Some(v) = entry.context_window {
+                lines.push_str(&format!("context_window = {}\n", v));
+            }
+            if let Some(v) = entry.max_output_tokens {
+                lines.push_str(&format!("max_output_tokens = {}\n", v));
+            }
+            if let Some(v) = entry.supports_images {
+                lines.push_str(&format!("supports_images = {}\n", v));
+            }
+            if let Some(v) = entry.supports_tool_calling {
+                lines.push_str(&format!("supports_tool_calling = {}\n", v));
+            }
+            if let Some(v) = entry.supports_streaming {
+                lines.push_str(&format!("supports_streaming = {}\n", v));
+            }
+            if let Some(v) = entry.supports_prompt_caching {
+                lines.push_str(&format!("supports_prompt_caching = {}\n", v));
+            }
+            if let Some(v) = entry.supports_json_mode {
+                lines.push_str(&format!("supports_json_mode = {}\n", v));
+            }
+            if let Some(v) = entry.supports_thinking {
+                lines.push_str(&format!("supports_thinking = {}\n", v));
+            }
+            if let Some(v) = &entry.auth_header {
+                lines.push_str(&format!("auth_header = {:?}\n", v));
+            }
+            if let Some(v) = &entry.auth_prefix {
+                lines.push_str(&format!("auth_prefix = {:?}\n", v));
+            }
+            if let Some(v) = &entry.chat_path {
+                lines.push_str(&format!("chat_path = {:?}\n", v));
+            }
+            if let Some(v) = &entry.models_path {
+                lines.push_str(&format!("models_path = {:?}\n", v));
+            }
+            if let Some(map) = &entry.extra_headers {
+                if !map.is_empty() {
+                    let mut keys: Vec<&String> = map.keys().collect();
+                    keys.sort();
+                    let body = keys
+                        .iter()
+                        .map(|k| format!("{:?} = {:?}", k, map[*k]))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    lines.push_str(&format!("extra_headers = {{ {} }}\n", body));
+                }
+            }
+            if let Some(v) = entry.allow_private_hosts {
+                lines.push_str(&format!("allow_private_hosts = {}\n", v));
+            }
             lines.push('\n');
         }
-        std::fs::write(path, lines).map_err(|e| format!("Failed to write provider catalog: {}", e))
+        // Atomic write: stage to a sibling `.tmp` file then rename. A crash
+        // mid-write leaves the original `providers.toml` intact rather than
+        // truncated.
+        let tmp_path = path.with_extension("toml.tmp");
+        std::fs::write(&tmp_path, lines)
+            .map_err(|e| format!("Failed to write provider catalog (tmp): {}", e))?;
+        std::fs::rename(&tmp_path, path).map_err(|e| {
+            // Best-effort cleanup of the staged file.
+            let _ = std::fs::remove_file(&tmp_path);
+            format!("Failed to rename provider catalog into place: {}", e)
+        })
     }
 }
 
@@ -244,5 +405,143 @@ models = ["local"]
         let catalog = ProviderCatalog::parse(TEST_TOML).expect("should parse");
         let lmstudio = catalog.lookup("lmstudio").expect("should find lmstudio");
         assert_eq!(lmstudio.api_key_env, "");
+    }
+
+    #[test]
+    fn test_default_overrides_used_when_unset() {
+        let catalog = ProviderCatalog::parse(TEST_TOML).expect("should parse");
+        let entry = catalog.lookup("deepseek").unwrap();
+        assert_eq!(entry.auth_header_name(), "Authorization");
+        assert_eq!(entry.auth_header_prefix(), "Bearer ");
+        assert_eq!(entry.chat_path_or_default(), "/chat/completions");
+        assert_eq!(entry.models_path_or_default(), "/models");
+    }
+
+    #[test]
+    fn test_overrides_parsed() {
+        let toml = r#"
+[[provider]]
+name = "azure"
+display_name = "Azure"
+base_url = "https://x.openai.azure.com/openai"
+api_key_env = "AZURE_KEY"
+compatible_with = "openai"
+default_model = "gpt-4o"
+auth_header = "api-key"
+auth_prefix = ""
+chat_path = "/deployments/gpt-4o/chat/completions?api-version=2024-08-01-preview"
+context_window = 128000
+supports_images = true
+[provider.extra_headers]
+"x-ms-region" = "eastus"
+"#;
+        let catalog = ProviderCatalog::parse(toml).expect("parse");
+        let e = catalog.lookup("azure").unwrap();
+        assert_eq!(e.auth_header_name(), "api-key");
+        assert_eq!(e.auth_header_prefix(), "");
+        assert!(e.chat_path_or_default().contains("api-version"));
+        assert_eq!(e.context_window, Some(128000));
+        assert_eq!(e.supports_images, Some(true));
+        let hdrs = e.extra_headers.as_ref().unwrap();
+        assert_eq!(hdrs.get("x-ms-region").map(String::as_str), Some("eastus"));
+    }
+
+    #[test]
+    fn test_upsert_and_remove() {
+        let mut catalog = ProviderCatalog::empty();
+        let entry = CatalogEntry {
+            name: "foo".into(),
+            display_name: "Foo".into(),
+            base_url: "https://foo".into(),
+            api_key_env: "FOO_KEY".into(),
+            compatible_with: "openai".into(),
+            default_model: "f1".into(),
+            ..Default::default()
+        };
+        assert!(!catalog.upsert(entry.clone()));
+        assert_eq!(catalog.len(), 1);
+        // Replace.
+        let mut e2 = entry.clone();
+        e2.display_name = "Foo2".into();
+        assert!(catalog.upsert(e2));
+        assert_eq!(catalog.lookup("foo").unwrap().display_name, "Foo2");
+        // Remove.
+        let removed = catalog.remove("FOO");
+        assert!(removed.is_some());
+        assert!(catalog.is_empty());
+    }
+
+    #[test]
+    fn test_parse_lowercases_mixed_case_names() {
+        let toml = r#"
+[[provider]]
+name = "DeepSeek"
+display_name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+compatible_with = "openai"
+default_model = "deepseek-chat"
+"#;
+        let mut catalog = ProviderCatalog::parse(toml).unwrap();
+        // Lookups under any case should hit the entry.
+        assert!(catalog.lookup("deepseek").is_some());
+        assert!(catalog.lookup("DeepSeek").is_some());
+        assert!(catalog.lookup("DEEPSEEK").is_some());
+        // Mutations resolve the canonical key.
+        assert!(catalog.set_models("DeepSeek", vec!["m1".into()]));
+        assert_eq!(catalog.lookup("deepseek").unwrap().models, vec!["m1"]);
+        assert!(catalog.set_base_url("DEEPSEEK", "https://x".into()));
+        assert!(catalog.remove("DeepSeek").is_some());
+        assert!(catalog.is_empty());
+    }
+
+    #[test]
+    fn test_set_models() {
+        let mut catalog = ProviderCatalog::parse(TEST_TOML).unwrap();
+        assert!(catalog.set_models("deepseek", vec!["new-model".into()]));
+        assert_eq!(
+            catalog.lookup("deepseek").unwrap().models,
+            vec!["new-model"]
+        );
+        assert!(!catalog.set_models("nonexistent", vec![]));
+    }
+
+    #[test]
+    fn test_save_round_trip_with_overrides() {
+        let mut catalog = ProviderCatalog::empty();
+        let mut hdrs = HashMap::new();
+        hdrs.insert("x-tenant".into(), "abc".into());
+        catalog.upsert(CatalogEntry {
+            name: "azure".into(),
+            display_name: "Azure".into(),
+            base_url: "https://x".into(),
+            api_key_env: "AZ".into(),
+            compatible_with: "openai".into(),
+            default_model: "gpt-4o".into(),
+            context_window: Some(128_000),
+            supports_images: Some(true),
+            auth_header: Some("api-key".into()),
+            auth_prefix: Some(String::new()),
+            chat_path: Some("/foo".into()),
+            extra_headers: Some(hdrs),
+            ..Default::default()
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        catalog.save_to_file(&path).unwrap();
+        let loaded = ProviderCatalog::from_file(&path).unwrap();
+        let e = loaded.lookup("azure").unwrap();
+        assert_eq!(e.context_window, Some(128_000));
+        assert_eq!(e.supports_images, Some(true));
+        assert_eq!(e.auth_header_name(), "api-key");
+        assert_eq!(e.auth_header_prefix(), "");
+        assert_eq!(e.chat_path.as_deref(), Some("/foo"));
+        assert_eq!(
+            e.extra_headers
+                .as_ref()
+                .and_then(|m| m.get("x-tenant"))
+                .map(String::as_str),
+            Some("abc")
+        );
     }
 }
