@@ -9,6 +9,7 @@ agentos-kernel = { path = "../agentos-kernel" }
 agentos-audit = { path = "../agentos-audit" }
 agentos-vault = { path = "../agentos-vault" }
 agentos-pipeline = { path = "../agentos-pipeline" }
+agentos-llm = { path = "../agentos-llm" }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -40,6 +40,105 @@ pub struct ProcessEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocketEntry {
+    pub protocol: String,
+    pub ip_version: String,
+    pub local_addr: String,
+    pub remote_addr: String,
+    pub state: String,
+    pub inode: u64,
+    pub pid: Option<u32>,
+    pub process_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocketsResult {
+    pub sockets: Vec<SocketEntry>,
+    pub total_matched: usize,
+    pub returned: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountEntry {
+    pub device: String,
+    pub mount_point: String,
+    pub fs_type: String,
+    pub options: String,
+    pub writable: bool,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+    pub use_percent: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountsResult {
+    pub mounts: Vec<MountEntry>,
+    pub total_matched: usize,
+    pub returned: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenFileEntry {
+    pub pid: u32,
+    pub process_name: Option<String>,
+    pub fd: i32,
+    pub path: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenFilesResult {
+    pub files: Vec<OpenFileEntry>,
+    pub total_matched: usize,
+    pub returned: usize,
+    /// True when the walk was cut short at `limit` and `total_matched` reflects
+    /// only the rows scanned so far. Pass `accurate_total: true` in params to
+    /// force a full walk (slower).
+    #[serde(default)]
+    pub incomplete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnitEntry {
+    pub name: String,
+    pub load_state: String,
+    pub active_state: String,
+    pub sub_state: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnitsResult {
+    pub units: Vec<UnitEntry>,
+    pub total_matched: usize,
+    pub returned: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnitStatus {
+    pub name: String,
+    pub active_state: String,
+    pub sub_state: String,
+    pub main_pid: Option<u32>,
+    pub memory_current_bytes: Option<u64>,
+    pub active_enter_timestamp: Option<DateTime<Utc>>,
+    pub n_restarts: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JournalEntry {
+    pub timestamp: DateTime<Utc>,
+    pub priority: u32,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JournalResult {
+    pub name: String,
+    pub entries: Vec<JournalEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkInterface {
     pub name: String,
     pub ip_addresses: Vec<String>,

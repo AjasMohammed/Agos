@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}{{ spec.name | default(value="New Workflow") }} — Workflow Builder{% endblock %}
+
+{% block head_extra %}
+<link rel="stylesheet" href="/static/css/vendor/drawflow.min.css">
+<link rel="stylesheet" href="/static/css/workflow-builder.css">
+{% endblock %}
+
+{% block content %}
+{# Pass WorkflowSpec as JSON for Alpine to pick up #}
+<div
+  x-data="workflowBuilder({{ spec_json }})"
+  x-init="init()"
+  @destroy.window="destroy()"
+  @param-change.window="updateParam($event.detail.id, $event.detail.key, $event.detail.val)"
+  class="wb-shell"
+>
+
+  <!-- ── Header ─────────────────────────────────────────── -->
+  <header class="wb-header">
+    <div class="wb-title">
+      <input type="text" x-model="spec.name" placeholder="Workflow name" @input="dirty=true">
+    </div>
+    <div class="wb-version">
+      <input type="text" x-model="spec.version" placeholder="1.0.0" @input="dirty=true">
+    </div>
+    <div class="wb-actions">
+      <button class="outline" @click="exportJson()">Export</button>
+      <button class="outline" @click="openRunModal()" :disabled="running">
+        <span x-show="!running">▶ Run</span>
+        <span x-show="running">Running…</span>
+      </button>
+      <button @click="save()" :disabled="saving || !dirty">
+        <span x-show="!saving">Save</span>
+        <span x-show="saving">Saving…</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ── Body Grid ───────────────────────────────────────── -->
+  <div class="wb-body">
+
+    <!-- Left: Palette -->
+    <aside class="wb-palette">
+      <div class="wb-palette-search">
+        <input type="search" placeholder="Search nodes…"
+               x-model="paletteFilter" @input="filterPalette()"
+               aria-label="Search palette">
+      </div>
+      {% include "workflow/partials/palette.html" %}
+    </aside>
+
+    <!-- Center: Canvas -->
+    <main class="wb-canvas"
+          @drop="onDrop($event)"
+          @dragover="onDragover($event)">
+      <div id="drawflow" x-ref="drawflow" class="wb-drawflow"></div>
+      <div class="wb-canvas-controls">
+        <button @click="zoomOut()" title="Zoom out">−</button>
+        <button @click="zoomFit()" title="Fit">⊞</button>
+        <button @click="zoomIn()"  title="Zoom in">+</button>
+      </div>
+    </main>
+
+    <!-- Right: Inspector -->
+    <aside class="wb-inspector">
+      <div class="wb-property-panel" id="wb-inspector-content">
+        <p class="muted">Select a node to edit its properties.</p>
+      </div>
+    </aside>
+
+  </div><!-- /wb-body -->
+
+  <!-- ── Run Modal ───────────────────────────────────────── -->
+  <div class="wb-modal" x-show="runModalOpen" x-cloak @keydown.escape.window="closeRunModal()">
+    <div class="wb-modal-inner" @click.stop>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+        <strong>Run Workflow</strong>
+        <button class="outline" style="padding:0.2rem 0.6rem" @click="closeRunModal()">✕</button>
+      </div>
+      <label>
+        Input (JSON or plain text)
+        <textarea rows="4" x-model="runInput" style="font-family:monospace;font-size:0.85rem"></textarea>
+      </label>
+      <div style="display:flex;gap:0.5rem;margin-top:0.75rem">
+        <button @click="run()" :disabled="running">
+          <span x-show="!running">▶ Start</span>
+          <span x-show="running">Running…</span>
+        </button>
+        <button class="outline" @click="closeRunModal()">Close</button>
+      </div>
+      <!-- event stream log -->
+      <template x-if="runEvents.length > 0">
+        <div style="margin-top:1rem;max-height:260px;overflow-y:auto;background:var(--pico-code-background);border-radius:var(--pico-border-radius);padding:0.75rem;font-family:monospace;font-size:0.8rem">
+          <template x-for="(evt,i) in runEvents" :key="i">
+            <div :style="`color:${evt.type==='error'?'#ef4444':evt.status==='complete'?'#22c55e':'inherit'}`">
+              <span x-text="evt.node_id ? `[${evt.node_id}] ` : ''"></span>
+              <span x-text="evt.message || evt.type"></span>
+            </div>
+          </template>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- Vault key datalist for @key autocomplete -->
+  <datalist id="vault-keys-list">
+    {% for key in vault_keys %}
+    <option value="@{{ key }}">@{{ key }}</option>
+    {% endfor %}
+  </datalist>
+
+</div><!-- /x-data -->
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/vendor/drawflow.min.js"></script>
+<script src="/static/js/workflow-builder.js"></script>
+{% endblock %}

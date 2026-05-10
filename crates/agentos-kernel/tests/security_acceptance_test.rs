@@ -46,6 +46,7 @@ fn make_blocked_manifest() -> ToolManifest {
             trust_tier: TrustTier::Blocked,
             tags: None,
             capability_tags: vec![],
+            group: String::new(),
         },
         capabilities_required: ToolCapabilities {
             permissions: vec![],
@@ -68,6 +69,8 @@ fn make_blocked_manifest() -> ToolManifest {
         executor: Default::default(),
         fallbacks: vec![],
         risk_class: Default::default(),
+        usage_hints: None,
+        tags: vec![],
     }
 }
 
@@ -84,6 +87,7 @@ fn make_community_manifest_with_sig(pubkey_hex: &str, sig_hex: &str) -> ToolMani
             trust_tier: TrustTier::Community,
             tags: None,
             capability_tags: vec![],
+            group: String::new(),
         },
         capabilities_required: ToolCapabilities {
             permissions: vec![],
@@ -106,6 +110,8 @@ fn make_community_manifest_with_sig(pubkey_hex: &str, sig_hex: &str) -> ToolMani
         executor: Default::default(),
         fallbacks: vec![],
         risk_class: Default::default(),
+        usage_hints: None,
+        tags: vec![],
     }
 }
 

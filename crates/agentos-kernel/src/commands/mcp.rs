@@ -10,6 +10,7 @@ use std::sync::Arc;
 use agentos_bus::{KernelResponse, McpServerStatus};
 use agentos_types::tool::{ToolCapabilities, ToolInfo, ToolOutputs, ToolSchema};
 use agentos_types::{ToolExecutor, ToolManifest, ToolSandbox, TrustTier};
+use zeroize::Zeroizing;
 
 use crate::kernel::Kernel;
 
@@ -82,11 +83,11 @@ impl Kernel {
         &self,
         connector_id: String,
         provider: String,
-        access_token: String,
-        refresh_token: Option<String>,
+        access_token: Zeroizing<String>,
+        refresh_token: Option<Zeroizing<String>>,
         token_endpoint: String,
         client_id: String,
-        client_secret: Option<String>,
+        client_secret: Option<Zeroizing<String>>,
         scopes: Vec<String>,
         expires_in_secs: Option<i64>,
     ) -> KernelResponse {
@@ -98,14 +99,14 @@ impl Kernel {
         let credential = OAuthCredential {
             connector_id: connector_id.clone(),
             provider: provider.clone(),
-            access_token,
-            refresh_token,
+            access_token: access_token.to_string(),
+            refresh_token: refresh_token.as_ref().map(|t| t.to_string()),
             token_type: "Bearer".to_string(),
             expires_at,
             scopes,
             token_endpoint,
             client_id,
-            client_secret,
+            client_secret: client_secret.as_ref().map(|s| s.to_string()),
         };
 
         let oauth_store = self.vault.oauth_store();
@@ -396,6 +397,7 @@ impl Kernel {
                     trust_tier: TrustTier::Core,
                     tags: Some(vec!["mcp".to_string(), name.clone()]),
                     capability_tags: vec![],
+                    group: String::new(),
                 },
                 capabilities_required: ToolCapabilities {
                     permissions: vec![format!(
@@ -425,6 +427,8 @@ impl Kernel {
                 // MCP tools are externally-provided and may perform arbitrary operations.
                 // Default to ExecCapable (requires approval) rather than ReadonlyExternal.
                 risk_class: agentos_types::RiskClass::ExecCapable,
+                usage_hints: None,
+                tags: vec![],
             };
 
             // Register into ToolRegistry so the LLM sees it.

@@ -41,6 +41,19 @@ max_parallel_tool_calls = 10
 # heavy load (10+ agents, frequent tool calls).
 channel_capacity = 1024
 
+[kernel.context_compaction]
+# Cadence in completed iterations: the compactor fires every N iterations
+# (and only when there are enough compactable entries to produce a useful
+# summary). Lower values compact more aggressively.
+cadence = 4
+# How many recent iteration's worth of entries to keep verbatim.
+# Older entries are merged into a rolling `[ROLLING TASK SUMMARY]` block.
+keep_recent_iterations = 2
+# When true, the compactor calls the agent's LLM to generate a coherent
+# semantic summary; on any LLM error it falls back to the extractive
+# heuristic. Set false for tight-latency agents or unreliable local models.
+enable_llm_summarization = true
+
 [kernel.tool_execution]
 # Maximum serialized bytes for a single tool's output injected into context.
 # Outputs exceeding this are truncated with a marker so the agent can adapt.
@@ -78,6 +91,37 @@ data_dir = "/tmp/agentos/data"
 # System roots (/etc, /var, /root, /home itself, /) are rejected at startup.
 # Example: allowed_paths = ["/home/user/project", "/shared/datasets"]
 allowed_paths = ["/media", "/run/media"]
+
+# host-package-install: install host OS packages via system package manager.
+# DISABLED by default. The tool runs OUTSIDE the bwrap sandbox via `pkexec` or
+# a setuid helper. Every call requires explicit user approval (control_plane
+# risk class) AND the requested package must appear verbatim in `allowlist`.
+[tools.host_package]
+enabled = false
+# Privilege escalator policy: "auto" | "pkexec" | "helper" | "none".
+# - auto: prefer pkexec, otherwise none. Recommended for desktops.
+# - helper: invoke the setuid binary at `helper_path`. For headless servers.
+# - none: disables the tool entirely (default if `enabled = false`).
+privilege_escalator = "auto"
+helper_path = "/usr/local/libexec/agentos-pkg-helper"
+# Package managers that the tool may invoke. The tool detects which is on
+# PATH and uses the first match in this list.
+managers = ["apt-get", "dnf", "pacman", "zypper", "apk", "brew"]
+# Operator-controlled allowlist. The agent can only install packages whose
+# names match an entry verbatim, even after the user approves the call. Edit
+# this list to expose more runtimes/tools to your agent fleet.
+allowlist = [
+    "python3",
+    "python3-pip",
+    "python3-venv",
+    "nodejs",
+    "npm",
+    "git",
+    "curl",
+    "ca-certificates",
+    "podman",
+    "docker.io",
+]
 
 [bus]
 # Development default socket path.

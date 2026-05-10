@@ -134,10 +134,50 @@ impl Kernel {
                 .complete(&task.id, serde_json::json!({ "result": result.answer }))
                 .await;
 
-            // If this was a scheduled task, emit ScheduledTaskCompleted
+            // If this was a scheduled task, emit ScheduledTaskCompleted +
+            // transition the matching Running ScheduledRun to Complete + dispatch
+            // the run's delivery (Direct / ViaAgent / Silent).
             if let Some(schedule_id) = scheduled_job_id {
                 if let Some(job) = self.schedule_manager.get_job(&schedule_id).await {
                     self.schedule_manager.emit_task_completed(&job).await;
+                    self.agent_inbox_writer
+                        .write_scheduled(
+                            task.agent_id,
+                            task.id,
+                            &job.name,
+                            true,
+                            serde_json::json!({ "result": result.answer }),
+                        )
+                        .await;
+                }
+                if let Some(store) = self.schedule_manager.store() {
+                    // Race-free lookup: pending_runs map is populated by run_loop
+                    // synchronously before the task starts. Falls back to an
+                    // indexed SQLite query if the map miss occurs (e.g. kernel
+                    // restart between task spawn and completion).
+                    let mut run_opt = match self.schedule_manager.take_pending_run(&task.id).await {
+                        Some(run_id) => match store.get_run(run_id).await {
+                            Ok(Some(r)) => Some(r),
+                            _ => None,
+                        },
+                        None => store
+                            .find_running_run_for_task(task.id)
+                            .await
+                            .ok()
+                            .flatten(),
+                    };
+                    if let Some(ref mut run) = run_opt {
+                        run.state = agentos_types::schedule::RunState::Complete;
+                        run.completed_at = Some(chrono::Utc::now());
+                        run.result = Some(serde_json::json!({ "result": result.answer }));
+                        run.tool_calls = result.tool_calls.clone();
+                        let run_id = run.run_id;
+                        if let Err(e) = store.upsert_run(run.clone()).await {
+                            tracing::warn!(error = %e, "Failed to mark ScheduledRun as Complete");
+                        } else {
+                            self.dispatch_scheduled_delivery(run_id).await;
+                        }
+                    }
                 }
             }
 
@@ -230,10 +270,22 @@ impl Kernel {
                 };
                 let sub_result = agentos_types::SubAgentResult {
                     child_task_id: task.id,
-                    agent_name,
+                    agent_name: agent_name.clone(),
                     output: result.answer.chars().take(8192).collect(),
                     success: true,
                 };
+
+                if let Some(parent) = self.scheduler.get_task(&parent_task_id).await {
+                    self.agent_inbox_writer
+                        .write_async_done(
+                            parent.agent_id,
+                            task.id,
+                            &agent_name,
+                            true,
+                            serde_json::json!({ "result": result.answer }),
+                        )
+                        .await;
+                }
                 if let Err(e) = self
                     .context_manager
                     .inject_sub_agent_result(parent_task_id, &sub_result)
@@ -435,6 +487,18 @@ impl Kernel {
                 output: failure_output.chars().take(8192).collect(),
                 success: false,
             };
+
+            if let Some(parent) = self.scheduler.get_task(&parent_task_id).await {
+                self.agent_inbox_writer
+                    .write_async_done(
+                        parent.agent_id,
+                        task.id,
+                        &agent_name,
+                        false,
+                        serde_json::json!({ "error": error_message }),
+                    )
+                    .await;
+            }
             match self
                 .context_manager
                 .inject_sub_agent_result(parent_task_id, &sub_result)
@@ -533,12 +597,49 @@ impl Kernel {
             .fail(&task.id, error_message.clone())
             .await;
 
-        // If this was a scheduled task, emit ScheduledTaskFailed
+        // If this was a scheduled task, emit ScheduledTaskFailed + transition
+        // the matching Running ScheduledRun to Failed + dispatch its delivery
+        // so the creator agent / target sees the failure too.
         if let Some(schedule_id) = scheduled_job_id_on_failure {
             if let Some(job) = self.schedule_manager.get_job(&schedule_id).await {
                 self.schedule_manager
                     .emit_task_failed(&job, &error_message)
                     .await;
+                self.agent_inbox_writer
+                    .write_scheduled(
+                        task.agent_id,
+                        task.id,
+                        &job.name,
+                        false,
+                        serde_json::json!({ "error": error_message }),
+                    )
+                    .await;
+            }
+            if let Some(store) = self.schedule_manager.store() {
+                // Race-free lookup via pending_runs map (see complete_task_success).
+                let mut run_opt = match self.schedule_manager.take_pending_run(&task.id).await {
+                    Some(run_id) => match store.get_run(run_id).await {
+                        Ok(Some(r)) => Some(r),
+                        _ => None,
+                    },
+                    None => store
+                        .find_running_run_for_task(task.id)
+                        .await
+                        .ok()
+                        .flatten(),
+                };
+                let _ = schedule_id;
+                if let Some(ref mut run) = run_opt {
+                    run.state = agentos_types::schedule::RunState::Failed;
+                    run.completed_at = Some(chrono::Utc::now());
+                    run.error = Some(error_message.clone());
+                    let run_id = run.run_id;
+                    if let Err(e) = store.upsert_run(run.clone()).await {
+                        tracing::warn!(error = %e, "Failed to mark ScheduledRun as Failed");
+                    } else {
+                        self.dispatch_scheduled_delivery(run_id).await;
+                    }
+                }
             }
         }
 
@@ -645,6 +746,13 @@ impl Kernel {
             .await;
 
         self.cleanup_task_subscriptions(&task.id).await;
+
+        // Free per-task kernel state. Failed tasks cannot resume — context window,
+        // intent history, reject counters, and force-end flags are all dead state
+        // and would otherwise leak when execute_task_sync bails before the
+        // success-path cleanup at the end of the iteration loop.
+        self.context_manager.remove_context(&task.id).await;
+        self.intent_validator.remove_task(&task.id).await;
     }
 
     // ── Scratchpad auto-write ────────────────────────────────────────────────

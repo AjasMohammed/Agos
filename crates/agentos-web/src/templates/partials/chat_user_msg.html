@@ -1,5 +1,6 @@
 <div class="chat-row chat-row-user" data-msg-id="{{ msg.id|default('') }}">
     <div class="chat-bubble chat-bubble-user">
+        <div class="chat-speaker-tag">You</div>
         <div class="chat-bubble-content">{{ msg.content }}</div>
         <div class="chat-bubble-actions">
             <button class="chat-msg-action" title="Copy" onclick="navigator.clipboard.writeText(this.closest('.chat-bubble').querySelector('.chat-bubble-content').innerText)">Copy</button>

@@ -10,7 +10,9 @@ use agentos_kernel::kernel::ChatStreamEvent;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::task::JoinHandle;
 
 /// Grace period after `mark_done` before the entry is evicted from the map. Lets a late
 /// refresh still replay the final events — crucial for error messages that are not
@@ -25,6 +27,7 @@ const COALESCE_THRESHOLD: usize = 8_000;
 pub struct InFlightInference {
     inner: Mutex<InFlightInner>,
     notify: Notify,
+    task_handle: StdMutex<Option<JoinHandle<()>>>,
     /// Sync-safe done flag so `try_start` can check without async.
     done_flag: AtomicBool,
 }
@@ -69,6 +72,7 @@ impl InFlightInference {
                 done: false,
             }),
             notify: Notify::new(),
+            task_handle: StdMutex::new(None),
             done_flag: AtomicBool::new(false),
         })
     }
@@ -78,8 +82,51 @@ impl InFlightInference {
         self.done_flag.load(Ordering::Acquire)
     }
 
-    pub async fn push(&self, event: ChatStreamEvent) {
+    pub fn set_task_handle(&self, handle: JoinHandle<()>) {
+        if self.is_done() {
+            handle.abort();
+            return;
+        }
+        let mut slot = self.task_handle.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = Some(handle);
+    }
+
+    pub async fn cancel(&self, message: impl Into<String>) -> bool {
+        if self.done_flag.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+
+        if let Some(handle) = self
+            .task_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            handle.abort();
+        }
+
         let mut inner = self.inner.lock().await;
+        inner.events.push(ChatStreamEvent::Done {
+            answer: message.into(),
+            tool_calls: Vec::new(),
+            iterations: 0,
+            tokens_used: 0,
+            cost_usd: 0.0,
+        });
+        inner.done = true;
+        drop(inner);
+        self.notify.notify_waiters();
+        true
+    }
+
+    pub async fn push(&self, event: ChatStreamEvent) {
+        if self.is_done() {
+            return;
+        }
+        let mut inner = self.inner.lock().await;
+        if inner.done {
+            return;
+        }
         if inner.events.len() >= COALESCE_THRESHOLD {
             inner.coalesce_old_text(2_000);
         }

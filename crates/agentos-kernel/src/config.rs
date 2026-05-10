@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 /// Controls when tools are executed in a sandbox child process vs in-process.
 ///
@@ -91,6 +92,18 @@ pub struct ChatConfig {
     /// empty-answer placeholder reply.
     #[serde(default)]
     pub enforce_final_tag: bool,
+
+    /// Maximum tool-call iterations per chat session before the loop is forced
+    /// to terminate with a "limit reached" note. One iteration covers a single
+    /// LLM inference + any tool calls it requested. Small models that thrash
+    /// on meta-tools (search-tools/describe-tool/agent-manual) need headroom
+    /// before reaching real action; raise this if chat sessions hit the cap.
+    #[serde(default = "default_chat_max_tool_iterations")]
+    pub max_tool_iterations: u32,
+}
+
+fn default_chat_max_tool_iterations() -> u32 {
+    25
 }
 
 /// Configuration for the Unified Notification and Interaction System (UNIS).
@@ -155,7 +168,7 @@ pub struct WebhookAdapterConfig {
     pub url: String,
     /// HMAC-SHA256 secret for X-AgentOS-Signature header. Empty = no signature.
     #[serde(default)]
-    pub secret: String,
+    pub secret: Zeroizing<String>,
     /// Minimum priority to deliver (info/warning/urgent/critical). Default: "warning".
     #[serde(default = "default_warning_priority")]
     pub min_priority: String,
@@ -175,7 +188,7 @@ impl Default for WebhookAdapterConfig {
         Self {
             enabled: false,
             url: String::new(),
-            secret: String::new(),
+            secret: Zeroizing::new(String::new()),
             min_priority: default_warning_priority(),
             max_retries: default_max_retries(),
             retry_delay_secs: default_retry_delay_secs(),
@@ -328,6 +341,57 @@ pub struct KernelSettings {
     /// Default: number of logical CPUs (minimum 2).
     #[serde(default = "default_max_concurrent_sandbox_children")]
     pub max_concurrent_sandbox_children: usize,
+    /// Tunables for the iteration-loop context compactor (see
+    /// `crates/agentos-kernel/src/context_compactor.rs`). Without this
+    /// block the kernel uses sane defaults; operators tuning long-running
+    /// agentic workflows can override `cadence` (compact every N
+    /// iterations), `keep_recent_iterations` (rolling window kept fresh),
+    /// or disable LLM summarization to reduce per-iteration latency.
+    #[serde(default)]
+    pub context_compaction: ContextCompactionConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContextCompactionConfig {
+    /// Cadence in completed iterations. The compactor self-gates: it
+    /// only fires when `completed_iterations` is a non-zero multiple of
+    /// this value AND there are enough compactable entries.
+    #[serde(default = "default_compaction_cadence")]
+    pub cadence: usize,
+    /// How many recent iteration's worth of entries to keep verbatim.
+    /// Older entries are summarized into a rolling `[ROLLING TASK
+    /// SUMMARY]` block. The compactor multiplies this by 4 to derive
+    /// the entry count.
+    #[serde(default = "default_compaction_keep_recent")]
+    pub keep_recent_iterations: usize,
+    /// When true, the compactor calls the agent's current LLM adapter
+    /// to generate a coherent summary; on any LLM failure it transparently
+    /// falls back to the extractive heuristic. Operators on tight latency
+    /// budgets or running unreliable local models can set this to false.
+    #[serde(default = "default_enable_llm_compaction")]
+    pub enable_llm_summarization: bool,
+}
+
+impl Default for ContextCompactionConfig {
+    fn default() -> Self {
+        Self {
+            cadence: default_compaction_cadence(),
+            keep_recent_iterations: default_compaction_keep_recent(),
+            enable_llm_summarization: default_enable_llm_compaction(),
+        }
+    }
+}
+
+fn default_compaction_cadence() -> usize {
+    4
+}
+
+fn default_compaction_keep_recent() -> usize {
+    2
+}
+
+fn default_enable_llm_compaction() -> bool {
+    true
 }
 
 /// Per-tool output and runtime limits applied at context injection time.
@@ -561,6 +625,62 @@ pub struct ToolsSettings {
     /// Configurable workspace directories the agent can access beyond `data_dir`.
     #[serde(default)]
     pub workspace: WorkspaceConfig,
+    /// `host-package-install` tool configuration. Disabled by default.
+    #[serde(default)]
+    pub host_package: HostPackageSettings,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HostPackageSettings {
+    /// Master kill-switch. When `false`, the tool is registered but every
+    /// call returns "no privilege escalator configured" — no host packages
+    /// can be installed regardless of allowlist or approval.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Privilege escalator policy. One of: "auto", "pkexec", "helper", "none".
+    #[serde(default = "default_host_package_escalator")]
+    pub privilege_escalator: String,
+    /// Path to the setuid helper (used when `privilege_escalator = "helper"`).
+    #[serde(default = "default_host_package_helper_path")]
+    pub helper_path: String,
+    /// Package managers to detect on PATH (in priority order).
+    #[serde(default = "default_host_package_managers")]
+    pub managers: Vec<String>,
+    /// Operator-controlled allowlist. Only packages whose names match an
+    /// entry verbatim may be installed, even after user approval.
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+}
+
+impl Default for HostPackageSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            privilege_escalator: default_host_package_escalator(),
+            helper_path: default_host_package_helper_path(),
+            managers: default_host_package_managers(),
+            allowlist: Vec::new(),
+        }
+    }
+}
+
+fn default_host_package_escalator() -> String {
+    "auto".into()
+}
+
+fn default_host_package_helper_path() -> String {
+    "/usr/local/libexec/agentos-pkg-helper".into()
+}
+
+fn default_host_package_managers() -> Vec<String> {
+    vec![
+        "apt-get".into(),
+        "dnf".into(),
+        "pacman".into(),
+        "zypper".into(),
+        "apk".into(),
+        "brew".into(),
+    ]
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

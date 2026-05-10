@@ -1,0 +1,42 @@
+tags = ["meta", "read"]
+
+[manifest]
+name        = "search-tools"
+version     = "1.0.0"
+description = "Search available tools by keyword and return the top matches."
+author      = "agentos-core"
+trust_tier  = "core"
+risk_class  = "readonly_scoped"
+tags        = ["meta", "read"]
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "ToolSearchQuery"
+output = "ToolSearchResults"
+
+[input_schema]
+type = "object"
+required = ["query"]
+
+[input_schema.properties.query]
+type = "string"
+description = "Keyword query for tool discovery"
+
+[input_schema.properties.top_k]
+type = "integer"
+minimum = 1
+maximum = 20
+default = 5
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 1000
+syscalls      = []

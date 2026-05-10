@@ -72,6 +72,12 @@ pub struct ToolExecutionContext {
     /// long-running I/O (HTTP, shell exec) should check this token periodically
     /// and return early with a `ToolExecutionFailed` error if it is cancelled.
     pub cancellation_token: CancellationToken,
+    /// Optional task-scoped tool category allowlist. When `Some(list)`, the
+    /// paginated manual surface (`agent-manual`, `list-tools`, `search-tools`,
+    /// `describe-tool`) hides tools whose `category` is not in `list`. `None`
+    /// (default) = no restriction.
+    /// Mirrors `AgentTask.tool_categories`. Set by the kernel at dispatch.
+    pub tool_categories: Option<Vec<String>>,
 }
 
 /// Percent-decode ASCII bytes in a path string (e.g. `%2e%2e` → `..`, `%2f` → `/`).

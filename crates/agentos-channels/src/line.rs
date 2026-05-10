@@ -4,13 +4,13 @@
 /// Inbound: HTTP webhook at `/api/channels/line` in agentos-web, HMAC-SHA256 verified.
 use crate::types::{ChannelCapabilities, DeliveryReceipt, InboundMessage, OutboundMessage};
 use crate::{ChannelAdapter, ChannelHealth};
+use agentos_http::{client, HttpProfile};
 use agentos_types::AgentOSError;
 use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::Client;
 use serde_json::json;
 use tokio::sync::mpsc;
-use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use uuid::Uuid;
@@ -27,10 +27,7 @@ pub struct LineAdapter {
 impl LineAdapter {
     pub fn new(channel_access_token: String, channel_secret: String) -> Self {
         Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(15))
-                .build()
-                .expect("HTTP client build failed"),
+            client: client(HttpProfile::Outbound),
             channel_access_token: Zeroizing::new(channel_access_token),
             channel_secret: Zeroizing::new(channel_secret),
             name: "line".to_string(),

@@ -1,19 +1,35 @@
 {% extends "base.html" %}
 {% block content %}
-<section>
-  <article id="notif-{{ notification.id }}">
-    <header>
-      <hgroup>
-        <h2>{{ notification.subject }}</h2>
-        <p>
+<section class="notification-detail-layout" aria-labelledby="notification-title">
+  <article id="notif-{{ notification.id }}" class="notification-card">
+    <header class="notification-detail-header">
+      <div>
+        <div class="notification-title">
           <span class="badge badge-{{ notification.priority }}">{{ notification.priority | upper }}</span>
-          from {{ notification.from }} &mdash; {{ notification.created_at }}
-        </p>
-      </hgroup>
+          {% if not notification.read %}<mark>unread</mark>{% endif %}
+        </div>
+        <h1 id="notification-title" class="notification-detail-title">{{ notification.subject }}</h1>
+        <div class="notification-meta">
+          <span>From {{ notification.from }}</span>
+          <span>{{ notification.created_at }}</span>
+          {% if notification.expires_at %}<span>Expires {{ notification.expires_at }}</span>{% endif %}
+        </div>
+      </div>
+      <div class="notification-actions">
+        <a href="/notifications" role="button" class="outline secondary">Back</a>
+        <button type="button"
+                class="outline secondary"
+                hx-delete="/notifications/{{ notification.id }}"
+                hx-confirm="Dismiss this notification?"
+                hx-target="#notif-{{ notification.id }}"
+                hx-swap="outerHTML">
+          Dismiss
+        </button>
+      </div>
     </header>
 
-    <div class="notification-body">
-      {{ notification.body }}
+    <div class="notification-body markdown-content">
+      {{ notification.body | markdown }}
     </div>
 
     {% if notification.kind_tag == "question" and notification.requires_response %}
@@ -24,6 +40,5 @@
     {% endif %}
   </article>
 
-  <p><a href="/notifications">&larr; Back to inbox</a></p>
 </section>
 {% endblock %}

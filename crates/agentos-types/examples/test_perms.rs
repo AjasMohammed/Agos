@@ -1,4 +1,4 @@
-use agentos_types::capability::{PermissionEntry, PermissionOp, PermissionSet};
+use agentos_types::capability::{PermissionOp, PermissionSet};
 
 fn main() {
     let mut perms = PermissionSet::new();

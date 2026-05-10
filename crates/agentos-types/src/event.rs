@@ -161,6 +161,8 @@ pub enum EventType {
     ScheduledTaskMissed,
     ScheduledTaskCompleted,
     ScheduledTaskFailed,
+    ScheduledTaskDelivered,
+    ScheduledTaskDeliveryFailed,
 
     // ── ExternalEvents (Phase 5) ──
     WebhookReceived,
@@ -268,7 +270,9 @@ impl EventType {
             Self::CronJobFired
             | Self::ScheduledTaskMissed
             | Self::ScheduledTaskCompleted
-            | Self::ScheduledTaskFailed => EventCategory::ScheduleEvents,
+            | Self::ScheduledTaskFailed
+            | Self::ScheduledTaskDelivered
+            | Self::ScheduledTaskDeliveryFailed => EventCategory::ScheduleEvents,
 
             Self::WebhookReceived
             | Self::ExternalFileChanged

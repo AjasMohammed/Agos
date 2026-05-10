@@ -1,5 +1,6 @@
 use crate::types::*;
 use crate::{ChannelAdapter, ChannelCapabilities, ChannelHealth};
+use agentos_http::{client, HttpProfile};
 use agentos_types::AgentOSError;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
@@ -28,7 +29,7 @@ impl DiscordAdapter {
             bot_token: Zeroizing::new(bot_token),
             channel_id,
             instance_id,
-            client: reqwest::Client::new(),
+            client: client(HttpProfile::Outbound),
             listener_alive: Arc::new(AtomicBool::new(false)),
         }
     }

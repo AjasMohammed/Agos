@@ -1,0 +1,51 @@
+tags = ["meta", "read", "fs"]
+
+[manifest]
+name        = "system-open-files"
+version     = "1.0.0"
+risk_class  = "readonly_external"
+description = "List host-wide open files and file descriptors mapped to processes via the Hardware Abstraction Layer."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[manifest.usage_hints]
+use_for = ["Finding which process has a file open", "Listing all files opened by a specific PID"]
+prefer_over = ["shell-exec lsof", "shell-exec fuser"]
+quick_example = { path_contains = "/var/log" }
+
+[capabilities_required]
+permissions = ["system.open_files:r"]
+
+[capabilities_provided]
+outputs = ["content.structured"]
+
+[intent_schema]
+input  = "SystemOpenFilesIntent"
+output = "SystemOpenFilesResult"
+
+[input_schema]
+type = "object"
+
+[input_schema.properties.pid]
+type = "integer"
+minimum = 1
+description = "Filter by process PID (significantly faster)"
+
+[input_schema.properties.path_contains]
+type = "string"
+description = "Filter by file path substring"
+
+[input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 1000
+default = 200
+description = "Max number of files to return"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 32
+max_cpu_ms    = 5000
+syscalls      = []

@@ -1,4 +1,10 @@
 (function () {
+    function autosizeTextarea(ta) {
+        if (!ta) return;
+        ta.style.height = "auto";
+        ta.style.height = Math.min(ta.scrollHeight, 320) + "px";
+    }
+
     // ── Reply form clearing after successful send ────────────
     document.body.addEventListener("htmx:afterRequest", function (e) {
         if (!e || !e.detail || !e.detail.elt || e.detail.elt.id !== "chat-reply-form") {
@@ -12,7 +18,7 @@
         form.reset();
         var ta = form.querySelector('textarea[name="message"]');
         if (ta) {
-            ta.style.height = "auto";
+            autosizeTextarea(ta);
             ta.focus();
         }
     });
@@ -51,4 +57,11 @@
     if (chatArea) {
         chatArea.scrollTop = chatArea.scrollHeight;
     }
+
+    document.querySelectorAll("textarea[data-autoresize]").forEach(function (ta) {
+        autosizeTextarea(ta);
+        ta.addEventListener("input", function () {
+            autosizeTextarea(ta);
+        });
+    });
 }());

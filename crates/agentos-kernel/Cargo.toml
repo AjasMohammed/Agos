@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 agentos-types = { path = "../agentos-types" }
 agentos-audit = { path = "../agentos-audit" }
+agentos-storage = { workspace = true }
 agentos-mcp = { path = "../agentos-mcp" }
 agentos-vault = { path = "../agentos-vault" }
 agentos-capability = { path = "../agentos-capability" }

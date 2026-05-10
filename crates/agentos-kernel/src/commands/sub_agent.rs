@@ -5,151 +5,6 @@ use agentos_types::*;
 use chrono::Utc;
 use std::time::Duration;
 
-#[cfg(test)]
-mod tests {
-    use super::MAX_SPAWN_DEPTH;
-    use crate::scheduler::TaskScheduler;
-    use agentos_types::*;
-    use std::collections::BTreeSet;
-    use std::time::Duration;
-
-    fn make_task_at_depth(depth: u8) -> AgentTask {
-        AgentTask {
-            id: TaskID::new(),
-            state: TaskState::Queued,
-            agent_id: AgentID::new(),
-            capability_token: CapabilityToken {
-                task_id: TaskID::new(),
-                agent_id: AgentID::new(),
-                allowed_tools: BTreeSet::new(),
-                allowed_intents: BTreeSet::new(),
-                permissions: PermissionSet::new(),
-                issued_at: chrono::Utc::now(),
-                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
-                signature: Vec::new(),
-            },
-            assigned_llm: None,
-            priority: 5,
-            created_at: chrono::Utc::now(),
-            started_at: None,
-            timeout: Duration::from_secs(300),
-            original_prompt: "test".to_string(),
-            history: Vec::new(),
-            parent_task: None,
-            reasoning_hints: None,
-            max_iterations: None,
-            trigger_source: None,
-            autonomous: false,
-            parent_task_id: None,
-            spawn_depth: depth,
-            is_team_coordinator: false,
-            skip_checkpoint: false,
-            thinking_level: Default::default(),
-            spawner_agent_id: None,
-        }
-    }
-
-    /// Depth-limit check: a task at MAX_SPAWN_DEPTH must not be allowed to spawn children.
-    /// This tests the depth guard logic independently of a full Kernel.
-    #[tokio::test]
-    async fn test_depth_limit_exceeded_rejects_spawn() {
-        let scheduler = TaskScheduler::new(10);
-        let parent = make_task_at_depth(MAX_SPAWN_DEPTH);
-        let parent_id = parent.id;
-        scheduler.enqueue(parent).await;
-
-        // Retrieve the task and assert the guard condition directly.
-        let task = scheduler.get_task(&parent_id).await.unwrap();
-        assert!(
-            task.spawn_depth >= MAX_SPAWN_DEPTH,
-            "task should be at or beyond the max depth"
-        );
-
-        // The handler checks `spawn_depth >= MAX_SPAWN_DEPTH`. Simulate the guard.
-        let would_be_blocked = task.spawn_depth >= MAX_SPAWN_DEPTH;
-        assert!(
-            would_be_blocked,
-            "SpawnSubAgent must be blocked when spawn_depth >= {}",
-            MAX_SPAWN_DEPTH
-        );
-    }
-
-    /// A task below the depth limit should be allowed to proceed.
-    #[tokio::test]
-    async fn test_depth_below_limit_not_blocked() {
-        let scheduler = TaskScheduler::new(10);
-        let parent = make_task_at_depth(MAX_SPAWN_DEPTH - 1);
-        let parent_id = parent.id;
-        scheduler.enqueue(parent).await;
-
-        let task = scheduler.get_task(&parent_id).await.unwrap();
-        let would_be_blocked = task.spawn_depth >= MAX_SPAWN_DEPTH;
-        assert!(
-            !would_be_blocked,
-            "SpawnSubAgent must be allowed when spawn_depth < {}",
-            MAX_SPAWN_DEPTH
-        );
-    }
-
-    /// register_child / get_children round-trip.
-    #[tokio::test]
-    async fn test_register_and_get_children() {
-        let scheduler = TaskScheduler::new(10);
-        let parent_id = TaskID::new();
-        let child1 = TaskID::new();
-        let child2 = TaskID::new();
-
-        scheduler.register_child(parent_id, child1).await;
-        scheduler.register_child(parent_id, child2).await;
-
-        let children = scheduler.get_children(&parent_id).await;
-        assert_eq!(children.len(), 2);
-        assert!(children.contains(&child1));
-        assert!(children.contains(&child2));
-    }
-
-    /// get_children returns empty vec for unknown parent.
-    #[tokio::test]
-    async fn test_get_children_unknown_parent_returns_empty() {
-        let scheduler = TaskScheduler::new(10);
-        let unknown = TaskID::new();
-        let children = scheduler.get_children(&unknown).await;
-        assert!(children.is_empty());
-    }
-
-    /// Cascade cancel: registering a child under a parent and querying get_children
-    /// returns exactly that child; a child has no children of its own by default.
-    /// (The actual cancel cascade is exercised via cmd_cancel_task; this unit test
-    /// verifies the data-structure contract that cascade relies on.)
-    #[tokio::test]
-    async fn test_cancel_parent_cancels_children() {
-        let scheduler = TaskScheduler::new(4);
-
-        let parent_id = TaskID::new();
-        let child_id = TaskID::new();
-
-        let mut parent_task = make_task_at_depth(0);
-        parent_task.id = parent_id;
-
-        let mut child_task = make_task_at_depth(1);
-        child_task.id = child_id;
-        child_task.parent_task_id = Some(parent_id);
-
-        scheduler.enqueue(parent_task).await;
-        scheduler.enqueue(child_task).await;
-        scheduler.register_child(parent_id, child_id).await;
-
-        // Parent must report exactly one child.
-        let children = scheduler.get_children(&parent_id).await;
-        assert_eq!(children.len(), 1);
-        assert_eq!(children[0], child_id);
-
-        // Child has no registered children of its own.
-        let no_children = scheduler.get_children(&child_id).await;
-        assert!(no_children.is_empty(), "child has no registered children");
-    }
-}
-
 /// Maximum sub-agent spawn depth. Tasks at this depth may not spawn children.
 const MAX_SPAWN_DEPTH: u8 = 5;
 
@@ -167,6 +22,7 @@ impl Kernel {
     /// 5. Enqueue the child task and register it in the child_map for cascade-cancel.
     /// 6. Optionally seed the child context window from the parent's ContextSlice.
     /// 7. Write a structured audit entry.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn cmd_spawn_sub_agent(
         &self,
         parent_task_id: TaskID,
@@ -174,6 +30,8 @@ impl Kernel {
         prompt: &str,
         requested_permissions: &[String],
         context_slice: Option<agentos_types::ContextSlice>,
+        handoff_mode: Option<agentos_types::HandoffMode>,
+        requested_tool_categories: Option<Vec<String>>,
     ) -> KernelResponse {
         let span = tracing::info_span!(
             "spawn_sub_agent",
@@ -248,6 +106,37 @@ impl Kernel {
             ps
         };
 
+        // Resolve effective tool_categories allowlist for the child.
+        // Sub-agents may NEVER widen the parent's allowlist; child request must
+        // be a subset of parent's allowlist when both are present. If the child
+        // requests a category the parent does not allow, reject the spawn —
+        // this is a permission escalation attempt.
+        let effective_tool_categories = match (
+            parent_task.tool_categories.as_ref(),
+            requested_tool_categories,
+        ) {
+            (None, requested) => requested,
+            (Some(parent_allow), None) => Some(parent_allow.clone()),
+            (Some(parent_allow), Some(requested)) => {
+                let parent_set: std::collections::HashSet<&String> = parent_allow.iter().collect();
+                if let Some(bad) = requested.iter().find(|c| !parent_set.contains(c)) {
+                    tracing::warn!(
+                        parent_task_id = %parent_task_id,
+                        agent_name = %agent_name,
+                        widened_category = %bad,
+                        "SpawnSubAgent: rejected — child tool_categories must be a subset of parent's"
+                    );
+                    return KernelResponse::Error {
+                        message: format!(
+                            "sub-agent tool_categories must be a subset of parent's; \
+                             requested category '{bad}' is not in the parent's allowlist",
+                        ),
+                    };
+                }
+                Some(requested)
+            }
+        };
+
         // Generate child IDs BEFORE calling scope_for_child so the token is
         // issued for the child's own task/agent IDs, not the parent's.
         // This is the fix for the scheduler entry collision bug.
@@ -302,6 +191,7 @@ impl Kernel {
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
+            tool_categories: effective_tool_categories,
         };
 
         self.scheduler.enqueue(child_task).await;
@@ -327,8 +217,23 @@ impl Kernel {
             "SpawnSubAgent: child task enqueued"
         );
 
-        // 6. Seed child context from parent slice if provided.
-        if let Some(slice) = context_slice {
+        // 6. Seed child context from parent slice. An explicit `context_slice`
+        //    from the caller wins; otherwise a `handoff_mode` (when set and not
+        //    `None`) tells the kernel to build the slice itself by filtering
+        //    the parent's window. Building kernel-side avoids shipping the
+        //    full parent context over the bus and lets the policy layer choose
+        //    blast radius (None / TaskOnly / TaskAndKnowledge / Full).
+        const HANDOFF_MAX_ENTRIES: usize = 64;
+        let effective_slice = match (context_slice, handoff_mode) {
+            (Some(s), _) => Some(s),
+            (None, Some(mode)) if !matches!(mode, agentos_types::HandoffMode::None) => {
+                self.context_manager
+                    .build_handoff_slice(&parent_task_id, mode, HANDOFF_MAX_ENTRIES)
+                    .await
+            }
+            _ => None,
+        };
+        if let Some(slice) = effective_slice {
             let msg_count = slice.messages.len();
             match self
                 .context_manager
@@ -440,5 +345,150 @@ impl Kernel {
         );
 
         KernelResponse::SubAgentResults { results }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::MAX_SPAWN_DEPTH;
+    use crate::scheduler::TaskScheduler;
+    use agentos_types::*;
+    use std::collections::BTreeSet;
+    use std::time::Duration;
+
+    fn make_task_at_depth(depth: u8) -> AgentTask {
+        AgentTask {
+            id: TaskID::new(),
+            state: TaskState::Queued,
+            agent_id: AgentID::new(),
+            capability_token: CapabilityToken {
+                task_id: TaskID::new(),
+                agent_id: AgentID::new(),
+                allowed_tools: BTreeSet::new(),
+                allowed_intents: BTreeSet::new(),
+                permissions: PermissionSet::new(),
+                issued_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                signature: Vec::new(),
+            },
+            assigned_llm: None,
+            priority: 5,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            timeout: Duration::from_secs(300),
+            original_prompt: "test".to_string(),
+            history: Vec::new(),
+            parent_task: None,
+            reasoning_hints: None,
+            max_iterations: None,
+            trigger_source: None,
+            autonomous: false,
+            parent_task_id: None,
+            spawn_depth: depth,
+            is_team_coordinator: false,
+            skip_checkpoint: false,
+            thinking_level: Default::default(),
+            spawner_agent_id: None,
+            tool_categories: None,
+        }
+    }
+
+    /// Depth-limit check: a task at MAX_SPAWN_DEPTH must not be allowed to spawn children.
+    /// This tests the depth guard logic independently of a full Kernel.
+    #[tokio::test]
+    async fn test_depth_limit_exceeded_rejects_spawn() {
+        let scheduler = TaskScheduler::new(10);
+        let parent = make_task_at_depth(MAX_SPAWN_DEPTH);
+        let parent_id = parent.id;
+        scheduler.enqueue(parent).await;
+
+        // Retrieve the task and assert the guard condition directly.
+        let task = scheduler.get_task(&parent_id).await.unwrap();
+        assert!(
+            task.spawn_depth >= MAX_SPAWN_DEPTH,
+            "task should be at or beyond the max depth"
+        );
+
+        // The handler checks `spawn_depth >= MAX_SPAWN_DEPTH`. Simulate the guard.
+        let would_be_blocked = task.spawn_depth >= MAX_SPAWN_DEPTH;
+        assert!(
+            would_be_blocked,
+            "SpawnSubAgent must be blocked when spawn_depth >= {}",
+            MAX_SPAWN_DEPTH
+        );
+    }
+
+    /// A task below the depth limit should be allowed to proceed.
+    #[tokio::test]
+    async fn test_depth_below_limit_not_blocked() {
+        let scheduler = TaskScheduler::new(10);
+        let parent = make_task_at_depth(MAX_SPAWN_DEPTH - 1);
+        let parent_id = parent.id;
+        scheduler.enqueue(parent).await;
+
+        let task = scheduler.get_task(&parent_id).await.unwrap();
+        let would_be_blocked = task.spawn_depth >= MAX_SPAWN_DEPTH;
+        assert!(
+            !would_be_blocked,
+            "SpawnSubAgent must be allowed when spawn_depth < {}",
+            MAX_SPAWN_DEPTH
+        );
+    }
+
+    /// register_child / get_children round-trip.
+    #[tokio::test]
+    async fn test_register_and_get_children() {
+        let scheduler = TaskScheduler::new(10);
+        let parent_id = TaskID::new();
+        let child1 = TaskID::new();
+        let child2 = TaskID::new();
+
+        scheduler.register_child(parent_id, child1).await;
+        scheduler.register_child(parent_id, child2).await;
+
+        let children = scheduler.get_children(&parent_id).await;
+        assert_eq!(children.len(), 2);
+        assert!(children.contains(&child1));
+        assert!(children.contains(&child2));
+    }
+
+    /// get_children returns empty vec for unknown parent.
+    #[tokio::test]
+    async fn test_get_children_unknown_parent_returns_empty() {
+        let scheduler = TaskScheduler::new(10);
+        let unknown = TaskID::new();
+        let children = scheduler.get_children(&unknown).await;
+        assert!(children.is_empty());
+    }
+
+    /// Cascade cancel: registering a child under a parent and querying get_children
+    /// returns exactly that child; a child has no children of its own by default.
+    /// (The actual cancel cascade is exercised via cmd_cancel_task; this unit test
+    /// verifies the data-structure contract that cascade relies on.)
+    #[tokio::test]
+    async fn test_cancel_parent_cancels_children() {
+        let scheduler = TaskScheduler::new(4);
+
+        let parent_id = TaskID::new();
+        let child_id = TaskID::new();
+
+        let mut parent_task = make_task_at_depth(0);
+        parent_task.id = parent_id;
+
+        let mut child_task = make_task_at_depth(1);
+        child_task.id = child_id;
+        child_task.parent_task_id = Some(parent_id);
+
+        scheduler.enqueue(parent_task).await;
+        scheduler.enqueue(child_task).await;
+        scheduler.register_child(parent_id, child_id).await;
+
+        // Parent must report exactly one child.
+        let children = scheduler.get_children(&parent_id).await;
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0], child_id);
+
+        // Child has no registered children of its own.
+        let no_children = scheduler.get_children(&child_id).await;
+        assert!(no_children.is_empty(), "child has no registered children");
     }
 }

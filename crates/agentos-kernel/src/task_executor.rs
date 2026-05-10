@@ -1,3 +1,5 @@
+use crate::context_compactor::ContextCompactor;
+use crate::escalation::{EscalationManager, ResolutionOutcome};
 use crate::event_bus::{parse_event_type_filter, parse_subscription_priority};
 use crate::injection_scanner::ThreatLevel;
 use crate::kernel::Kernel;
@@ -8,11 +10,92 @@ use agentos_types::*;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinSet;
+
+/// Maximum wall-clock time `task_executor` will park waiting for human
+/// resolution of a privileged-tool escalation. Set just above the
+/// default `EscalationManager` timeout (5 min) so the manager's auto-
+/// deny sweeper wins the race in the common case.
+const APPROVAL_WAIT_TIMEOUT_SECS: u64 = 360;
+
+/// Outcome returned by [`wait_for_approval_resolution`] — a small
+/// classifier so the caller can pick a typed `AgentOSError` reason
+/// without inspecting the receiver state machine.
+enum ApprovalWaitOutcome {
+    Approved,
+    Denied,
+    /// Receiver was missing or the sender was dropped without a value
+    /// (race with concurrent resolve / kernel restart). Treated as a
+    /// failure but with a distinct reason string so operators can grep
+    /// audit logs for stuck approvals.
+    Lost,
+}
+
+/// Parse an `approval_pending:<id>:...` abort reason produced by
+/// `ApprovalHook::on_event`. Returns `Some(id)` for the structured
+/// shape; any other reason returns `None` and is treated as a hard
+/// hook denial.
+fn extract_approval_pending_id(reason: &str) -> Option<u64> {
+    let rest = reason.strip_prefix("approval_pending:")?;
+    let id_str = rest.split(':').next()?;
+    id_str.trim().parse::<u64>().ok()
+}
+
+/// Park on the resolution channel for `escalation_id` with a hard
+/// upper-bound timeout. Returns [`ApprovalWaitOutcome::Lost`] if the
+/// channel is missing or already taken — the caller will surface a
+/// typed tool failure so the agent can retry.
+async fn wait_for_approval_resolution(
+    escalation_manager: Arc<EscalationManager>,
+    escalation_id: u64,
+) -> ApprovalWaitOutcome {
+    let Some(rx) = escalation_manager
+        .take_resolution_receiver(escalation_id)
+        .await
+    else {
+        return ApprovalWaitOutcome::Lost;
+    };
+    match tokio::time::timeout(Duration::from_secs(APPROVAL_WAIT_TIMEOUT_SECS), rx).await {
+        Ok(Ok(ResolutionOutcome::Approved)) => ApprovalWaitOutcome::Approved,
+        Ok(Ok(ResolutionOutcome::Denied)) => ApprovalWaitOutcome::Denied,
+        Ok(Err(_)) => ApprovalWaitOutcome::Lost,
+        Err(_) => ApprovalWaitOutcome::Denied,
+    }
+}
 use tracing::Instrument;
 
-/// Maximum time (seconds) to wait for a single LLM inference call before aborting the task.
-/// Prevents tasks from blocking a slot indefinitely when the LLM provider hangs.
+/// Soft threshold (seconds) after which a long-running LLM inference is
+/// escalated to the user instead of being killed outright. The previous
+/// hard timeout sat here; with the user-gate in place the inference is
+/// allowed to keep running while we ask the user whether to abort.
 const LLM_INFERENCE_TIMEOUT_SECS: u64 = 120;
+
+/// Time (seconds) we wait for the user to respond to a long-running
+/// inference escalation before defaulting to abort. Kept short so a
+/// stuck task is not unbounded when the user is offline.
+const LLM_INFERENCE_USER_GRACE_SECS: u64 = 60;
+
+/// Maximum number of times the user can extend a single inference
+/// before we force-abort. Upper bound on total wall-clock per inference is
+/// `(MAX_EXTENSIONS + 1) * LLM_INFERENCE_TIMEOUT_SECS + MAX_EXTENSIONS * LLM_INFERENCE_USER_GRACE_SECS`
+/// — with the defaults that's 4*120 + 3*60 = 660s ≈ 11 min, since the
+/// inference keeps running while we wait for the user during each grace window.
+const LLM_INFERENCE_MAX_EXTENSIONS: u32 = 3;
+
+/// Outcome of one watchdog tick: either the inference finished, or the
+/// soft threshold elapsed and we need to ask the user.
+enum InferenceWatchdogStep<T> {
+    Completed(T),
+    Threshold,
+}
+
+/// Outcome of the user-gate race: either the inference finished while
+/// we were waiting on the user, the user picked Continue, or we should
+/// abort (user denied / grace expired / channel lost).
+enum InferenceGateStep<T> {
+    Completed(T),
+    Continue,
+    Abort,
+}
 
 /// Result of synchronous task execution, carrying data needed by the outer
 /// `execute_task()` method for enriched episodic memory recording.
@@ -20,9 +103,66 @@ pub(crate) struct TaskResult {
     pub answer: String,
     pub tool_call_count: u32,
     pub iterations: u32,
+    /// Per-tool records for downstream observability (run history,
+    /// delivery context). Populated incrementally during execution.
+    pub tool_calls: Vec<agentos_types::ToolCallRecord>,
 }
 
 impl Kernel {
+    fn manual_query_details(
+        tool_name: &str,
+        payload: &serde_json::Value,
+        result: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let (layer, section, category, page) = match tool_name {
+            "list-tools" => (
+                "L1",
+                Some("tools".to_string()),
+                payload
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                payload.get("page").and_then(|v| v.as_u64()),
+            ),
+            "search-tools" => ("L1", Some("search".to_string()), None, None),
+            "describe-tool" | "tool-info" => ("L2", Some("tool-detail".to_string()), None, None),
+            "agent-manual" => {
+                let section = payload
+                    .get("section")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let section_lc = section
+                    .as_deref()
+                    .map(str::to_ascii_lowercase)
+                    .unwrap_or_default();
+                let layer = match section_lc.as_str() {
+                    "index" => "L0",
+                    "tools" | "suggest" => "L1",
+                    "tool-detail" => "L2",
+                    _ => return None,
+                };
+                (
+                    layer,
+                    section,
+                    payload
+                        .get("category")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    payload.get("page").and_then(|v| v.as_u64()),
+                )
+            }
+            _ => return None,
+        };
+        let token_estimate = (result.to_string().chars().count() / 4).max(1);
+        Some(serde_json::json!({
+            "layer": layer,
+            "section": section,
+            "category": category,
+            "page": page,
+            "tokens_returned": token_estimate,
+        }))
+    }
+
     pub(crate) fn classify_task_failure(
         error_message: &str,
     ) -> (&'static str, EventSeverity, bool) {
@@ -445,6 +585,7 @@ impl Kernel {
         mut tool_calls: Vec<crate::tool_call::ParsedToolCall>,
         tool_call_count: &mut u32,
         refresh_knowledge_blocks: &mut bool,
+        tool_not_found_suggest_count: &mut u32,
     ) -> Result<(), anyhow::Error> {
         let mut consecutive_push_failures: u32 = 0;
         struct PreparedParallelToolCall {
@@ -676,9 +817,15 @@ impl Kernel {
                             Some(task.id),
                         )
                         .await;
-                        let error_result = serde_json::json!({
-                            "error": format!("Unknown tool requested: {}", tool_call.tool_name)
-                        });
+                        let error_result = self
+                            .build_tool_not_found_payload(
+                                &tool_call.tool_name,
+                                task.id,
+                                task.agent_id,
+                                trace_id,
+                                tool_not_found_suggest_count,
+                            )
+                            .await;
                         if let Err(e) = self
                             .context_manager
                             .push_tool_result(
@@ -875,15 +1022,18 @@ impl Kernel {
                         reason = %reason,
                         "Parallel tool-call coherence rejected"
                     );
-                    let error_result = serde_json::json!({
-                        "error": format!("Coherence check failed: {}", reason)
+                    let stop_directive = serde_json::json!({
+                        "kernel_directive": "STOP",
+                        "tool": tool_call.tool_name,
+                        "reason": reason,
+                        "instruction": "Do NOT call this tool again with similar arguments. Synthesize a final answer using information already gathered. If the task cannot be completed, summarise what you have and end."
                     });
                     if let Err(e) = self
                         .context_manager
                         .push_tool_result(
                             &task.id,
                             &tool_call.tool_name,
-                            &error_result,
+                            &stop_directive,
                             tool_call.id.clone(),
                         )
                         .await
@@ -918,6 +1068,19 @@ impl Kernel {
                     self.intent_validator
                         .record_tool_call(&task.id, &tool_call)
                         .await;
+                    let reject_count = self
+                        .intent_validator
+                        .increment_reject_count(&task.id, &tool_call.tool_name)
+                        .await;
+                    if reject_count >= crate::intent_validator::REJECT_FORCE_END_THRESHOLD {
+                        tracing::warn!(
+                            task_id = %task.id,
+                            tool = %tool_call.tool_name,
+                            reject_count,
+                            "Forcing task EndTurn — model ignored prior STOP directive"
+                        );
+                        self.intent_validator.mark_force_end_turn(&task.id).await;
+                    }
                     continue;
                 }
                 Ok(IntentCoherenceResult::Suspicious { reason, .. }) => {
@@ -1250,6 +1413,7 @@ impl Kernel {
         for call in prepared {
             let tool_runner = self.tool_runner.clone();
             let sandbox = self.sandbox.clone();
+            let escalation_manager = Arc::clone(&self.escalation_manager);
             #[cfg(feature = "otel")]
             let otel = self.otel.clone();
             let data_dir = self.data_dir.clone();
@@ -1273,6 +1437,7 @@ impl Kernel {
             let tool_call = call.tool_call;
             let sandbox_plan = call.sandbox_plan;
             let tool_cancellation = self.cancellation_token.child_token();
+            let task_tool_categories = task.tool_categories.clone();
             let hook_registry = Arc::clone(&self.hook_registry);
             let execution_mode: &'static str = if sandbox_plan.is_some() {
                 "sandbox"
@@ -1335,6 +1500,7 @@ impl Kernel {
                         capability_dispatcher: Some(cap_dispatcher),
                         storage_zone_query: Some(zone_query),
                         cancellation_token: tool_cancellation,
+                        tool_categories: task_tool_categories,
                     };
 
                     let tool_start = std::time::Instant::now();
@@ -1351,20 +1517,87 @@ impl Kernel {
                         })
                         .await;
                     if let agentos_types::HookResult::Abort(reason) = pre_result {
-                        let tool_name = tool_call.tool_name.clone();
-                        return ParallelToolOutcome {
-                            order,
-                            tool_call,
-                            trace_id,
-                            snapshot_ref,
-                            tool_payload_preview,
-                            duration_ms: tool_start.elapsed().as_millis() as u64,
-                            result: Err(agentos_types::AgentOSError::ToolExecutionFailed {
-                                tool_name,
-                                reason: format!("Blocked by hook: {}", reason),
-                            }),
-                            execution_mode,
-                        };
+                        // ApprovalHook tags abort reasons with
+                        // `approval_pending:<id>:` when it has installed
+                        // a resolution channel for the escalation. In
+                        // that case we PARK on the channel — on
+                        // `Approved` we fall through to the execution
+                        // block (without re-firing ToolPre); on `Denied`
+                        // or expiry we surface a typed tool failure.
+                        // Any other Abort is a hard hook denial.
+                        let approval_pending_id = extract_approval_pending_id(&reason);
+                        if let Some(esc_id) = approval_pending_id {
+                            let outcome = wait_for_approval_resolution(
+                                Arc::clone(&escalation_manager),
+                                esc_id,
+                            )
+                            .await;
+                            match outcome {
+                                ApprovalWaitOutcome::Approved => {
+                                    tracing::info!(
+                                        task_id = %task_id,
+                                        tool = %tool_call.tool_name,
+                                        escalation_id = esc_id,
+                                        "Approval resolved → resuming privileged tool call"
+                                    );
+                                    // Fall through to the execution block below.
+                                }
+                                ApprovalWaitOutcome::Denied => {
+                                    return ParallelToolOutcome {
+                                        order,
+                                        tool_call: tool_call.clone(),
+                                        trace_id,
+                                        snapshot_ref,
+                                        tool_payload_preview,
+                                        duration_ms: tool_start.elapsed().as_millis() as u64,
+                                        result: Err(
+                                            agentos_types::AgentOSError::ToolExecutionFailed {
+                                                tool_name: tool_call.tool_name.clone(),
+                                                reason: format!(
+                                                    "denied by user (escalation {esc_id})"
+                                                ),
+                                            },
+                                        ),
+                                        execution_mode,
+                                    };
+                                }
+                                ApprovalWaitOutcome::Lost => {
+                                    return ParallelToolOutcome {
+                                        order,
+                                        tool_call: tool_call.clone(),
+                                        trace_id,
+                                        snapshot_ref,
+                                        tool_payload_preview,
+                                        duration_ms: tool_start.elapsed().as_millis() as u64,
+                                        result: Err(
+                                            agentos_types::AgentOSError::ToolExecutionFailed {
+                                                tool_name: tool_call.tool_name.clone(),
+                                                reason: format!(
+                                                    "approval channel for escalation {esc_id} \
+                                                     was unavailable; the tool call did not run"
+                                                ),
+                                            },
+                                        ),
+                                        execution_mode,
+                                    };
+                                }
+                            }
+                        } else {
+                            let tool_name = tool_call.tool_name.clone();
+                            return ParallelToolOutcome {
+                                order,
+                                tool_call,
+                                trace_id,
+                                snapshot_ref,
+                                tool_payload_preview,
+                                duration_ms: tool_start.elapsed().as_millis() as u64,
+                                result: Err(agentos_types::AgentOSError::ToolExecutionFailed {
+                                    tool_name,
+                                    reason: format!("Blocked by hook: {}", reason),
+                                }),
+                                execution_mode,
+                            };
+                        }
                     }
 
                     let result = if let Some((config, category_overhead_bytes, manifest_weight)) =
@@ -1535,6 +1768,38 @@ impl Kernel {
                             Some(task.id),
                         )
                         .await;
+                    }
+                    self.tool_usage
+                        .record(&task.agent_id.to_string(), &outcome.tool_call.tool_name)
+                        .await;
+                    // Update in-memory LRU for this agent (cap 10).
+                    {
+                        let tool_name = outcome.tool_call.tool_name.clone();
+                        let mut lru = self.agent_tool_lru.write().await;
+                        let entry = lru.entry(task.agent_id).or_default();
+                        entry.retain(|n| n != &tool_name);
+                        entry.push_front(tool_name);
+                        if entry.len() > 10 {
+                            entry.truncate(10);
+                        }
+                    }
+                    if let Some(details) = Self::manual_query_details(
+                        &outcome.tool_call.tool_name,
+                        &outcome.tool_call.payload,
+                        &result,
+                    ) {
+                        self.audit_log(agentos_audit::AuditEntry {
+                            timestamp: chrono::Utc::now(),
+                            trace_id: outcome.trace_id,
+                            event_type: agentos_audit::AuditEventType::ManualQuery,
+                            agent_id: Some(task.agent_id),
+                            task_id: Some(task.id),
+                            tool_id: None,
+                            details,
+                            severity: agentos_audit::AuditSeverity::Info,
+                            reversible: false,
+                            rollback_ref: None,
+                        });
                     }
 
                     let context_result = if let Some(action) =
@@ -1899,9 +2164,57 @@ impl Kernel {
         let mut knowledge_blocks: Vec<String> = Vec::new();
         let mut refresh_knowledge_blocks = true;
         let mut context_warning_emitted = false;
+        let mut tool_not_found_suggest_count: u32 = 0;
+
+        // Cadence-gated context compactor. Reads tunables from
+        // `[kernel.context_compaction]` so operators can adjust without a
+        // recompile (Phase 5b). When `enable_llm_summarization = true`
+        // the compactor calls the agent's current LLM adapter for a
+        // semantic summary; on any LLM error it transparently falls back
+        // to the extractive heuristic so a flaky model never breaks
+        // task progress.
+        let cc_cfg = &self.config.kernel.context_compaction;
+        let context_compactor =
+            ContextCompactor::new(cc_cfg.cadence, cc_cfg.keep_recent_iterations);
 
         for iteration in 0..max_iterations {
             completed_iterations = iteration + 1;
+
+            // Best-effort compaction. Errors are logged and swallowed —
+            // the iteration body must not fail because compaction stumbled.
+            if completed_iterations > 0 {
+                let llm_for_compaction = if cc_cfg.enable_llm_summarization {
+                    Some(Arc::clone(&current_llm))
+                } else {
+                    None
+                };
+                match context_compactor
+                    .maybe_compact_with_llm(
+                        self,
+                        &task.id,
+                        completed_iterations as usize,
+                        llm_for_compaction,
+                    )
+                    .await
+                {
+                    Ok(Some(outcome)) => {
+                        tracing::info!(
+                            task_id = %task.id,
+                            compressed_entries = outcome.compressed_entries,
+                            llm_summarized = outcome.llm_summarized,
+                            "Context compacted into rolling summary"
+                        );
+                    }
+                    Ok(None) => {} // not yet at cadence / not enough to compact
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task.id,
+                            error = %e,
+                            "Context compaction failed; continuing without it"
+                        );
+                    }
+                }
+            }
             let iteration_trace_id = TraceID::new();
             let iteration_span = self.otel.start_iteration_span(
                 task_span,
@@ -1910,6 +2223,30 @@ impl Kernel {
             );
             iteration_span.set_string_attribute("task.id", task.id.to_string());
             iteration_span.set_string_attribute("agent.id", task.agent_id.to_string());
+
+            // If the intent validator forced a final-synthesis pass on the
+            // previous iteration, push a synthetic user nudge before the next
+            // inference and run it with tools disabled. This bounds the
+            // pathological case where a small model keeps emitting the same
+            // rejected tool call regardless of `kernel_directive: STOP`.
+            let final_synthesis_iteration =
+                self.intent_validator.take_force_end_turn(&task.id).await;
+            if final_synthesis_iteration {
+                let nudge = agentos_types::ContextEntry::from_text(
+                    agentos_types::ContextRole::User,
+                    "[KERNEL] Tool calls have been disabled for this turn — the same tool was \
+                     rejected repeatedly. Provide your final answer now using only the \
+                     information already in your context. No tool calls.",
+                );
+                if let Err(e) = self.context_manager.push_entry(&task.id, nudge).await {
+                    tracing::error!(
+                        error = %e,
+                        task_id = %task.id,
+                        "Failed to push final-synthesis nudge — proceeding without it"
+                    );
+                }
+            }
+
             let raw_context = match self.context_manager.get_context(&task.id).await {
                 Ok(ctx) => ctx,
                 Err(e) => {
@@ -2083,13 +2420,17 @@ impl Kernel {
             }
 
             // Filter history: only non-system Active entries
-            let history: Vec<ContextEntry> = raw_context
+            let mut history: Vec<ContextEntry> = raw_context
                 .entries
                 .into_iter()
                 .filter(|e| {
                     e.role != ContextRole::System && e.partition == ContextPartition::Active
                 })
                 .collect();
+
+            // Scrub stale meta-tool results: keep only the latest ToolResult for
+            // list-tools and search-tools so old paginated results don't stack up.
+            scrub_meta_tool_results(&mut history);
 
             // Compile the optimized context window
             let compiled_context =
@@ -2291,42 +2632,248 @@ impl Kernel {
                 ..Default::default()
             };
 
-            let inference = match tokio::time::timeout(
-                Duration::from_secs(LLM_INFERENCE_TIMEOUT_SECS),
-                current_llm.infer_with_options(
+            let tools_for_inference: &[ToolManifest] = if final_synthesis_iteration {
+                &[]
+            } else {
+                &llm_tool_manifests
+            };
+            // Watchdog-gated inference: rather than killing the call at the
+            // soft threshold, we ask the user whether to keep waiting or
+            // abort. The inference future stays alive across the gate so
+            // no work is lost if the user picks Continue (or if the call
+            // finishes naturally while we were asking). Scoped in its own
+            // block so the borrow on `current_llm` ends before any later
+            // model-downgrade reassignment in this iteration.
+            let inference_outcome = {
+                // Capture provider/model up front so log fields are
+                // available without re-borrowing through `infer_fut`.
+                let provider_name = current_llm.provider_name().to_string();
+                let model_name = current_llm.model_name().to_string();
+                let infer_fut = current_llm.infer_with_options(
                     &compiled_context,
-                    &llm_tool_manifests,
+                    tools_for_inference,
                     &inference_opts,
-                ),
-            )
-            .await
-            {
-                Err(_elapsed) => {
-                    tracing::error!(
-                        task_id = %task.id,
-                        timeout_secs = LLM_INFERENCE_TIMEOUT_SECS,
-                        "LLM inference timed out — aborting task"
-                    );
-                    self.context_manager.remove_context(&task.id).await;
-                    self.intent_validator.remove_task(&task.id).await;
-                    anyhow::bail!(
-                        "LLM inference timed out after {}s",
-                        LLM_INFERENCE_TIMEOUT_SECS
-                    );
+                );
+                tokio::pin!(infer_fut);
+                let inference_start = std::time::Instant::now();
+                let mut extensions_used: u32 = 0;
+                loop {
+                    let threshold_sleep =
+                        tokio::time::sleep(Duration::from_secs(LLM_INFERENCE_TIMEOUT_SECS));
+                    tokio::pin!(threshold_sleep);
+
+                    let step = tokio::select! {
+                        biased;
+                        res = &mut infer_fut => InferenceWatchdogStep::Completed(res),
+                        _ = &mut threshold_sleep => InferenceWatchdogStep::Threshold,
+                    };
+
+                    match step {
+                        InferenceWatchdogStep::Completed(res) => break res,
+                        InferenceWatchdogStep::Threshold => {
+                            let elapsed_secs = inference_start.elapsed().as_secs();
+                            tracing::warn!(
+                                task_id = %task.id,
+                                agent_id = %task.agent_id,
+                                provider = %provider_name,
+                                model = %model_name,
+                                elapsed_secs,
+                                extensions_used,
+                                "LLM inference exceeded soft threshold — escalating to user"
+                            );
+
+                            if extensions_used >= LLM_INFERENCE_MAX_EXTENSIONS {
+                                tracing::error!(
+                                    task_id = %task.id,
+                                    agent_id = %task.agent_id,
+                                    provider = %provider_name,
+                                    model = %model_name,
+                                    elapsed_secs,
+                                    extensions_used,
+                                    max = LLM_INFERENCE_MAX_EXTENSIONS,
+                                    "LLM inference: max user-gate extensions reached, aborting"
+                                );
+                                self.context_manager.remove_context(&task.id).await;
+                                self.intent_validator.remove_task(&task.id).await;
+                                anyhow::bail!(
+                                    "LLM inference timed out after {}s ({} extensions exhausted)",
+                                    elapsed_secs,
+                                    extensions_used
+                                );
+                            }
+
+                            // Atomic create+install: closes the race in which a
+                            // sink-driven user resolution arrives before we can
+                            // park on the receiver. See
+                            // `EscalationManager::create_escalation_with_resolution`.
+                            let (esc_id, rx) = self
+                                .escalation_manager
+                                .create_escalation_with_resolution(
+                                    task.id,
+                                    task.agent_id,
+                                    crate::kernel_action::EscalationReason::Other(
+                                        "long_running_inference".to_string(),
+                                    ),
+                                    format!(
+                                        "Agent has been running an LLM inference for {}s (extension {}/{}).",
+                                        elapsed_secs,
+                                        extensions_used + 1,
+                                        LLM_INFERENCE_MAX_EXTENSIONS
+                                    ),
+                                    "Agent is taking longer than expected. Continue waiting, or abort?"
+                                        .to_string(),
+                                    vec!["Continue".to_string(), "Abort".to_string()],
+                                    "high".to_string(),
+                                    true,
+                                    TraceID::new(),
+                                    Some(crate::escalation::AutoAction::Deny),
+                                )
+                                .await;
+
+                            if esc_id == u64::MAX {
+                                tracing::error!(
+                                    task_id = %task.id,
+                                    agent_id = %task.agent_id,
+                                    provider = %provider_name,
+                                    model = %model_name,
+                                    "LLM inference: escalation cap reached, aborting"
+                                );
+                                self.context_manager.remove_context(&task.id).await;
+                                self.intent_validator.remove_task(&task.id).await;
+                                anyhow::bail!(
+                                    "LLM inference timed out after {}s — escalation cap reached",
+                                    elapsed_secs
+                                );
+                            }
+
+                            if rx.is_none() {
+                                tracing::warn!(
+                                    task_id = %task.id,
+                                    escalation_id = esc_id,
+                                    "LLM inference: resolution channel unavailable; falling back to grace-only abort"
+                                );
+                            }
+
+                            let grace = tokio::time::sleep(Duration::from_secs(
+                                LLM_INFERENCE_USER_GRACE_SECS,
+                            ));
+                            tokio::pin!(grace);
+
+                            let gate_step = match rx {
+                                Some(rx) => tokio::select! {
+                                    biased;
+                                    res = &mut infer_fut => InferenceGateStep::Completed(res),
+                                    outcome = rx => match outcome {
+                                        Ok(crate::escalation::ResolutionOutcome::Approved) => {
+                                            InferenceGateStep::Continue
+                                        }
+                                        Ok(crate::escalation::ResolutionOutcome::Denied) => {
+                                            InferenceGateStep::Abort
+                                        }
+                                        Err(_) => InferenceGateStep::Abort,
+                                    },
+                                    _ = &mut grace => InferenceGateStep::Abort,
+                                },
+                                None => tokio::select! {
+                                    biased;
+                                    res = &mut infer_fut => InferenceGateStep::Completed(res),
+                                    _ = &mut grace => InferenceGateStep::Abort,
+                                },
+                            };
+
+                            match gate_step {
+                                InferenceGateStep::Completed(res) => {
+                                    // Inference finished while the user-gate
+                                    // was open — auto-resolve as approved so
+                                    // no escalation is left orphaned.
+                                    let _ = self
+                                        .escalation_manager
+                                        .resolve(esc_id, "approved".to_string())
+                                        .await;
+                                    break res;
+                                }
+                                InferenceGateStep::Continue => {
+                                    // Close out this escalation cleanly so it
+                                    // does not linger and consume a slot from
+                                    // `MAX_ESCALATIONS_PER_TASK` for 5 minutes
+                                    // (until the auto-deny sweeper expires it).
+                                    let _ = self
+                                        .escalation_manager
+                                        .resolve(esc_id, "approved".to_string())
+                                        .await;
+                                    extensions_used += 1;
+                                    tracing::info!(
+                                        task_id = %task.id,
+                                        agent_id = %task.agent_id,
+                                        provider = %provider_name,
+                                        model = %model_name,
+                                        escalation_id = esc_id,
+                                        extensions_used,
+                                        "User approved continuation — re-arming watchdog"
+                                    );
+                                    continue;
+                                }
+                                InferenceGateStep::Abort => {
+                                    let _ = self
+                                        .escalation_manager
+                                        .resolve(esc_id, "denied".to_string())
+                                        .await;
+                                    let total_secs = inference_start.elapsed().as_secs();
+                                    tracing::error!(
+                                        task_id = %task.id,
+                                        agent_id = %task.agent_id,
+                                        provider = %provider_name,
+                                        model = %model_name,
+                                        escalation_id = esc_id,
+                                        total_secs,
+                                        "LLM inference aborted at user gate"
+                                    );
+                                    self.context_manager.remove_context(&task.id).await;
+                                    self.intent_validator.remove_task(&task.id).await;
+                                    anyhow::bail!(
+                                        "LLM inference aborted after {}s (user denied or no response)",
+                                        total_secs
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
-                Ok(Err(e)) => {
+            };
+
+            let inference = match inference_outcome {
+                Err(e) => {
                     self.context_manager.remove_context(&task.id).await;
                     self.intent_validator.remove_task(&task.id).await;
                     anyhow::bail!("LLM error: {}", e);
                 }
-                Ok(Ok(mut result)) => {
-                    // Parse uncertainty declarations from the LLM response
+                Ok(mut result) => {
                     if result.uncertainty.is_none() {
                         result.uncertainty = agentos_llm::parse_uncertainty(&result.text);
                     }
                     result
                 }
             };
+
+            // Forced final-synthesis pass: take whatever text the model
+            // produced (tools were already disabled above) and end the task.
+            // Skip every tool-call extraction path so a stray ```json fence
+            // can no longer re-enter the loop.
+            if final_synthesis_iteration {
+                tracing::info!(
+                    task_id = %task.id,
+                    iteration = completed_iterations,
+                    text_len = inference.text.len(),
+                    "Final synthesis pass produced text — ending task"
+                );
+                final_answer = if inference.text.trim().is_empty() {
+                    "[KERNEL] Task ended after repeated tool-call rejections; no final answer was produced."
+                        .to_string()
+                } else {
+                    inference.text
+                };
+                break;
+            }
 
             crate::metrics::record_inference(
                 current_llm.provider_name(),
@@ -2767,7 +3314,9 @@ impl Kernel {
                     &task.id,
                     ContextEntry {
                         role: ContextRole::Assistant,
-                        content: inference.text.clone(),
+                        parts: vec![ContentPart::Text {
+                            text: inference.text.clone(),
+                        }],
                         timestamp: chrono::Utc::now(),
                         metadata: Some(ContextMetadata {
                             tool_name: None,
@@ -2852,6 +3401,37 @@ impl Kernel {
                         "Parsed text-mode tool call from LLM response (no native function calling)"
                     );
                     parsed_tool_calls.push(text_tc);
+                } else {
+                    // Multi-block fallback: small models often emit several
+                    // ```json {tool:..., payload:...} ``` fences inside the
+                    // response text. Recover them so the kernel can execute.
+                    let recovered = crate::tool_call::extract_text_tool_calls(&inference.text);
+                    if !recovered.is_empty() {
+                        let names: Vec<String> =
+                            recovered.iter().map(|c| c.tool_name.clone()).collect();
+                        tracing::info!(
+                            task_id = %task.id,
+                            count = recovered.len(),
+                            tools = ?names,
+                            "Recovered tool calls from JSON-in-markdown text content"
+                        );
+                        self.audit_log(agentos_audit::AuditEntry {
+                            timestamp: chrono::Utc::now(),
+                            trace_id: *task_trace_id,
+                            event_type: agentos_audit::AuditEventType::ToolCallRecovered,
+                            agent_id: Some(task.agent_id),
+                            task_id: Some(task.id),
+                            tool_id: None,
+                            details: serde_json::json!({
+                                "count": recovered.len(),
+                                "tools": names,
+                            }),
+                            severity: agentos_audit::AuditSeverity::Info,
+                            reversible: false,
+                            rollback_ref: None,
+                        });
+                        parsed_tool_calls = recovered;
+                    }
                 }
             }
             if parsed_tool_calls.len() > 1 {
@@ -2864,6 +3444,7 @@ impl Kernel {
                         parsed_tool_calls,
                         &mut tool_call_count,
                         &mut refresh_knowledge_blocks,
+                        &mut tool_not_found_suggest_count,
                     )
                     .await?;
                     continue;
@@ -3047,9 +3628,15 @@ impl Kernel {
                                 )
                                 .await;
 
-                                let error_result = serde_json::json!({
-                                    "error": format!("Unknown tool requested: {}", tool_call.tool_name)
-                                });
+                                let error_result = self
+                                    .build_tool_not_found_payload(
+                                        &tool_call.tool_name,
+                                        task.id,
+                                        task.agent_id,
+                                        trace_id,
+                                        &mut tool_not_found_suggest_count,
+                                    )
+                                    .await;
                                 if let Err(e) = self
                                     .context_manager
                                     .push_tool_result(
@@ -3256,15 +3843,18 @@ impl Kernel {
                                 tool_call.tool_name,
                                 reason
                             );
-                            let error_result = serde_json::json!({
-                                "error": format!("Coherence check failed: {}", reason)
+                            let stop_directive = serde_json::json!({
+                                "kernel_directive": "STOP",
+                                "tool": tool_call.tool_name,
+                                "reason": reason,
+                                "instruction": "Do NOT call this tool again with similar arguments. Synthesize a final answer using information already gathered. If the task cannot be completed, summarise what you have and end."
                             });
                             if let Err(e) = self
                                 .context_manager
                                 .push_tool_result(
                                     &task.id,
                                     &tool_call.tool_name,
-                                    &error_result,
+                                    &stop_directive,
                                     tool_call.id.clone(),
                                 )
                                 .await
@@ -3292,6 +3882,19 @@ impl Kernel {
                             self.intent_validator
                                 .record_tool_call(&task.id, &tool_call)
                                 .await;
+                            let reject_count = self
+                                .intent_validator
+                                .increment_reject_count(&task.id, &tool_call.tool_name)
+                                .await;
+                            if reject_count >= crate::intent_validator::REJECT_FORCE_END_THRESHOLD {
+                                tracing::warn!(
+                                    task_id = %task.id,
+                                    tool = %tool_call.tool_name,
+                                    reject_count,
+                                    "Forcing task EndTurn — model ignored prior STOP directive"
+                                );
+                                self.intent_validator.mark_force_end_turn(&task.id).await;
+                            }
                             continue;
                         }
                         Ok(IntentCoherenceResult::Suspicious { reason, .. }) => {
@@ -3720,6 +4323,7 @@ impl Kernel {
                             Arc::new(self.zone_table.clone()) as Arc<dyn StorageZoneQuery>
                         ),
                         cancellation_token: self.cancellation_token.child_token(),
+                        tool_categories: task.tool_categories.clone(),
                     };
                     let tool_payload_preview = Self::truncate_for_prompt_payload(
                         &serde_json::to_string(&tool_call.payload).unwrap_or_default(),
@@ -3847,7 +4451,7 @@ impl Kernel {
                                     &task.id,
                                     crate::trace_collector::TraceCollector::success_tool_call(
                                         &tool_call.tool_name,
-                                        seq_input_json,
+                                        seq_input_json.clone(),
                                         result.clone(),
                                         seq_duration_ms,
                                         snapshot_ref.clone(),
@@ -3890,6 +4494,38 @@ impl Kernel {
                                     Some(task.id),
                                 )
                                 .await;
+                            }
+                            self.tool_usage
+                                .record(&task.agent_id.to_string(), &tool_call.tool_name)
+                                .await;
+                            // Update in-memory LRU for this agent (cap 10).
+                            {
+                                let tool_name = tool_call.tool_name.clone();
+                                let mut lru = self.agent_tool_lru.write().await;
+                                let entry = lru.entry(task.agent_id).or_default();
+                                entry.retain(|n| n != &tool_name);
+                                entry.push_front(tool_name);
+                                if entry.len() > 10 {
+                                    entry.truncate(10);
+                                }
+                            }
+                            if let Some(details) = Self::manual_query_details(
+                                &tool_call.tool_name,
+                                &seq_input_json,
+                                &result,
+                            ) {
+                                self.audit_log(agentos_audit::AuditEntry {
+                                    timestamp: chrono::Utc::now(),
+                                    trace_id,
+                                    event_type: agentos_audit::AuditEventType::ManualQuery,
+                                    agent_id: Some(task.agent_id),
+                                    task_id: Some(task.id),
+                                    tool_id: None,
+                                    details,
+                                    severity: agentos_audit::AuditSeverity::Info,
+                                    reversible: false,
+                                    rollback_ref: None,
+                                });
                             }
 
                             // Intercept kernel actions from tool results
@@ -4386,7 +5022,9 @@ impl Kernel {
                                 &task.id,
                                 agentos_types::ContextEntry {
                                     role: agentos_types::ContextRole::System,
-                                    content: reprompt.to_string(),
+                                    parts: vec![agentos_types::ContentPart::Text {
+                                        text: reprompt.to_string(),
+                                    }],
                                     timestamp: chrono::Utc::now(),
                                     metadata: None,
                                     importance: 0.9,
@@ -4501,6 +5139,10 @@ impl Kernel {
             answer: final_answer,
             tool_call_count,
             iterations: completed_iterations,
+            // FOLLOWUP: thread per-record `ToolCallRecord` through the
+            // executor so scheduled run history shows tool-by-tool detail.
+            // Currently only the count is recorded.
+            tool_calls: Vec::new(),
         })
     }
 
@@ -4829,7 +5471,7 @@ impl Kernel {
 
         for entry in recent_entries {
             // Take first 200 chars to avoid processing huge entries
-            let snippet: String = entry.content.chars().take(200).collect();
+            let snippet: String = entry.text().chars().take(200).collect();
             for word in snippet.split_whitespace() {
                 let clean: String = word
                     .chars()
@@ -4856,6 +5498,97 @@ impl Kernel {
             .map(|w| format!("\"{}\"", w))
             .collect::<Vec<_>>()
             .join(" OR ")
+    }
+
+    /// Build the agent-facing tool-not-found error payload, write the
+    /// `ToolSuggested` audit row, and increment `suggest_count`. Both the
+    /// parallel-batch path and the sequential dispatcher call this so
+    /// the audit shape and error wording stay in sync (review R2 S5).
+    ///
+    /// Returns `serde_json::Value` (the error_result) for the caller to
+    /// push into the agent's context.
+    pub(crate) async fn build_tool_not_found_payload(
+        &self,
+        tool_name: &str,
+        task_id: TaskID,
+        agent_id: AgentID,
+        trace_id: TraceID,
+        suggest_count: &mut u32,
+    ) -> serde_json::Value {
+        // Compute suggestions FIRST, then increment the cap counter
+        // only if we actually produced something. Without this guard,
+        // a string of unknown tool names with no near-matches would
+        // burn the cap silently, suppressing later legitimate hints
+        // (review fix #1).
+        let (suggestions, sections) = if *suggest_count < 3 {
+            let summaries = {
+                let g = self.tool_summaries.read().await;
+                g.clone()
+            };
+            (
+                suggest_tools(&summaries, tool_name, 3),
+                agentos_tools::suggest_manual_sections_async(tool_name, 2).await,
+            )
+        } else {
+            (vec![], vec![])
+        };
+        if !suggestions.is_empty() || !sections.is_empty() {
+            *suggest_count += 1;
+        }
+
+        if !suggestions.is_empty() || !sections.is_empty() {
+            self.audit_log(agentos_audit::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                trace_id,
+                event_type: agentos_audit::AuditEventType::ToolSuggested,
+                agent_id: Some(agent_id),
+                task_id: Some(task_id),
+                tool_id: None,
+                details: serde_json::json!({
+                    "missing_tool": tool_name,
+                    "suggestions": suggestions,
+                    "manual_sections": sections,
+                    "task_suggest_count": *suggest_count,
+                }),
+                severity: agentos_audit::AuditSeverity::Info,
+                reversible: false,
+                rollback_ref: None,
+            });
+        }
+
+        if suggestions.is_empty() && sections.is_empty() {
+            return serde_json::json!({
+                "error": format!("Unknown tool requested: {}", tool_name),
+            });
+        }
+
+        let mut msg = format!("Tool '{}' not found.", tool_name);
+        if !suggestions.is_empty() {
+            msg.push_str(&format!(" Did you mean: {}?", suggestions.join(", ")));
+        }
+        // Inline a one-line summary per suggested section so a small
+        // model can resolve the next move without a round-trip
+        // `agent-manual section=X` call. Each summary is bounded to
+        // ~140 chars by `ManualSection::section_summary`, so 2 sections
+        // add at most ~300 chars to the error payload — well below the
+        // tool-output cap.
+        let briefs: Vec<String> = sections
+            .iter()
+            .filter_map(|n| {
+                agentos_tools::agent_manual::ManualSection::section_summary(n)
+                    .map(|s| format!("  - {n}: {s}"))
+            })
+            .collect();
+        if !briefs.is_empty() {
+            msg.push_str("\nRelevant manual sections:\n");
+            msg.push_str(&briefs.join("\n"));
+            msg.push_str(&format!(
+                "\n(Full prose via `agent-manual section=<name>` for: {}.)",
+                sections.join(", ")
+            ));
+        }
+        msg.push_str("\nUse `list-tools` or `search-tools` to discover available tools.");
+        serde_json::json!({ "error": msg })
     }
 }
 
@@ -4884,6 +5617,47 @@ fn extract_feedback_blocks(text: &str) -> Vec<serde_json::Value> {
 ///
 /// Extracted as a pure function for testability — the full `sandbox_plan_for_tool()`
 /// method requires a running kernel with tool registry access.
+/// Drop old ToolResult entries for idempotent meta-tools (list-tools, search-tools).
+/// Keeps only the latest result per tool — older ones are replaced with a one-line placeholder
+/// so the paired assistant tool_use block stays valid (Anthropic API requires tool_use+tool_result pairs).
+fn scrub_meta_tool_results(history: &mut [ContextEntry]) {
+    const META_TOOLS: &[&str] = &["list-tools", "search-tools"];
+
+    // Find the index of the last ToolResult entry for each meta tool.
+    let mut latest: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, entry) in history.iter().enumerate() {
+        if entry.role == ContextRole::ToolResult {
+            if let Some(ref meta) = entry.metadata {
+                if let Some(ref name) = meta.tool_name {
+                    if let Some(&mt) = META_TOOLS.iter().find(|&&mt| mt == name.as_str()) {
+                        latest.insert(mt, i);
+                    }
+                }
+            }
+        }
+    }
+
+    // Replace content of all older ToolResult entries for meta tools with a short placeholder.
+    for (i, entry) in history.iter_mut().enumerate() {
+        if entry.role == ContextRole::ToolResult {
+            if let Some(ref meta) = entry.metadata {
+                if let Some(ref name) = meta.tool_name {
+                    if META_TOOLS.contains(&name.as_str()) {
+                        let is_latest = latest.get(name.as_str()).copied() == Some(i);
+                        if !is_latest {
+                            entry.parts = vec![ContentPart::Text {
+                                text:
+                                    r#"{"replaced":"Stale result — superseded by a newer call."}"#
+                                        .to_string(),
+                            }];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn should_sandbox_tool(policy: crate::config::SandboxPolicy, trust_tier: TrustTier) -> bool {
     match policy {
         crate::config::SandboxPolicy::Never => false,
@@ -4892,11 +5666,69 @@ fn should_sandbox_tool(policy: crate::config::SandboxPolicy, trust_tier: TrustTi
     }
 }
 
+/// Return up to `max` tool names from `summaries` closest to `query`.
+/// Scores: substring containment (strong), then bigram overlap (order-sensitive).
+fn suggest_tools(
+    summaries: &[agentos_tools::agent_manual::ToolSummary],
+    query: &str,
+    max: usize,
+) -> Vec<String> {
+    let q = query.to_lowercase();
+    let q_grams: std::collections::HashSet<[u8; 2]> =
+        q.as_bytes().windows(2).map(|w| [w[0], w[1]]).collect();
+
+    let mut scored: Vec<(i32, &str)> = summaries
+        .iter()
+        .map(|s| {
+            let name = s.name.to_lowercase();
+            let mut score: i32 = 0;
+            if name.contains(q.as_str()) {
+                score += 100;
+            } else if q.contains(name.as_str()) {
+                score += 50;
+            }
+            let n_grams: std::collections::HashSet<[u8; 2]> =
+                name.as_bytes().windows(2).map(|w| [w[0], w[1]]).collect();
+            score += q_grams.intersection(&n_grams).count() as i32;
+            (score, s.name.as_str())
+        })
+        .filter(|(score, _)| *score > 0)
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    scored
+        .into_iter()
+        .take(max)
+        .map(|(_, n)| n.to_string())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use std::time::Duration;
+
+    #[test]
+    fn extract_approval_pending_id_parses_structured_reason() {
+        assert_eq!(
+            super::extract_approval_pending_id(
+                "approval_pending:42: tool 'host-package-install' …"
+            ),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn extract_approval_pending_id_rejects_unstructured() {
+        // Plain hook denial — no pending channel installed.
+        assert!(super::extract_approval_pending_id("Blocked by hook: bad input").is_none());
+        // Wrong prefix.
+        assert!(super::extract_approval_pending_id("approval:42:foo").is_none());
+        // Missing id.
+        assert!(super::extract_approval_pending_id("approval_pending::nope").is_none());
+        // Non-numeric id.
+        assert!(super::extract_approval_pending_id("approval_pending:abc:nope").is_none());
+    }
 
     #[test]
     fn classify_failure_marks_paused_tasks() {
@@ -4953,6 +5785,7 @@ mod tests {
             skip_checkpoint: false,
             thinking_level: Default::default(),
             spawner_agent_id: None,
+            tool_categories: None,
         }
     }
 
@@ -5142,10 +5975,12 @@ mod tests {
 
     // ── extract_topic_keywords tests ──────────────────────────────────────
 
-    fn make_context_entry(role: ContextRole, content: &str) -> ContextEntry {
+    fn make_context_entry(role: ContextRole, text: &str) -> ContextEntry {
         ContextEntry {
             role,
-            content: content.to_string(),
+            parts: vec![ContentPart::Text {
+                text: text.to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,

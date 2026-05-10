@@ -40,6 +40,19 @@ impl WebServer {
                 .map_err(|e| anyhow::anyhow!("Failed to open file store: {}", e))?,
         );
 
+        let resolver: Arc<dyn agentos_llm::ImageResolver> =
+            match crate::handlers::files::FileStoreImageResolver::new(Arc::clone(&file_store)) {
+                Ok(r) => Arc::new(r),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Could not canonicalize uploads dir — FileRef images disabled"
+                    );
+                    Arc::new(agentos_llm::NoopImageResolver)
+                }
+            };
+        kernel.set_image_resolver(resolver);
+
         // Create the notification broadcast channel and register the SSE adapter
         // with the kernel's NotificationRouter so it receives real-time pushes.
         let (notification_tx, _) = tokio::sync::broadcast::channel(256);

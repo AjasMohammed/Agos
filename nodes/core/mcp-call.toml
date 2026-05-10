@@ -1,0 +1,41 @@
+[node]
+id = "mcp-call"
+version = 1
+display_name = "MCP Tool Call"
+description = "Call a tool exposed by an attached MCP server."
+category = "integrations"
+icon = "zap"
+color = "#14b8a6"
+risk_class = "exec_capable"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "server_name"
+display_name = "MCP Server"
+type = "string"
+required = true
+description = "Name of the attached MCP server (from the MCP page)."
+
+[[node.properties]]
+name = "tool_name"
+display_name = "Tool Name"
+type = "string"
+required = true
+description = "Name of the tool to call on the MCP server."
+
+[[node.properties]]
+name = "arguments"
+display_name = "Arguments (JSON)"
+type = "json"
+required = false
+description = "Arguments to pass to the MCP tool as a JSON object."
+
+[node.execute]
+kind = "tool"
+tool_id = "mcp-proxy"

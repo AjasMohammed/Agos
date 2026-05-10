@@ -1,0 +1,43 @@
+[node]
+id = "code-transform"
+version = 1
+display_name = "Code / Transform"
+description = "Transform data using a Lua or Rhai script. Input data is available as `input`."
+category = "core"
+icon = "code"
+color = "#64748b"
+risk_class = "exec_capable"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "language"
+display_name = "Language"
+type = "options"
+required = true
+default = "rhai"
+
+  [[node.properties.options]]
+  value = "rhai"
+  label = "Rhai (embedded)"
+
+  [[node.properties.options]]
+  value = "lua"
+  label = "Lua"
+
+[[node.properties]]
+name = "code"
+display_name = "Script"
+type = "code"
+required = true
+description = "Script to run. Return a value to pass it to the next node."
+placeholder = "// input is available as `input`\ninput"
+
+[node.execute]
+kind = "builtin"
+name = "code"

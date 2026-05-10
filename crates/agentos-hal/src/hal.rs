@@ -242,6 +242,9 @@ impl HardwareAbstractionLayer {
         hal.register(Box::new(crate::drivers::system::SystemDriver::new()));
         hal.register(Box::new(crate::drivers::process::ProcessDriver::new()));
         hal.register(Box::new(crate::drivers::network::NetworkDriver::new()));
+        hal.register(Box::new(
+            crate::drivers::network_sockets::NetworkSocketsDriver::new(),
+        ));
         hal.register(Box::new(crate::drivers::storage::StorageDriver::new()));
         #[cfg(feature = "bluetooth")]
         hal.register(Box::new(crate::drivers::bluetooth::BluetoothDriver::new()));
@@ -259,6 +262,9 @@ impl HardwareAbstractionLayer {
         ));
         #[cfg(feature = "webcam")]
         hal.register(Box::new(crate::drivers::webcam::WebcamDriver::new()));
+        hal.register(Box::new(crate::drivers::mounts::MountsDriver::new()));
+        hal.register(Box::new(crate::drivers::open_files::OpenFilesDriver::new()));
+        hal.register(Box::new(crate::drivers::services::ServicesDriver::new()));
         // Note: log_reader requires paths, initialized differently usually, but we can provide defaults or leave it for Kernel.
         hal
     }

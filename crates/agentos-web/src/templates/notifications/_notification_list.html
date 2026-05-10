@@ -1,0 +1,8 @@
+{% for n in notifications %}
+  {% include "notifications/_notification_row.html" %}
+{% else %}
+<article class="empty-state">
+  <p class="empty-state-title">No notifications yet</p>
+  <p class="empty-state-message">Agent questions, kernel status updates, and completed task summaries will appear here.</p>
+</article>
+{% endfor %}

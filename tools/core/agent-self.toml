@@ -1,7 +1,9 @@
+tags = ["meta", "read"]
+
 [manifest]
 name        = "agent-self"
 version     = "1.0.0"
-description = "Return a snapshot of the calling agent's own state: current permissions, budget, available tools, active event subscriptions, and running tasks. No special permissions required — every agent can always inspect its own context."
+description = "Return a snapshot of the calling agent's own state: current permissions, budget, tool count, active event subscriptions, and running tasks. Use agent-manual to browse available tools. No special permissions required — every agent can always inspect its own context."
 author      = "agentos-core"
 trust_tier  = "core"
 

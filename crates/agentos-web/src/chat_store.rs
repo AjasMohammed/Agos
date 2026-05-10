@@ -55,7 +55,7 @@ pub enum TimelineEntry {
         content: String,
         created_at: String,
         tokens_used: Option<u64>,
-        cost_usd: Option<String>,
+        cost_usd: Option<f64>,
     },
     Tool {
         id: i64,
@@ -270,11 +270,44 @@ impl ChatStore {
                 .query_map([], |row| row.get::<_, String>(1))?
                 .any(|col| col.as_deref() == Ok("file_ids"));
             if !has_file_ids {
-                conn.execute_batch(
-                    "ALTER TABLE chat_messages ADD COLUMN file_ids TEXT;",
-                )?;
+                conn.execute_batch("ALTER TABLE chat_messages ADD COLUMN file_ids TEXT;")?;
             }
             conn.execute_batch("UPDATE chat_store_version SET version = 5 WHERE id = 1;")?;
+        }
+
+        let version: i64 = conn.query_row(
+            "SELECT version FROM chat_store_version WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )?;
+        if version < 6 {
+            let columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(chat_messages)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<_, _>>()?;
+            if !columns.iter().any(|col| col == "tokens_used") {
+                conn.execute_batch("ALTER TABLE chat_messages ADD COLUMN tokens_used INTEGER;")?;
+            }
+            if !columns.iter().any(|col| col == "cost_usd") {
+                conn.execute_batch("ALTER TABLE chat_messages ADD COLUMN cost_usd REAL;")?;
+            }
+            conn.execute_batch("UPDATE chat_store_version SET version = 6 WHERE id = 1;")?;
+        }
+
+        let version: i64 = conn.query_row(
+            "SELECT version FROM chat_store_version WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )?;
+        if version < 8 {
+            let columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(chat_messages)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<_, _>>()?;
+            if !columns.iter().any(|col| col == "cost_usd") {
+                conn.execute_batch("ALTER TABLE chat_messages ADD COLUMN cost_usd REAL;")?;
+            }
+            conn.execute_batch("UPDATE chat_store_version SET version = 8 WHERE id = 1;")?;
         }
 
         Ok(Self {
@@ -430,15 +463,40 @@ impl ChatStore {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.unchecked_transaction()?;
-        let fid = if role == "user" {
-            file_ids
-        } else {
-            None
-        };
+        let fid = if role == "user" { file_ids } else { None };
         tx.execute(
             "INSERT INTO chat_messages (session_id, role, content, file_ids, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![session_id, role, content, fid, now],
+        )?;
+        tx.execute(
+            "UPDATE chat_sessions SET updated_at = ?1 WHERE id = ?2",
+            params![now, session_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn add_assistant_message(
+        &self,
+        session_id: &str,
+        content: &str,
+        tokens_used: Option<u64>,
+        cost_usd: Option<f64>,
+    ) -> Result<(), rusqlite::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO chat_messages (session_id, role, content, tokens_used, cost_usd, created_at)
+             VALUES (?1, 'assistant', ?2, ?3, ?4, ?5)",
+            params![
+                session_id,
+                content,
+                tokens_used.map(|v| v.min(i64::MAX as u64) as i64),
+                cost_usd,
+                now
+            ],
         )?;
         tx.execute(
             "UPDATE chat_sessions SET updated_at = ?1 WHERE id = ?2",
@@ -495,7 +553,7 @@ impl ChatStore {
 
         // Fetch user + assistant messages.
         let mut msg_stmt = conn.prepare(
-            "SELECT m.id, m.role, m.content, m.created_at
+            "SELECT m.id, m.role, m.content, m.created_at, m.tokens_used, m.cost_usd
              FROM chat_messages m
              WHERE m.session_id = ?1 AND m.role IN ('user', 'assistant')
              ORDER BY m.id ASC
@@ -507,6 +565,9 @@ impl ChatStore {
                 let role: String = row.get(1)?;
                 let content: String = row.get(2)?;
                 let created_at: String = row.get(3)?;
+                let tokens_used: Option<u64> =
+                    row.get::<_, Option<i64>>(4)?.map(|v| v.max(0) as u64);
+                let cost_usd: Option<f64> = row.get(5)?;
                 let entry = match role.as_str() {
                     "user" => TimelineEntry::User {
                         id,
@@ -517,8 +578,8 @@ impl ChatStore {
                         id,
                         content,
                         created_at: created_at.clone(),
-                        tokens_used: None,
-                        cost_usd: None,
+                        tokens_used,
+                        cost_usd,
                     },
                 };
                 Ok((created_at, entry))

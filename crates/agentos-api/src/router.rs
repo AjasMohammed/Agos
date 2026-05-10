@@ -129,7 +129,14 @@ pub fn build_router(
             "/api/v1/notifications/unread",
             get(notifications::unread_count),
         )
-        .route("/api/v1/notifications/{id}", get(notifications::get))
+        .route(
+            "/api/v1/notifications/read",
+            delete(notifications::clear_read),
+        )
+        .route(
+            "/api/v1/notifications/{id}",
+            get(notifications::get).delete(notifications::dismiss),
+        )
         .route(
             "/api/v1/notifications/{id}/respond",
             post(notifications::respond),

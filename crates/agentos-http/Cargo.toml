@@ -1,0 +1,8 @@
+[package]
+name = "agentos-http"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+reqwest = { workspace = true, features = ["json", "stream"] }
+thiserror = { workspace = true }

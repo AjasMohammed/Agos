@@ -11,6 +11,7 @@ use agentos_vault::{OAuthStore, SecretsVault};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use tokio::sync::Mutex;
+use zeroize::Zeroizing;
 
 /// How far ahead of token expiry to trigger a proactive refresh.
 const REFRESH_AHEAD_SECS: i64 = 120; // 2 minutes
@@ -181,9 +182,9 @@ impl VaultOAuthProvider {
 
         #[derive(serde::Deserialize)]
         struct TokenResponse {
-            access_token: String,
+            access_token: Zeroizing<String>,
             #[serde(default)]
-            refresh_token: Option<String>,
+            refresh_token: Option<Zeroizing<String>>,
             #[serde(default)]
             expires_in: Option<i64>,
         }
@@ -201,9 +202,9 @@ impl VaultOAuthProvider {
             .oauth_store
             .refresh(
                 &self.connector_id,
-                &token_resp.access_token,
+                token_resp.access_token.as_str(),
                 new_expires_at,
-                token_resp.refresh_token.as_deref(),
+                token_resp.refresh_token.as_ref().map(|t| t.as_str()),
             )
             .await
         {
@@ -221,7 +222,7 @@ impl VaultOAuthProvider {
             "OAuth token refreshed for MCP server"
         );
 
-        Ok(token_resp.access_token)
+        Ok(token_resp.access_token.to_string())
     }
 }
 

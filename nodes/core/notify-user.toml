@@ -1,0 +1,59 @@
+[node]
+id = "notify-user"
+version = 1
+display_name = "Notify User"
+description = "Send a notification to the user's inbox in the AgentOS web UI."
+category = "core"
+icon = "bell"
+color = "#f59e0b"
+risk_class = "write_scoped"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "title"
+display_name = "Title"
+type = "template"
+required = true
+placeholder = "Workflow completed"
+description = "Short notification title."
+
+[[node.properties]]
+name = "body"
+display_name = "Body"
+type = "template"
+required = false
+placeholder = "Result: {{input}}"
+description = "Notification body. Use {{var}} to include workflow outputs."
+
+[[node.properties]]
+name = "level"
+display_name = "Level"
+type = "options"
+required = false
+default = "info"
+
+  [[node.properties.options]]
+  value = "info"
+  label = "Info"
+
+  [[node.properties.options]]
+  value = "success"
+  label = "Success"
+
+  [[node.properties.options]]
+  value = "warning"
+  label = "Warning"
+
+  [[node.properties.options]]
+  value = "error"
+  label = "Error"
+
+[node.execute]
+kind = "builtin"
+name = "notify_user"

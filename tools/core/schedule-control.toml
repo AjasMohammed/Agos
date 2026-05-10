@@ -1,0 +1,41 @@
+tags = ["meta", "write"]
+
+[manifest]
+name        = "schedule-control"
+version     = "1.0.0"
+description = "Pause, resume, or delete a schedule by name."
+author      = "agentos-core"
+trust_tier  = "core"
+group       = "scheduling"
+risk_class  = "write_scoped"
+
+[capabilities_required]
+permissions = ["schedule.job:w"]
+
+[capabilities_provided]
+outputs = ["updated", "action", "name", "kind"]
+
+[intent_schema]
+input  = "ScheduleControlIntent"
+output = "ScheduleControlResult"
+
+[input_schema]
+type = "object"
+required = ["action", "name"]
+
+[input_schema.properties.action]
+type = "string"
+enum = ["pause", "resume", "delete"]
+description = "Lifecycle action to apply."
+
+[input_schema.properties.name]
+type = "string"
+description = "Schedule name (or compatible ID string)."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 4
+max_cpu_ms    = 100
+syscalls      = []

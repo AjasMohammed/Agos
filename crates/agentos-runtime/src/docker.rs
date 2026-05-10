@@ -244,15 +244,15 @@ impl ComputeRuntime for DockerRuntime {
                             Some(Ok(msg)) => {
                                 let text = msg.to_string();
                                 match msg {
-                                    bollard::container::LogOutput::StdOut { .. } => {
-                                        if stdout.len() + text.len() <= MAX_OUTPUT_BYTES {
-                                            stdout.push_str(&text);
-                                        }
+                                    bollard::container::LogOutput::StdOut { .. }
+                                        if stdout.len() + text.len() <= MAX_OUTPUT_BYTES =>
+                                    {
+                                        stdout.push_str(&text);
                                     }
-                                    bollard::container::LogOutput::StdErr { .. } => {
-                                        if stderr.len() + text.len() <= MAX_OUTPUT_BYTES {
-                                            stderr.push_str(&text);
-                                        }
+                                    bollard::container::LogOutput::StdErr { .. }
+                                        if stderr.len() + text.len() <= MAX_OUTPUT_BYTES =>
+                                    {
+                                        stderr.push_str(&text);
                                     }
                                     _ => {}
                                 }

@@ -1,7 +1,7 @@
 use crate::traits::{AgentTool, ToolExecutionContext};
 use agentos_types::{AgentOSError, PermissionOp};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{Local, Utc};
 
 pub struct DatetimeTool;
 
@@ -32,14 +32,18 @@ impl AgentTool for DatetimeTool {
         _payload: serde_json::Value,
         _context: ToolExecutionContext,
     ) -> Result<serde_json::Value, AgentOSError> {
-        let now = Utc::now();
+        let utc_now = Utc::now();
+        let local_now = Local::now();
         Ok(serde_json::json!({
-            "utc_iso8601": now.to_rfc3339(),
-            "unix_timestamp_secs": now.timestamp(),
-            "unix_timestamp_millis": now.timestamp_millis(),
-            "date": now.format("%Y-%m-%d").to_string(),
-            "time": now.format("%H:%M:%S").to_string(),
-            "timezone": "UTC",
+            "utc_iso8601": utc_now.to_rfc3339(),
+            "local_iso8601": local_now.to_rfc3339(),
+            "unix_timestamp_secs": utc_now.timestamp(),
+            "unix_timestamp_millis": utc_now.timestamp_millis(),
+            "utc_date": utc_now.format("%Y-%m-%d").to_string(),
+            "utc_time": utc_now.format("%H:%M:%S").to_string(),
+            "local_date": local_now.format("%Y-%m-%d").to_string(),
+            "local_time": local_now.format("%H:%M:%S").to_string(),
+            "utc_offset": local_now.format("%:z").to_string(),
         }))
     }
 }
@@ -67,20 +71,24 @@ mod tests {
             capability_dispatcher: None,
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tool_categories: None,
         }
     }
 
     #[tokio::test]
-    async fn datetime_returns_utc_fields() {
+    async fn datetime_returns_utc_and_local_fields() {
         let tool = DatetimeTool::new();
         let result = tool.execute(serde_json::json!({}), ctx()).await.unwrap();
         assert!(result["utc_iso8601"].as_str().unwrap().contains('T'));
+        assert!(result["local_iso8601"].as_str().unwrap().contains('T'));
         assert!(result["unix_timestamp_secs"].as_i64().unwrap() > 0);
         assert!(result["unix_timestamp_millis"].as_i64().unwrap() > 0);
-        assert_eq!(result["timezone"], "UTC");
-        // date should be YYYY-MM-DD format (10 chars)
-        assert_eq!(result["date"].as_str().unwrap().len(), 10);
-        // time should be HH:MM:SS format (8 chars)
-        assert_eq!(result["time"].as_str().unwrap().len(), 8);
+        assert_eq!(result["utc_date"].as_str().unwrap().len(), 10);
+        assert_eq!(result["utc_time"].as_str().unwrap().len(), 8);
+        assert_eq!(result["local_date"].as_str().unwrap().len(), 10);
+        assert_eq!(result["local_time"].as_str().unwrap().len(), 8);
+        // offset format: +HH:MM or -HH:MM
+        let offset = result["utc_offset"].as_str().unwrap();
+        assert!(offset.starts_with('+') || offset.starts_with('-'));
     }
 }

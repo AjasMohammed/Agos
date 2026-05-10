@@ -605,6 +605,58 @@ impl ProceduralStore {
         .map_err(|e| AgentOSError::StorageError(format!("Delete task panicked: {}", e)))?
     }
 
+    /// Delete every procedure (and its FTS rows) for the given agent. Returns the number of
+    /// `procedures` rows removed. Offloads to the blocking thread pool.
+    pub async fn delete_by_agent(&self, agent_id: &AgentID) -> Result<usize, AgentOSError> {
+        let db = self.conn.clone();
+        let agent_id_str = agent_id.as_uuid().to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError(
+                    "Failed to lock procedural db for delete_by_agent".to_string(),
+                )
+            })?;
+            let tx = conn.transaction().map_err(|e| {
+                AgentOSError::StorageError(format!(
+                    "Failed to begin delete_by_agent transaction: {}",
+                    e
+                ))
+            })?;
+            tx.execute(
+                "DELETE FROM procedures_fts_content WHERE proc_id IN (SELECT id FROM procedures WHERE agent_id = ?1)",
+                params![agent_id_str],
+            )
+            .map_err(|e| {
+                AgentOSError::StorageError(format!(
+                    "Failed to delete procedure FTS for agent: {}",
+                    e
+                ))
+            })?;
+            let deleted = tx
+                .execute(
+                    "DELETE FROM procedures WHERE agent_id = ?1",
+                    params![agent_id_str],
+                )
+                .map_err(|e| {
+                    AgentOSError::StorageError(format!(
+                        "Failed to delete procedures for agent: {}",
+                        e
+                    ))
+                })?;
+            tx.commit().map_err(|e| {
+                AgentOSError::StorageError(format!(
+                    "Failed to commit delete_by_agent: {}",
+                    e
+                ))
+            })?;
+            Ok(deleted)
+        })
+        .await
+        .map_err(|e| {
+            AgentOSError::StorageError(format!("delete_by_agent task panicked: {}", e))
+        })?
+    }
+
     /// List procedures, optionally scoped to an agent. Offloads to blocking thread pool.
     pub async fn list_by_agent(
         &self,

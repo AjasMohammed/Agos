@@ -1,3 +1,4 @@
+use crate::media::{openai_user_content_value, ImageResolver, NoopImageResolver};
 use crate::tool_helpers;
 use crate::traits::LLMCore;
 use crate::types::{
@@ -12,6 +13,7 @@ use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -26,6 +28,9 @@ pub struct OpenAICore {
     pricing: ModelPricing,
     retry_policy: crate::retry::RetryPolicy,
     circuit_breaker: crate::retry::CircuitBreaker,
+    /// Per-instance in-flight cap for outbound requests.
+    concurrency: Arc<tokio::sync::Semaphore>,
+    image_resolver: Arc<dyn ImageResolver>,
 }
 
 impl OpenAICore {
@@ -76,7 +81,14 @@ impl OpenAICore {
             pricing,
             retry_policy: crate::retry::RetryPolicy::default(),
             circuit_breaker: crate::retry::CircuitBreaker::default(),
+            concurrency: crate::retry::default_concurrency_limiter(),
+            image_resolver: Arc::new(NoopImageResolver),
         }
+    }
+
+    pub fn with_image_resolver(mut self, resolver: Arc<dyn ImageResolver>) -> Self {
+        self.image_resolver = resolver;
+        self
     }
 
     /// Override the pricing for this adapter instance (e.g., for custom deployments).
@@ -103,26 +115,31 @@ impl OpenAICore {
                         messages.push(json!({
                             "role": "tool",
                             "tool_call_id": call_id,
-                            "content": entry.content,
+                            "content": entry.text(),
                         }));
                     } else {
                         // Legacy fallback: plain user message with prefix.
                         messages.push(json!({
                             "role": "user",
-                            "content": format!("Tool Result:\n{}", entry.content),
+                            "content": format!("Tool Result:\n{}", entry.text()),
                         }));
                     }
                 }
                 ContextRole::System => {
                     messages.push(json!({
                         "role": "system",
-                        "content": entry.content,
+                        "content": entry.text(),
                     }));
                 }
                 ContextRole::User => {
+                    let content = openai_user_content_value(
+                        entry,
+                        self.capabilities.supports_images,
+                        &self.image_resolver,
+                    );
                     messages.push(json!({
                         "role": "user",
-                        "content": entry.content,
+                        "content": content,
                     }));
                 }
                 ContextRole::Assistant => {
@@ -161,10 +178,10 @@ impl OpenAICore {
                                 }))
                             })
                             .collect();
-                        let content = if entry.content.is_empty() {
+                        let content = if entry.text().is_empty() {
                             Value::Null
                         } else {
-                            Value::String(entry.content.clone())
+                            Value::String(entry.text().clone())
                         };
                         messages.push(json!({
                             "role": "assistant",
@@ -174,7 +191,7 @@ impl OpenAICore {
                     } else {
                         messages.push(json!({
                             "role": "assistant",
-                            "content": entry.content,
+                            "content": entry.text(),
                         }));
                     }
                 }
@@ -206,12 +223,17 @@ impl OpenAICore {
             );
             intent_by_tool.insert(tool_name.to_string(), intent_type);
 
+            let parameters =
+                tool_helpers::normalize_tool_input_schema(manifest.input_schema.as_ref());
+            let strict = tool_helpers::is_openai_strict_compatible_schema(&parameters);
+
             openai_tools.push(json!({
                 "type": "function",
                 "function": {
                     "name": tool_name,
                     "description": manifest.manifest.description,
-                    "parameters": tool_helpers::normalize_tool_input_schema(manifest.input_schema.as_ref()),
+                    "parameters": parameters,
+                    "strict": strict,
                 }
             }));
         }
@@ -433,6 +455,17 @@ impl OpenAICore {
 
 #[async_trait]
 impl LLMCore for OpenAICore {
+    fn supports_images(&self) -> bool {
+        if !self.capabilities.supports_images {
+            return false;
+        }
+        let m = self.model.to_ascii_lowercase();
+        if m.contains("o1-mini") || m.contains("o3-mini") || m.contains("gpt-3.5") {
+            return false;
+        }
+        true
+    }
+
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
         self.infer_with_tools(context, &[]).await
     }
@@ -466,6 +499,14 @@ impl LLMCore for OpenAICore {
 
         let start_time = Instant::now();
         let url = format!("{}/chat/completions", self.base_url);
+        let prepared = crate::media::prepare_for_inference(
+            context,
+            crate::traits::LLMCore::supports_images(self),
+            self.image_resolver.clone(),
+            &self.client,
+        )
+        .await;
+        let context = &prepared;
         let messages = self.format_messages(context);
 
         // If options disable tools, exclude them from the request body.
@@ -508,6 +549,7 @@ impl LLMCore for OpenAICore {
             "openai",
             &self.retry_policy,
             &self.circuit_breaker,
+            Some(&self.concurrency),
             || {
                 self.client
                     .post(&url)
@@ -598,6 +640,14 @@ impl LLMCore for OpenAICore {
 
         let start_time = Instant::now();
         let url = format!("{}/chat/completions", self.base_url);
+        let prepared = crate::media::prepare_for_inference(
+            context,
+            crate::traits::LLMCore::supports_images(self),
+            self.image_resolver.clone(),
+            &self.client,
+        )
+        .await;
+        let context = &prepared;
         let messages = self.format_messages(context);
         let (openai_tools, intent_by_tool) = self.build_openai_tools_payload(tools);
 
@@ -857,6 +907,7 @@ struct PartialToolCall {
 mod tests {
     use super::*;
     use agentos_types::tool::{ToolCapabilities, ToolExecutor, ToolInfo, ToolOutputs, ToolSchema};
+    use agentos_types::ContentPart;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
@@ -867,7 +918,9 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         ctx.push(ContextEntry {
             role: ContextRole::System,
-            content: "You are a helpful assistant.".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "You are a helpful assistant.".to_string(),
+            }],
             metadata: None,
             timestamp: chrono::Utc::now(),
             importance: 0.5,
@@ -879,7 +932,9 @@ mod tests {
         });
         ctx.push(ContextEntry {
             role: ContextRole::User,
-            content: "Hello".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "Hello".to_string(),
+            }],
             metadata: None,
             timestamp: chrono::Utc::now(),
             importance: 0.5,
@@ -891,7 +946,9 @@ mod tests {
         });
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "status: ok".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "status: ok".to_string(),
+            }],
             metadata: None,
             timestamp: chrono::Utc::now(),
             importance: 0.5,
@@ -931,6 +988,7 @@ mod tests {
                 trust_tier: TrustTier::Core,
                 tags: None,
                 capability_tags: vec![],
+                group: String::new(),
             },
             capabilities_required: ToolCapabilities {
                 permissions: permissions.into_iter().map(str::to_string).collect(),
@@ -953,6 +1011,8 @@ mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: Default::default(),
+            usage_hints: None,
+            tags: vec![],
         }
     }
 
@@ -1182,7 +1242,9 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         ctx.push(ContextEntry {
             role: ContextRole::User,
-            content: "Read test.txt".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "Read test.txt".to_string(),
+            }],
             metadata: None,
             timestamp: chrono::Utc::now(),
             importance: 0.5,
@@ -1311,7 +1373,9 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: r#"{"status": "ok"}"#.to_string(),
+            parts: vec![ContentPart::Text {
+                text: r#"{"status": "ok"}"#.to_string(),
+            }],
             metadata: Some(ContextMetadata {
                 tool_name: Some("file-reader".to_string()),
                 tool_id: None,
@@ -1343,7 +1407,9 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "status: ok".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "status: ok".to_string(),
+            }],
             metadata: None,
             timestamp: chrono::Utc::now(),
             importance: 0.5,

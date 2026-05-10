@@ -1,0 +1,35 @@
+[node]
+id = "web-search-node"
+version = 1
+display_name = "Web Search"
+description = "Search the web for current information using the built-in search tool."
+category = "integrations"
+icon = "search"
+color = "#0ea5e9"
+risk_class = "readonly_external"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "query"
+display_name = "Search Query"
+type = "template"
+required = true
+placeholder = "latest news about {{topic}}"
+description = "What to search for."
+
+[[node.properties]]
+name = "max_results"
+display_name = "Max Results"
+type = "number"
+required = false
+default = 5
+
+[node.execute]
+kind = "tool"
+tool_id = "web-search"

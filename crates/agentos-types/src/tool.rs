@@ -31,6 +31,12 @@ pub enum ExecutorType {
     #[default]
     Inline, // built-in Rust implementation (compiled into kernel)
     Wasm, // external .wasm module loaded at runtime
+    /// Privileged executor: runs OUTSIDE the bwrap sandbox via `pkexec` or a
+    /// setuid helper. Reserved for tools that must elevate privilege (e.g.
+    /// host package install). The kernel HARD-REJECTS unless the manifest
+    /// is `trust_tier = "core"` AND `risk_class = "control_plane"` AND
+    /// dispatch is gated by a resolved `PendingEscalation`.
+    Privileged,
 }
 
 /// Executor configuration for a tool manifest.
@@ -110,6 +116,32 @@ pub struct ToolManifest {
     /// a human approval request before execution.
     #[serde(default)]
     pub risk_class: RiskClass,
+    /// Hints for the LLM on when to use this tool and what to avoid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_hints: Option<UsageHints>,
+    /// Coarse capability tags used by the L0/L1 paginated manual to filter and
+    /// group tools (e.g. `["read", "fs"]`, `["write", "network"]`).
+    /// Distinct from `manifest.tags` (free-form marketplace discovery) and
+    /// `manifest.capability_tags` (semantic search vocabulary). Empty when
+    /// not declared; the manual falls back to inferred category in that case.
+    /// Recognised v1 taxonomy: `read`, `write`, `exec`, `network`, `fs`, `meta`.
+    /// Unknown tags are preserved (forward-compat) but do not surface in filters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+/// Recognised v1 manifest tag taxonomy. Manifests may declare additional tags
+/// for forward-compat; only these surface in pagination filters.
+pub const MANIFEST_TAG_TAXONOMY_V1: &[&str] = &["read", "write", "exec", "network", "fs", "meta"];
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct UsageHints {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub use_for: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefer_over: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quick_example: Option<serde_json::Value>,
 }
 
 /// A single fallback rule in a tool manifest's degradation chain.
@@ -165,6 +197,9 @@ pub struct ToolInfo {
     /// Embedded alongside the description for intent-based tool search.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capability_tags: Vec<String>,
+    /// Tool-selector partition (e.g. fs, network). Empty when uncategorized.
+    #[serde(default)]
+    pub group: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,6 +287,74 @@ mod tests {
         let serialized = serde_json::to_value(&sandbox).unwrap();
 
         assert!(serialized.get("weight").is_none());
+    }
+
+    #[test]
+    fn tool_manifest_tags_default_empty() {
+        use crate::tool::ToolManifest;
+        let toml = r#"
+[manifest]
+name = "x"
+version = "1.0"
+description = "desc"
+author = "test"
+trust_tier = "core"
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = []
+
+[intent_schema]
+input  = "x"
+output = "y"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 8
+max_cpu_ms    = 500
+syscalls      = []
+        "#;
+        let m: ToolManifest = toml::from_str(toml).unwrap();
+        assert!(m.tags.is_empty());
+    }
+
+    #[test]
+    fn tool_manifest_tags_round_trip() {
+        use crate::tool::ToolManifest;
+        let toml = r#"
+tags = ["read", "fs"]
+
+[manifest]
+name = "x"
+version = "1.0"
+description = "desc"
+author = "test"
+trust_tier = "core"
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = []
+
+[intent_schema]
+input  = "x"
+output = "y"
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 8
+max_cpu_ms    = 500
+syscalls      = []
+        "#;
+        let m: ToolManifest = toml::from_str(toml).unwrap();
+        assert_eq!(m.tags, vec!["read".to_string(), "fs".to_string()]);
     }
 
     #[test]

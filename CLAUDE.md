@@ -3,6 +3,7 @@
 ## General Instructions
 
 - When asked to "continue" or resume work, immediately pick up where you left off without re-reading context or re-analyzing. Do not stall.
+- **Never run `git stash` without explicit user confirmation.** Always ask first, describe what will be stashed, and wait for approval. This applies to `git stash push`, `git stash drop`, and `git stash pop` on a dirty tree.
 
 ## Workflows
 

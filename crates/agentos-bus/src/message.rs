@@ -1,6 +1,7 @@
 use agentos_audit::AuditEntry;
 use agentos_types::*;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 /// Messages sent over the bus. This is the top-level envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +53,14 @@ pub enum KernelCommand {
     },
     ListAgents,
     DisconnectAgent {
+        agent_id: AgentID,
+    },
+    /// Remove an agent permanently from the ecosystem: deletes the persisted profile,
+    /// deregisters its pubkey, and wipes its memory tiers, scratchpad, inboxes, memory
+    /// blocks, checkpoints, and any schedules it created. Vault secrets and the audit
+    /// log are intentionally preserved. Re-adding the agent with the same name will be
+    /// treated as a brand-new agent (UUID + onboarding task).
+    RemoveAgent {
         agent_id: AgentID,
     },
     /// Change the LLM endpoint URL for a connected agent (takes effect immediately).
@@ -106,8 +115,22 @@ pub enum KernelCommand {
         #[serde(default)]
         requested_permissions: Vec<String>,
         /// Optional slice of parent context to seed the child's context window.
+        /// When `None` and `handoff_mode` is set, the kernel builds the slice
+        /// itself from the parent's window — this is the recommended path so
+        /// the parent's tool layer doesn't have to ship full context over the
+        /// bus.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_slice: Option<agentos_types::ContextSlice>,
+        /// Strategy for slicing parent context. Mutually exclusive with
+        /// `context_slice` (an explicit slice always wins). Defaults to
+        /// `HandoffMode::None` — child starts with only its spawn prompt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handoff_mode: Option<agentos_types::HandoffMode>,
+        /// Optional task-scoped tool category allowlist for the child. Must be
+        /// a subset of the parent's allowlist (narrow-only). `None` inherits
+        /// the parent's allowlist as-is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_categories: Option<Vec<String>>,
     },
     /// Wait for a set of child tasks to complete and retrieve their results.
     AwaitSubAgents {
@@ -585,15 +608,15 @@ pub enum KernelCommand {
         /// Human-readable provider name (e.g. "zomato", "github").
         provider: String,
         /// OAuth2 access token.
-        access_token: String,
+        access_token: Zeroizing<String>,
         /// OAuth2 refresh token (used to obtain new access tokens).
-        refresh_token: Option<String>,
+        refresh_token: Option<Zeroizing<String>>,
         /// OAuth2 token endpoint URL (e.g. "https://accounts.zomato.com/oauth/token").
         token_endpoint: String,
         /// OAuth2 client ID registered with the provider.
         client_id: String,
         /// OAuth2 client secret (for confidential clients).
-        client_secret: Option<String>,
+        client_secret: Option<Zeroizing<String>>,
         /// Scopes granted by this token (e.g. ["order:read", "order:write"]).
         #[serde(default)]
         scopes: Vec<String>,
@@ -660,6 +683,19 @@ pub enum KernelCommand {
     SetProviderUrl {
         name: String,
         url: String,
+    },
+    /// Add or replace a provider catalog entry. Persists to `providers.toml`.
+    /// `entry_json` is a serialised `agentos_llm::CatalogEntry`.
+    AddProvider {
+        entry_json: serde_json::Value,
+    },
+    /// Remove a provider from the catalog. Persists to `providers.toml`.
+    RemoveProvider {
+        name: String,
+    },
+    /// Query the provider's `models_path` and store the discovered list.
+    ProbeProviderModels {
+        name: String,
     },
 
     // Scratchpad management

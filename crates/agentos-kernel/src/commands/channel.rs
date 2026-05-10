@@ -59,6 +59,8 @@ impl Kernel {
                 message: format!("Failed to register channel: {e}"),
             };
         }
+        // Refresh the agent-facing snapshot so subsequent tasks see the new channel.
+        self.refresh_connected_channels_snapshot().await;
 
         // Build and register the delivery adapter.
         let adapter_result = self
@@ -188,6 +190,7 @@ impl Kernel {
                 message: format!("Failed to deregister channel: {e}"),
             };
         }
+        self.refresh_connected_channels_snapshot().await;
 
         let _ = self.audit.append(AuditEntry {
             timestamp: Utc::now(),

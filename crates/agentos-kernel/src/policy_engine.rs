@@ -78,7 +78,7 @@ impl PolicyEngine {
     /// Create a policy engine with the given rules and default effect.
     pub fn new(mut rules: Vec<PolicyRule>, default_effect: PolicyEffect) -> Self {
         // Sort by priority descending (highest checked first).
-        rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
         Self {
             rules,
             default_effect,
@@ -229,7 +229,7 @@ impl PolicyEngine {
 
     /// Replace all rules (e.g., on config reload).
     pub fn replace_rules(&mut self, mut rules: Vec<PolicyRule>) {
-        rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
         self.rules = rules;
     }
 

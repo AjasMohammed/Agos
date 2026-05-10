@@ -1,13 +1,35 @@
-<article id="notif-{{ n.id }}" {% if not n.read %}aria-current="true"{% endif %}>
+<article id="notif-{{ n.id }}" class="notification-card" {% if not n.read %}aria-current="true"{% endif %}>
   <header>
-    <span class="badge badge-{{ n.priority }}">{{ n.priority | upper }}</span>
-    <strong>{{ n.subject }}</strong>
-    <small class="muted">{{ n.created_at }}</small>
-    <small class="muted">from {{ n.from }}</small>
-    {% if not n.read %}<mark>unread</mark>{% endif %}
+    <div>
+      <div class="notification-title">
+        <span class="badge badge-{{ n.priority }}">{{ n.priority | upper }}</span>
+        <strong>{{ n.subject }}</strong>
+        {% if not n.read %}<mark>unread</mark>{% endif %}
+      </div>
+      <div class="notification-meta">
+        <span>From {{ n.from }}</span>
+        <span>{{ n.created_at }}</span>
+      </div>
+    </div>
+    <div class="notification-actions">
+      <a href="/notifications/{{ n.id }}"
+         hx-get="/notifications/{{ n.id }}"
+         hx-target="#notif-{{ n.id }}"
+         hx-swap="outerHTML"
+         role="button"
+         class="outline secondary">Details</a>
+      <button type="button"
+              class="outline secondary"
+              hx-delete="/notifications/{{ n.id }}"
+              hx-confirm="Dismiss this notification?"
+              hx-target="#notif-{{ n.id }}"
+              hx-swap="outerHTML">
+        Dismiss
+      </button>
+    </div>
   </header>
 
-  <p>{{ n.body | truncate(200) }}</p>
+  <div class="notification-preview markdown-content">{{ n.body | markdown }}</div>
 
   {% if n.kind_tag == "question" and n.requires_response %}
     {% set msg = n %}
@@ -16,12 +38,4 @@
     <footer><em>You responded: &#34;{{ n.response_text }}&#34;</em></footer>
   {% endif %}
 
-  <footer>
-    <a href="/notifications/{{ n.id }}"
-       hx-get="/notifications/{{ n.id }}"
-       hx-target="#notif-{{ n.id }}"
-       hx-swap="outerHTML"
-       role="button"
-       class="outline secondary">View detail</a>
-  </footer>
 </article>

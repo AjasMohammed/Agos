@@ -67,8 +67,10 @@ pub enum MockCallMethod {
 /// Record of a single call made to the mock adapter.
 #[derive(Debug, Clone)]
 pub struct MockCallRecord {
-    /// Role and content for each active context entry at call time.
+    /// Role and plain text for each active context entry at call time (images omitted).
     pub context_entries: Vec<(ContextRole, String)>,
+    /// Full active entries (including [`ContentPart::Image`]) for multimodal assertions.
+    pub active_snapshot: Vec<ContextEntry>,
     /// Names of tool manifests passed to the call.
     pub tool_names: Vec<String>,
     /// Which trait method was invoked.
@@ -109,6 +111,12 @@ impl MockLLMCore {
         }
     }
 
+    /// Mark the mock as vision-capable (`supports_images` / catalog-style gating in tests).
+    pub fn enable_vision(mut self) -> Self {
+        self.capabilities.supports_images = true;
+        self
+    }
+
     /// Backward-compatible constructor — accepts plain strings.
     ///
     /// Each string becomes a `MockResponse::text(...)` with `StopReason::EndTurn`.
@@ -146,11 +154,17 @@ impl MockLLMCore {
         let context_entries = context
             .active_entries()
             .iter()
-            .map(|e| (e.role, e.content.clone()))
+            .map(|e| (e.role, e.text()))
+            .collect();
+        let active_snapshot: Vec<ContextEntry> = context
+            .active_entries()
+            .iter()
+            .map(|e| (*e).clone())
             .collect();
         let tool_names = tools.iter().map(|t| t.manifest.name.clone()).collect();
         self.call_history.lock().unwrap().push(MockCallRecord {
             context_entries,
+            active_snapshot,
             tool_names,
             method,
         });
@@ -309,19 +323,8 @@ mod tests {
         ]);
 
         let mut ctx = ContextWindow::new(100);
-        use agentos_types::{ContextCategory, ContextEntry, ContextPartition};
-        ctx.push(ContextEntry {
-            role: ContextRole::User,
-            content: "hello".to_string(),
-            timestamp: chrono::Utc::now(),
-            metadata: None,
-            importance: 0.5,
-            pinned: false,
-            reference_count: 0,
-            partition: ContextPartition::default(),
-            category: ContextCategory::default(),
-            is_summary: false,
-        });
+        use agentos_types::ContextEntry;
+        ctx.push(ContextEntry::from_text(ContextRole::User, "hello"));
 
         mock.infer_with_tools(&ctx, &[]).await.unwrap();
         mock.infer_with_tools(&ctx, &[]).await.unwrap();
@@ -332,7 +335,23 @@ mod tests {
         assert_eq!(history[0].context_entries.len(), 1);
         assert_eq!(history[0].context_entries[0].0, ContextRole::User);
         assert_eq!(history[0].context_entries[0].1, "hello");
+        assert_eq!(history[0].active_snapshot.len(), 1);
         assert_eq!(history[0].tool_names, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn test_mock_call_history_includes_image_in_snapshot() {
+        let mock = MockLLMCore::with_responses(vec![MockResponse::text("ok")]);
+        let mut ctx = ContextWindow::new(10);
+        let mut user = ContextEntry::from_text(ContextRole::User, "see");
+        user.parts.push(ContentPart::Image {
+            mime: "image/png".into(),
+            source: ImageSource::Base64 { data: "abc".into() },
+        });
+        ctx.push(user);
+        mock.infer_with_tools(&ctx, &[]).await.unwrap();
+        let snap = &mock.call_history()[0].active_snapshot;
+        assert!(snap[0].has_images());
     }
 
     #[tokio::test]

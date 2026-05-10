@@ -1,7 +1,10 @@
 use crate::channel_chat_bridge::KernelChatBridge;
+use crate::escalation::EscalationManager;
 use crate::notification_router::{InboundMessage, NotificationRouter};
 use crate::scheduler::TaskScheduler;
 use crate::user_channel_registry::UserChannelRegistry;
+use agentos_audit::{AuditEntry, AuditEventType, AuditLog, AuditSeverity};
+use agentos_channels::pairing::PairingManager;
 use agentos_types::{
     AgentOSError, ChannelInstanceID, ChannelKind, DeliveryChannel, NotificationID,
     NotificationPriority, NotificationSource, TaskState, TraceID, UserMessage, UserMessageKind,
@@ -18,6 +21,10 @@ AgentOS commands:
   /tasks      — list active tasks
   /status     — system status (alias for /tasks)
   /stop <id>  — cancel a task (first 8 chars of task ID)
+  /approve <id> — approve a pending escalation (paired senders only)
+  /deny <id>  — deny a pending escalation (paired senders only)
+  /pair <code> — authorise this channel sender to issue /approve and /deny.
+                 Codes are issued the first time you try /approve or /deny.
   /help       — show this message
   /agents     — list agents available for chat
   /agent      — show the default chat agent for this channel
@@ -44,6 +51,13 @@ pub struct InboundRouter {
     channel_registry: Arc<UserChannelRegistry>,
     scheduler: Arc<TaskScheduler>,
     chat_bridge: Arc<KernelChatBridge>,
+    audit: Arc<AuditLog>,
+    /// Resolves `/approve <id>` and `/deny <id>` channel commands.
+    escalation_manager: Arc<EscalationManager>,
+    /// Verifies that a channel sender is paired before honoring approval
+    /// commands. Without this, anyone who can DM the bot could resolve
+    /// pending escalations.
+    pairing_manager: Arc<PairingManager>,
     rx: mpsc::Receiver<InboundMessage>,
     /// Per-channel rate limiter: (message count, window start instant).
     rate_limiter: HashMap<ChannelInstanceID, (u32, Instant)>,
@@ -52,11 +66,15 @@ pub struct InboundRouter {
 }
 
 impl InboundRouter {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         notification_router: Arc<NotificationRouter>,
         channel_registry: Arc<UserChannelRegistry>,
         scheduler: Arc<TaskScheduler>,
         chat_bridge: Arc<KernelChatBridge>,
+        audit: Arc<AuditLog>,
+        escalation_manager: Arc<EscalationManager>,
+        pairing_manager: Arc<PairingManager>,
         rx: mpsc::Receiver<InboundMessage>,
     ) -> Self {
         Self {
@@ -64,6 +82,9 @@ impl InboundRouter {
             channel_registry,
             scheduler,
             chat_bridge,
+            audit,
+            escalation_manager,
+            pairing_manager,
             rx,
             rate_limiter: HashMap::new(),
             last_prune: Instant::now(),
@@ -488,6 +509,75 @@ impl InboundRouter {
                 .await;
             }
 
+            "/approve" | "/deny" if parts.len() >= 2 => {
+                self.handle_approval_command(&msg, cmd, parts[1].trim())
+                    .await;
+            }
+
+            "/approve" | "/deny" => {
+                self.send_reply(&msg, format!("Usage: {cmd} <escalation-id>"))
+                    .await;
+            }
+
+            "/pair" if parts.len() >= 2 => {
+                // Approve a pairing code generated when an unknown sender
+                // first DMed the bot. After this succeeds, the channel
+                // sender can use `/approve <id>` and `/deny <id>` on
+                // pending escalations (R3 finding C1: without this arm
+                // the entire approval-channel-fanout feature is a no-op
+                // because `PairingManager.list_approved` stays empty).
+                let code = parts[1].trim();
+                match self.pairing_manager.approve_code(code).await {
+                    Ok(sender) => {
+                        tracing::info!(
+                            channel_id = %msg.channel_instance_id,
+                            sender_id = %sender.sender_id,
+                            "Pairing approved via /pair"
+                        );
+                        let _ = self.audit.append(AuditEntry {
+                            timestamp: Utc::now(),
+                            trace_id: TraceID::new(),
+                            event_type: AuditEventType::PermissionGranted,
+                            agent_id: None,
+                            task_id: None,
+                            tool_id: None,
+                            details: serde_json::json!({
+                                "subsystem": "inbound_router",
+                                "kind": "channel_pairing_approved",
+                                "channel_instance_id": msg.channel_instance_id.to_string(),
+                                "channel_sender": sender.sender_id,
+                            }),
+                            severity: AuditSeverity::Info,
+                            reversible: false,
+                            rollback_ref: None,
+                        });
+                        self.send_reply(
+                            &msg,
+                            "✅ Paired. You can now use `/approve <id>` and \
+                             `/deny <id>` to resolve pending escalations."
+                                .to_string(),
+                        )
+                        .await;
+                    }
+                    Err(reason) => {
+                        // Uniform error from PairingManager — does NOT
+                        // distinguish wrong code from expired so attackers
+                        // cannot probe for valid prefixes.
+                        self.send_reply(&msg, reason).await;
+                    }
+                }
+            }
+
+            "/pair" => {
+                self.send_reply(
+                    &msg,
+                    "Usage: /pair <code>. Codes are issued the first time you \
+                     DM the bot from an unpaired channel."
+                        .to_string(),
+                )
+                .await;
+            }
+
             _ => {
                 self.send_reply(
                     &msg,
@@ -500,13 +590,181 @@ impl InboundRouter {
         Ok(())
     }
 
+    /// Handle `/approve <id>` and `/deny <id>` commands from a paired
+    /// channel sender. The sender MUST be on the pairing allowlist for
+    /// this channel; otherwise the command is rejected without consulting
+    /// the escalation store. Already-resolved escalations return a clear
+    /// "already resolved" reply (idempotent).
+    async fn handle_approval_command(&self, msg: &InboundMessage, cmd: &str, id_str: &str) {
+        // Parse the escalation id first so a malformed id doesn't leak
+        // the existence of paired senders.
+        let id: u64 = match id_str.parse() {
+            Ok(v) => v,
+            Err(_) => {
+                self.send_reply(
+                    msg,
+                    format!("Invalid escalation id '{id_str}' — must be a number."),
+                )
+                .await;
+                return;
+            }
+        };
+
+        // Pairing check. We use `external_sender_id` as the sender
+        // identity and `channel_instance_id` as the channel scope. An
+        // unpaired sender gets a uniform error that does NOT confirm
+        // the escalation exists.
+        let channel_id_str = msg.channel_instance_id.to_string();
+        if !self
+            .pairing_manager
+            .is_allowed(&channel_id_str, &msg.external_sender_id)
+            .await
+        {
+            tracing::warn!(
+                channel_id = %channel_id_str,
+                sender = %msg.external_sender_id,
+                escalation_id = id,
+                command = cmd,
+                "Rejecting approval command from unpaired sender"
+            );
+            let _ = self.audit.append(AuditEntry {
+                timestamp: Utc::now(),
+                trace_id: TraceID::new(),
+                event_type: AuditEventType::ActionForbidden,
+                agent_id: None,
+                task_id: None,
+                tool_id: None,
+                details: serde_json::json!({
+                    "subsystem": "inbound_router",
+                    "command": cmd,
+                    "escalation_id": id,
+                    "reason": "channel_sender_not_paired",
+                    "channel_instance_id": channel_id_str,
+                }),
+                severity: AuditSeverity::Warn,
+                reversible: false,
+                rollback_ref: None,
+            });
+            // Issue a fresh pairing code so the operator can self-
+            // onboard with `/pair <code>` from this same channel.
+            // Without this UX, paired-sender enforcement is a dead-end
+            // and the entire approval flow becomes a no-op (R3 finding C1).
+            let code = self
+                .pairing_manager
+                .generate_code(&channel_id_str, &msg.external_sender_id)
+                .await;
+            self.send_reply(
+                msg,
+                format!(
+                    "🔒 This sender is not paired with AgentOS. Reply \
+                     `/pair {code}` to authorise approval commands. Code \
+                     expires in 10 minutes."
+                ),
+            )
+            .await;
+            return;
+        }
+
+        // Look up the escalation. Idempotent: already-resolved → friendly
+        // reply, no state change.
+        let existing = self.escalation_manager.get(id).await;
+        let Some(esc) = existing else {
+            self.send_reply(msg, format!("No escalation #{id} found."))
+                .await;
+            return;
+        };
+        if esc.resolved {
+            self.send_reply(
+                msg,
+                format!(
+                    "Escalation #{id} is already resolved ({}).",
+                    esc.resolution.as_deref().unwrap_or("unknown")
+                ),
+            )
+            .await;
+            return;
+        }
+
+        let resolution = if cmd == "/approve" {
+            "approved"
+        } else {
+            "denied"
+        };
+        match self.escalation_manager.resolve(id, resolution.into()).await {
+            Some((_task_id, _agent_id, _blocking)) => {
+                tracing::info!(
+                    escalation_id = id,
+                    resolution,
+                    channel_id = %channel_id_str,
+                    sender = %msg.external_sender_id,
+                    "Escalation resolved via channel"
+                );
+                let event = if resolution == "approved" {
+                    AuditEventType::PermissionGranted
+                } else {
+                    AuditEventType::PermissionDenied
+                };
+                let _ = self.audit.append(AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: event,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "subsystem": "inbound_router",
+                        "command": cmd,
+                        "escalation_id": id,
+                        "resolution": resolution,
+                        "channel_instance_id": channel_id_str,
+                        "channel_sender": msg.external_sender_id,
+                    }),
+                    severity: AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                let symbol = if resolution == "approved" {
+                    "✅"
+                } else {
+                    "🚫"
+                };
+                // ACF Phase 4: `EscalationManager::resolve` now sends on
+                // a oneshot resolution channel that `task_executor`
+                // parks on whenever ApprovalHook returns
+                // `approval_pending:<id>`. The agent's tool call resumes
+                // automatically — no need for the operator to re-issue.
+                let suffix = if resolution == "approved" {
+                    " The agent's tool call is resuming."
+                } else {
+                    ""
+                };
+                self.send_reply(
+                    msg,
+                    format!("{symbol} Escalation #{id} {resolution}.{suffix}"),
+                )
+                .await;
+            }
+            None => {
+                // Race with another approver (web UI, sweeper) — already resolved.
+                self.send_reply(
+                    msg,
+                    format!("Escalation #{id} is already resolved or expired."),
+                )
+                .await;
+            }
+        }
+    }
+
     async fn send_reply(&self, original: &InboundMessage, text: String) {
+        let trace_id = TraceID::new();
+        let preview: String = text.chars().take(120).collect();
+        let text_len = text.chars().count();
         let subject: String = text.chars().take(80).collect();
         let reply = UserMessage {
             id: NotificationID::new(),
             from: NotificationSource::Kernel,
             task_id: None,
-            trace_id: TraceID::new(),
+            trace_id,
             kind: UserMessageKind::Notification,
             priority: NotificationPriority::Info,
             subject,
@@ -522,25 +780,50 @@ impl InboundRouter {
         };
         // Route back to the originating channel only — not all registered adapters.
         let instance_id = original.channel_instance_id.to_string();
-        if let Err(e) = self
+        match self
             .notification_router
             .deliver_to_channel(reply, &instance_id)
             .await
         {
-            tracing::warn!(
-                channel = %original.channel,
-                error = %e,
-                "InboundRouter: failed to deliver reply"
-            );
+            Ok(()) => {
+                let _ = self.audit.append(AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id,
+                    event_type: AuditEventType::ChannelMessageSent,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "channel_id": instance_id,
+                        "channel": original.channel,
+                        "source": "kernel_command_reply",
+                        "text_preview": preview,
+                        "text_len": text_len,
+                    }),
+                    severity: AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    channel = %original.channel,
+                    error = %e,
+                    "InboundRouter: failed to deliver reply"
+                );
+            }
         }
     }
 
     async fn send_agent_chat_reply(&self, original: &InboundMessage, agent_name: &str, body: &str) {
-        let from = if let Some(id) = self.chat_bridge.agent_id_for_name(agent_name).await {
-            NotificationSource::Agent(id)
-        } else {
-            NotificationSource::Kernel
+        let agent_id_opt = self.chat_bridge.agent_id_for_name(agent_name).await;
+        let from = match agent_id_opt {
+            Some(id) => NotificationSource::Agent(id),
+            None => NotificationSource::Kernel,
         };
+        let trace_id = TraceID::new();
+        let preview: String = body.chars().take(120).collect();
+        let text_len = body.chars().count();
         let subject = format!("[{agent_name}]")
             .chars()
             .take(80)
@@ -549,7 +832,7 @@ impl InboundRouter {
             id: NotificationID::new(),
             from,
             task_id: None,
-            trace_id: TraceID::new(),
+            trace_id,
             kind: UserMessageKind::Notification,
             priority: NotificationPriority::Info,
             subject,
@@ -565,16 +848,39 @@ impl InboundRouter {
         };
         // Route back to the originating channel only — not all registered adapters.
         let instance_id = original.channel_instance_id.to_string();
-        if let Err(e) = self
+        match self
             .notification_router
             .deliver_to_channel(reply, &instance_id)
             .await
         {
-            tracing::warn!(
-                channel = %original.channel,
-                error = %e,
-                "InboundRouter: failed to deliver agent chat reply"
-            );
+            Ok(()) => {
+                let _ = self.audit.append(AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id,
+                    event_type: AuditEventType::ChannelMessageSent,
+                    agent_id: agent_id_opt,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "channel_id": instance_id,
+                        "channel": original.channel,
+                        "source": "agent_chat_reply",
+                        "agent_name": agent_name,
+                        "text_preview": preview,
+                        "text_len": text_len,
+                    }),
+                    severity: AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    channel = %original.channel,
+                    error = %e,
+                    "InboundRouter: failed to deliver agent chat reply"
+                );
+            }
         }
     }
 }

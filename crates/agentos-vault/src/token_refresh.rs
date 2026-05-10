@@ -4,6 +4,7 @@ use agentos_types::TraceID;
 use chrono::{Duration, Utc};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 /// Background service that proactively refreshes OAuth tokens before they expire.
 pub struct TokenRefreshLoop {
@@ -98,7 +99,7 @@ impl TokenRefreshLoop {
                             &cred.connector_id,
                             &response.access_token,
                             new_expires_at,
-                            response.refresh_token.as_deref(),
+                            response.refresh_token.as_ref().map(|t| t.as_str()),
                         )
                         .await
                     {
@@ -200,11 +201,11 @@ impl TokenRefreshLoop {
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 struct TokenResponse {
-    access_token: String,
+    access_token: Zeroizing<String>,
     #[serde(default)]
-    refresh_token: Option<String>,
+    refresh_token: Option<Zeroizing<String>>,
     #[serde(default)]
     expires_in: Option<i64>,
     #[allow(dead_code)]

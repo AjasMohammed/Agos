@@ -252,9 +252,7 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
             ));
         }
 
-        // Plain text only — MarkdownV2 is brittle with arbitrary agent/user content
-        // (URLs, punctuation, code) and causes sendMessage 400s with no user-visible copy.
-        let text = format_telegram_plain(msg);
+        let plain = format_telegram_plain(msg);
         let reply_markup = build_inline_keyboard(msg);
         let reply_to = msg
             .reply_to_external_id
@@ -264,25 +262,39 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
         let url = self.api_url("sendMessage");
         let has_markup = !reply_markup.is_null();
 
-        // Inline keyboards must attach to a single message; avoid splitting Question payloads.
-        let chunks: Vec<String> = if has_markup {
-            vec![text.chars().take(TELEGRAM_MAX_MESSAGE_CHARS).collect()]
+        // Chunk the plain source first (Telegram's char limit is on the rendered
+        // text), then convert each chunk independently. Converting then chunking
+        // could split an HTML tag mid-attribute. The HTML-escaped output is at
+        // most 5x longer than the input (`>` → `&gt;`), so we use a smaller
+        // input cap to leave room. Inline keyboards (Question payloads) must
+        // attach to a single message — never split.
+        let plain_chunks: Vec<String> = if has_markup {
+            vec![plain.chars().take(TELEGRAM_MAX_MESSAGE_CHARS).collect()]
         } else {
-            chunk_telegram_text(&text, TELEGRAM_MAX_MESSAGE_CHARS)
+            // ~3000 chars of input fit safely under 4096 chars after expansion.
+            chunk_telegram_text(&plain, 3000)
         };
 
+        let chunks: Vec<(String, String)> = plain_chunks
+            .into_iter()
+            .map(|p| {
+                let h = agentos_channels::telegram_format::markdown_to_telegram_html(&p);
+                (h, p)
+            })
+            .collect();
+
         let n = chunks.len();
-        for (i, chunk) in chunks.iter().enumerate() {
-            if chunk.is_empty() {
+        for (i, (html_chunk, plain_chunk)) in chunks.iter().enumerate() {
+            if html_chunk.is_empty() && plain_chunk.is_empty() {
                 continue;
             }
             let is_last = i + 1 == n;
             let mut payload = json!({
                 "chat_id": &*chat_id,
-                "text": chunk,
+                "text": html_chunk,
+                "parse_mode": "HTML",
                 "disable_web_page_preview": true,
             });
-            // Only the final segment replies to the operator message (Telegram rejects invalid ids).
             if is_last {
                 if let Some(rid) = reply_to {
                     payload["reply_to_message_id"] = json!(rid);
@@ -292,7 +304,32 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
                 }
             }
 
-            let _ = telegram_post_json_with_retry(&self.client, &url, &payload).await?;
+            match telegram_post_json_with_retry(&self.client, &url, &payload).await {
+                Ok(_) => {}
+                Err(e) => {
+                    // Parse failure → resend the same segment as plain text.
+                    let es = format!("{e}");
+                    if es.contains("can't parse entities") || es.contains("HTTP 400") {
+                        tracing::warn!(error = %e, "Telegram HTML parse failed; resending as plain");
+                        let mut fb = json!({
+                            "chat_id": &*chat_id,
+                            "text": plain_chunk,
+                            "disable_web_page_preview": true,
+                        });
+                        if is_last {
+                            if let Some(rid) = reply_to {
+                                fb["reply_to_message_id"] = json!(rid);
+                            }
+                            if has_markup {
+                                fb["reply_markup"] = reply_markup.clone();
+                            }
+                        }
+                        let _ = telegram_post_json_with_retry(&self.client, &url, &fb).await?;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
         }
 
         Ok(())

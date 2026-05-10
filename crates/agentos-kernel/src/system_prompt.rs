@@ -3,6 +3,32 @@ use std::fmt::Write;
 /// Maximum sub-agent spawn depth (mirrors `commands::sub_agent::MAX_SPAWN_DEPTH`).
 pub const MAX_SPAWN_DEPTH: u8 = 5;
 
+/// Returns the system's local timezone as an IANA name + UTC offset, e.g.
+/// "Asia/Kolkata (UTC+05:30)". Falls back to offset-only if IANA name is unavailable.
+pub fn local_timezone_str() -> String {
+    let offset = chrono::Local::now().format("UTC%:z").to_string();
+    // Try TZ env var (most reliable when set explicitly)
+    if let Ok(tz) = std::env::var("TZ") {
+        if !tz.is_empty() {
+            return format!("{tz} ({offset})");
+        }
+    }
+    // Try /etc/timezone (Debian/Ubuntu)
+    if let Ok(tz) = std::fs::read_to_string("/etc/timezone") {
+        let tz = tz.trim();
+        if !tz.is_empty() {
+            return format!("{tz} ({offset})");
+        }
+    }
+    // Try /etc/localtime symlink target (Arch/Fedora/macOS)
+    if let Ok(link) = std::fs::read_link("/etc/localtime") {
+        if let Some(tz) = link.to_str().and_then(|s| s.split("/zoneinfo/").nth(1)) {
+            return format!("{tz} ({offset})");
+        }
+    }
+    offset
+}
+
 /// Context for building the canonical AgentOS system prompt.
 ///
 /// Every context window — task execution, web UI chat, sub-agent — uses this
@@ -22,6 +48,23 @@ pub struct SystemPromptContext {
     /// mode — only text inside `<final>...</final>` tags reaches the user.
     /// The system prompt instructs the model to follow the convention.
     pub enforce_final_tag: bool,
+    /// Host timezone, e.g. "Asia/Kolkata (UTC+05:30)". Tells the agent which
+    /// timezone local times are in. Call `datetime` tool for the actual current time.
+    pub timezone: String,
+    /// Currently connected channels (telegram, slack, …) — rendered as a
+    /// compact awareness block. Empty vec → block is skipped entirely.
+    /// Populated from `UserChannelRegistry::list_active()` per task.
+    pub connected_channels: Vec<ChannelHint>,
+}
+
+/// One connected channel, rendered into the system prompt awareness block.
+/// Carries only the minimum the agent needs to call `channel-send`.
+#[derive(Debug, Clone)]
+pub struct ChannelHint {
+    /// Human-readable name (e.g. "telegram-main"). What the agent passes as `channel`.
+    pub name: String,
+    /// Platform kind — e.g. "telegram", "slack". Drives `channel-<kind>` manual section lookup.
+    pub kind: String,
 }
 
 /// Additional context injected when the executing task is a sub-agent.
@@ -35,10 +78,10 @@ pub struct SubAgentContext {
 /// Build the canonical AgentOS system prompt.
 ///
 /// This is the ONE system prompt placed at the top of every context window.
-/// It is designed to be compact (~1.5 KB) while giving agents full awareness
-/// of their identity, environment, tools, and coordination primitives.
+/// Renders to ~5–6 KB (≈ 1500 tokens). Tests cap the size at 6500 chars; the
+/// initial buffer is sized to fit the typical render without reallocation.
 pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
-    let mut prompt = String::with_capacity(2048);
+    let mut prompt = String::with_capacity(5120);
 
     // ── Identity ──────────────────────────────────────────────────
     write!(
@@ -48,6 +91,14 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
     )
     .ok();
 
+    if !ctx.timezone.is_empty() {
+        write!(
+            prompt,
+            "\nTimezone: {ctx_tz}. Call `datetime` for current time.",
+            ctx_tz = ctx.timezone
+        )
+        .ok();
+    }
     if !ctx.agent_roles.is_empty() {
         write!(prompt, "\nRoles: {}.", ctx.agent_roles.join(", ")).ok();
     }
@@ -118,27 +169,77 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
         "\n\n## Execution\n\
          - You run in iterations: respond \u{2192} tools execute \u{2192} results injected \u{2192} respond again.\n\
          - Plan before acting. Your task has an iteration limit — use iterations efficiently.\n\
-         - If a tool fails, read the error and adjust. Do not retry identically more than twice.\n\
+         - If a tool fails, read the error and adjust before retrying.\n\
          - Tool outputs > 256 KB are truncated ([TRUNCATED]). Request smaller data or paginate.\n\
-         - If a tool returns 'awaiting_approval', your task is paused for human review.",
+         - If a tool returns 'awaiting_approval', your task is paused for human review.\n\
+         - Priority when rules conflict: safety > task completion > correctness > efficiency.\n\
+         - Respond directly if the answer is factual and no external state is needed. \
+           Use tools for current state, files, side effects, or when uncertain about system state. \
+           Prefer fewer tool calls — batch or combine operations where possible.",
+    );
+
+    // ── User adaptation ──────────────────────────────────────────
+    prompt.push_str(
+        "\n\n## User Adaptation\n\
+         Notice user behavior, preferences, style, goals, and needs. \
+         Adapt detail, pace, tone, proactivity, and tool use. \
+         Treat patterns as hypotheses; revise when evidence changes.",
+    );
+
+    // ── Tool result contract (anti-verify preamble) ──────────────
+    prompt.push_str(
+        "\n\n## Tool Result Contract\n\
+         No error = success. Never re-read to verify a write. Never send the same payload twice. \
+         If kernel returns `kernel_directive: STOP`, do not retry that tool; finalize from existing context. \
+         Two consecutive identical rejections end the task.",
+    );
+
+    // ── Host inspection (compact — full prose in `agent-manual section=hal`) ──
+    prompt.push_str(
+        "\n\n## Host Inspection\n\
+         shell-exec is sandboxed (isolated PID + network ns) — its ps/top/netstat \
+         reflect the sandbox, NOT the host. For host state use:\n\
+         - Processes \u{2192} process-manager · Sockets \u{2192} network-sockets\n\
+         - Mounts \u{2192} system-mounts · Open files \u{2192} system-open-files\n\
+         - systemd \u{2192} system-services · Net iface \u{2192} network-monitor\n\
+         shell-exec is for transient compute, not introspection.",
     );
 
     // ── Self-discovery ───────────────────────────────────────────
     prompt.push_str(
         "\n\n## Self-Discovery\n\
          - `agent-self` \u{2014} your permissions, active tasks, capabilities, budget.\n\
-         - `agent-manual` \u{2014} 25 documentation sections. Use {\"section\": \"index\"} for the full directory. \
-         Key: tools, capabilities, permissions, memory, coordination, events, commands, errors.\n\
-         - `agent-list` \u{2014} peer agents and their status.",
+         - `agent-manual` \u{2014} 26 documentation sections. Use {\"section\": \"index\"} for the full directory. \
+         Key: tools, capabilities, scheduling, permissions, memory, coordination, events, commands, errors.\n\
+         - `agent-list` \u{2014} peer agents and their status.\n\
+         - `list-tools(category=<name>|tag=<tag>|page=N)` \u{2014} paginated tool catalogue.\n\
+         - `search-tools(query=...)` \u{2014} keyword/tag search over all tools (use when L0 counts don't tell you which tool fits).\n\
+         - `describe-tool(name=...)` \u{2014} full schema + example for a specific tool.",
     );
 
-    // ── Memory (compact) ─────────────────────────────────────────
+    // ── Live information & refusal policy ────────────────────────
+    prompt.push_str(
+        "\n\n## Live Information\n\
+         For current/today/live data (news, prices, scores, election results, weather, public info) \
+         you MUST attempt a tool call before refusing. Pipeline:\n\
+         1. `web-search(query=...)` if visible in your tool list.\n\
+         2. Otherwise `search-tools(query=\"web search\")` \u{2192} `describe-tool(name=...)` \u{2192} call.\n\
+         Do NOT reply \"I have no internet access\" or \"I cannot fetch live data\" without trying. \
+         Refusing without a tool attempt is forbidden when search/fetch tools exist.",
+    );
+
+    // ── Memory (compact — full prose in `agent-manual section=memory`) ──
     prompt.push_str(
         "\n\n## Memory\n\
-         - **Context memory**: your personal notebook, injected at every task start. Update via `context-memory-update` (4096-token budget). \
-         Store patterns, tool tips, and reusable knowledge — not ephemeral task state.\n\
-         - **Semantic**: long-term, cross-task. `memory-write` / `memory-search` (scope=semantic).\n\
-         - **Episodic**: task-scoped event log. Auto-recorded on task completion.",
+         Persists across tasks. Read first when prior context may matter; \
+         write durable user facts, patterns, and novel solutions.\n\
+         - Read: `context-memory-read`, `memory-search`, `procedure-search` \
+         (call on \"last time\" / \"my X\" / \"remember\" cues).\n\
+         - Write: `memory-write` (facts), `context-memory-update` (stable \
+         user prefs), `procedure-create` (novel multi-step), \
+         `memory-delete` then rewrite (contradicted fact).\n\
+         Tiers: context · semantic · episodic (auto) · procedural · archival · blocks. \
+         See `agent-manual section=memory` for tier rules + examples.",
     );
 
     // ── Coordination ─────────────────────────────────────────────
@@ -147,7 +248,45 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
          - `spawn-agent` \u{2014} create a child task on another agent. `await-agents` \u{2014} collect results.\n\
          - `task-delegate` / `agent-message` \u{2014} delegate work or message peers.\n\
          - Child results are auto-injected into your context on completion.\n\
-         - Max spawn depth: 5. Plan agent hierarchies accordingly.",
+         - Max spawn depth: 5. Plan agent hierarchies accordingly.\n\
+         - Spawn when: work is parallelizable and each part needs >2 tool calls, or requires a specialist agent. \
+           Do not spawn for tasks you can complete in 1\u{2013}3 calls — each child agent consumes budget. \
+           Spawn narrow (specific prompt + tight scope), not broad.",
+    );
+
+    // ── Channels (only when at least one is connected) ───────────
+    if !ctx.connected_channels.is_empty() {
+        const MAX_LISTED: usize = 5;
+        prompt.push_str("\n\n## Channels\nConnected: ");
+        let total = ctx.connected_channels.len();
+        let listed = ctx.connected_channels.iter().take(MAX_LISTED);
+        let parts: Vec<String> = listed.map(|c| format!("{} ({})", c.name, c.kind)).collect();
+        prompt.push_str(&parts.join(", "));
+        if total > MAX_LISTED {
+            write!(
+                prompt,
+                ", … and {} more (see agent-manual section=channels for full list)",
+                total - MAX_LISTED
+            )
+            .ok();
+        }
+        prompt.push_str(
+            "\nSend: `channel-send` with `{\"channel\": \"<name|id>\", \"text\": \"...\"}`. \
+             Platform features: `agent-manual section=channel-<kind>` (load only when sending).",
+        );
+    }
+
+    // ── Scheduling ──────────────────────────────────────────────
+    prompt.push_str(
+        "\n\n## Scheduling\n\
+         Defer work to a future time: `schedule-once` (one-shot via fire_at ISO 8601 or delay_secs 1\u{2013}86400), \
+         `set-timer` / `cancel-timer` / `list-timers`, `list-my-schedules`, `get-schedule-runs`. \
+         **Pick the right mode for `schedule-once`:** \
+         use `mode=\"notify\"` with `notify_subject`/`notify_body` for a plain reminder (no LLM at fire time — fastest, cheapest, no loop risk); \
+         use `mode=\"tool\"` with `tool`/`tool_args` to invoke one tool with fixed args; \
+         only use `mode=\"task\"` (default) when fire-time reasoning is required. \
+         Do NOT use `mode=\"task\"` with a prompt that just says \"call notify-user\" — use `mode=\"notify\"` instead. \
+         See `agent-manual` section \"scheduling\" for patterns.",
     );
 
     // ── Capabilities (KMC) ──────────────────────────────────────
@@ -189,6 +328,8 @@ mod tests {
             custom_instructions: None,
             sub_agent: None,
             enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: vec![],
         });
         assert!(prompt.contains("You are analyst, an AI agent in AgentOS"));
         assert!(!prompt.contains("Sub-Agent Context"));
@@ -203,6 +344,8 @@ mod tests {
             custom_instructions: None,
             sub_agent: None,
             enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: vec![],
         });
         assert!(prompt.contains("Roles: security, auditor."));
         assert!(prompt.contains("Watches for security anomalies."));
@@ -217,6 +360,8 @@ mod tests {
             custom_instructions: Some("Always answer with a brief checklist.".into()),
             sub_agent: None,
             enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: vec![],
         });
         assert!(prompt.contains("## Agent Custom Instructions"));
         assert!(prompt.contains("Always answer with a brief checklist."));
@@ -231,6 +376,8 @@ mod tests {
             custom_instructions: None,
             sub_agent: None,
             enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: vec![],
         });
         // Must not leak model details
         assert!(!prompt.contains("llama"));
@@ -247,6 +394,8 @@ mod tests {
             agent_roles: vec![],
             custom_instructions: None,
             enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: vec![],
             sub_agent: Some(SubAgentContext {
                 parent_task_id: "abc-123".into(),
                 spawn_depth: 2,
@@ -266,6 +415,8 @@ mod tests {
             agent_roles: vec![],
             custom_instructions: None,
             enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: vec![],
             sub_agent: Some(SubAgentContext {
                 parent_task_id: "xyz".into(),
                 spawn_depth: MAX_SPAWN_DEPTH,
@@ -274,28 +425,56 @@ mod tests {
         assert!(prompt.contains("maximum depth and cannot spawn further"));
     }
 
-    #[test]
-    fn test_all_sections_present() {
-        let prompt = build_system_prompt(&SystemPromptContext {
+    fn default_prompt() -> String {
+        build_system_prompt(&SystemPromptContext {
             agent_name: "test".into(),
             agent_description: String::new(),
             agent_roles: vec![],
             custom_instructions: None,
             sub_agent: None,
             enforce_final_tag: false,
-        });
+            timezone: String::new(),
+            connected_channels: vec![],
+        })
+    }
+
+    #[test]
+    fn test_all_section_headers_present() {
+        let prompt = default_prompt();
         for section in &[
             "## Tools",
             "## Execution",
+            "## User Adaptation",
+            "## Tool Result Contract",
             "## Self-Discovery",
             "## Memory",
             "## Coordination",
+            "## Scheduling",
             "## Capabilities",
             "## Security",
             "## Escalation & Errors",
         ] {
             assert!(prompt.contains(section), "Missing section: {section}");
         }
+    }
+
+    #[test]
+    fn test_critical_body_content_present() {
+        let prompt = default_prompt();
+        // Memory triggers — protect against silent deletion of READ/WRITE rules
+        assert!(prompt.contains("context-memory-read"), "memory READ");
+        assert!(prompt.contains("memory-search"), "memory search");
+        assert!(prompt.contains("memory-write"), "memory write");
+        assert!(prompt.contains("procedure-search"), "procedure search");
+        // Tool Result Contract — dedup rule + STOP directive
+        assert!(prompt.contains("payload twice"), "dedup rule");
+        assert!(prompt.contains("kernel_directive: STOP"), "STOP directive");
+        // Execution — priority stack + direct-response heuristic
+        assert!(prompt.contains("safety"), "priority stack");
+        assert!(prompt.contains("Respond directly"), "direct-response rule");
+        // Coordination — spawn-cost heuristic
+        assert!(prompt.contains("Spawn"), "spawn rule header");
+        assert!(prompt.contains("consumes budget"), "spawn cost");
     }
 
     #[test]
@@ -307,6 +486,8 @@ mod tests {
             custom_instructions: None,
             sub_agent: None,
             enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: vec![],
         });
         assert!(!prompt.contains("## Output Format"));
         assert!(!prompt.contains("<final>"));
@@ -322,12 +503,91 @@ mod tests {
             custom_instructions: None,
             sub_agent: None,
             enforce_final_tag: true,
+            timezone: String::new(),
+            connected_channels: vec![],
         });
         assert!(prompt.contains("## Output Format"));
         assert!(prompt.contains("<final>"));
         assert!(prompt.contains("</final>"));
         assert!(prompt.contains("<think>"));
         assert!(prompt.contains("hidden from the user"));
+    }
+
+    #[test]
+    fn test_channels_block_omitted_when_empty() {
+        let prompt = build_system_prompt(&SystemPromptContext {
+            agent_name: "no-channels".into(),
+            agent_description: String::new(),
+            agent_roles: vec![],
+            custom_instructions: None,
+            sub_agent: None,
+            enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: vec![],
+        });
+        assert!(!prompt.contains("## Channels"));
+        assert!(!prompt.contains("channel-send"));
+    }
+
+    #[test]
+    fn test_channels_block_lists_connected() {
+        let prompt = build_system_prompt(&SystemPromptContext {
+            agent_name: "agent".into(),
+            agent_description: String::new(),
+            agent_roles: vec![],
+            custom_instructions: None,
+            sub_agent: None,
+            enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: vec![
+                ChannelHint {
+                    name: "telegram-main".into(),
+                    kind: "telegram".into(),
+                },
+                ChannelHint {
+                    name: "team-slack".into(),
+                    kind: "slack".into(),
+                },
+            ],
+        });
+        assert!(prompt.contains("## Channels"));
+        assert!(prompt.contains("telegram-main (telegram)"));
+        assert!(prompt.contains("team-slack (slack)"));
+        assert!(prompt.contains("channel-send"));
+        assert!(prompt.contains("agent-manual section=channel-<kind>"));
+    }
+
+    #[test]
+    fn test_channels_block_caps_at_five() {
+        let many: Vec<ChannelHint> = (0..8)
+            .map(|i| ChannelHint {
+                name: format!("ch-{i}"),
+                kind: "custom".into(),
+            })
+            .collect();
+        let prompt = build_system_prompt(&SystemPromptContext {
+            agent_name: "many".into(),
+            agent_description: String::new(),
+            agent_roles: vec![],
+            custom_instructions: None,
+            sub_agent: None,
+            enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: many,
+        });
+        assert!(prompt.contains("ch-0"));
+        assert!(prompt.contains("ch-4"));
+        assert!(!prompt.contains("ch-5"));
+        assert!(prompt.contains("3 more"));
+        // Stays well under budget even with 8 channels (capped at 5 + overflow line).
+        // 8 KB ceiling: trims (memory + host-inspection compaction)
+        // typically land prompts well under 5.5 KB. Headroom covers
+        // future additions while still catching unbounded growth.
+        assert!(
+            prompt.len() < 8000,
+            "Prompt too large: {} chars",
+            prompt.len()
+        );
     }
 
     #[test]
@@ -338,15 +598,19 @@ mod tests {
             agent_roles: vec!["tester".into()],
             custom_instructions: None,
             enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: vec![],
             sub_agent: Some(SubAgentContext {
                 parent_task_id: "parent-id".into(),
                 spawn_depth: 1,
             }),
         });
-        // Even with all optional sections, the prompt should stay under 3000 chars
-        // (well within the 15% system budget of a typical 128k-token context window)
+        // Even with all optional sections, stays well under context budget (~1500 tokens).
+        // 8 KB ceiling: trims (memory + host-inspection compaction)
+        // typically land prompts well under 5.5 KB. Headroom covers
+        // future additions while still catching unbounded growth.
         assert!(
-            prompt.len() < 3000,
+            prompt.len() < 8000,
             "Prompt is too large: {} chars",
             prompt.len()
         );

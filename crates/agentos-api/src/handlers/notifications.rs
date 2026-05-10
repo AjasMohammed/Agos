@@ -62,3 +62,27 @@ pub async fn respond(
     svc.respond_to_notification(nid, req.text).await?;
     Ok(Json(serde_json::json!({ "data": { "ok": true } })))
 }
+
+/// `DELETE /api/v1/notifications/read` — Clear all read notifications.
+pub async fn clear_read(
+    State(svc): State<Arc<dyn KernelService>>,
+    Extension(key): Extension<AuthenticatedKey>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_permission(&key, "notifications:w")?;
+    let deleted = svc.clear_read_notifications().await?;
+    Ok(Json(serde_json::json!({ "data": { "deleted": deleted } })))
+}
+
+/// `DELETE /api/v1/notifications/{id}` — Dismiss a single notification.
+pub async fn dismiss(
+    State(svc): State<Arc<dyn KernelService>>,
+    Extension(key): Extension<AuthenticatedKey>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_permission(&key, "notifications:w")?;
+    let nid = id
+        .parse()
+        .map_err(|_| ApiError::BadRequest(format!("Invalid notification ID: {id}")))?;
+    let deleted = svc.dismiss_notification(nid).await?;
+    Ok(Json(serde_json::json!({ "data": { "deleted": deleted } })))
+}

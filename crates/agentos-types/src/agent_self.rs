@@ -22,9 +22,8 @@ pub struct AgentSelfView {
     /// the execution context (e.g. tests, lightweight pipelines).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget: Option<BudgetSummary>,
-    /// Names of every tool available to this agent in the current runner.
-    /// Empty when the runner has not been initialised with self-view support.
-    pub tools: Vec<String>,
+    /// Number of tools available to this agent. Use `agent-manual` to browse them.
+    pub tool_count: usize,
     /// Active event subscriptions. Empty when no subscription query interface
     /// is available in the current execution context.
     pub subscriptions: Vec<SubscriptionSummary>,

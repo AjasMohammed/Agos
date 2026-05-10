@@ -16,6 +16,7 @@ use agentos_tools::runner::ToolRunner;
 use async_trait::async_trait;
 use clap::Subcommand;
 use subtle::ConstantTimeEq;
+use zeroize::Zeroizing;
 
 #[derive(Debug, Subcommand)]
 pub enum McpCommands {
@@ -520,11 +521,11 @@ pub async fn cmd_mcp_oauth_store(
     let cmd = KernelCommand::McpOAuthStore {
         connector_id: connector_id.clone(),
         provider,
-        access_token,
-        refresh_token,
+        access_token: Zeroizing::new(access_token),
+        refresh_token: refresh_token.map(Zeroizing::new),
         token_endpoint,
         client_id,
-        client_secret,
+        client_secret: client_secret.map(Zeroizing::new),
         scopes: scopes_vec,
         expires_in_secs: expires_in,
     };
@@ -779,6 +780,7 @@ impl McpToolExecutor for ToolRunnerExecutor {
             capability_dispatcher: None,
             storage_zone_query: None,
             cancellation_token: CancellationToken::new(),
+            tool_categories: None,
         };
 
         self.runner

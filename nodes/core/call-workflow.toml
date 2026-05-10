@@ -1,0 +1,36 @@
+[node]
+id = "call-workflow"
+version = 1
+display_name = "Call Workflow"
+description = "Invoke another saved workflow as a sub-workflow. Its output becomes this node's output."
+category = "core"
+icon = "layers"
+color = "#f97316"
+risk_class = "exec_capable"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "workflow_id"
+display_name = "Workflow"
+type = "resource_picker"
+required = true
+description = "The workflow to invoke."
+[node.properties.type_options]
+resource = "workflows"
+
+[[node.properties]]
+name = "input"
+display_name = "Input"
+type = "template"
+required = false
+description = "Input to pass to the sub-workflow. Defaults to the current node's input if empty."
+
+[node.execute]
+kind = "call_workflow"
+workflow_id_property = "workflow_id"

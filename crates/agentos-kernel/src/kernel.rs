@@ -37,7 +37,7 @@ use agentos_hal::{
     DeviceAccessGate, DeviceStatus, HalEventSink, HalOperation, HardwareAbstractionLayer,
     HardwareRegistry,
 };
-use agentos_llm::LLMCore;
+use agentos_llm::{LLMCore, NoopImageResolver};
 use agentos_memory::Embedder;
 use agentos_pipeline::{PipelineEngine, PipelineStore};
 use agentos_sandbox::SandboxExecutor;
@@ -619,9 +619,15 @@ pub struct Kernel {
     pub agent_registry: Arc<RwLock<AgentRegistry>>,
     pub bus: Arc<BusServer>,
     pub tool_runner: Arc<ToolRunner>,
+    /// Live tool catalogue shared with agent-manual. Refreshed on tool install/remove.
+    pub tool_summaries: agentos_tools::agent_manual::SharedToolSummaries,
+    /// Per-agent tool usage rankings (SQLite-backed, spawn_blocking writes).
+    pub tool_usage: Arc<crate::tool_usage_store::ToolUsageStore>,
     pub sandbox: Arc<SandboxExecutor>,
     pub router: Arc<crate::router::TaskRouter>,
     pub active_llms: Arc<RwLock<HashMap<AgentID, Arc<dyn LLMCore>>>>,
+    /// Resolves chat `ImageSource::FileRef` to base64; replaced by the web UI with a file-store implementation.
+    pub image_resolver: std::sync::RwLock<Arc<dyn agentos_llm::ImageResolver>>,
     pub message_bus: Arc<crate::agent_message_bus::AgentMessageBus>,
     pub profile_manager: Arc<ProfileManager>,
     pub episodic_memory: Arc<agentos_memory::EpisodicStore>,
@@ -658,10 +664,20 @@ pub struct Kernel {
     /// Unified notification router — dispatches UserMessages to delivery adapters
     /// and persists them to the user inbox.
     pub notification_router: Arc<crate::notification_router::NotificationRouter>,
+    /// Agent-facing notification inbox for scheduled/event/background deliveries.
+    pub agent_inbox: Arc<crate::agent_inbox::AgentInbox>,
+    /// Agent-facing peer message inbox.
+    pub agent_message_inbox: Arc<crate::agent_message_inbox::AgentMessageInbox>,
+    /// Writes agent inbox/message entries from kernel delivery paths.
+    pub agent_inbox_writer: Arc<crate::agent_inbox_writer::AgentInboxWriter>,
     /// Registry of user-connected bidirectional channels (Phase 6).
     pub channel_registry: Arc<crate::user_channel_registry::UserChannelRegistry>,
     /// Manages background listener tasks for bidirectional channels (Phase 6).
     pub channel_listener_registry: Arc<crate::user_channel_registry::ChannelListenerRegistry>,
+    /// Live snapshot of connected channels surfaced into the system prompt's
+    /// `## Channels` block and the agent-manual filter. Refreshed on every
+    /// channel register/deregister via `refresh_connected_channels_snapshot`.
+    pub connected_channels_snapshot: agentos_tools::agent_manual::SharedConnectedChannels,
     /// Sender for inbound messages from channel listeners to InboundRouter (Phase 6).
     pub inbound_tx: tokio::sync::mpsc::Sender<crate::notification_router::InboundMessage>,
     /// Resolves channel inbound chat to `chat_infer_with_tools` after `wire_inbound_chat_bridge`.
@@ -744,6 +760,18 @@ pub struct Kernel {
     pub(crate) channel_manager_rx: Arc<
         tokio::sync::Mutex<tokio::sync::mpsc::Receiver<agentos_channels::types::InboundMessage>>,
     >,
+    /// DM pairing allowlist used by `/pair`, `/approve <id>`, and
+    /// `/deny <id>` inbound commands. Shared with `ChannelBroadcastSink`
+    /// so escalations only fan out to paired senders.
+    pub pairing_manager: Arc<agentos_channels::pairing::PairingManager>,
+    /// Hot-reloadable handle to the `host-package-install` allowlist and
+    /// manager priority list. The `ConfigWatcher` reload path writes
+    /// fresh values here on `[tools.host_package]` changes so revocations
+    /// take effect without a kernel restart.
+    ///
+    /// `pub(crate)` so external callers cannot bypass the audited
+    /// `Kernel::reload_host_package_policy` write path (R3 finding I2).
+    pub(crate) host_package_policy: agentos_tools::host_package::HostPackagePolicy,
     /// Lifecycle hook registry — fired at task/tool/agent lifecycle points.
     pub hook_registry: Arc<crate::hooks::HookRegistry>,
     /// Plugin registry — discovers and activates plugin manifests.
@@ -765,7 +793,26 @@ pub struct Kernel {
     /// (e.g., `KernelCommand::Shutdown` writes the entry, then `cancel()` also
     /// triggers the `cancelled()` arm in `run()` which would write a second one).
     pub(crate) shutdown_audited: std::sync::atomic::AtomicBool,
+    /// In-memory LRU of recently used tool names per agent (cap 10).
+    /// Used to append a "Recently used: ..." hint to the L0 tool description in context.
+    pub agent_tool_lru: Arc<RwLock<HashMap<AgentID, std::collections::VecDeque<String>>>>,
+    /// Per-chat-session tool-call dedup cache, keyed by chat session id.
+    /// Inner map keys are `(tool_name, canonical_payload_json)`. Each entry
+    /// stores `(inserted_at, result)` so the cap-eviction can drop oldest
+    /// entries (LRU-by-insertion). Outer tuple is `(last_touched, inner)` so
+    /// `TimeoutChecker` can sweep idle sessions. Survives across
+    /// `chat_infer_streaming` invocations within the same session — small
+    /// models forget prior tool calls (no tool-result replay in chat history)
+    /// without this. Cap: 128 entries per session.
+    pub chat_session_dedup: Arc<RwLock<ChatSessionDedupMap>>,
 }
+
+/// Inner per-session dedup cache: `(tool_name, canonical_payload_json) →
+/// (inserted_at, result)`.
+pub type ChatSessionDedupCache = HashMap<(String, String), (std::time::Instant, serde_json::Value)>;
+
+/// Outer kernel-wide map: `session_id → (last_touched, dedup_cache)`.
+pub type ChatSessionDedupMap = HashMap<String, (std::time::Instant, ChatSessionDedupCache)>;
 
 /// Record of a single tool call made during chat inference.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -786,6 +833,10 @@ pub struct ChatInferenceResult {
     pub tool_calls: Vec<ChatToolCallRecord>,
     /// Total number of LLM inference iterations.
     pub iterations: u32,
+    /// Aggregate token usage across all inference iterations.
+    pub tokens_used: u64,
+    /// Aggregate estimated USD cost across all inference iterations.
+    pub cost_usd: f64,
 }
 
 /// Events emitted during streaming chat inference.
@@ -810,15 +861,42 @@ pub enum ChatStreamEvent {
         answer: String,
         tool_calls: Vec<ChatToolCallRecord>,
         iterations: u32,
+        tokens_used: u64,
+        cost_usd: f64,
     },
     /// An error occurred.
     Error { message: String },
 }
 
-const CHAT_MAX_TOOL_ITERATIONS: u32 = 10;
+/// Fallback chat tool-iteration cap when config is missing. Live config value
+/// is `chat.max_tool_iterations` and is read per-call via `self.config.chat`.
+const CHAT_MAX_TOOL_ITERATIONS_FALLBACK: u32 = 25;
 
 const EMPTY_LLM_ANSWER_PLACEHOLDER: &str =
     "_(no response from model — the provider returned an empty answer; please retry)_";
+
+/// Max consecutive iterations the model is allowed to spend in
+/// meta-tool calls (any combination) before the chat loop aborts.
+/// Four is enough to scan an index, search by keyword, and inspect a
+/// candidate; a fifth iteration without invoking a real tool is the
+/// loop signature observed in 2026-05-08 logs (Sandae ran
+/// `search-tools×12 + describe-tool×12 + agent-manual×8` over 21
+/// iterations before returning a 98-char answer). The list of meta
+/// tool names is the canonical
+/// [`agentos_tools::META_TOOL_NAMES`] — single source of truth so
+/// the dedup-cache and streak guard cannot drift apart.
+const META_TOOL_STREAK_LIMIT: u32 = 4;
+
+/// Returns true if every tool call in the batch is a meta-tool.
+/// `[]` returns false (an empty batch is not a meta-tool iteration —
+/// it is a *no-op* and is handled by the text-only reset path so a
+/// non-meta thinking iteration breaks the streak).
+fn iteration_is_all_meta(tool_names: &[String]) -> bool {
+    !tool_names.is_empty()
+        && tool_names
+            .iter()
+            .all(|n| agentos_tools::META_TOOL_NAMES.contains(&n.as_str()))
+}
 
 pub fn resolve_boot_vault_passphrase(
     config: &KernelConfig,
@@ -890,6 +968,29 @@ fn generate_vault_passphrase() -> String {
     hex::encode(bytes)
 }
 
+/// Some kernel actions require a real running task context (parent/child
+/// linkage, scheduler state, blocking task suspension). Chat sessions do not
+/// own a registered task — synthetic tasks would corrupt scheduler state or
+/// deadlock the chat HTTP request. Reject those with a clean message instead
+/// of dispatching them.
+fn chat_incompatible_action_error(
+    action: &crate::kernel_action::KernelAction,
+) -> Option<&'static str> {
+    use crate::kernel_action::KernelAction;
+    match action {
+        KernelAction::SpawnAgent { .. }
+        | KernelAction::AwaitAgents { .. }
+        | KernelAction::PollAgents { .. }
+        | KernelAction::CancelAgent { .. }
+        | KernelAction::DelegateTask { .. }
+        | KernelAction::SpawnAsync { .. }
+        | KernelAction::AgentRpcCall { .. } => Some(
+            "This action requires a running task context. Run it from `agentos task run …` (or have an agent invoke it inside an executing task), not from chat.",
+        ),
+        _ => None,
+    }
+}
+
 fn persist_generated_passphrase(path: &Path, passphrase: &str) -> Result<(), anyhow::Error> {
     match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(mut file) => {
@@ -915,10 +1016,84 @@ fn persist_generated_passphrase(path: &Path, passphrase: &str) -> Result<(), any
     }
 }
 
+/// Merge the per-call dedup cache back into the kernel's session-keyed map.
+/// Existing entries for unchanged keys are preserved, new entries override.
+/// When the cap is exceeded, evicts oldest by insertion timestamp (LRU). The
+/// merge guards against concurrent same-session writers clobbering each
+/// other's results — last writer wins per-key, but no entries are wholesale
+/// dropped.
+async fn persist_session_dedup_cache(
+    map: &Arc<RwLock<ChatSessionDedupMap>>,
+    session_id: &str,
+    cache: ChatSessionDedupCache,
+    cap: usize,
+) {
+    let now = std::time::Instant::now();
+    let mut guard = map.write().await;
+    let entry = guard
+        .entry(session_id.to_string())
+        .or_insert_with(|| (now, HashMap::new()));
+    entry.0 = now;
+    entry.1.extend(cache);
+    if entry.1.len() > cap {
+        let mut by_age: Vec<((String, String), std::time::Instant)> =
+            entry.1.iter().map(|(k, (t, _))| (k.clone(), *t)).collect();
+        by_age.sort_by_key(|(_, t)| *t);
+        let drop_count = entry.1.len() - cap;
+        for (k, _) in by_age.into_iter().take(drop_count) {
+            entry.1.remove(&k);
+        }
+    }
+}
+
 impl Kernel {
     /// Returns the kernel data directory (used by the web server to co-locate stores).
     pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
+    }
+
+    /// Drop the dedup cache for a chat session. Call when the session is
+    /// deleted from `chat_store` so the kernel doesn't leak memory keyed by a
+    /// session id no caller can reach again.
+    pub async fn forget_chat_session_dedup(&self, session_id: &str) {
+        self.chat_session_dedup.write().await.remove(session_id);
+    }
+
+    /// Evict dedup-cache entries for sessions untouched longer than `max_age`.
+    /// Wired into `TimeoutChecker` (24h sweep). Bounds memory on long-running
+    /// kernels with many distinct chat sessions.
+    pub async fn sweep_chat_session_dedup(&self, max_age: std::time::Duration) -> usize {
+        let now = std::time::Instant::now();
+        let mut guard = self.chat_session_dedup.write().await;
+        let before = guard.len();
+        guard.retain(|_, (last, _)| now.duration_since(*last) <= max_age);
+        before - guard.len()
+    }
+
+    /// Re-pull the connected channel list from `UserChannelRegistry` and update
+    /// the shared snapshot used by `agent-manual` filtering. Called after every
+    /// channel register/deregister so the agent-facing view stays current.
+    pub(crate) async fn refresh_connected_channels_snapshot(&self) {
+        let new_list: Vec<agentos_tools::agent_manual::ConnectedChannel> = match self
+            .channel_registry
+            .list_active()
+            .await
+        {
+            Ok(list) => list
+                .into_iter()
+                .filter(|c| c.active)
+                .map(|c| agentos_tools::agent_manual::ConnectedChannel {
+                    name: c.display_name,
+                    kind: c.kind.to_string(),
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "refresh_connected_channels_snapshot: list_active failed");
+                return;
+            }
+        };
+        let mut guard = self.connected_channels_snapshot.write().await;
+        *guard = new_list;
     }
 
     /// Re-register all active channels that were persisted from the previous run.
@@ -979,6 +1154,143 @@ impl Kernel {
         }
     }
 
+    /// Install the image resolver used by LLM adapters for [`ImageSource::FileRef`] (e.g. web uploads).
+    pub fn set_image_resolver(&self, resolver: Arc<dyn agentos_llm::ImageResolver>) {
+        *self
+            .image_resolver
+            .write()
+            .expect("image_resolver lock poisoned") = resolver;
+    }
+
+    fn merge_chat_user_parts(
+        new_message: &str,
+        user_parts: Option<Vec<agentos_types::ContentPart>>,
+    ) -> Vec<agentos_types::ContentPart> {
+        match user_parts {
+            Some(p) if !p.is_empty() => p,
+            _ => vec![agentos_types::ContentPart::Text {
+                text: new_message.to_string(),
+            }],
+        }
+    }
+
+    /// Build the LLM tool-schema list for a chat turn.
+    ///
+    /// Selection: `CHAT_DEFAULT_TOOL_NAMES` ∪ tools recently invoked in this
+    /// session (from `chat_session_dedup`) ∪ top-N tools by recency-weighted
+    /// usage for this agent (from `tool_usage_store`). Deduped by name, sorted
+    /// alphabetically, with non-default extras capped at `CHAT_MANIFEST_EXTRA_BUDGET`.
+    ///
+    /// Without this, the chat path always sent the static default set, so a
+    /// follow-up turn could not re-invoke an MCP tool the previous turn had
+    /// already used (e.g. `gmail_send`) — the LLM had no schema for it, and
+    /// burned iterations re-running `agent-manual`/`search-tools`/`describe-tool`
+    /// every turn. Anthropic prompt caching tolerates this: extras grow only
+    /// once per newly-used tool and stabilize within a few turns.
+    ///
+    /// Per-turn semantics: this is invoked once at the start of each chat
+    /// inference. The manifest set is FIXED for that turn — a tool first
+    /// invoked at iteration 1 of turn N becomes visible in turn N+1, not
+    /// iteration 2. That's intentional: the LLM's tools= block is a prompt
+    /// cache prefix and changing it mid-loop would invalidate the cache and
+    /// cost a full reprice on every iteration.
+    ///
+    /// Stability: kept `pub` (not `pub(crate)`) only so integration tests in
+    /// `tests/e2e/` can call it. Treat as semver-unstable internal API; do
+    /// not call from out-of-tree.
+    pub async fn build_chat_tool_manifests(
+        &self,
+        agent_id: &AgentID,
+        session_id: Option<&str>,
+    ) -> Vec<ToolManifest> {
+        const CHAT_MANIFEST_EXTRA_BUDGET: usize = 25;
+        // Floor on usage-rank score to suppress boundary churn at the cap edge.
+        // Anything that hasn't been used recently enough to clear this won't
+        // win an extras slot — the prompt-cache prefix stays stable instead
+        // of flipping a near-zero name in and out across turns.
+        const USAGE_RANK_MIN_SCORE: f64 = 0.1;
+
+        // Names of tools actually executed in this session, most recent first.
+        // `chat_session_dedup` already filters out `META_TOOL_NAMES` at insert
+        // time, so we don't have to filter again here.
+        let session_recent: Vec<String> = if let Some(sid) = session_id {
+            let guard = self.chat_session_dedup.read().await;
+            if let Some((_, inner)) = guard.get(sid) {
+                let mut by_recency: Vec<(String, std::time::Instant)> = inner
+                    .iter()
+                    .map(|((name, _), (ts, _))| (name.clone(), *ts))
+                    .collect();
+                by_recency.sort_by_key(|x| std::cmp::Reverse(x.1));
+                let mut seen = std::collections::HashSet::new();
+                by_recency
+                    .into_iter()
+                    .filter_map(|(n, _)| seen.insert(n.clone()).then_some(n))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Cross-session usage rank (count * exp(-age/168h)).
+        let usage_rank = self.tool_usage.rank_snapshot(&agent_id.to_string()).await;
+        let mut ranked: Vec<(String, f64)> = usage_rank
+            .into_iter()
+            .filter(|(_, score)| *score >= USAGE_RANK_MIN_SCORE)
+            .collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top_usage: Vec<String> = ranked.into_iter().map(|(n, _)| n).collect();
+
+        let mut allowed: std::collections::HashSet<String> =
+            agentos_tools::factory::CHAT_DEFAULT_TOOL_NAMES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+        let mut extras_added = 0usize;
+        // Session-recent first so a tool the model just used in this conversation
+        // wins over a globally popular but session-irrelevant tool when the budget
+        // is tight.
+        for name in session_recent.iter().chain(top_usage.iter()) {
+            if extras_added >= CHAT_MANIFEST_EXTRA_BUDGET {
+                break;
+            }
+            if agentos_tools::META_TOOL_NAMES.contains(&name.as_str()) {
+                continue;
+            }
+            if allowed.insert(name.clone()) {
+                extras_added += 1;
+            }
+        }
+
+        let registry = self.tool_registry.read().await;
+        let mut manifests: Vec<ToolManifest> = registry
+            .list_all()
+            .into_iter()
+            .filter(|tool| {
+                if allowed.contains(&tool.manifest.manifest.name) {
+                    return true;
+                }
+                // Always surface tools attached at runtime by an MCP server.
+                // Identified by the `mcp` tag set in commands/mcp.rs when a
+                // server connects. Without this, a fresh chat session has no
+                // gmail_*/linkedin_*/etc schemas and the LLM either hallucinates
+                // a refusal ("I can't send emails") or burns iterations on
+                // search-tools/agent-manual to rediscover what is already
+                // attached. The list is stable across turns (changes only on
+                // server attach/detach), so prompt caching still benefits.
+                tool.manifest
+                    .manifest
+                    .tags
+                    .as_ref()
+                    .is_some_and(|t| t.iter().any(|s| s == "mcp"))
+            })
+            .map(|tool| tool.manifest.clone())
+            .collect();
+        manifests.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
+        manifests
+    }
+
     /// Direct chat inference — calls the agent's LLM with the conversation history.
     ///
     /// Does NOT create a task or touch the scheduler. Used exclusively by the web UI
@@ -992,7 +1304,7 @@ impl Kernel {
         new_message: &str,
     ) -> Result<String, String> {
         let result = self
-            .chat_infer_with_tools(agent_name, history, new_message)
+            .chat_infer_with_tools(agent_name, history, new_message, None, None)
             .await?;
         Ok(result.answer)
     }
@@ -1001,12 +1313,15 @@ impl Kernel {
     ///
     /// Detects tool call JSON in LLM responses, executes the tool via `ToolRunner`,
     /// injects the result back into the context window, and re-infers until the LLM
-    /// produces a final natural-language answer (max 10 iterations).
+    /// produces a final natural-language answer. Cap is `chat.max_tool_iterations`
+    /// (default 25) — `CHAT_MAX_TOOL_ITERATIONS_FALLBACK` is used when config is 0.
     pub async fn chat_infer_with_tools(
         &self,
         agent_name: &str,
         history: &[(String, String)],
         new_message: &str,
+        user_parts: Option<Vec<agentos_types::ContentPart>>,
+        session_id: Option<&str>,
     ) -> Result<ChatInferenceResult, String> {
         let (agent_id, agent_permissions, agent_description, agent_roles, agent_system_prompt) = {
             let registry = self.agent_registry.read().await;
@@ -1038,16 +1353,20 @@ impl Kernel {
         };
 
         // Build system prompt from the canonical builder — same structure as task execution.
-        let (_tools_desc, llm_tool_manifests): (String, Vec<ToolManifest>) = {
-            let registry = self.tool_registry.read().await;
-            let mut manifests = registry
-                .list_all()
-                .into_iter()
-                .map(|tool| tool.manifest.clone())
-                .collect::<Vec<_>>();
-            manifests.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
-            (registry.tools_for_prompt(), manifests)
-        };
+        let llm_tool_manifests: Vec<ToolManifest> =
+            self.build_chat_tool_manifests(&agent_id, session_id).await;
+        let connected_channels: Vec<crate::system_prompt::ChannelHint> =
+            match self.channel_registry.list_active().await {
+                Ok(list) => list
+                    .into_iter()
+                    .filter(|c| c.active)
+                    .map(|c| crate::system_prompt::ChannelHint {
+                        name: c.display_name,
+                        kind: c.kind.to_string(),
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
         let system_prompt =
             crate::system_prompt::build_system_prompt(&crate::system_prompt::SystemPromptContext {
                 agent_name: agent_name.to_string(),
@@ -1056,12 +1375,16 @@ impl Kernel {
                 custom_instructions: agent_system_prompt,
                 sub_agent: None,
                 enforce_final_tag: self.config.chat.enforce_final_tag,
+                timezone: crate::system_prompt::local_timezone_str(),
+                connected_channels,
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
         ctx.push(agentos_types::ContextEntry {
             role: agentos_types::ContextRole::System,
-            content: system_prompt,
+            parts: vec![agentos_types::ContentPart::Text {
+                text: system_prompt,
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1079,7 +1402,9 @@ impl Kernel {
             };
             ctx.push(agentos_types::ContextEntry {
                 role: ctx_role,
-                content: content.clone(),
+                parts: vec![agentos_types::ContentPart::Text {
+                    text: content.clone(),
+                }],
                 timestamp: chrono::Utc::now(),
                 metadata: None,
                 importance: 0.5,
@@ -1092,7 +1417,7 @@ impl Kernel {
         }
         ctx.push(agentos_types::ContextEntry {
             role: agentos_types::ContextRole::User,
-            content: new_message.to_string(),
+            parts: Self::merge_chat_user_parts(new_message, user_parts),
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,
@@ -1105,9 +1430,66 @@ impl Kernel {
 
         let mut tool_calls: Vec<ChatToolCallRecord> = Vec::new();
         let mut iterations = 0u32;
+        let mut total_tokens_used = 0u64;
+        let mut total_cost_usd = 0.0f64;
+        let chat_max_tool_iterations = if self.config.chat.max_tool_iterations == 0 {
+            CHAT_MAX_TOOL_ITERATIONS_FALLBACK
+        } else {
+            self.config.chat.max_tool_iterations
+        };
+
+        // Circuit breakers for stuck small-model loops. Reset whenever the
+        // model makes progress (different tool / non-empty text / different
+        // error). See logs around 2026-04-30T07:46 — gemma4:31b-cloud spammed
+        // the same failing `agent-manual` call 8x with empty assistant text.
+        const REPEAT_TOOL_ERROR_LIMIT: u32 = 2;
+        const EMPTY_TEXT_TOOLCALL_STREAK_LIMIT: u32 = 3;
+        const DEDUP_STREAK_LIMIT: u32 = 3;
+        let mut repeated_tool_errors: std::collections::HashMap<(String, String), u32> =
+            std::collections::HashMap::new();
+        let mut empty_text_streak_signature: Option<String> = None;
+        let mut empty_text_streak_count: u32 = 0;
+        // Meta-tool streak: catches alternating discovery loops
+        // (search-tools → describe-tool → agent-manual → …) that the
+        // identical-tool guard misses because the signature changes
+        // every iteration. Resets on the first real tool call.
+        let mut meta_tool_streak_count: u32 = 0;
+        // Same-call dedup cache. Small models re-issue identical (tool_name,
+        // payload) calls inside a single chat session — logs 2026-05-08T07:02
+        // show `describe-tool {name: gmail_send}` ran 3x and `agent-manual
+        // {section: mcp}` ran 2x back-to-back. Replay first result with a
+        // `_dedup: true` flag + hint so the model unblocks instead of looping.
+        // Pre-populate from the per-session dedup map. Each user message
+        // spawns a fresh `chat_infer_*` call with an empty history of tool
+        // results (chat history sent to the LLM is text-only — tool results
+        // from prior turns are NOT replayed). Without this, a small model
+        // re-issues `agent-manual`/`describe-tool` for tools it already used
+        // moments earlier — see logs 2026-05-08T08:04. Persisted across calls
+        // for the same `session_id`; cap 128 entries / session.
+        let mut executed_tool_calls: std::collections::HashMap<
+            (String, String),
+            (std::time::Instant, serde_json::Value),
+        > = if let Some(sid) = session_id {
+            self.chat_session_dedup
+                .read()
+                .await
+                .get(sid)
+                .map(|(_, m)| m.clone())
+                .unwrap_or_default()
+        } else {
+            std::collections::HashMap::new()
+        };
+        let mut consecutive_dedup_count: u32 = 0;
+        const SESSION_DEDUP_CACHE_CAP: usize = 128;
 
         let final_answer = loop {
             iterations += 1;
+            let image_parts_in_context = ctx
+                .active_entries()
+                .iter()
+                .flat_map(|e| &e.parts)
+                .filter(|p| matches!(p, agentos_types::ContentPart::Image { .. }))
+                .count();
             let mut result = llm
                 .infer_with_tools(&ctx, &llm_tool_manifests)
                 .await
@@ -1129,11 +1511,18 @@ impl Kernel {
                 text_len = result.text.len(),
                 visible_text_len = visible_text.len(),
                 native_tool_calls = result.tool_calls.len(),
+                image_parts_in_context,
                 tokens_used = result.tokens_used.total_tokens,
                 model = %result.model,
                 duration_ms = result.duration_ms,
                 "Chat LLM response received"
             );
+            total_tokens_used = total_tokens_used.saturating_add(result.tokens_used.total_tokens);
+            if let Some(cost) = &result.cost {
+                if cost.total_cost_usd.is_finite() && cost.total_cost_usd > 0.0 {
+                    total_cost_usd += cost.total_cost_usd;
+                }
+            }
             tracing::debug!(
                 target: "agentos::chat",
                 agent = %agent_name,
@@ -1142,7 +1531,7 @@ impl Kernel {
                 "Chat LLM raw response text"
             );
 
-            if iterations >= CHAT_MAX_TOOL_ITERATIONS {
+            if iterations >= chat_max_tool_iterations {
                 let trimmed = visible_text.trim();
                 if trimmed.is_empty() {
                     break format!(
@@ -1154,6 +1543,16 @@ impl Kernel {
                     "{}\n\n[Note: Maximum tool call limit reached.]",
                     visible_text
                 );
+            }
+
+            // Reset the meta-tool streak when the model produces real
+            // visible text — a thinking turn or final-answer paragraph
+            // counts as breaking the discovery loop (review fix W3).
+            // Without this reset, a model that emits 3 meta calls,
+            // then a thinking-only iteration, then more meta calls
+            // would keep climbing the streak across the gap.
+            if !visible_text.trim().is_empty() {
+                meta_tool_streak_count = 0;
             }
 
             // Prefer native tool calls from the adapter. Use tool_calls presence
@@ -1177,6 +1576,75 @@ impl Kernel {
             }
 
             if has_native_tool_calls {
+                // Empty-text + same-tool-call streak detector. See docstring
+                // on the streaming variant for context.
+                let mut sig_names: Vec<String> = result
+                    .tool_calls
+                    .iter()
+                    .map(|tc| tc.tool_name.clone())
+                    .collect();
+                sig_names.sort();
+                sig_names.dedup();
+                let signature = sig_names.join("+");
+                if visible_text.trim().is_empty() {
+                    if empty_text_streak_signature.as_deref() == Some(signature.as_str()) {
+                        empty_text_streak_count += 1;
+                    } else {
+                        empty_text_streak_signature = Some(signature.clone());
+                        empty_text_streak_count = 1;
+                    }
+                    if empty_text_streak_count >= EMPTY_TEXT_TOOLCALL_STREAK_LIMIT {
+                        tracing::warn!(
+                            target: "agentos::chat",
+                            agent = %agent_name,
+                            iteration = iterations,
+                            tools = %signature,
+                            streak = empty_text_streak_count,
+                            "Aborting chat loop: model stuck calling same tool(s) with no text"
+                        );
+                        break format!(
+                            "{}\n\n[Note: aborted — model called {} {}x with no text. Likely stuck. Try rephrasing or use a stronger model.]",
+                            EMPTY_LLM_ANSWER_PLACEHOLDER,
+                            signature,
+                            empty_text_streak_count,
+                        );
+                    }
+                } else {
+                    empty_text_streak_signature = None;
+                    empty_text_streak_count = 0;
+                }
+
+                // Meta-tool streak guard: increment if the entire batch
+                // is meta-tool calls; reset the moment a real tool is
+                // invoked. Fires regardless of text content because the
+                // signature of a discovery loop is "calls 4+ rounds of
+                // search/describe/manual, never invokes a real tool".
+                let tool_names_only: Vec<String> = result
+                    .tool_calls
+                    .iter()
+                    .map(|tc| tc.tool_name.clone())
+                    .collect();
+                if iteration_is_all_meta(&tool_names_only) {
+                    meta_tool_streak_count += 1;
+                    if meta_tool_streak_count >= META_TOOL_STREAK_LIMIT {
+                        tracing::warn!(
+                            target: "agentos::chat",
+                            agent = %agent_name,
+                            iteration = iterations,
+                            streak = meta_tool_streak_count,
+                            tools = %tool_names_only.join(","),
+                            "Aborting chat loop: meta-tool discovery streak exceeded"
+                        );
+                        break format!(
+                            "{}\n\n[Note: aborted — model spent {} iterations on tool-discovery (search/describe/manual) without invoking a real tool. Pick a tool from `list-tools` and call it directly, or rephrase the request.]",
+                            EMPTY_LLM_ANSWER_PLACEHOLDER,
+                            meta_tool_streak_count,
+                        );
+                    }
+                } else {
+                    meta_tool_streak_count = 0;
+                }
+
                 // Push the LLM's tool-call response into context, preserving
                 // the tool_calls array so adapters can reconstruct the
                 // provider-native assistant message format on the next turn.
@@ -1193,7 +1661,9 @@ impl Kernel {
                 };
                 ctx.push(agentos_types::ContextEntry {
                     role: agentos_types::ContextRole::Assistant,
-                    content: result.text.clone(),
+                    parts: vec![agentos_types::ContentPart::Text {
+                        text: result.text.clone(),
+                    }],
                     timestamp: chrono::Utc::now(),
                     metadata: Some(agentos_types::ContextMetadata {
                         tool_name: None,
@@ -1225,17 +1695,34 @@ impl Kernel {
                         })
                         .collect();
 
+                let agent_snapshot_for_chat: Arc<dyn AgentRegistryQuery> = {
+                    let registry = self.agent_registry.read().await;
+                    let agents: Vec<AgentSummary> = registry
+                        .list_all()
+                        .into_iter()
+                        .map(|p| AgentSummary {
+                            id: p.id,
+                            name: p.name.clone(),
+                            status: format!("{:?}", p.status).to_lowercase(),
+                            registered_at: p.created_at,
+                        })
+                        .collect();
+                    Arc::new(AgentRegistrySnapshot::new(agents))
+                };
+
+                let mut repeat_error_abort: Option<String> = None;
                 for (tool_name, payload, intent_type_str, tool_call_id) in &calls_to_execute {
+                    let chat_trace_id = TraceID::new();
                     let exec_ctx = ToolExecutionContext {
                         data_dir: self.data_dir.clone(),
                         task_id: TaskID::new(),
                         agent_id,
-                        trace_id: TraceID::new(),
+                        trace_id: chat_trace_id,
                         permissions: agent_permissions.clone(),
                         vault: None,
                         hal: Some(self.hal.clone()),
                         file_lock_registry: None,
-                        agent_registry: None,
+                        agent_registry: Some(Arc::clone(&agent_snapshot_for_chat)),
                         task_registry: None,
                         escalation_query: None,
                         workspace_paths: self.workspace_paths.clone(),
@@ -1252,25 +1739,168 @@ impl Kernel {
                             Arc::new(self.zone_table.clone()) as Arc<dyn StorageZoneQuery>
                         ),
                         cancellation_token: self.cancellation_token.child_token(),
+                        tool_categories: None,
                     };
 
+                    let dedup_key = (
+                        tool_name.clone(),
+                        serde_json::to_string(payload).unwrap_or_default(),
+                    );
+                    let cached = executed_tool_calls.get(&dedup_key).map(|(_, v)| v.clone());
+                    // Refresh LRU timestamp on hit so hot keys aren't evicted
+                    // before colder keys inserted later in the same call.
+                    if cached.is_some() {
+                        if let Some(entry) = executed_tool_calls.get_mut(&dedup_key) {
+                            entry.0 = std::time::Instant::now();
+                        }
+                    }
+
                     let start = std::time::Instant::now();
-                    let tool_result = match self
-                        .tool_runner
-                        .execute(tool_name, payload.clone(), exec_ctx)
-                        .await
-                    {
-                        Ok(value) => value,
-                        Err(e) => {
-                            tracing::warn!(
-                                tool = %tool_name,
-                                error = %e,
-                                "Chat tool execution failed"
+                    let mut tool_result = if let Some(prev) = cached.clone() {
+                        consecutive_dedup_count += 1;
+                        let mut wrapped = prev;
+                        if let Some(obj) = wrapped.as_object_mut() {
+                            obj.insert("_dedup".to_string(), serde_json::Value::Bool(true));
+                            obj.insert(
+                                "_dedup_hint".to_string(),
+                                serde_json::Value::String(format!(
+                                    "Identical call to '{}' was already executed in this session. \
+                                     Result replayed verbatim. Use the existing result; do not call '{}' again with the same arguments. \
+                                     If you need different information, change arguments or call a different tool.",
+                                    tool_name, tool_name
+                                )),
                             );
-                            serde_json::json!({"error": e.to_string()})
+                        } else {
+                            wrapped = serde_json::json!({
+                                "_dedup": true,
+                                "_dedup_hint": format!(
+                                    "Identical call to '{}' was already executed; result replayed verbatim.",
+                                    tool_name
+                                ),
+                                "result": wrapped,
+                            });
+                        }
+                        tracing::warn!(
+                            tool = %tool_name,
+                            consecutive = consecutive_dedup_count,
+                            "Chat tool dedup hit — replaying cached result"
+                        );
+                        if consecutive_dedup_count >= DEDUP_STREAK_LIMIT {
+                            repeat_error_abort = Some(format!(
+                                "[Note: aborted — same tool/payload repeated {}x with no progress (dedup cache hit). Last tool: '{}']",
+                                consecutive_dedup_count, tool_name
+                            ));
+                        }
+                        wrapped
+                    } else {
+                        consecutive_dedup_count = 0;
+                        match self
+                            .tool_runner
+                            .execute(tool_name, payload.clone(), exec_ctx)
+                            .await
+                        {
+                            Ok(value) => value,
+                            Err(e) => {
+                                tracing::warn!(
+                                    tool = %tool_name,
+                                    error = %e,
+                                    "Chat tool execution failed"
+                                );
+                                serde_json::json!({"error": e.to_string()})
+                            }
                         }
                     };
+                    if cached.is_none() {
+                        if let Some(action) =
+                            crate::kernel_action::KernelAction::from_tool_result(&tool_result)
+                        {
+                            if let Some(reject) = chat_incompatible_action_error(&action) {
+                                tool_result = serde_json::json!({ "error": reject });
+                            } else {
+                                let synthetic_task = {
+                                    let mut t = agentos_types::AgentTask {
+                                        agent_id,
+                                        ..Default::default()
+                                    };
+                                    t.capability_token.agent_id = agent_id;
+                                    t.capability_token.task_id = t.id;
+                                    t.capability_token.permissions = agent_permissions.clone();
+                                    t
+                                };
+                                let outcome = self
+                                    .dispatch_kernel_action(&synthetic_task, action, chat_trace_id)
+                                    .await;
+                                tool_result = outcome.result;
+                            }
+                        }
+                        // Don't cache meta/discovery tool results. Their output is
+                        // stateless documentation; caching would freeze stale
+                        // search/manual results across turns and trip dedup on
+                        // legitimate re-exploration in the next chat turn.
+                        if !agentos_tools::META_TOOL_NAMES.contains(&tool_name.as_str()) {
+                            executed_tool_calls.insert(
+                                dedup_key,
+                                (std::time::Instant::now(), tool_result.clone()),
+                            );
+                        }
+                    }
                     let duration_ms = start.elapsed().as_millis() as u64;
+
+                    let success = !tool_result
+                        .as_object()
+                        .is_some_and(|o| o.contains_key("error"));
+
+                    // Record successful real (non-dedup) tool calls into the
+                    // cross-session usage rank and the in-memory LRU. Mirrors
+                    // `task_executor.rs` so chat-driven tool use feeds back
+                    // into `build_chat_tool_manifests`'s top-N selection on
+                    // future turns. Failures and dedup-replays are not
+                    // recorded — they don't represent productive use.
+                    //
+                    // Intentional asymmetry vs `task_executor.rs:1772-1785`:
+                    // the executor records on every successful exec because
+                    // it has no per-(tool, payload) dedup. Chat does, so the
+                    // `cached.is_none()` guard collapses three identical
+                    // `gmail_send {to: alice}` calls in one session into a
+                    // single rank-record event — counting "agent uses gmail
+                    // routinely", not "agent spammed it". Do not remove
+                    // `cached.is_none()` thinking it's a bug.
+                    if cached.is_none()
+                        && success
+                        && !agentos_tools::META_TOOL_NAMES.contains(&tool_name.as_str())
+                    {
+                        self.tool_usage
+                            .record(&agent_id.to_string(), tool_name.as_str())
+                            .await;
+                        let tool_name_owned = tool_name.clone();
+                        let mut lru = self.agent_tool_lru.write().await;
+                        let entry = lru.entry(agent_id).or_default();
+                        entry.retain(|n| n != &tool_name_owned);
+                        entry.push_front(tool_name_owned);
+                        if entry.len() > 10 {
+                            entry.truncate(10);
+                        }
+                    }
+
+                    if !success {
+                        let err_text = tool_result
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let mut err_sig: String = err_text.chars().take(80).collect();
+                        if err_sig.is_empty() {
+                            err_sig = "<no-message>".into();
+                        }
+                        let key = (tool_name.clone(), err_sig.clone());
+                        let count = repeated_tool_errors.entry(key).or_insert(0);
+                        *count += 1;
+                        if *count >= REPEAT_TOOL_ERROR_LIMIT {
+                            repeat_error_abort = Some(format!(
+                                "[Note: aborted — tool '{}' kept failing with the same error ({}x): {}]",
+                                tool_name, count, err_sig
+                            ));
+                        }
+                    }
 
                     tool_calls.push(ChatToolCallRecord {
                         tool_name: tool_name.clone(),
@@ -1297,7 +1927,7 @@ impl Kernel {
                     // Inject tool result with native metadata when available.
                     ctx.push(agentos_types::ContextEntry {
                         role: agentos_types::ContextRole::ToolResult,
-                        content: result_str,
+                        parts: vec![agentos_types::ContentPart::Text { text: result_str }],
                         timestamp: chrono::Utc::now(),
                         metadata: Some(agentos_types::ContextMetadata {
                             tool_name: Some(tool_name.clone()),
@@ -1314,6 +1944,19 @@ impl Kernel {
                         category: agentos_types::ContextCategory::Task,
                         is_summary: false,
                     });
+
+                    if repeat_error_abort.is_some() {
+                        break;
+                    }
+                }
+                if let Some(note) = repeat_error_abort {
+                    tracing::warn!(
+                        target: "agentos::chat",
+                        agent = %agent_name,
+                        iteration = iterations,
+                        "Aborting chat loop: repeat tool-error circuit breaker tripped"
+                    );
+                    break format!("{}\n\n{}", EMPTY_LLM_ANSWER_PLACEHOLDER, note);
                 }
             } else {
                 // No tool call — this is the final answer.
@@ -1346,10 +1989,26 @@ impl Kernel {
             }
         };
 
+        // Persist runs only on the success path. Earlier `return Err(...)`
+        // arms (registry-lookup, LLM-adapter init) bypass this deliberately:
+        // no tool calls executed, so nothing changed in the dedup cache and
+        // there is nothing useful to write back.
+        if let Some(sid) = session_id {
+            persist_session_dedup_cache(
+                &self.chat_session_dedup,
+                sid,
+                executed_tool_calls,
+                SESSION_DEDUP_CACHE_CAP,
+            )
+            .await;
+        }
+
         Ok(ChatInferenceResult {
             answer: final_answer,
             tool_calls,
             iterations,
+            tokens_used: total_tokens_used,
+            cost_usd: total_cost_usd,
         })
     }
 
@@ -1365,7 +2024,9 @@ impl Kernel {
         agent_name: &str,
         history: &[(String, String)],
         new_message: &str,
+        user_parts: Option<Vec<agentos_types::ContentPart>>,
         tx: tokio::sync::mpsc::Sender<ChatStreamEvent>,
+        session_id: Option<&str>,
     ) -> Result<ChatInferenceResult, String> {
         let (agent_id, agent_permissions, agent_description, agent_roles, agent_system_prompt) = {
             let registry = self.agent_registry.read().await;
@@ -1415,16 +2076,20 @@ impl Kernel {
             }
         };
 
-        let (_tools_desc, llm_tool_manifests): (String, Vec<ToolManifest>) = {
-            let registry = self.tool_registry.read().await;
-            let mut manifests = registry
-                .list_all()
-                .into_iter()
-                .map(|tool| tool.manifest.clone())
-                .collect::<Vec<_>>();
-            manifests.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
-            (registry.tools_for_prompt(), manifests)
-        };
+        let llm_tool_manifests: Vec<ToolManifest> =
+            self.build_chat_tool_manifests(&agent_id, session_id).await;
+        let connected_channels: Vec<crate::system_prompt::ChannelHint> =
+            match self.channel_registry.list_active().await {
+                Ok(list) => list
+                    .into_iter()
+                    .filter(|c| c.active)
+                    .map(|c| crate::system_prompt::ChannelHint {
+                        name: c.display_name,
+                        kind: c.kind.to_string(),
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
         let system_prompt =
             crate::system_prompt::build_system_prompt(&crate::system_prompt::SystemPromptContext {
                 agent_name: agent_name.to_string(),
@@ -1433,12 +2098,16 @@ impl Kernel {
                 custom_instructions: agent_system_prompt,
                 sub_agent: None,
                 enforce_final_tag: self.config.chat.enforce_final_tag,
+                timezone: crate::system_prompt::local_timezone_str(),
+                connected_channels,
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
         ctx.push(agentos_types::ContextEntry {
             role: agentos_types::ContextRole::System,
-            content: system_prompt,
+            parts: vec![agentos_types::ContentPart::Text {
+                text: system_prompt,
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -1456,7 +2125,9 @@ impl Kernel {
             };
             ctx.push(agentos_types::ContextEntry {
                 role: ctx_role,
-                content: content.clone(),
+                parts: vec![agentos_types::ContentPart::Text {
+                    text: content.clone(),
+                }],
                 timestamp: chrono::Utc::now(),
                 metadata: None,
                 importance: 0.5,
@@ -1469,7 +2140,7 @@ impl Kernel {
         }
         ctx.push(agentos_types::ContextEntry {
             role: agentos_types::ContextRole::User,
-            content: new_message.to_string(),
+            parts: Self::merge_chat_user_parts(new_message, user_parts),
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,
@@ -1482,9 +2153,58 @@ impl Kernel {
 
         let mut tool_calls: Vec<ChatToolCallRecord> = Vec::new();
         let mut iterations = 0u32;
+        let mut total_tokens_used = 0u64;
+        let mut total_cost_usd = 0.0f64;
+        let chat_max_tool_iterations = if self.config.chat.max_tool_iterations == 0 {
+            CHAT_MAX_TOOL_ITERATIONS_FALLBACK
+        } else {
+            self.config.chat.max_tool_iterations
+        };
+
+        // Circuit breakers for stuck small-model loops. Reset whenever the
+        // model makes progress (different tool / non-empty text / different
+        // error). See logs around 2026-04-30T07:46 — gemma4:31b-cloud spammed
+        // the same failing `agent-manual` call 8x with empty assistant text.
+        const REPEAT_TOOL_ERROR_LIMIT: u32 = 2;
+        const EMPTY_TEXT_TOOLCALL_STREAK_LIMIT: u32 = 3;
+        const DEDUP_STREAK_LIMIT: u32 = 3;
+        let mut repeated_tool_errors: std::collections::HashMap<(String, String), u32> =
+            std::collections::HashMap::new();
+        let mut empty_text_streak_signature: Option<String> = None;
+        let mut empty_text_streak_count: u32 = 0;
+        let mut meta_tool_streak_count: u32 = 0;
+        // Pre-populate from the per-session dedup map. Each user message
+        // spawns a fresh `chat_infer_*` call with an empty history of tool
+        // results (chat history sent to the LLM is text-only — tool results
+        // from prior turns are NOT replayed). Without this, a small model
+        // re-issues `agent-manual`/`describe-tool` for tools it already used
+        // moments earlier — see logs 2026-05-08T08:04. Persisted across calls
+        // for the same `session_id`; cap 128 entries / session.
+        let mut executed_tool_calls: std::collections::HashMap<
+            (String, String),
+            (std::time::Instant, serde_json::Value),
+        > = if let Some(sid) = session_id {
+            self.chat_session_dedup
+                .read()
+                .await
+                .get(sid)
+                .map(|(_, m)| m.clone())
+                .unwrap_or_default()
+        } else {
+            std::collections::HashMap::new()
+        };
+        let mut consecutive_dedup_count: u32 = 0;
+        const SESSION_DEDUP_CACHE_CAP: usize = 128;
 
         let final_answer = loop {
             iterations += 1;
+
+            let image_parts_in_context = ctx
+                .active_entries()
+                .iter()
+                .flat_map(|e| &e.parts)
+                .filter(|p| matches!(p, agentos_types::ContentPart::Image { .. }))
+                .count();
 
             let _ = tx
                 .send(ChatStreamEvent::Thinking {
@@ -1500,12 +2220,23 @@ impl Kernel {
             let ctx_clone = ctx.clone();
             let manifests_clone = llm_tool_manifests.clone();
             tokio::spawn(async move {
+                let inner_tx = inner_tx;
                 if let Err(e) = llm_clone
-                    .infer_stream_with_tools(&ctx_clone, &manifests_clone, inner_tx)
+                    .infer_stream_with_tools(&ctx_clone, &manifests_clone, inner_tx.clone())
                     .await
                 {
+                    // Some adapters surface the error via the channel before
+                    // returning; some (e.g. reqwest connect/read failures in
+                    // the OpenAI-compat path) only return Err and never wire
+                    // up the SSE bridge — the receiver would otherwise observe
+                    // a clean channel close and report the unhelpful
+                    // "Stream ended without a Done event". Forward unconditionally;
+                    // a duplicate Error event is harmless because the consumer
+                    // breaks on the first one.
                     tracing::error!("infer_stream_with_tools failed: {e}");
-                    // Error event is already sent through the channel by the adapter.
+                    let _ = inner_tx
+                        .send(agentos_llm::InferenceEvent::Error(e.to_string()))
+                        .await;
                 }
             });
 
@@ -1637,11 +2368,18 @@ impl Kernel {
                 text_len = result.text.len(),
                 visible_text_len = visible_text.len(),
                 native_tool_calls = result.tool_calls.len(),
+                image_parts_in_context,
                 tokens_used = result.tokens_used.total_tokens,
                 model = %result.model,
                 duration_ms = result.duration_ms,
                 "Chat streaming LLM response received"
             );
+            total_tokens_used = total_tokens_used.saturating_add(result.tokens_used.total_tokens);
+            if let Some(cost) = &result.cost {
+                if cost.total_cost_usd.is_finite() && cost.total_cost_usd > 0.0 {
+                    total_cost_usd += cost.total_cost_usd;
+                }
+            }
             tracing::debug!(
                 target: "agentos::chat",
                 agent = %agent_name,
@@ -1650,7 +2388,7 @@ impl Kernel {
                 "Chat streaming LLM raw response text"
             );
 
-            if iterations >= CHAT_MAX_TOOL_ITERATIONS {
+            if iterations >= chat_max_tool_iterations {
                 let visible_trimmed = visible_text.trim();
                 let answer = if visible_trimmed.is_empty() {
                     format!(
@@ -1668,9 +2406,21 @@ impl Kernel {
                         answer: answer.clone(),
                         tool_calls: tool_calls.clone(),
                         iterations,
+                        tokens_used: total_tokens_used,
+                        cost_usd: total_cost_usd,
                     })
                     .await;
                 break answer;
+            }
+
+            // Reset the meta-tool streak when the model produces real
+            // visible text — a thinking turn or final-answer paragraph
+            // counts as breaking the discovery loop (review fix W3).
+            // Without this reset, a model that emits 3 meta calls,
+            // then a thinking-only iteration, then more meta calls
+            // would keep climbing the streak across the gap.
+            if !visible_text.trim().is_empty() {
+                meta_tool_streak_count = 0;
             }
 
             // Prefer native tool calls from the adapter. Use tool_calls presence
@@ -1694,6 +2444,93 @@ impl Kernel {
             }
 
             if has_native_tool_calls {
+                // Circuit breaker: same tool-call set with empty assistant
+                // text N iterations in a row. Triggers on the small-model
+                // failure mode where the model emits no prose, only repeats
+                // a tool call it cannot recover from.
+                let mut sig_names: Vec<String> = result
+                    .tool_calls
+                    .iter()
+                    .map(|tc| tc.tool_name.clone())
+                    .collect();
+                sig_names.sort();
+                sig_names.dedup();
+                let signature = sig_names.join("+");
+                if visible_text.trim().is_empty() {
+                    if empty_text_streak_signature.as_deref() == Some(signature.as_str()) {
+                        empty_text_streak_count += 1;
+                    } else {
+                        empty_text_streak_signature = Some(signature.clone());
+                        empty_text_streak_count = 1;
+                    }
+                    if empty_text_streak_count >= EMPTY_TEXT_TOOLCALL_STREAK_LIMIT {
+                        tracing::warn!(
+                            target: "agentos::chat",
+                            agent = %agent_name,
+                            iteration = iterations,
+                            tools = %signature,
+                            streak = empty_text_streak_count,
+                            "Aborting chat loop: model stuck calling same tool(s) with no text"
+                        );
+                        let answer = format!(
+                            "{}\n\n[Note: aborted — model called {} {}x with no text. Likely stuck. Try rephrasing or use a stronger model.]",
+                            EMPTY_LLM_ANSWER_PLACEHOLDER,
+                            signature,
+                            empty_text_streak_count,
+                        );
+                        let _ = tx
+                            .send(ChatStreamEvent::Done {
+                                answer: answer.clone(),
+                                tool_calls: tool_calls.clone(),
+                                iterations,
+                                tokens_used: total_tokens_used,
+                                cost_usd: total_cost_usd,
+                            })
+                            .await;
+                        break answer;
+                    }
+                } else {
+                    empty_text_streak_signature = None;
+                    empty_text_streak_count = 0;
+                }
+
+                // Meta-tool discovery loop guard — see sync variant for rationale.
+                let tool_names_only: Vec<String> = result
+                    .tool_calls
+                    .iter()
+                    .map(|tc| tc.tool_name.clone())
+                    .collect();
+                if iteration_is_all_meta(&tool_names_only) {
+                    meta_tool_streak_count += 1;
+                    if meta_tool_streak_count >= META_TOOL_STREAK_LIMIT {
+                        tracing::warn!(
+                            target: "agentos::chat",
+                            agent = %agent_name,
+                            iteration = iterations,
+                            streak = meta_tool_streak_count,
+                            tools = %tool_names_only.join(","),
+                            "Aborting chat loop: meta-tool discovery streak exceeded"
+                        );
+                        let answer = format!(
+                            "{}\n\n[Note: aborted — model spent {} iterations on tool-discovery (search/describe/manual) without invoking a real tool. Pick a tool from `list-tools` and call it directly, or rephrase the request.]",
+                            EMPTY_LLM_ANSWER_PLACEHOLDER,
+                            meta_tool_streak_count,
+                        );
+                        let _ = tx
+                            .send(ChatStreamEvent::Done {
+                                answer: answer.clone(),
+                                tool_calls: tool_calls.clone(),
+                                iterations,
+                                tokens_used: total_tokens_used,
+                                cost_usd: total_cost_usd,
+                            })
+                            .await;
+                        break answer;
+                    }
+                } else {
+                    meta_tool_streak_count = 0;
+                }
+
                 let tool_calls_json = match serde_json::to_value(&result.tool_calls) {
                     Ok(v) => Some(v),
                     Err(e) => {
@@ -1707,7 +2544,9 @@ impl Kernel {
                 };
                 ctx.push(agentos_types::ContextEntry {
                     role: agentos_types::ContextRole::Assistant,
-                    content: result.text.clone(),
+                    parts: vec![agentos_types::ContentPart::Text {
+                        text: result.text.clone(),
+                    }],
                     timestamp: chrono::Utc::now(),
                     metadata: Some(agentos_types::ContextMetadata {
                         tool_name: None,
@@ -1739,6 +2578,22 @@ impl Kernel {
                         })
                         .collect();
 
+                let agent_snapshot_for_chat: Arc<dyn AgentRegistryQuery> = {
+                    let registry = self.agent_registry.read().await;
+                    let agents: Vec<AgentSummary> = registry
+                        .list_all()
+                        .into_iter()
+                        .map(|p| AgentSummary {
+                            id: p.id,
+                            name: p.name.clone(),
+                            status: format!("{:?}", p.status).to_lowercase(),
+                            registered_at: p.created_at,
+                        })
+                        .collect();
+                    Arc::new(AgentRegistrySnapshot::new(agents))
+                };
+
+                let mut repeat_error_abort: Option<String> = None;
                 for (tool_name, payload, intent_type_str, tool_call_id) in &calls_to_execute {
                     let _ = tx
                         .send(ChatStreamEvent::ToolStart {
@@ -1747,16 +2602,17 @@ impl Kernel {
                         })
                         .await;
 
+                    let chat_trace_id = TraceID::new();
                     let exec_ctx = ToolExecutionContext {
                         data_dir: self.data_dir.clone(),
                         task_id: TaskID::new(),
                         agent_id,
-                        trace_id: TraceID::new(),
+                        trace_id: chat_trace_id,
                         permissions: agent_permissions.clone(),
                         vault: None,
                         hal: Some(self.hal.clone()),
                         file_lock_registry: None,
-                        agent_registry: None,
+                        agent_registry: Some(Arc::clone(&agent_snapshot_for_chat)),
                         task_registry: None,
                         escalation_query: None,
                         workspace_paths: self.workspace_paths.clone(),
@@ -1773,24 +2629,111 @@ impl Kernel {
                             Arc::new(self.zone_table.clone()) as Arc<dyn StorageZoneQuery>
                         ),
                         cancellation_token: self.cancellation_token.child_token(),
+                        tool_categories: None,
                     };
 
+                    let dedup_key = (
+                        tool_name.clone(),
+                        serde_json::to_string(payload).unwrap_or_default(),
+                    );
+                    let cached = executed_tool_calls.get(&dedup_key).map(|(_, v)| v.clone());
+                    // Refresh LRU timestamp on hit so hot keys aren't evicted
+                    // before colder keys inserted later in the same call.
+                    if cached.is_some() {
+                        if let Some(entry) = executed_tool_calls.get_mut(&dedup_key) {
+                            entry.0 = std::time::Instant::now();
+                        }
+                    }
+
                     let start = std::time::Instant::now();
-                    let tool_result = match self
-                        .tool_runner
-                        .execute(tool_name, payload.clone(), exec_ctx)
-                        .await
-                    {
-                        Ok(value) => value,
-                        Err(e) => {
-                            tracing::warn!(
-                                tool = %tool_name,
-                                error = %e,
-                                "Chat streaming tool execution failed"
+                    let mut tool_result = if let Some(prev) = cached.clone() {
+                        consecutive_dedup_count += 1;
+                        let mut wrapped = prev;
+                        if let Some(obj) = wrapped.as_object_mut() {
+                            obj.insert("_dedup".to_string(), serde_json::Value::Bool(true));
+                            obj.insert(
+                                "_dedup_hint".to_string(),
+                                serde_json::Value::String(format!(
+                                    "Identical call to '{}' was already executed in this session. \
+                                     Result replayed verbatim. Use the existing result; do not call '{}' again with the same arguments. \
+                                     If you need different information, change arguments or call a different tool.",
+                                    tool_name, tool_name
+                                )),
                             );
-                            serde_json::json!({"error": e.to_string()})
+                        } else {
+                            wrapped = serde_json::json!({
+                                "_dedup": true,
+                                "_dedup_hint": format!(
+                                    "Identical call to '{}' was already executed; result replayed verbatim.",
+                                    tool_name
+                                ),
+                                "result": wrapped,
+                            });
+                        }
+                        tracing::warn!(
+                            tool = %tool_name,
+                            consecutive = consecutive_dedup_count,
+                            "Chat streaming tool dedup hit — replaying cached result"
+                        );
+                        if consecutive_dedup_count >= DEDUP_STREAK_LIMIT {
+                            repeat_error_abort = Some(format!(
+                                "[Note: aborted — same tool/payload repeated {}x with no progress (dedup cache hit). Last tool: '{}']",
+                                consecutive_dedup_count, tool_name
+                            ));
+                        }
+                        wrapped
+                    } else {
+                        consecutive_dedup_count = 0;
+                        match self
+                            .tool_runner
+                            .execute(tool_name, payload.clone(), exec_ctx)
+                            .await
+                        {
+                            Ok(value) => value,
+                            Err(e) => {
+                                tracing::warn!(
+                                    tool = %tool_name,
+                                    error = %e,
+                                    "Chat streaming tool execution failed"
+                                );
+                                serde_json::json!({"error": e.to_string()})
+                            }
                         }
                     };
+                    if cached.is_none() {
+                        if let Some(action) =
+                            crate::kernel_action::KernelAction::from_tool_result(&tool_result)
+                        {
+                            if let Some(reject) = chat_incompatible_action_error(&action) {
+                                tool_result = serde_json::json!({ "error": reject });
+                            } else {
+                                let synthetic_task = {
+                                    let mut t = agentos_types::AgentTask {
+                                        agent_id,
+                                        ..Default::default()
+                                    };
+                                    t.capability_token.agent_id = agent_id;
+                                    t.capability_token.task_id = t.id;
+                                    t.capability_token.permissions = agent_permissions.clone();
+                                    t
+                                };
+                                let outcome = self
+                                    .dispatch_kernel_action(&synthetic_task, action, chat_trace_id)
+                                    .await;
+                                tool_result = outcome.result;
+                            }
+                        }
+                        // Don't cache meta/discovery tool results. Their output is
+                        // stateless documentation; caching would freeze stale
+                        // search/manual results across turns and trip dedup on
+                        // legitimate re-exploration in the next chat turn.
+                        if !agentos_tools::META_TOOL_NAMES.contains(&tool_name.as_str()) {
+                            executed_tool_calls.insert(
+                                dedup_key,
+                                (std::time::Instant::now(), tool_result.clone()),
+                            );
+                        }
+                    }
                     let duration_ms = start.elapsed().as_millis() as u64;
 
                     let result_str = {
@@ -1822,6 +2765,46 @@ impl Kernel {
                         .as_object()
                         .is_some_and(|o| o.contains_key("error"));
 
+                    // Record successful real (non-dedup) tool calls into the
+                    // cross-session usage rank and the in-memory LRU. See
+                    // `chat_infer_with_tools` for rationale; same pattern.
+                    if cached.is_none()
+                        && success
+                        && !agentos_tools::META_TOOL_NAMES.contains(&tool_name.as_str())
+                    {
+                        self.tool_usage
+                            .record(&agent_id.to_string(), tool_name.as_str())
+                            .await;
+                        let tool_name_owned = tool_name.clone();
+                        let mut lru = self.agent_tool_lru.write().await;
+                        let entry = lru.entry(agent_id).or_default();
+                        entry.retain(|n| n != &tool_name_owned);
+                        entry.push_front(tool_name_owned);
+                        if entry.len() > 10 {
+                            entry.truncate(10);
+                        }
+                    }
+
+                    if !success {
+                        let err_text = tool_result
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let mut err_sig: String = err_text.chars().take(80).collect();
+                        if err_sig.is_empty() {
+                            err_sig = "<no-message>".into();
+                        }
+                        let key = (tool_name.clone(), err_sig.clone());
+                        let count = repeated_tool_errors.entry(key).or_insert(0);
+                        *count += 1;
+                        if *count >= REPEAT_TOOL_ERROR_LIMIT {
+                            repeat_error_abort = Some(format!(
+                                "[Note: aborted — tool '{}' kept failing with the same error ({}x): {}]",
+                                tool_name, count, err_sig
+                            ));
+                        }
+                    }
+
                     let _ = tx
                         .send(ChatStreamEvent::ToolResult {
                             tool_name: tool_name.clone(),
@@ -1842,7 +2825,7 @@ impl Kernel {
                     // Inject tool result with native metadata when available.
                     ctx.push(agentos_types::ContextEntry {
                         role: agentos_types::ContextRole::ToolResult,
-                        content: result_str,
+                        parts: vec![agentos_types::ContentPart::Text { text: result_str }],
                         timestamp: chrono::Utc::now(),
                         metadata: Some(agentos_types::ContextMetadata {
                             tool_name: Some(tool_name.clone()),
@@ -1859,6 +2842,29 @@ impl Kernel {
                         category: agentos_types::ContextCategory::Task,
                         is_summary: false,
                     });
+
+                    if repeat_error_abort.is_some() {
+                        break;
+                    }
+                }
+                if let Some(note) = repeat_error_abort {
+                    tracing::warn!(
+                        target: "agentos::chat",
+                        agent = %agent_name,
+                        iteration = iterations,
+                        "Aborting chat loop: repeat tool-error circuit breaker tripped"
+                    );
+                    let answer = format!("{}\n\n{}", EMPTY_LLM_ANSWER_PLACEHOLDER, note);
+                    let _ = tx
+                        .send(ChatStreamEvent::Done {
+                            answer: answer.clone(),
+                            tool_calls: tool_calls.clone(),
+                            iterations,
+                            tokens_used: total_tokens_used,
+                            cost_usd: total_cost_usd,
+                        })
+                        .await;
+                    break answer;
                 }
             } else {
                 let answer = if visible_text.trim().is_empty() {
@@ -1892,16 +2898,34 @@ impl Kernel {
                         answer: answer.clone(),
                         tool_calls: tool_calls.clone(),
                         iterations,
+                        tokens_used: total_tokens_used,
+                        cost_usd: total_cost_usd,
                     })
                     .await;
                 break answer;
             }
         };
 
+        // Persist runs only on the success path. Earlier `return Err(...)`
+        // arms (registry-lookup, LLM-adapter init) bypass this deliberately:
+        // no tool calls executed, so nothing changed in the dedup cache and
+        // there is nothing useful to write back.
+        if let Some(sid) = session_id {
+            persist_session_dedup_cache(
+                &self.chat_session_dedup,
+                sid,
+                executed_tool_calls,
+                SESSION_DEDUP_CACHE_CAP,
+            )
+            .await;
+        }
+
         Ok(ChatInferenceResult {
             answer: final_answer,
             tool_calls,
             iterations,
+            tokens_used: total_tokens_used,
+            cost_usd: total_cost_usd,
         })
     }
 
@@ -2335,6 +3359,10 @@ impl Kernel {
             Embedder::with_cache_dir(&model_cache_dir)
                 .map_err(|e| anyhow::anyhow!("Failed to initialize shared embedder: {}", e))?,
         );
+        // Pre-compute manual section embeddings so `suggest_manual_sections`
+        // can rank semantically (cosine over MiniLM) instead of falling
+        // back to keyword overlap. Idempotent — first call wins.
+        agentos_tools::agent_manual::install_section_embeddings(Arc::clone(&shared_embedder));
         let episodic_memory = Arc::new(agentos_memory::EpisodicStore::open(&data_dir)?);
         let semantic_memory = Arc::new(agentos_memory::SemanticStore::open_with_embedder(
             &data_dir,
@@ -2356,6 +3384,50 @@ impl Kernel {
 
         // Register scratchpad tools
         tool_runner.register_scratchpad_tools(scratchpad_store.clone());
+
+        // host-package-install: replace the placeholder registered by
+        // ToolRunner::new with one configured from `[tools.host_package]`.
+        // When `enabled = false` we install with an empty allowlist + no
+        // escalator so every call returns a clear error. When `enabled = true`
+        // we resolve the operator-chosen privilege escalator and feed in the
+        // allowlist + manager priority list. The returned `policy` handle
+        // is retained on the kernel so the `ConfigWatcher` reload path can
+        // hot-update the allowlist + manager list without restarting.
+        let host_package_policy = {
+            use agentos_tools::host_package::{
+                resolve_escalator, EscalatorPolicy, HostPackageInstallTool, HostPackagePolicy,
+            };
+            let hp = &config.tools.host_package;
+            let (allowlist, managers, escalator) = if hp.enabled {
+                let escalator_policy = match hp.privilege_escalator.as_str() {
+                    "auto" => EscalatorPolicy::Auto,
+                    "pkexec" => EscalatorPolicy::Pkexec,
+                    "helper" => EscalatorPolicy::Helper(std::path::PathBuf::from(&hp.helper_path)),
+                    "none" => EscalatorPolicy::None,
+                    other => {
+                        tracing::error!(
+                            value = %other,
+                            "[tools.host_package].privilege_escalator must be one of \
+                             auto|pkexec|helper|none — disabling host-package-install"
+                        );
+                        EscalatorPolicy::None
+                    }
+                };
+                (
+                    hp.allowlist.clone(),
+                    hp.managers.clone(),
+                    resolve_escalator(&escalator_policy),
+                )
+            } else {
+                (Vec::new(), Vec::new(), None)
+            };
+            let policy = HostPackagePolicy::new(allowlist, managers);
+            tool_runner.register(Box::new(HostPackageInstallTool::with_policy(
+                policy.clone(),
+                escalator,
+            )));
+            policy
+        };
 
         // Register WASM tools from manifests that specify executor = wasm
         let wasm_executor = WasmToolExecutor::new(&data_dir);
@@ -2394,19 +3466,40 @@ impl Kernel {
         // Register agent-manual and agent-self tools with a snapshot of all
         // registered tools. Both tools are registered after the tool registry is
         // fully loaded so they have an accurate view of all available tools.
-        {
+        let tool_summaries_shared = {
             let registry_read = tool_registry.read().await;
             let all_tools: Vec<&agentos_types::RegisteredTool> = registry_read.list_all();
-            let summaries =
+            let summaries_vec =
                 agentos_tools::agent_manual::AgentManualTool::summaries_from_registry(&all_tools);
+            std::sync::Arc::new(tokio::sync::RwLock::new(summaries_vec))
+        };
+        // Live snapshot of connected channels — populated now from the
+        // registry, refreshed on register/deregister so the manual filter
+        // and any other consumer always see the current state.
+        // Populated at boot via `refresh_connected_channels_snapshot` (after `channel_registry` exists).
+        let connected_channels_shared: agentos_tools::agent_manual::SharedConnectedChannels =
+            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
+        {
             // Collect tool names before registering agent-self so the list
             // includes every other tool but not agent-self itself (which is
             // registered in the next line). This avoids a chicken-and-egg
             // ordering problem and keeps the list accurate.
-            let tool_names: Vec<String> = tool_runner.list_tools();
-            tool_runner.register_agent_manual(summaries);
-            tool_runner.register_agent_self(tool_names);
+            let tool_count = tool_runner.list_tools().len();
+            tool_runner.register_agent_manual_with_channels(
+                std::sync::Arc::clone(&tool_summaries_shared),
+                std::sync::Arc::clone(&connected_channels_shared),
+            );
+            tool_runner.register_list_tools(std::sync::Arc::clone(&tool_summaries_shared));
+            tool_runner.register_describe_tool(std::sync::Arc::clone(&tool_summaries_shared));
+            tool_runner.register_search_tools(std::sync::Arc::clone(&tool_summaries_shared));
+            tool_runner.register_agent_self(tool_count);
         }
+
+        let tool_usage = Arc::new(
+            crate::tool_usage_store::ToolUsageStore::open(&data_dir.join("agent_tool_usage.db"))
+                .map_err(|e| anyhow::anyhow!("ToolUsageStore init failed: {}", e))?,
+        );
 
         // Create hook registry early so it can be shared with the plugin registry.
         let hook_registry_arc = crate::hooks::HookRegistry::new();
@@ -2772,6 +3865,7 @@ impl Kernel {
                                                 record.name.clone(),
                                             ]),
                                             capability_tags: vec![],
+                                            group: String::new(),
                                         },
                                         capabilities_required:
                                             agentos_types::tool::ToolCapabilities {
@@ -2803,6 +3897,8 @@ impl Kernel {
                                         // to ExecCapable so approval is required unless the
                                         // operator has an explicit auto-approve rule.
                                         risk_class: agentos_types::RiskClass::ExecCapable,
+                                        usage_hints: None,
+                                        tags: vec![],
                                     };
                                     {
                                         let mut reg = tool_registry.write().await;
@@ -2829,6 +3925,31 @@ impl Kernel {
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to load persisted MCP attachments — continuing without them");
                 }
+            }
+
+            // After MCP restore: rebuild tool_summaries so boot-restored MCP tools
+            // are visible to agent-manual / list-tools / describe-tool / search-tools.
+            //
+            // Boot ordering: tool_summaries_shared is initialised earlier (line ~2819)
+            // from a registry snapshot taken BEFORE this MCP restore loop, and the
+            // lifecycle_sender is wired up AFTER it. So lifecycle events fired during
+            // restore are silently dropped and the initial snapshot misses every
+            // MCP tool. Without this explicit refresh agents cannot discover any
+            // boot-restored MCP tools at all (only runtime `mcp attach` would work,
+            // because by then the listener is alive and refreshes summaries on each
+            // ToolInstalled event).
+            {
+                let registry_read = tool_registry.read().await;
+                let all_tools = registry_read.list_all();
+                let fresh = agentos_tools::agent_manual::AgentManualTool::summaries_from_registry(
+                    &all_tools,
+                );
+                let count = fresh.len();
+                *tool_summaries_shared.write().await = fresh;
+                tracing::info!(
+                    tool_count = count,
+                    "tool_summaries refreshed after MCP restore"
+                );
             }
         }
 
@@ -2917,7 +4038,48 @@ impl Kernel {
             config.memory.context.max_versions,
             config.context_budget.chars_per_token,
         )?);
-        let schedule_manager = Arc::new(ScheduleManager::new());
+        let schedule_persistence = Arc::new(
+            crate::schedule_persistence::SchedulePersistence::new(&data_dir)
+                .map_err(|e| anyhow::anyhow!("Schedule persistence init failed: {}", e))?,
+        );
+        let schedule_store = Arc::new(
+            crate::schedule_store::ScheduleStore::open(data_dir.join("schedules.db"))
+                .await
+                .map_err(|e| anyhow::anyhow!("Schedule store init failed: {}", e))?,
+        );
+        // Sweep orphaned `Running` runs left over from a kernel crash.
+        // Threshold 1h — anything still Running that long without a completion
+        // event must be stale; mark as Failed so visibility tools and the
+        // delivery sweeper don't treat them as in-flight forever.
+        match schedule_store
+            .mark_orphaned_runs_failed(chrono::Duration::hours(1))
+            .await
+        {
+            Ok(n) if n > 0 => {
+                tracing::warn!(
+                    orphaned = n,
+                    "Marked orphaned scheduled runs as Failed on boot"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "Orphaned-run sweep failed on boot");
+            }
+        }
+        let schedule_manager = Arc::new(
+            ScheduleManager::with_persistence_and_store(
+                schedule_persistence.clone(),
+                Some(schedule_store.clone()),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Schedule manager rehydration failed: {}", e))?,
+        );
+        tracing::info!(
+            schedule_count = schedule_manager.list_jobs().await.len(),
+            once_count = schedule_manager.list_once_jobs().await.len(),
+            timer_count = schedule_manager.list_timers().await.len(),
+            "Schedule manager rehydrated from disk"
+        );
         let background_pool = Arc::new(BackgroundPool::new());
 
         // 6.5 Initialize pipeline engine
@@ -3121,6 +4283,26 @@ impl Kernel {
             tokio::sync::broadcast::channel::<agentos_bus::StatusUpdate>(256);
 
         // Initialise the Unified Notification and Interaction System (UNIS).
+        let agent_inbox = Arc::new(
+            crate::agent_inbox::AgentInbox::new(
+                &data_dir.join("agent_inbox.db"),
+                config.notifications.max_inbox_size,
+            )
+            .map_err(|e| anyhow::anyhow!("AgentInbox init failed: {e}"))?,
+        );
+        let agent_message_inbox = Arc::new(
+            crate::agent_message_inbox::AgentMessageInbox::new(
+                &data_dir.join("agent_messages.db"),
+                config.notifications.max_inbox_size,
+            )
+            .map_err(|e| anyhow::anyhow!("AgentMessageInbox init failed: {e}"))?,
+        );
+        let agent_inbox_writer = Arc::new(crate::agent_inbox_writer::AgentInboxWriter::new(
+            Arc::clone(&agent_inbox),
+            Arc::clone(&agent_message_inbox),
+            30,
+        ));
+
         let notification_router = {
             let inbox_path = data_dir.join("user_inbox.db");
             let inbox = Arc::new(
@@ -3224,6 +4406,27 @@ impl Kernel {
             kernel_cancellation_token.clone(),
         ));
 
+        // Pairing manager: tracks the (channel_instance_id, sender_id) DM
+        // allowlist used by the channel adapters AND by the escalation
+        // broadcast sink (so approval prompts only go to paired senders).
+        let pairing_manager = agentos_channels::pairing::PairingManager::new();
+
+        // Wire the channel broadcast sink into the escalation manager so
+        // every new PendingEscalation fans out to paired DM channels in
+        // addition to the legacy `notify_url` webhook. The sink also
+        // takes a handle to AuditLog so it can record
+        // `EscalationBroadcastSuppressed` events when dedupe or rate
+        // limits withhold a prompt — operators must see what was missed.
+        escalation_manager
+            .add_sink(Arc::new(
+                crate::escalation_channel_sink::ChannelBroadcastSink::with_audit(
+                    Arc::clone(&channel_manager_arc),
+                    Arc::clone(&pairing_manager),
+                    Arc::clone(&audit),
+                ),
+            ))
+            .await;
+
         let connector_registry = Arc::new(agentos_connectors::ConnectorRegistry::new(Arc::clone(
             &vault,
         )));
@@ -3279,9 +4482,12 @@ impl Kernel {
             agent_registry,
             bus,
             tool_runner,
+            tool_summaries: tool_summaries_shared,
+            tool_usage,
             sandbox,
             router,
             active_llms,
+            image_resolver: std::sync::RwLock::new(Arc::new(NoopImageResolver)),
             message_bus,
             profile_manager,
             episodic_memory,
@@ -3320,8 +4526,12 @@ impl Kernel {
             otel,
             event_bus,
             notification_router,
+            agent_inbox,
+            agent_message_inbox,
+            agent_inbox_writer,
             channel_registry,
             channel_listener_registry,
+            connected_channels_snapshot: connected_channels_shared,
             inbound_tx,
             inbound_chat_bridge,
             pending_inbound_rx: std::sync::Mutex::new(Some(inbound_rx)),
@@ -3360,6 +4570,8 @@ impl Kernel {
             shutdown_audited: std::sync::atomic::AtomicBool::new(false),
             channel_manager: channel_manager_arc,
             channel_manager_rx: Arc::new(tokio::sync::Mutex::new(channel_manager_inbound_rx)),
+            pairing_manager,
+            host_package_policy,
             hook_registry: Arc::clone(&hook_registry_arc),
             plugin_registry: crate::plugin_registry::PluginRegistry::new(
                 Arc::clone(&hook_registry_arc),
@@ -3382,6 +4594,8 @@ impl Kernel {
                     Arc::clone(&audit_for_dispatcher),
                 ),
             ),
+            agent_tool_lru: Arc::new(RwLock::new(HashMap::new())),
+            chat_session_dedup: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // Re-wire the dispatcher to use the actual registry (the one with providers registered).
@@ -3459,6 +4673,7 @@ impl Kernel {
 
         // Restore bidirectional channels persisted from the previous run.
         kernel.restore_channels().await;
+        kernel.refresh_connected_channels_snapshot().await;
 
         // Load connector manifests from the connectors/ directory.
         {
@@ -3544,6 +4759,9 @@ impl Kernel {
                     self.channel_registry.clone(),
                     self.scheduler.clone(),
                     self.inbound_chat_bridge.clone(),
+                    self.audit.clone(),
+                    self.escalation_manager.clone(),
+                    self.pairing_manager.clone(),
                     rx,
                 )
                 .run(),
@@ -3631,6 +4849,38 @@ impl Kernel {
         thinking_level: Option<ThinkingLevel>,
         system_prompt: Option<String>,
     ) -> Result<(), String> {
+        self.api_connect_agent_with_options(
+            name,
+            provider,
+            model,
+            base_url,
+            roles,
+            description,
+            thinking_level,
+            system_prompt,
+            false,
+        )
+        .await
+    }
+
+    /// Public API: Connect a new agent with explicit `skip_health_check`.
+    ///
+    /// Use `skip_health_check = true` for test harnesses or environments where
+    /// the LLM endpoint is intentionally unreachable but a mock adapter will be
+    /// substituted post-registration.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn api_connect_agent_with_options(
+        &self,
+        name: String,
+        provider: LLMProvider,
+        model: String,
+        base_url: Option<String>,
+        roles: Vec<String>,
+        description: Option<String>,
+        thinking_level: Option<ThinkingLevel>,
+        system_prompt: Option<String>,
+        skip_health_check: bool,
+    ) -> Result<(), String> {
         match self
             .cmd_connect_agent(
                 name,
@@ -3644,7 +4894,7 @@ impl Kernel {
                 false,
                 vec![],
                 false,
-                false,
+                skip_health_check,
             )
             .await
         {
@@ -3658,6 +4908,19 @@ impl Kernel {
     pub async fn api_disconnect_agent(&self, agent_id: AgentID) -> Result<(), String> {
         match self.cmd_disconnect_agent(agent_id).await {
             agentos_bus::KernelResponse::Success { .. } => Ok(()),
+            agentos_bus::KernelResponse::Error { message } => Err(message),
+            _ => Err("Unexpected kernel response".to_string()),
+        }
+    }
+
+    /// Public API: Permanently remove an agent (profile + memory + inboxes + schedules).
+    /// Returns the wipe-summary JSON on success.
+    pub async fn api_remove_agent(
+        &self,
+        agent_id: AgentID,
+    ) -> Result<Option<serde_json::Value>, String> {
+        match self.cmd_remove_agent(agent_id).await {
+            agentos_bus::KernelResponse::Success { data } => Ok(data),
             agentos_bus::KernelResponse::Error { message } => Err(message),
             _ => Err("Unexpected kernel response".to_string()),
         }
@@ -3926,6 +5189,54 @@ fn get_free_disk_mb(path: &std::path::Path) -> Result<u64, anyhow::Error> {
 }
 
 #[cfg(test)]
+mod meta_tool_streak_tests {
+    use super::iteration_is_all_meta;
+
+    #[test]
+    fn empty_batch_is_not_meta() {
+        assert!(!iteration_is_all_meta(&[]));
+    }
+
+    #[test]
+    fn pure_meta_batch_is_meta() {
+        assert!(iteration_is_all_meta(&[
+            "search-tools".into(),
+            "describe-tool".into(),
+        ]));
+    }
+
+    #[test]
+    fn any_real_tool_breaks_meta() {
+        // The exact case from the 2026-05-08 logs: alternating
+        // search-tools/describe-tool with a single gmail_send
+        // interleaved must reset the streak.
+        assert!(!iteration_is_all_meta(&[
+            "search-tools".into(),
+            "gmail_send".into(),
+        ]));
+        assert!(!iteration_is_all_meta(&["file-reader".into()]));
+    }
+
+    #[test]
+    fn agent_manual_alone_is_meta() {
+        assert!(iteration_is_all_meta(&["agent-manual".into()]));
+    }
+
+    #[test]
+    fn iteration_is_all_meta_recognises_canonical_list() {
+        // Sanity: the streak guard should match every entry in the
+        // canonical agentos-tools list, so the dedup cache and the
+        // discovery-loop guard can never drift out of sync.
+        for name in agentos_tools::META_TOOL_NAMES {
+            assert!(
+                iteration_is_all_meta(&[(*name).to_string()]),
+                "missing canonical meta tool: {name}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod preflight_tests {
     use super::*;
     use crate::config::*;
@@ -3954,6 +5265,7 @@ mod preflight_tests {
                 events: Default::default(),
                 sandbox_policy: Default::default(),
                 max_concurrent_sandbox_children: 4,
+                context_compaction: Default::default(),
             },
             secrets: SecretsSettings {
                 vault_path: vault_path.to_string(),
@@ -3969,6 +5281,7 @@ mod preflight_tests {
                 data_dir: data_dir.to_string(),
                 crl_path: None,
                 workspace: crate::config::WorkspaceConfig::default(),
+                host_package: crate::config::HostPackageSettings::default(),
             },
             bus: BusSettings {
                 socket_path: "/tmp/test.sock".to_string(),
@@ -4129,6 +5442,7 @@ mod vault_bootstrap_tests {
                 events: Default::default(),
                 sandbox_policy: Default::default(),
                 max_concurrent_sandbox_children: 4,
+                context_compaction: Default::default(),
             },
             secrets: SecretsSettings {
                 vault_path: root.join("vault/vault.db").to_string_lossy().into_owned(),
@@ -4144,6 +5458,7 @@ mod vault_bootstrap_tests {
                 data_dir: root.join("data").to_string_lossy().into_owned(),
                 crl_path: None,
                 workspace: WorkspaceConfig::default(),
+                host_package: crate::config::HostPackageSettings::default(),
             },
             bus: BusSettings {
                 socket_path: root

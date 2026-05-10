@@ -60,6 +60,19 @@ pub fn signing_payload(manifest: &ToolManifest) -> Vec<u8> {
 pub fn verify_manifest(manifest: &ToolManifest) -> Result<(), AgentOSError> {
     let info = &manifest.manifest;
 
+    // Privileged executor is reserved for distribution-trusted, mandatory-
+    // approval tools. Reject any manifest that requests it without both
+    // `trust_tier = core` AND `risk_class = control_plane`. Without this
+    // gate, a Community-tier tool could escape the bwrap sandbox.
+    if manifest.executor.executor_type == agentos_types::ExecutorType::Privileged
+        && (info.trust_tier != TrustTier::Core
+            || manifest.risk_class != agentos_types::RiskClass::ControlPlane)
+    {
+        return Err(AgentOSError::ToolBlocked {
+            name: info.name.clone(),
+        });
+    }
+
     match info.trust_tier {
         TrustTier::Blocked => Err(AgentOSError::ToolBlocked {
             name: info.name.clone(),
@@ -234,6 +247,7 @@ mod tests {
                 trust_tier,
                 tags: None,
                 capability_tags: vec![],
+                group: String::new(),
             },
             capabilities_required: ToolCapabilities {
                 permissions: vec!["fs.read".into()],
@@ -258,6 +272,8 @@ mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: RiskClass::ReadonlyScoped,
+            usage_hints: None,
+            tags: vec![],
         }
     }
 
@@ -316,6 +332,55 @@ mod tests {
 
         let err = verify_manifest(&manifest).unwrap_err();
         assert!(matches!(err, AgentOSError::ToolSignatureInvalid { .. }));
+    }
+
+    #[test]
+    fn privileged_executor_requires_core_tier_and_control_plane_risk() {
+        use agentos_types::ExecutorType;
+
+        // Core + ControlPlane + Privileged → accepted
+        let mut m = make_manifest(TrustTier::Core);
+        m.executor.executor_type = ExecutorType::Privileged;
+        m.risk_class = RiskClass::ControlPlane;
+        assert!(verify_manifest(&m).is_ok());
+
+        // Core + Privileged but wrong risk class → rejected
+        let mut m = make_manifest(TrustTier::Core);
+        m.executor.executor_type = ExecutorType::Privileged;
+        m.risk_class = RiskClass::WriteScoped;
+        assert!(matches!(
+            verify_manifest(&m).unwrap_err(),
+            AgentOSError::ToolBlocked { .. }
+        ));
+
+        // Community-tier Privileged → rejected even with valid signature
+        let seed = [42u8; 32];
+        let signing_key = SigningKey::from_bytes(&seed);
+        let pubkey_hex = hex::encode(signing_key.verifying_key().to_bytes());
+        let mut m = make_manifest(TrustTier::Community);
+        m.manifest.author_pubkey = Some(pubkey_hex);
+        m.risk_class = RiskClass::ControlPlane;
+        m.executor.executor_type = ExecutorType::Privileged;
+        let payload = signing_payload(&m);
+        let sig = signing_key.sign(&payload);
+        m.manifest.signature = Some(hex::encode(sig.to_bytes()));
+        assert!(matches!(
+            verify_manifest(&m).unwrap_err(),
+            AgentOSError::ToolBlocked { .. }
+        ));
+
+        // Inline executor on a Community tool with control_plane risk → accepted
+        // (the gate fires only on Privileged executor).
+        let mut m = make_manifest(TrustTier::Community);
+        m.manifest.author_pubkey = Some(hex::encode(
+            SigningKey::from_bytes(&seed).verifying_key().to_bytes(),
+        ));
+        m.risk_class = RiskClass::ControlPlane;
+        m.executor.executor_type = ExecutorType::Inline;
+        let payload = signing_payload(&m);
+        let sig = SigningKey::from_bytes(&seed).sign(&payload);
+        m.manifest.signature = Some(hex::encode(sig.to_bytes()));
+        assert!(verify_manifest(&m).is_ok());
     }
 
     #[test]

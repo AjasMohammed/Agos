@@ -40,11 +40,19 @@ pub enum AuditEventType {
     ToolExecutionStarted,
     ToolExecutionCompleted,
     ToolExecutionFailed,
+    /// Emitted when an agent queries the manual/discovery surface.
+    ManualQuery,
+    /// Emitted when the kernel injects tool suggestions after a ToolNotFound error.
+    ToolSuggested,
 
     // LLM events
     AgentConnected,
     AgentReconnected,
     AgentDisconnected,
+    /// Emitted when an agent is permanently removed from the ecosystem: profile,
+    /// pubkey, memory tiers, scratchpad, inboxes, memory blocks, checkpoints, and
+    /// schedules are all wiped. Vault secrets and the audit log are preserved.
+    AgentRemoved,
     /// Emitted when the pre-flight health check against an LLM backend fails at
     /// `agent connect` time and the agent registration is aborted.
     LLMConnectionFailed,
@@ -71,6 +79,8 @@ pub enum AuditEventType {
     ScheduledJobPaused,
     ScheduledJobResumed,
     ScheduledJobDeleted,
+    ScheduledToolFired,
+    ScheduledToolFailed,
 
     // agentd - Timers
     TimerCreated,
@@ -91,6 +101,29 @@ pub enum AuditEventType {
     // Risk classification
     RiskEscalation,
     ActionForbidden,
+
+    // Privileged host operations (host-package-install)
+    /// Emitted when a host package was successfully installed via the
+    /// `host-package-install` tool (privileged executor). Payload should
+    /// include `package`, `version`, `manager`, `escalation_id`,
+    /// `approver_user_id`, `agent_id`, `task_id`, and `duration_ms`.
+    HostPackageInstalled,
+    /// Emitted when a host package install attempt failed (mgr error,
+    /// non-zero exit, allowlist rejection, missing escalator, etc.).
+    HostPackageInstallDenied,
+    /// Emitted when a host package install exceeded its time budget and
+    /// was killed by the kernel.
+    HostPackageInstallTimeout,
+
+    // Escalation broadcast (approval-channel-fanout)
+    /// Emitted by `ChannelBroadcastSink` when an approval prompt was NOT
+    /// delivered to a paired channel sender — either because of dedupe
+    /// (a recent equivalent escalation already broadcast) or per-sender
+    /// rate limiting. Payload includes `escalation_id`, `reason`
+    /// ("duplicate" or "rate_limited"), and the channel/sender when
+    /// applicable. Operators can monitor this to know when a control-
+    /// plane prompt was withheld.
+    EscalationBroadcastSuppressed,
 
     // Checkpoint / Snapshot (Spec §5)
     SnapshotTaken,
@@ -143,6 +176,11 @@ pub enum AuditEventType {
     // Agent feedback / tester findings
     TestFindingCaptured,
 
+    /// Emitted when the kernel recovered one or more tool calls from JSON-in-markdown
+    /// fences in an LLM response that returned no structured tool_use blocks. Common
+    /// on small models (gemma, llama3, phi-3) without reliable native function calling.
+    ToolCallRecovered,
+
     // Proxy token lifecycle
     /// Emitted when outstanding proxy tokens are invalidated because the
     /// underlying secret was rotated or deleted.
@@ -181,6 +219,10 @@ pub enum AuditEventType {
     ChannelDisconnected,
     /// Emitted when a message is received from a user via an inbound channel.
     InboundMessageReceived,
+    /// Emitted when an agent successfully sends a message to a single connected
+    /// channel via the `channel-send` tool. Distinct from `NotificationSent`,
+    /// which fans out to all delivery adapters.
+    ChannelMessageSent,
 
     // Agent context memory
     /// Emitted when an agent's context memory is created, updated, rolled back, or cleared.

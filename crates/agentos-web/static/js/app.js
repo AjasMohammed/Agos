@@ -1,5 +1,45 @@
 // AgentOS Web UI — client-side utilities
 
+// ── Motion polish ─────────────────────────────────────────
+// Keep navigation feeling smooth without getting in the way of normal browser
+// affordances like new-tab clicks, downloads, anchors, and external links.
+document.addEventListener('click', function(event) {
+    var link = event.target.closest('a[href]');
+    if (!link) return;
+    if (event.defaultPrevented || event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    if (link.target && link.target !== '_self') return;
+    if (link.hasAttribute('download')) return;
+
+    var url;
+    try {
+        url = new URL(link.href, window.location.href);
+    } catch (_) {
+        return;
+    }
+
+    if (url.origin !== window.location.origin) return;
+    if (url.pathname === window.location.pathname && url.search === window.location.search && url.hash) return;
+
+    document.body.classList.add('is-leaving');
+});
+
+document.body.addEventListener('htmx:beforeSwap', function(event) {
+    if (event.detail && event.detail.target) {
+        event.detail.target.classList.add('is-swapping');
+    }
+});
+
+document.body.addEventListener('htmx:afterSwap', function(event) {
+    if (event.detail && event.detail.target) {
+        event.detail.target.classList.remove('is-swapping');
+        event.detail.target.classList.add('swap-enter');
+        setTimeout(function() {
+            event.detail.target.classList.remove('swap-enter');
+        }, 360);
+    }
+});
+
 // ── SSE Connection Status (Alpine.js component) ───────────
 // Monitors SSE connections on the page and exposes state for the topbar indicator.
 // Note: relies on htmx-internal-data (HTMX internal API) — pin HTMX version.
@@ -38,7 +78,10 @@ function sseStatus() {
                     self.label = 'Offline';
                 }
             }
-            check();
+            // Defer the first check to avoid forcing layout before styles are ready.
+            setTimeout(function() {
+                check();
+            }, 0);
             self._intervalId = setInterval(check, 2000);
         },
         destroy: function() {
@@ -166,3 +209,14 @@ document.body.addEventListener('showToast', function(event) {
 document.body.addEventListener('closeAgentModal', function() {
     window.dispatchEvent(new CustomEvent('close-agent-modal'));
 });
+
+// ── Clipboard Utilities ──────────────────────────────────
+function copyToClipboard(btn, targetId) {
+    var pre = document.getElementById(targetId);
+    if (!pre) return;
+    navigator.clipboard.writeText(pre.textContent).then(function () {
+        var orig = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(function () { btn.textContent = orig; }, 1500);
+    });
+}

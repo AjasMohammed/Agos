@@ -1,22 +1,48 @@
 # Security advisory exceptions for AgentOS
 # This file documents known advisory exceptions and their rationale.
-# CI invokes: cargo audit --ignore RUSTSEC-2026-0049
+# CI invokes:
+#   cargo audit --ignore RUSTSEC-2026-0049 \
+#               --ignore RUSTSEC-2026-0098 \
+#               --ignore RUSTSEC-2026-0099 \
+#               --ignore RUSTSEC-2026-0104
+#
+# All four advisories below share the same root cause and the same mitigation
+# stance: rumqttc 0.25.1 is the latest published release and transitively
+# pins rustls-webpki 0.102.8. The mqtt feature in agentos-hal is opt-in,
+# and none of the affected rustls-webpki code paths are exercised in our
+# default broker configuration.
+#
+# Re-evaluate the entire block when rumqttc 0.26+ ships.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # RUSTSEC-2026-0049 — rustls-webpki 0.102.8 CRL Distribution Point matching bug
 # ─────────────────────────────────────────────────────────────────────────────
-# Crate:   rustls-webpki 0.102.8
-# Fix:     Upgrade to >= 0.103.10
-# Path:    rumqttc 0.25.1 → rustls-webpki 0.102.8 (direct dep in agentos-hal)
+# Fix:  Upgrade to >= 0.103.10
+# Path: rumqttc 0.25.1 → rustls-webpki 0.102.8 (direct dep in agentos-hal)
+# Risk: only fires with CRL Distribution Point revocation enabled — not used.
 #
-# Status: CANNOT FIX — rumqttc 0.25.1 is the latest release and pins
-# rustls-webpki 0.102.8 directly. No upstream fix available as of 2026-04-10.
+# ─────────────────────────────────────────────────────────────────────────────
+# RUSTSEC-2026-0098 — Name constraints for URI names were incorrectly accepted
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix:  Upgrade to >= 0.103.12
+# Path: rumqttc 0.25.1 → rustls-webpki 0.102.8
+# Risk: requires name-constrained CA + URI SAN cert — not part of the AgentOS
+#       MQTT trust chain.
 #
-# Risk assessment:
-# - Vulnerability only fires when CRL Distribution Point-based revocation is
-#   enabled on the MQTT broker. This is not the case in any AgentOS deployment.
-# - The mqtt feature in agentos-hal is opt-in (Cargo feature flag).
-# - CRL Distribution Point revocation is an edge case for IoT broker connections.
+# ─────────────────────────────────────────────────────────────────────────────
+# RUSTSEC-2026-0099 — Name constraints accepted for wildcard certs
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix:  Upgrade to >= 0.103.12
+# Path: rumqttc 0.25.1 → rustls-webpki 0.102.8
+# Risk: requires wildcard cert under a name-constrained CA — not used.
 #
-# Track: https://github.com/bytebeamio/rumqtt/issues — re-evaluate when
-# rumqttc 0.26+ is released.
+# ─────────────────────────────────────────────────────────────────────────────
+# RUSTSEC-2026-0104 — Reachable panic in CRL parsing
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix:  Upgrade to >= 0.103.13
+# Path: rumqttc 0.25.1 → rustls-webpki 0.102.8
+# Risk: requires CRL fetched from an attacker-controlled URL — not used; we
+#       do not load CRLs in the default MQTT path.
+#
+# Track: https://github.com/bytebeamio/rumqtt/issues — re-evaluate on
+# rumqttc 0.26+ (will pull rustls-webpki >= 0.103.13).

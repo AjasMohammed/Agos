@@ -1,0 +1,50 @@
+[node]
+id = "memory-write"
+version = 1
+display_name = "Memory Write"
+description = "Store a fact or event into the agent's memory for future recall."
+category = "memory"
+icon = "database"
+color = "#8b5cf6"
+risk_class = "write_scoped"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "content"
+display_name = "Content"
+type = "template"
+required = true
+placeholder = "{{input}}"
+description = "The information to store. Use {{var}} to capture workflow data."
+
+[[node.properties]]
+name = "tier"
+display_name = "Memory Tier"
+type = "options"
+required = false
+default = "episodic"
+
+  [[node.properties.options]]
+  value = "episodic"
+  label = "Episodic (event log)"
+
+  [[node.properties.options]]
+  value = "semantic"
+  label = "Semantic (fact)"
+
+[[node.properties]]
+name = "tags"
+display_name = "Tags (comma-separated)"
+type = "string"
+required = false
+description = "Optional tags for later filtering."
+
+[node.execute]
+kind = "tool"
+tool_id = "memory-write"

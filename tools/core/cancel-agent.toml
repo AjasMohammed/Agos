@@ -1,3 +1,5 @@
+tags = ["meta", "write"]
+
 [manifest]
 name        = "cancel-agent"
 version     = "1.0.0"

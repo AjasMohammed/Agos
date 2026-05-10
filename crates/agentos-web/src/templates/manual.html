@@ -3,58 +3,40 @@
 <div class="page-header">
     <div>
         <h1>Agent Manual</h1>
-        <p class="page-meta">Runtime documentation exposed by the <code>agent-manual</code> built-in tool</p>
+        <p class="page-meta">Live runtime documentation as the agent sees it (via the <code>agent-manual</code> built-in tool)</p>
     </div>
 </div>
 
 <article>
-    <header><strong>What this is</strong></header>
-    <p>
-        Agents call the <code>agent-manual</code> tool with a JSON payload to retrieve structured OS documentation
-        (permissions, memory tiers, events, commands, errors, coordination, and more) without bloating the system prompt.
-        This page is a human-readable overview; the authoritative content is whatever the running kernel returns from the tool.
-    </p>
-    <p>
-        To browse installed tools and manifests in the UI, use <a href="/tools">Tools</a>.
+    <p class="muted">
+        This page renders the exact JSON the kernel returns when an agent calls <code>agent-manual</code>.
+        Use the sidebar to switch sections; the content panel updates in place.
+        For full per-tool schema, open the <strong>Tools</strong> section and click a tool name.
     </p>
 </article>
 
-<article>
-    <header><strong>Example tool call</strong></header>
-    <pre><code>{"section": "index"}</code></pre>
-    <p class="muted">Use <code>{"section": "tool-detail", "name": "&lt;tool-name&gt;"}</code> for full schema for one tool,
-    and <code>{"section": "suggest", "query": "…"}</code> for intent-based tool hints.</p>
-</article>
+<div class="manual-layout" style="display:grid; grid-template-columns: 220px 1fr; gap:1rem; align-items:start;">
+    <aside aria-label="Manual sections">
+        <nav>
+            <ul style="list-style:none; padding:0; margin:0;">
+                {% for s in sections %}
+                <li style="margin-bottom:.25rem;">
+                    <a href="#"
+                       hx-get="/manual/view?section={{ s.slug }}"
+                       hx-target="#manual-content"
+                       hx-swap="innerHTML"
+                       hx-push-url="false">{{ s.label }}</a>
+                </li>
+                {% endfor %}
+            </ul>
+        </nav>
+    </aside>
 
-<article>
-    <header><strong>Manual sections</strong></header>
-    <p class="muted">Pass one of these as <code>section</code> (kebab-case).</p>
-    <dl class="detail-list">
-        <dt>index</dt><dd>Directory of all sections</dd>
-        <dt>tools</dt><dd>Registered tools (name, description, permissions, trust tier)</dd>
-        <dt>tool-detail</dt><dd>Full docs for one tool; requires <code>name</code></dd>
-        <dt>permissions</dt><dd>Resource classes and the rwx model</dd>
-        <dt>memory</dt><dd>Semantic, episodic, procedural tiers and blocks</dd>
-        <dt>events</dt><dd>Event categories, subscribe workflow, permissions</dd>
-        <dt>commands</dt><dd>Kernel commands and tool-mapped entry points</dd>
-        <dt>errors</dt><dd>Common <code>AgentOSError</code> patterns and recovery</dd>
-        <dt>feedback</dt><dd>Structured <code>[FEEDBACK]</code> blocks</dd>
-        <dt>agents</dt><dd>Peer discovery and messaging</dd>
-        <dt>tasks</dt><dd>Lifecycle, inspection, autonomous mode</dd>
-        <dt>procedural</dt><dd>Recording and searching procedures</dd>
-        <dt>escalation</dt><dd>When and how to escalate to operators</dd>
-        <dt>coordination</dt><dd>Spawn, await, verify, teams</dd>
-        <dt>suggest</dt><dd>Keyword search over tools; requires <code>query</code></dd>
-        <dt>scratchpad</dt><dd>Wikilinks and graph navigation</dd>
-        <dt>channels</dt><dd>Bidirectional adapters</dd>
-        <dt>mcp</dt><dd>Model Context Protocol attach and security</dd>
-        <dt>hal</dt><dd>Hardware abstraction and device approval</dd>
-        <dt>plugins</dt><dd>Discovery, trust tiers, lifecycle</dd>
-        <dt>skills</dt><dd>Skill packages and execution</dd>
-        <dt>notifications</dt><dd><code>notify-user</code> and <code>ask-user</code></dd>
-        <dt>containers</dt><dd>Isolated execution</dd>
-        <dt>webhooks</dt><dd>Inbound HTTP endpoints</dd>
-        <dt>capabilities</dt><dd>Kernel-mediated capabilities (KMC)</dd>
-    </dl>
-</article>
+    <section id="manual-content"
+             hx-get="/manual/view?section=index"
+             hx-trigger="load"
+             hx-swap="innerHTML">
+        <p class="muted">Loading…</p>
+    </section>
+</div>
 {% endblock %}

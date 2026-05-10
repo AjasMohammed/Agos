@@ -17,16 +17,16 @@
          style="flex: {{ task_summary.failed }}">{{ task_summary.failed }} failed</div>
     {% endif %}
 </div>
-<div style="display:grid; grid-template-columns:repeat(4,1fr); gap:0.5rem; margin-top:0.75rem; font-size:0.82rem; text-align:center">
-    <div><strong>{{ task_summary.queued }}</strong><br><small class="muted">Queued</small></div>
-    <div><strong>{{ task_summary.running }}</strong><br><small class="muted">Running</small></div>
-    <div><strong>{{ task_summary.completed }}</strong><br><small class="muted">Done</small></div>
-    <div><strong>{{ task_summary.failed }}</strong><br><small class="muted">Failed</small></div>
+<div class="task-metric-grid" aria-label="Task counts by status">
+    <div class="task-metric"><strong>{{ task_summary.queued }}</strong><small class="muted">Queued</small></div>
+    <div class="task-metric"><strong>{{ task_summary.running }}</strong><small class="muted">Running</small></div>
+    <div class="task-metric"><strong>{{ task_summary.completed }}</strong><small class="muted">Done</small></div>
+    <div class="task-metric"><strong>{{ task_summary.failed }}</strong><small class="muted">Failed</small></div>
 </div>
 {% else %}
-<div style="text-align: center; padding: 1.5rem 1rem; color: var(--pico-muted-color);">
-    <p style="font-size: 0.95rem; margin-bottom: 0.5rem;">No tasks yet</p>
-    <p style="font-size: 0.82rem; margin-bottom: 0.75rem;">Tasks appear when agents process prompts.</p>
+<div class="inline-empty-state">
+    <p><strong>No tasks yet</strong></p>
+    <p>Tasks appear when agents process prompts.</p>
     <a href="/chat" class="quick-action-btn">Start a Chat</a>
 </div>
 {% endif %}

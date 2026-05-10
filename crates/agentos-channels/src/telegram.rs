@@ -1,5 +1,6 @@
 use crate::types::*;
 use crate::{ChannelAdapter, ChannelCapabilities, ChannelHealth};
+use agentos_http::{client, HttpProfile};
 use agentos_types::AgentOSError;
 use async_trait::async_trait;
 use rand::Rng;
@@ -67,11 +68,7 @@ impl TelegramAdapter {
             bot_token: Zeroizing::new(bot_token),
             chat_id,
             instance_id,
-            client: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(15))
-                .timeout(Duration::from_secs(120))
-                .build()
-                .expect("Telegram HTTP client init failed"),
+            client: client(HttpProfile::Outbound),
         }
     }
 
@@ -200,22 +197,45 @@ impl ChannelAdapter for TelegramAdapter {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
-        let text = msg.content.as_text();
-        let text: String = text.chars().take(TELEGRAM_MAX_TEXT).collect();
+        // All outbound text is rendered as Telegram HTML so agents can use
+        // markdown (`**bold**`, `*italic*`, code, links, fenced blocks). The
+        // converter HTML-escapes raw input first so plain text with `<`/`>`/`&`
+        // remains safe.
+        let raw = msg.content.as_text();
+        let raw: String = raw.chars().take(TELEGRAM_MAX_TEXT).collect();
+        let html = crate::telegram_format::markdown_to_telegram_html(&raw);
         let chat_id = self.chat_id.clone();
         let policy = crate::retry::RetryPolicy::default();
 
         crate::retry::with_retry(&policy, "telegram", || async {
-            let v = self
-                .post_telegram(
-                    "sendMessage",
-                    &json!({
-                        "chat_id": chat_id,
-                        "text": text,
-                        "disable_web_page_preview": true,
-                    }),
-                )
-                .await?;
+            // Try HTML mode first; on Telegram parse errors fall back to plain.
+            let html_payload = json!({
+                "chat_id": chat_id,
+                "text": html,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": true,
+            });
+            let v = match self.post_telegram("sendMessage", &html_payload).await {
+                Ok(v) => v,
+                Err(e) => {
+                    // 400 with description "can't parse entities" → fall back to plain raw.
+                    let msg = format!("{e}");
+                    if msg.contains("can't parse entities") || msg.contains("HTTP 400") {
+                        warn!(error = %e, "Telegram HTML parse failed; resending as plain text");
+                        self.post_telegram(
+                            "sendMessage",
+                            &json!({
+                                "chat_id": chat_id,
+                                "text": raw,
+                                "disable_web_page_preview": true,
+                            }),
+                        )
+                        .await?
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
 
             let ext_id = v
                 .get("result")

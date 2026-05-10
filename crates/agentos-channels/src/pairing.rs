@@ -69,12 +69,19 @@ impl PairingManager {
     /// Uses the full `[A-Z0-9]` charset (36^6 ≈ 2.18B possibilities) rather than
     /// UUID hex slices (16^6 ≈ 16.7M), making brute-force 130x harder.
     pub async fn generate_code(&self, channel_id: &str, sender_id: &str) -> String {
-        use rand::Rng;
-        const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        let mut rng = rand::thread_rng();
-        let code: String = (0..6)
-            .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
-            .collect();
+        // Scope `rand::thread_rng()` (which is `Rc<UnsafeCell<...>>` and
+        // therefore !Send) inside its own block so the resulting future
+        // does NOT hold a non-Send guard across the `.await` below.
+        // Without this, callers from any `tokio::spawn` (e.g. the
+        // approval inbound router) fail to compile.
+        let code: String = {
+            use rand::Rng;
+            const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+            let mut rng = rand::thread_rng();
+            (0..6)
+                .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
+                .collect()
+        };
         let pairing = PendingPairing {
             channel_id: channel_id.to_string(),
             sender_id: sender_id.to_string(),
@@ -82,7 +89,7 @@ impl PairingManager {
             expires_at: Utc::now() + self.code_ttl,
         };
         self.pending.write().await.insert(code.clone(), pairing);
-        code.clone()
+        code
     }
 
     /// Approve a pairing code. Returns the approved sender on success.

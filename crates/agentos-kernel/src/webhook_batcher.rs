@@ -62,7 +62,11 @@ impl WebhookBatcher {
 
         // Flush immediately if batch is full
         if batch.events.len() >= self.max_batch_size {
-            let batch = pending.remove(&endpoint_id).unwrap();
+            let Some(batch) = pending.remove(&endpoint_id) else {
+                // Should not happen — we just inserted/modified this entry above.
+                tracing::warn!(%endpoint_id, "max-batch flush: endpoint vanished before remove");
+                return;
+            };
             // Drop the lock before sending to avoid holding it across await
             drop(pending);
             self.send_batch(batch).await;

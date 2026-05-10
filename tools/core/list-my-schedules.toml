@@ -1,0 +1,39 @@
+tags = ["meta", "read"]
+
+[manifest]
+name        = "list-my-schedules"
+version     = "1.0.0"
+description = "List every schedule, once-job, and timer the calling agent has created."
+author      = "agentos-core"
+trust_tier  = "core"
+
+[capabilities_required]
+permissions = ["schedule.self:r"]
+
+[capabilities_provided]
+outputs = ["schedules"]
+
+[intent_schema]
+input  = "ListMySchedulesIntent"
+output = "ListMySchedulesResult"
+
+[input_schema]
+type = "object"
+
+[input_schema.properties.kinds]
+type        = "array"
+description = "Optional filter: subset of ['schedule', 'once', 'timer']. Default = all."
+
+[input_schema.properties.include_inactive]
+type        = "boolean"
+description = "Include Paused/Disabled/Fired/Cancelled schedules. Default false."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 8
+max_cpu_ms    = 500
+syscalls      = []
+
+risk_class = "readonly_scoped"

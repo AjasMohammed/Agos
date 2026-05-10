@@ -10,6 +10,19 @@ impl ShellExec {
     pub fn new() -> Self {
         Self
     }
+
+    fn sandbox_context(&self, allow_network: bool) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "bwrap",
+            "pid_namespace": "isolated",
+            "network": if allow_network { "host" } else { "isolated" },
+            "filesystem": "tmpfs+data_dir_bind",
+            "note": "Process list, network sockets, and most of /proc reflect \
+                     the sandbox container, not the host. For host-level \
+                     inspection use process-manager, network-sockets, \
+                     system-mounts, system-services, or system-open-files."
+        })
+    }
 }
 
 impl Default for ShellExec {
@@ -89,11 +102,8 @@ impl AgentTool for ShellExec {
                 .arg("--ro-bind")
                 .arg("/sbin")
                 .arg("/sbin")
-                // Bind the data dir as the only writable place
-                .arg("--bind")
-                .arg(&data_dir_str)
-                .arg(&data_dir_str)
-                // Hide sensitive directories
+                // Hide sensitive directories first — bwrap applies args in order,
+                // so any --bind on these paths must come AFTER the tmpfs to survive.
                 .arg("--tmpfs")
                 .arg("/root")
                 .arg("--tmpfs")
@@ -101,10 +111,14 @@ impl AgentTool for ShellExec {
                 .arg("--tmpfs")
                 .arg("/var")
                 .arg("--tmpfs")
-                .arg("/home") // hide other users' homes
-                // Give it a fresh /tmp and /dev
+                .arg("/home")
                 .arg("--tmpfs")
                 .arg("/tmp")
+                // Bind the data dir as the only writable place (after /home tmpfs
+                // so it isn't shadowed when data_dir lives under /home/<user>).
+                .arg("--bind")
+                .arg(&data_dir_str)
+                .arg(&data_dir_str)
                 .arg("--dev")
                 .arg("/dev")
                 .arg("--proc")
@@ -214,6 +228,70 @@ impl AgentTool for ShellExec {
             "stdout": stdout_display,
             "stderr": stderr_display,
             "success": output.status.success(),
+            "sandbox": self.sandbox_context(allow_network),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::ToolExecutionContext;
+    use agentos_types::{AgentID, PermissionSet, TaskID, TraceID};
+    use tokio_util::sync::CancellationToken;
+
+    fn make_context(data_dir: std::path::PathBuf) -> ToolExecutionContext {
+        ToolExecutionContext {
+            data_dir,
+            task_id: TaskID::new(),
+            agent_id: AgentID::new(),
+            trace_id: TraceID::new(),
+            permissions: PermissionSet::new(),
+            vault: None,
+            hal: None,
+            file_lock_registry: None,
+            agent_registry: None,
+            task_registry: None,
+            escalation_query: None,
+            workspace_paths: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
+            cancellation_token: CancellationToken::new(),
+            tool_categories: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_shell_exec_includes_sandbox_envelope() {
+        if std::process::Command::new("bwrap")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            println!("Skipping test: bwrap not installed");
+            return;
+        }
+
+        let tool = ShellExec::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let context = make_context(temp_dir.path().to_path_buf());
+
+        let payload = serde_json::json!({
+            "command": "echo hello",
+        });
+
+        let result = tool.execute(payload, context).await.unwrap();
+        let sandbox = result
+            .get("sandbox")
+            .expect("Result should have 'sandbox' field");
+
+        assert_eq!(sandbox["kind"], "bwrap");
+        assert_eq!(sandbox["pid_namespace"], "isolated");
+        assert_eq!(sandbox["network"], "isolated");
+        assert!(sandbox["note"]
+            .as_str()
+            .unwrap()
+            .contains("host-level inspection"));
     }
 }

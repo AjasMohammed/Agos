@@ -1,3 +1,4 @@
+use agentos_types::ContentPart;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,9 @@ pub struct ChatRequest {
     pub message: String,
     #[serde(default)]
     pub history: Vec<(String, String)>,
+    /// Multimodal segments for the latest user turn. When empty, the kernel uses `message` as plain text.
+    #[serde(default)]
+    pub parts: Vec<ContentPart>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -8,6 +8,7 @@
 ///
 /// All security-relevant settings are pre-populated with inline comments
 /// so developers understand the capability model from the first run.
+use agentos_types::reject_traversal;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -52,7 +53,7 @@ pub fn handle(project_name: &str, template: InitTemplate) -> anyhow::Result<()> 
             project_name
         );
     }
-    if project_name.contains("..") {
+    if reject_traversal(project_name).is_err() {
         anyhow::bail!("Project name '{}' must not contain '..'.", project_name);
     }
     if project_name.contains('"') || project_name.contains('\n') || project_name.contains('\r') {

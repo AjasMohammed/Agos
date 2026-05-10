@@ -40,6 +40,11 @@ impl Kernel {
         // is set to "" (e.g. docker-compose `AGENTOS_LLM_URL=${AGENTOS_LLM_URL:-}`).
         // Treat them as unset so the config fallback still applies.
         let base_url = base_url.filter(|s| !s.trim().is_empty());
+        let image_resolver = self
+            .image_resolver
+            .read()
+            .expect("image_resolver lock poisoned")
+            .clone();
         match provider {
             LLMProvider::Ollama => {
                 let host = base_url
@@ -54,7 +59,8 @@ impl Kernel {
                     Arc::new(
                         OllamaCore::new(&host, model)
                             .with_request_timeout(self.config.ollama.request_timeout_secs)
-                            .with_context_window(self.config.llm.ollama_context_window),
+                            .with_context_window(self.config.llm.ollama_context_window)
+                            .with_image_resolver(image_resolver.clone()),
                     ),
                     effective,
                 ))
@@ -81,15 +87,20 @@ impl Kernel {
                     .or_else(|| self.config.llm.openai_base_url.clone());
                 if let Some(url) = resolved_base_url {
                     Ok((
-                        Arc::new(OpenAICore::with_base_url(
-                            sec,
-                            model.to_string(),
-                            url.clone(),
-                        )),
+                        Arc::new(
+                            OpenAICore::with_base_url(sec, model.to_string(), url.clone())
+                                .with_image_resolver(image_resolver.clone()),
+                        ),
                         Some(url),
                     ))
                 } else {
-                    Ok((Arc::new(OpenAICore::new(sec, model.to_string())), None))
+                    Ok((
+                        Arc::new(
+                            OpenAICore::new(sec, model.to_string())
+                                .with_image_resolver(image_resolver.clone()),
+                        ),
+                        None,
+                    ))
                 }
             }
             LLMProvider::Anthropic => {
@@ -112,7 +123,11 @@ impl Kernel {
                     AnthropicCore::new(sec, model.to_string())
                 };
                 Ok((
-                    Arc::new(adapter.with_max_tokens(self.config.llm.max_tokens)),
+                    Arc::new(
+                        adapter
+                            .with_max_tokens(self.config.llm.max_tokens)
+                            .with_image_resolver(image_resolver.clone()),
+                    ),
                     resolved_url,
                 ))
             }
@@ -129,7 +144,13 @@ impl Kernel {
                     "Missing 'gemini_api_key' in vault. Please store it first.".to_string()
                 })?;
                 let sec = SecretString::new(entry.as_str().to_string());
-                Ok((Arc::new(GeminiCore::new(sec, model.to_string())), None))
+                Ok((
+                    Arc::new(
+                        GeminiCore::new(sec, model.to_string())
+                            .with_image_resolver(image_resolver.clone()),
+                    ),
+                    None,
+                ))
             }
             LLMProvider::Custom(custom_name) => {
                 // Check the provider catalog first for known providers.
@@ -164,7 +185,12 @@ impl Kernel {
                         model.to_string()
                     };
                     Ok((
-                        Arc::new(CustomCore::new(sec, effective_model, url.clone())),
+                        Arc::new(
+                            CustomCore::new(sec, effective_model, url.clone())
+                                .with_vision_models(catalog_entry.vision_models.clone())
+                                .with_image_resolver(image_resolver.clone())
+                                .with_catalog_overrides(&catalog_entry),
+                        ),
                         Some(url),
                     ))
                 } else {
@@ -191,7 +217,10 @@ impl Kernel {
                             "Missing custom LLM endpoint. Provide --base-url, set AGENTOS_LLM_URL, or configure llm.custom_base_url in config.".to_string()
                         })?;
                     Ok((
-                        Arc::new(CustomCore::new(sec, model.to_string(), url.clone())),
+                        Arc::new(
+                            CustomCore::new(sec, model.to_string(), url.clone())
+                                .with_image_resolver(image_resolver.clone()),
+                        ),
                         Some(url),
                     ))
                 }
@@ -796,6 +825,7 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         skip_checkpoint: false,
                         thinking_level: ThinkingLevel::Off,
                         spawner_agent_id: None,
+                        tool_categories: None,
                     };
                     self.scheduler.enqueue(onboarding_task).await;
                     onboarding_task_id_opt = Some(onboarding_task_id);
@@ -939,6 +969,170 @@ Once you have explored, briefly summarise what you found and confirm you are rea
         KernelResponse::Success { data: None }
     }
 
+    /// Permanently remove an agent from the ecosystem.
+    ///
+    /// Unlike `cmd_disconnect_agent` which only marks the agent Offline (preserving the
+    /// profile + pubkey so reconnect reuses the UUID), this wipes every persisted slice
+    /// of agent state:
+    ///   - registry profile (so re-adding triggers a fresh UUID + onboarding task)
+    ///   - message-bus pubkey (so the old key cannot be replayed)
+    ///   - active LLM adapter, rate-limit slot, cost tracker entry, event subscriptions
+    ///   - episodic / semantic / procedural memory rows
+    ///   - memory blocks, scratchpad pages, agent inbox, agent message inbox
+    ///   - checkpoints, schedules created by the agent
+    ///
+    /// Intentionally preserved:
+    ///   - vault secrets (so API keys keyed by `<name>_<provider>_api_key` survive
+    ///     re-onboarding) — use `secret revoke` to remove these explicitly.
+    ///   - audit log (append-only by design).
+    pub(crate) async fn cmd_remove_agent(&self, agent_id: AgentID) -> KernelResponse {
+        let agent_name = {
+            let registry = self.agent_registry.read().await;
+            match registry.get_by_id(&agent_id) {
+                Some(p) => p.name.clone(),
+                None => {
+                    return KernelResponse::Error {
+                        message: format!("Agent '{}' not found", agent_id),
+                    }
+                }
+            }
+        };
+
+        // Evict live runtime state (mirrors disconnect, but applies whether online or offline).
+        self.active_llms.write().await.remove(&agent_id);
+        self.per_agent_rate_limiter.lock().await.remove(&agent_name);
+        self.cost_tracker.unregister_agent(&agent_id).await;
+        let agent_subs = self.event_bus.list_subscriptions_for_agent(&agent_id).await;
+        for sub in &agent_subs {
+            self.event_bus.unsubscribe(&sub.id).await;
+        }
+
+        // Wipe persisted slices. Each call returns a count for the audit summary; failures
+        // are logged but non-fatal so a corrupt store cannot pin an agent in the registry.
+        let mut wipe = serde_json::Map::new();
+
+        match self.episodic_memory.delete_by_agent(&agent_id).await {
+            Ok(n) => {
+                wipe.insert("episodic".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: episodic wipe failed")
+            }
+        }
+        match self.semantic_memory.delete_by_agent(&agent_id).await {
+            Ok(n) => {
+                wipe.insert("semantic".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: semantic wipe failed")
+            }
+        }
+        match self.procedural_memory.delete_by_agent(&agent_id).await {
+            Ok(n) => {
+                wipe.insert("procedural".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: procedural wipe failed")
+            }
+        }
+        match self.memory_blocks.delete_all_for_agent(&agent_id) {
+            Ok(n) => {
+                wipe.insert("memory_blocks".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: memory_blocks wipe failed")
+            }
+        }
+        match self.agent_inbox.delete_all_for_agent(agent_id).await {
+            Ok(n) => {
+                wipe.insert("agent_inbox".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: agent_inbox wipe failed")
+            }
+        }
+        match self
+            .agent_message_inbox
+            .delete_all_for_agent(agent_id)
+            .await
+        {
+            Ok(n) => {
+                wipe.insert("agent_messages".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: agent_messages wipe failed")
+            }
+        }
+        match self
+            .scratchpad_store
+            .delete_all_for_agent(&agent_id.to_string())
+            .await
+        {
+            Ok(n) => {
+                wipe.insert("scratchpad_pages".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: scratchpad wipe failed")
+            }
+        }
+        match self.checkpoint_store.delete_for_agent(&agent_id).await {
+            Ok(n) => {
+                wipe.insert("checkpoints".into(), serde_json::json!(n));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, agent_id = %agent_id, "remove_agent: checkpoint wipe failed")
+            }
+        }
+        let schedules_removed = self.schedule_manager.delete_all_for_creator(agent_id).await;
+        wipe.insert("schedules".into(), serde_json::json!(schedules_removed));
+
+        // Drop the pubkey BEFORE removing the registry profile so a concurrent reconnect
+        // sees an empty pubkey slot and proceeds along the new-agent path.
+        self.message_bus.deregister_pubkey(&agent_id).await;
+
+        {
+            let mut registry = self.agent_registry.write().await;
+            registry.remove(&agent_id);
+        }
+
+        self.audit_log(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: agentos_audit::AuditEventType::AgentRemoved,
+            agent_id: Some(agent_id),
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({
+                "agent_name": agent_name,
+                "wipe_summary": wipe,
+            }),
+            severity: agentos_audit::AuditSeverity::Security,
+            reversible: false,
+            rollback_ref: None,
+        });
+
+        self.emit_event(
+            EventType::AgentRemoved,
+            EventSource::AgentLifecycle,
+            EventSeverity::Info,
+            serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "agent_name": agent_name,
+                "wipe_summary": wipe,
+            }),
+            0,
+        )
+        .await;
+
+        KernelResponse::Success {
+            data: Some(serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "agent_name": agent_name,
+                "wipe_summary": wipe,
+            })),
+        }
+    }
+
     /// Change the LLM endpoint URL for a connected agent. The new LLMCore is built
     /// immediately using the same provider/model/credentials and replaces the old one
     /// in `active_llms`, so the change takes effect on the next task without reconnecting.
@@ -972,11 +1166,17 @@ Once you have explored, briefly summarise what you found and confirm you are rea
         };
 
         // Build a new LLMCore with the new URL using the same credentials
+        let image_resolver = self
+            .image_resolver
+            .read()
+            .expect("image_resolver lock poisoned")
+            .clone();
         let new_core: Result<Arc<dyn LLMCore>, String> = match &provider {
             LLMProvider::Ollama => Ok(Arc::new(
                 OllamaCore::new(&url, &model)
                     .with_request_timeout(self.config.ollama.request_timeout_secs)
-                    .with_context_window(self.config.llm.ollama_context_window),
+                    .with_context_window(self.config.llm.ollama_context_window)
+                    .with_image_resolver(image_resolver.clone()),
             )),
             LLMProvider::OpenAI => {
                 let key_result = match self.vault.get(&format!("{}_openai_api_key", name)).await {
@@ -986,11 +1186,10 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                 match key_result {
                     Ok(entry) => {
                         let sec = SecretString::new(entry.as_str().to_string());
-                        Ok(Arc::new(OpenAICore::with_base_url(
-                            sec,
-                            model.clone(),
-                            url.clone(),
-                        )))
+                        Ok(Arc::new(
+                            OpenAICore::with_base_url(sec, model.clone(), url.clone())
+                                .with_image_resolver(image_resolver.clone()),
+                        ))
                     }
                     _ => Err("Missing 'openai_api_key' in vault.".to_string()),
                 }
@@ -1006,7 +1205,8 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         let sec = SecretString::new(entry.as_str().to_string());
                         Ok(Arc::new(
                             AnthropicCore::with_base_url(sec, model.clone(), url.clone())
-                                .with_max_tokens(self.config.llm.max_tokens),
+                                .with_max_tokens(self.config.llm.max_tokens)
+                                .with_image_resolver(image_resolver.clone()),
                         ))
                     }
                     _ => Err("Missing 'anthropic_api_key' in vault.".to_string()),
@@ -1048,7 +1248,16 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         },
                     }
                 };
-                Ok(Arc::new(CustomCore::new(sec, model.clone(), url.clone())))
+                Ok(Arc::new(
+                    CustomCore::new(sec, model.clone(), url.clone())
+                        .with_vision_models(
+                            catalog_entry_opt
+                                .as_ref()
+                                .map(|c| c.vision_models.clone())
+                                .unwrap_or_default(),
+                        )
+                        .with_image_resolver(image_resolver.clone()),
+                ))
             }
         };
 
@@ -1110,7 +1319,7 @@ Once you have explored, briefly summarise what you found and confirm you are rea
             id: MessageID::new(),
             from: from_agent.id,
             to: agentos_types::MessageTarget::Direct(to_agent.id),
-            content: agentos_types::MessageContent::Text(content),
+            content: agentos_types::MessageContent::Text(content.clone()),
             reply_to: None,
             timestamp: now,
             trace_id: TraceID::new(),
@@ -1132,6 +1341,10 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                 };
             }
         }
+
+        self.agent_inbox_writer
+            .write_message(from_agent.id, from_name.clone(), to_agent.id, content)
+            .await;
 
         match self.message_bus.send_direct(msg).await {
             Ok(_) => KernelResponse::Success { data: None },

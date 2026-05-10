@@ -1,8 +1,14 @@
 pub mod a2a_tools;
 pub mod agent_call;
+pub mod agent_inbox_dismiss;
+pub mod agent_inbox_list;
+pub mod agent_inbox_read;
 pub mod agent_list;
 pub mod agent_manual;
 pub mod agent_message;
+pub mod agent_messages_dismiss;
+pub mod agent_messages_list;
+pub mod agent_messages_read;
 pub mod agent_self;
 pub mod archival_insert;
 pub mod archival_search;
@@ -10,11 +16,13 @@ pub mod ask_user;
 pub mod audio;
 pub mod bluetooth;
 pub mod cancel_agent;
+pub mod channel_send;
 pub mod context_memory_read;
 pub mod context_memory_update;
 pub mod coordination;
 pub mod data_parser;
 pub mod datetime;
+pub mod describe_tool;
 pub mod display;
 pub mod episodic_list;
 pub mod escalation_status;
@@ -33,8 +41,10 @@ pub mod file_move;
 pub mod file_reader;
 pub mod file_writer;
 pub mod hardware_info;
+pub mod host_package;
 pub mod http_client;
 pub mod kmc_tools;
+pub mod list_tools;
 pub mod loader;
 pub mod log_reader;
 pub mod memory_block_delete;
@@ -47,6 +57,7 @@ pub mod memory_search;
 pub mod memory_stats;
 pub mod memory_write;
 pub mod network_monitor;
+pub mod network_sockets;
 pub mod notify_user;
 pub mod poll_agent;
 pub mod printer;
@@ -58,18 +69,24 @@ pub mod process_manager;
 pub mod raw_usb;
 pub mod runner;
 pub mod sanitize;
+pub mod schedule_control;
 pub mod schedule_once;
+pub mod schedule_recurring;
 pub mod scratch_delete;
 pub mod scratch_graph;
 pub mod scratch_links;
 pub mod scratch_read;
 pub mod scratch_search;
 pub mod scratch_write;
+pub mod search_tools;
 pub mod set_timer;
 pub mod shell_exec;
 pub mod signing;
 pub(crate) mod ssrf;
 pub mod sys_monitor;
+pub mod system_mounts;
+pub mod system_open_files;
+pub mod system_services;
 pub mod task_delegate;
 pub mod task_list;
 pub mod task_spawn_async;
@@ -77,6 +94,7 @@ pub mod task_status;
 pub mod think;
 pub mod traits;
 pub mod usb_storage;
+pub mod user_file_reader;
 pub mod web_fetch;
 pub mod web_search;
 pub mod webcam;
@@ -84,9 +102,18 @@ pub mod workspace;
 
 pub use a2a_tools::A2ADelegateTool;
 pub use agent_call::AgentCallTool;
+pub use agent_inbox_dismiss::AgentInboxDismissTool;
+pub use agent_inbox_list::AgentInboxListTool;
+pub use agent_inbox_read::AgentInboxReadTool;
 pub use agent_list::AgentListTool;
-pub use agent_manual::AgentManualTool;
+pub use agent_manual::{
+    install_section_embeddings, suggest_manual_sections, suggest_manual_sections_async,
+    AgentManualTool, ManualSection,
+};
 pub use agent_message::AgentMessageTool;
+pub use agent_messages_dismiss::AgentMessagesDismissTool;
+pub use agent_messages_list::AgentMessagesListTool;
+pub use agent_messages_read::AgentMessagesReadTool;
 pub use agent_self::AgentSelfTool;
 pub use archival_insert::ArchivalInsert;
 pub use archival_search::ArchivalSearch;
@@ -94,15 +121,17 @@ pub use ask_user::AskUserTool;
 pub use audio::AudioTool;
 pub use bluetooth::BluetoothTool;
 pub use cancel_agent::CancelAgentTool;
+pub use channel_send::ChannelSendTool;
 pub use coordination::{AwaitAgentsTool, SpawnAgentTool};
 pub use data_parser::DataParser;
 pub use datetime::DatetimeTool;
+pub use describe_tool::DescribeToolTool;
 pub use display::DisplayConfigTool;
 pub use episodic_list::EpisodicList;
 pub use factory::{
     build_single_tool, build_single_tool_with_model_cache,
     build_single_tool_with_model_cache_and_weight, tool_category, tool_category_with_weight,
-    ToolCategory,
+    ToolCategory, CHAT_DEFAULT_TOOL_NAMES, META_TOOL_NAMES,
 };
 pub use file_delete::FileDelete;
 pub use file_diff::FileDiff;
@@ -115,6 +144,7 @@ pub use file_reader::FileReader;
 pub use file_writer::FileWriter;
 pub use hardware_info::HardwareInfoTool;
 pub use http_client::HttpClientTool;
+pub use list_tools::ListToolsTool;
 pub use loader::{load_all_manifests, load_manifest};
 pub use log_reader::LogReaderTool;
 pub use memory_block_delete::MemoryBlockDeleteTool;
@@ -127,6 +157,7 @@ pub use memory_search::MemorySearch;
 pub use memory_stats::MemoryStats;
 pub use memory_write::MemoryWrite;
 pub use network_monitor::NetworkMonitorTool;
+pub use network_sockets::NetworkSocketsTool;
 pub use notify_user::NotifyUserTool;
 pub use poll_agent::PollAgentTool;
 pub use printer::PrinterTool;
@@ -137,21 +168,28 @@ pub use procedure_search::ProcedureSearch;
 pub use process_manager::ProcessManagerTool;
 pub use raw_usb::RawUsbTool;
 pub use runner::ToolRunner;
+pub use schedule_control::ScheduleControlTool;
+pub use schedule_recurring::ScheduleRecurringTool;
 pub use scratch_delete::ScratchDeleteTool;
 pub use scratch_graph::ScratchGraphTool;
 pub use scratch_links::ScratchLinksTool;
 pub use scratch_read::ScratchReadTool;
 pub use scratch_search::ScratchSearchTool;
 pub use scratch_write::ScratchWriteTool;
+pub use search_tools::SearchToolsTool;
 pub use shell_exec::ShellExec;
 pub use signing::{pubkey_hex_from_seed, sign_manifest, signing_payload, verify_manifest};
 pub use sys_monitor::SysMonitorTool;
+pub use system_mounts::SystemMountsTool;
+pub use system_open_files::SystemOpenFilesTool;
+pub use system_services::SystemServicesTool;
 pub use task_delegate::TaskDelegate;
 pub use task_list::TaskListTool;
 pub use task_status::TaskStatusTool;
 pub use think::ThinkTool;
 pub use traits::{AgentTool, ToolExecutionContext};
 pub use usb_storage::UsbStorageTool;
+pub use user_file_reader::UserFileReader;
 pub use web_fetch::WebFetch;
 pub use webcam::WebcamTool;
 
@@ -186,6 +224,7 @@ mod tests {
             capability_dispatcher: None,
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tool_categories: None,
         };
 
         let result = tool.execute(payload, ctx).await.unwrap();
@@ -226,6 +265,7 @@ mod tests {
             capability_dispatcher: None,
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tool_categories: None,
         };
 
         let result = tool.execute(payload, ctx).await.unwrap();
@@ -269,6 +309,7 @@ mod tests {
             capability_dispatcher: None,
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tool_categories: None,
         }
     }
 
@@ -295,6 +336,7 @@ mod tests {
             capability_dispatcher: None,
             storage_zone_query: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tool_categories: None,
         }
     }
 
@@ -1910,7 +1952,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_index_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "index"}), ctx)
@@ -1924,7 +1966,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_tools_section_empty() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "tools"}), ctx)
@@ -1947,6 +1989,10 @@ mod tests {
                 input_schema: None,
                 trust_tier: "core".into(),
                 capability_tags: vec![],
+                category: "core".into(),
+                tags: vec!["read".into()],
+                risk_class: "readonly_scoped".into(),
+                usage_hints: None,
             },
             crate::agent_manual::ToolSummary {
                 name: "http-client".into(),
@@ -1956,9 +2002,13 @@ mod tests {
                 input_schema: None,
                 trust_tier: "core".into(),
                 capability_tags: vec![],
+                category: "core".into(),
+                tags: vec!["network".into()],
+                risk_class: "readonly_external".into(),
+                usage_hints: None,
             },
         ];
-        let tool = crate::agent_manual::AgentManualTool::new(summaries);
+        let tool = crate::agent_manual::AgentManualTool::from_static(summaries);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "tools"}), ctx)
@@ -1984,12 +2034,16 @@ mod tests {
             ),
             trust_tier: "core".into(),
             capability_tags: vec![],
+            category: "core".into(),
+            tags: vec!["read".into()],
+            risk_class: "readonly_scoped".into(),
+            usage_hints: None,
         }];
-        let tool = crate::agent_manual::AgentManualTool::new(summaries);
+        let tool = crate::agent_manual::AgentManualTool::from_static(summaries);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(
-                serde_json::json!({"section": "tool-detail", "name": "file-reader"}),
+                serde_json::json!({"section": "tool-detail", "name": "file-reader", "verbose": true}),
                 ctx,
             )
             .await
@@ -2003,7 +2057,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_tool_detail_not_found() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(
@@ -2018,7 +2072,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_tool_detail_missing_name() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "tool-detail"}), ctx)
@@ -2033,7 +2087,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_permissions_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "permissions"}), ctx)
@@ -2046,25 +2100,22 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_memory_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "memory"}), ctx)
             .await
             .unwrap();
         assert_eq!(result["section"], "memory");
-        let tiers = result["tiers"].as_array().unwrap();
-        assert_eq!(tiers.len(), 3);
-        let tier_names: Vec<&str> = tiers.iter().map(|t| t["tier"].as_str().unwrap()).collect();
-        assert!(tier_names.contains(&"semantic"));
-        assert!(tier_names.contains(&"episodic"));
-        assert!(tier_names.contains(&"procedural"));
+        // Empty registry → empty tools list with hint summary.
+        assert_eq!(result["tool_count"], 0);
+        assert!(result["tools"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn test_agent_manual_events_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "events"}), ctx)
@@ -2079,7 +2130,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_commands_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "commands"}), ctx)
@@ -2092,7 +2143,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_errors_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "errors"}), ctx)
@@ -2111,7 +2162,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_feedback_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "feedback"}), ctx)
@@ -2125,7 +2176,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_invalid_section() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"section": "nonexistent"}), ctx)
@@ -2139,7 +2190,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_missing_section_field() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         let ctx = make_context(dir.path());
         let result = tool
             .execute(serde_json::json!({"query": "hello"}), ctx)
@@ -2154,7 +2205,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_manual_requires_no_permissions() {
         let dir = TempDir::new().unwrap();
-        let tool = crate::agent_manual::AgentManualTool::new(vec![]);
+        let tool = crate::agent_manual::AgentManualTool::from_static(vec![]);
         // Use an empty permission set — should still work
         let ctx = make_context_with_permissions(dir.path(), PermissionSet::new());
         let result = tool
@@ -2170,15 +2221,21 @@ mod tests {
     async fn test_agent_manual_registered_with_summaries() {
         let dir = TempDir::new().unwrap();
         let mut runner = ToolRunner::new(dir.path()).unwrap();
-        runner.register_agent_manual(vec![crate::agent_manual::ToolSummary {
-            name: "test-tool".into(),
-            description: "A test".into(),
-            version: "0.1.0".into(),
-            permissions: vec![],
-            input_schema: None,
-            trust_tier: "core".into(),
-            capability_tags: vec![],
-        }]);
+        runner.register_agent_manual(std::sync::Arc::new(tokio::sync::RwLock::new(vec![
+            crate::agent_manual::ToolSummary {
+                name: "test-tool".into(),
+                description: "A test".into(),
+                version: "0.1.0".into(),
+                permissions: vec![],
+                input_schema: None,
+                trust_tier: "core".into(),
+                capability_tags: vec![],
+                category: "core".into(),
+                tags: vec!["read".into()],
+                risk_class: "readonly_scoped".into(),
+                usage_hints: None,
+            },
+        ])));
         let tools = runner.list_tools();
         assert!(tools.contains(&"agent-manual".to_string()));
 

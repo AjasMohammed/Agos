@@ -1,6 +1,6 @@
 use crate::injection_scanner::ThreatLevel;
 use crate::kernel::Kernel;
-use crate::system_prompt::{self, SubAgentContext, SystemPromptContext};
+use crate::system_prompt::{self, ChannelHint, SubAgentContext, SystemPromptContext};
 use agentos_types::*;
 
 impl Kernel {
@@ -16,7 +16,21 @@ impl Kernel {
         task_trace_id: &TraceID,
     ) -> anyhow::Result<(String, String, String, crate::retrieval_gate::RetrievalPlan)> {
         // 1. Collect elements for CompilationInputs
-        let tools_desc = self.tool_registry.read().await.tools_for_prompt();
+        let base_tools_desc = self.tool_registry.read().await.tools_for_prompt();
+        // Append recently-used tool hint from the in-memory LRU (cap 10 per agent).
+        let tools_desc = {
+            let lru_guard = self.agent_tool_lru.read().await;
+            if let Some(recent) = lru_guard.get(&task.agent_id) {
+                if !recent.is_empty() {
+                    let names: Vec<&str> = recent.iter().map(|s| s.as_str()).collect();
+                    format!("{}\nRecently used: {}.", base_tools_desc, names.join(", "))
+                } else {
+                    base_tools_desc
+                }
+            } else {
+                base_tools_desc
+            }
+        };
         let agent_directory = self.build_agent_directory(&task.agent_id).await;
 
         // Build system prompt from the canonical builder — same prompt structure
@@ -44,7 +58,25 @@ impl Kernel {
             spawn_depth: task.spawn_depth,
         });
 
-        let system_prompt = system_prompt::build_system_prompt(&SystemPromptContext {
+        // Tier-0 channel awareness: pull connected channels at task start so the
+        // agent always knows what's available. Skipped silently on registry
+        // errors — better to omit the block than fail the whole task.
+        let connected_channels: Vec<ChannelHint> = match self.channel_registry.list_active().await {
+            Ok(list) => list
+                .into_iter()
+                .filter(|c| c.active)
+                .map(|c| ChannelHint {
+                    name: c.display_name,
+                    kind: c.kind.to_string(),
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to list channels for system prompt; omitting block");
+                Vec::new()
+            }
+        };
+
+        let mut system_prompt = system_prompt::build_system_prompt(&SystemPromptContext {
             agent_name,
             agent_description,
             agent_roles,
@@ -53,7 +85,16 @@ impl Kernel {
             // Task execution does not stream through the chat output filter,
             // so the `<final>` enforcement convention does not apply.
             enforce_final_tag: false,
+            timezone: system_prompt::local_timezone_str(),
+            connected_channels,
         });
+        let inbox_segment = crate::agent_inbox_prompt::InboxPromptRenderer::new(
+            self.agent_inbox.clone(),
+            self.agent_message_inbox.clone(),
+        )
+        .render_segment(task.agent_id)
+        .await;
+        system_prompt.push_str(&inbox_segment);
 
         // We initialize context with empty string; Compiler injects the true system prompt
         // into the compiled ContextWindow at each iteration.
@@ -63,6 +104,22 @@ impl Kernel {
             .create_context(task.id, task.agent_id, "")
             .await;
 
+        // Override the per-task token budget with the LLM adapter's actual
+        // context window. Lets compaction + tool-result truncation track
+        // model size: an 8k local model triggers compaction at its 80%, a
+        // 200k Claude task at its own 80% — instead of one global threshold.
+        if let Some(adapter) = {
+            let active = self.active_llms.read().await;
+            active.get(&task.agent_id).cloned()
+        } {
+            let window = adapter.capabilities().context_window_tokens as usize;
+            if window > 0 {
+                self.context_manager
+                    .set_task_token_budget(&task.id, window)
+                    .await;
+            }
+        }
+
         // 2. Push the user's prompt into context (pinned — original task is always kept).
         // Guard against duplicates on task resume (escalation approval, checkpoint restore).
         if !self.context_manager.is_prompt_pushed(&task.id).await {
@@ -71,7 +128,9 @@ impl Kernel {
                     &task.id,
                     ContextEntry {
                         role: ContextRole::User,
-                        content: task.original_prompt.clone(),
+                        parts: vec![ContentPart::Text {
+                            text: task.original_prompt.clone(),
+                        }],
                         timestamp: chrono::Utc::now(),
                         metadata: None,
                         importance: 0.95,

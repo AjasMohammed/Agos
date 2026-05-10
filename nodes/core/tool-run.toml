@@ -1,0 +1,43 @@
+[node]
+id = "tool-run"
+version = 1
+display_name = "Tool Run"
+description = "Execute any installed AgentOS tool directly with explicit parameters."
+category = "core"
+icon = "tool"
+color = "#f59e0b"
+risk_class = "exec_capable"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "tool_name"
+display_name = "Tool"
+type = "resource_picker"
+required = true
+description = "The tool to execute."
+[node.properties.type_options]
+resource = "tools"
+
+[[node.properties]]
+name = "parameters"
+display_name = "Parameters (JSON)"
+type = "json"
+required = false
+description = "Input parameters to pass to the tool as a JSON object."
+
+[[node.properties]]
+name = "timeout_minutes"
+display_name = "Timeout (minutes)"
+type = "number"
+required = false
+default = 5
+
+[node.execute]
+kind = "builtin"
+name = "dynamic_tool"

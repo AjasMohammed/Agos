@@ -139,7 +139,7 @@ impl KernelChatBridge {
 
         let result = tokio::time::timeout(
             Duration::from_secs(CHANNEL_CHAT_TIMEOUT_SECS),
-            k.chat_infer_with_tools(agent_name, &hist, user_message),
+            k.chat_infer_with_tools(agent_name, &hist, user_message, None, None),
         )
         .await
         .map_err(|_| {

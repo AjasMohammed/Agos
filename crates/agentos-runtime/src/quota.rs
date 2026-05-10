@@ -168,8 +168,8 @@ mod tests {
         });
         let agent = AgentID::new();
         let containers = vec![
-            make_info(agent.clone(), 512 * 1024 * 1024, 0.5),
-            make_info(agent.clone(), 512 * 1024 * 1024, 0.5),
+            make_info(agent, 512 * 1024 * 1024, 0.5),
+            make_info(agent, 512 * 1024 * 1024, 0.5),
         ];
         let spec = make_spec(512 * 1024 * 1024, 0.5);
         assert!(enforcer.check(&agent, &spec, &containers).await.is_err());
@@ -183,7 +183,7 @@ mod tests {
         });
         let agent = AgentID::new();
         let containers = vec![make_info(
-            agent.clone(),
+            agent,
             1536 * 1024 * 1024, // 1.5 GiB
             0.5,
         )];
@@ -198,7 +198,7 @@ mod tests {
             ..Default::default()
         });
         let agent = AgentID::new();
-        let containers = vec![make_info(agent.clone(), 512 * 1024 * 1024, 1.5)];
+        let containers = vec![make_info(agent, 512 * 1024 * 1024, 1.5)];
         let spec = make_spec(512 * 1024 * 1024, 1.0); // total 2.5 > 2.0
         assert!(enforcer.check(&agent, &spec, &containers).await.is_err());
     }
@@ -212,7 +212,7 @@ mod tests {
         let agent_a = AgentID::new();
         let agent_b = AgentID::new();
         let containers = vec![
-            make_info(agent_b.clone(), 1024 * 1024 * 1024, 1.0),
+            make_info(agent_b, 1024 * 1024 * 1024, 1.0),
             make_info(agent_b, 1024 * 1024 * 1024, 1.0),
         ];
         let spec = make_spec(512 * 1024 * 1024, 0.5);
@@ -231,7 +231,7 @@ mod tests {
         // Override with higher limit
         enforcer
             .set_quota(
-                agent.clone(),
+                agent,
                 ContainerQuota {
                     max_containers: 5,
                     ..Default::default()
@@ -240,8 +240,8 @@ mod tests {
             .await;
 
         let containers = vec![
-            make_info(agent.clone(), 512 * 1024 * 1024, 0.5),
-            make_info(agent.clone(), 512 * 1024 * 1024, 0.5),
+            make_info(agent, 512 * 1024 * 1024, 0.5),
+            make_info(agent, 512 * 1024 * 1024, 0.5),
         ];
         let spec = make_spec(512 * 1024 * 1024, 0.5);
         assert!(enforcer.check(&agent, &spec, &containers).await.is_ok());

@@ -78,6 +78,7 @@ async fn register_mock_agent(kernel: &Kernel, name: &str, responses: Vec<String>
         base_url: None,
         default_thinking_level: ThinkingLevel::Off,
         system_prompt: None,
+        manually_offline: false,
     };
 
     {
@@ -297,10 +298,14 @@ async fn test_sandbox_exec_datetime_smoke() {
         .unwrap();
     let parsed = SandboxExecutor::parse_result(&result).unwrap();
 
-    assert_eq!(parsed["timezone"], "UTC");
+    let offset = parsed["utc_offset"].as_str().expect("utc_offset");
+    assert!(
+        offset.starts_with('+') || offset.starts_with('-'),
+        "expected offset, got {offset:?}"
+    );
     assert!(parsed["unix_timestamp_secs"].as_i64().unwrap() > 0);
-    assert_eq!(parsed["date"].as_str().unwrap().len(), 10);
-    assert_eq!(parsed["time"].as_str().unwrap().len(), 8);
+    assert_eq!(parsed["utc_date"].as_str().unwrap().len(), 10);
+    assert_eq!(parsed["utc_time"].as_str().unwrap().len(), 8);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

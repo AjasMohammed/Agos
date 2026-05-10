@@ -383,6 +383,33 @@ impl ScratchpadStore {
         }
     }
 
+    /// Delete every page (and its link_index rows) belonging to `agent_id`.
+    /// Returns the number of pages removed.
+    pub async fn delete_all_for_agent(&self, agent_id: &str) -> Result<usize, ScratchError> {
+        let conn = self.conn.clone();
+        let agent_id = agent_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let mut db = conn.lock().map_err(internal_err)?;
+            let tx = db.transaction()?;
+            tx.execute(
+                "DELETE FROM link_index WHERE agent_id = ?1",
+                params![&agent_id],
+            )?;
+            let pages_deleted =
+                tx.execute("DELETE FROM pages WHERE agent_id = ?1", params![&agent_id])?;
+            tx.commit()?;
+            debug!(
+                agent_id = %agent_id,
+                pages_deleted,
+                "Deleted all scratchpad pages for agent",
+            );
+            Ok(pages_deleted)
+        })
+        .await
+        .map_err(internal_err)?
+    }
+
     /// Delete a page by agent_id and title.
     pub async fn delete_page(&self, agent_id: &str, title: &str) -> Result<(), ScratchError> {
         let conn = self.conn.clone();

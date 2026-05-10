@@ -1,0 +1,30 @@
+<table
+    hx-get="/schedules/{{ schedule_id }}/runs?state={{ state_filter }}&limit={{ limit }}"
+    hx-trigger="every 10s [document.querySelector('.state-Running') !== null]"
+    hx-target="closest table"
+    hx-swap="outerHTML">
+    <thead>
+        <tr>
+            <th>Run ID</th>
+            <th>Started</th>
+            <th>Completed</th>
+            <th>State</th>
+            <th>Delivered</th>
+            <th>Tools</th>
+            <th>Error</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for r in runs %}
+    <tr class="state-{{ r.state }}">
+        <td><a href="/schedules/runs/{{ r.run_id }}"><code>{{ r.run_id[:8] }}</code></a></td>
+        <td>{{ r.started_at }}</td>
+        <td>{{ r.completed_at or "-" }}</td>
+        <td>{{ r.state }}</td>
+        <td>{{ r.delivered }}</td>
+        <td>{{ r.tool_call_count }}</td>
+        <td>{{ r.error or "" }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>

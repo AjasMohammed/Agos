@@ -1,3 +1,5 @@
+tags = ["meta", "write"]
+
 [manifest]
 name        = "agent-message"
 version     = "1.0.0"

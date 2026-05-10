@@ -176,6 +176,14 @@ pub async fn detail(
                     } else {
                         payload_str
                     };
+
+                    let pretty_payload = serde_json::to_string_pretty(&msg.payload).unwrap_or_default();
+                    let formatted_payload = if pretty_payload.chars().count() > 2000 {
+                        format!("{}…\n\n[Payload truncated for display. Click 'View raw payload' below to see the full content.]", pretty_payload.chars().take(2000).collect::<String>())
+                    } else {
+                        pretty_payload
+                    };
+
                     // IntentMessage carries an IntentType (Read/Write/Message/…),
                     // not a chat-style User/Assistant/Tool role. Expose both so the
                     // template can label and class-scope the badge correctly.
@@ -185,7 +193,7 @@ pub async fn detail(
                         intent,
                         intent_slug,
                         preview,
-                        payload => msg.payload.clone(),
+                        payload => formatted_payload,
                         timestamp => msg.timestamp.to_rfc3339(),
                     }
                 })
@@ -519,6 +527,7 @@ pub async fn resume(
         is_team_coordinator: payload.task.is_team_coordinator,
         skip_checkpoint: payload.task.skip_checkpoint,
         thinking_level: payload.task.thinking_level,
+        tool_categories: payload.task.tool_categories,
     };
 
     let _ = state

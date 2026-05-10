@@ -7,6 +7,7 @@ use crate::types::{
     OutboundMessage,
 };
 use crate::{ChannelAdapter, ChannelHealth};
+use agentos_http::{client, HttpProfile};
 use agentos_types::AgentOSError;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -39,10 +40,7 @@ impl MatrixAdapter {
     ) -> Result<Self, agentos_types::AgentOSError> {
         crate::webhook::validate_server_base_url(&homeserver, "matrix")?;
         Ok(Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(35))
-                .build()
-                .expect("HTTP client build failed"),
+            client: client(HttpProfile::Outbound),
             homeserver: homeserver.trim_end_matches('/').to_string(),
             access_token: Zeroizing::new(access_token),
             rooms,

@@ -1,7 +1,7 @@
 use agentos_bus::client::BusClient;
 use agentos_bus::message::{KernelCommand, KernelResponse};
 use agentos_tools::signing::{pubkey_hex_from_seed, sign_manifest, verify_manifest};
-use agentos_types::ToolManifest;
+use agentos_types::{reject_traversal, ToolManifest};
 use clap::Subcommand;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -131,7 +131,7 @@ fn validate_tool_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() {
         anyhow::bail!("Tool name cannot be empty");
     }
-    if name.contains("..") || name.contains('/') || name.contains('\\') {
+    if reject_traversal(name).is_err() || name.contains('/') || name.contains('\\') {
         anyhow::bail!("Tool name contains path traversal characters: '{}'", name);
     }
     if !name

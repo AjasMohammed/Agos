@@ -20,7 +20,7 @@ required = ["hardware-info", "notify-user", "memory-write"]
 optional = ["network-monitor", "process-manager"]
 
 [permissions]
-required = ["hardware:read", "notification:write", "memory:write"]
+required = ["hardware.system:r", "network.logs:r", "process.list:r", "user.notify:w", "memory.semantic:w", "memory.episodic:w"]
 
 [budget]
 max_cost_per_run = 0.10

@@ -220,6 +220,7 @@ mod tests {
             skip_checkpoint: false,
             thinking_level: Default::default(),
             spawner_agent_id: None,
+            tool_categories: None,
         }
     }
 

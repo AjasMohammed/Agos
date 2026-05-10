@@ -71,6 +71,7 @@ async fn test_tool_execute() {
         capability_dispatcher: None,
         storage_zone_query: None,
         cancellation_token: tokio_util::sync::CancellationToken::new(),
+        tool_categories: None,
     };
 
     let result = tool.execute(payload, context).await.unwrap();

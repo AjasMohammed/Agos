@@ -25,7 +25,7 @@ impl ProcessDriver {
         }
     }
 
-    pub fn list_processes(&self) -> Result<Vec<ProcessEntry>, AgentOSError> {
+    pub fn list_processes(&self, opts: ListOpts) -> Result<ProcessListResult, AgentOSError> {
         let mut sys = self.sys.lock().unwrap_or_else(|e| e.into_inner());
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
@@ -36,7 +36,7 @@ impl ProcessDriver {
                 .single()
                 .unwrap_or_else(chrono::Utc::now);
 
-            processes.push(ProcessEntry {
+            let entry = ProcessEntry {
                 pid: pid.as_u32(),
                 name: process.name().to_string_lossy().to_string(),
                 cpu_usage_percent: process.cpu_usage(),
@@ -50,10 +50,79 @@ impl ProcessDriver {
                     .map(|s| s.to_string_lossy().to_string())
                     .collect::<Vec<_>>()
                     .join(" "),
-            });
+            };
+
+            // Apply filters
+            if let Some(ref name_filter) = opts.name_contains {
+                let filter = name_filter.to_lowercase();
+                if !entry.name.to_lowercase().contains(&filter)
+                    && !entry.command.to_lowercase().contains(&filter)
+                {
+                    continue;
+                }
+            }
+            if let Some(min_mem) = opts.min_memory_mb {
+                if entry.memory_mb < min_mem {
+                    continue;
+                }
+            }
+            if let Some(min_cpu) = opts.min_cpu_percent {
+                if entry.cpu_usage_percent < min_cpu {
+                    continue;
+                }
+            }
+
+            processes.push(entry);
         }
 
-        Ok(processes)
+        let total_matched = processes.len();
+
+        // Sort. Accept common LLM aliases (`cpu_percent`, `memory_mb`, `mem`,
+        // etc.) so small models that hallucinate field names still succeed.
+        let sort_by_raw = opts.sort_by.as_deref().unwrap_or("memory");
+        let sort_by = match sort_by_raw {
+            "memory" | "mem" | "memory_mb" | "mem_mb" | "rss" => "memory",
+            "cpu" | "cpu_percent" | "cpu_usage" | "cpu_usage_percent" => "cpu",
+            "pid" => "pid",
+            "name" | "command" | "process" => "name",
+            "start_time" | "started" | "start" => "start_time",
+            other => {
+                return Err(AgentOSError::HalError(format!(
+                    "invalid sort_by: {}",
+                    other
+                )))
+            }
+        };
+        let order = opts.order.as_deref().unwrap_or("desc");
+
+        match sort_by {
+            "memory" => processes.sort_by_key(|p| p.memory_mb),
+            "cpu" => processes.sort_by(|a, b| {
+                a.cpu_usage_percent
+                    .partial_cmp(&b.cpu_usage_percent)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            "pid" => processes.sort_by_key(|p| p.pid),
+            "name" => processes.sort_by(|a, b| a.name.cmp(&b.name)),
+            "start_time" => processes.sort_by_key(|p| p.start_time),
+            _ => unreachable!("sort_by alias normalization failed"),
+        }
+
+        if order == "desc" {
+            processes.reverse();
+        }
+
+        // Limit
+        let limit = opts.limit.unwrap_or(50).min(500);
+        processes.truncate(limit);
+
+        let returned = processes.len();
+
+        Ok(ProcessListResult {
+            processes,
+            total_matched,
+            returned,
+        })
     }
 
     pub fn kill_process(&self, target_pid: u32) -> Result<(), AgentOSError> {
@@ -115,7 +184,8 @@ impl HalDriver for ProcessDriver {
 
         match action {
             "list" => {
-                let procs = self.list_processes()?;
+                let procs =
+                    self.list_processes(serde_json::from_value(params).unwrap_or_default())?;
                 Ok(serde_json::to_value(procs)
                     .map_err(|e| AgentOSError::HalError(e.to_string()))?)
             }
@@ -154,8 +224,110 @@ mod tests {
     #[test]
     fn test_process_list_returns_self() {
         let driver = ProcessDriver::new();
-        let procs = driver.list_processes().unwrap();
+        let opts = ListOpts {
+            limit: Some(500),
+            ..Default::default()
+        };
+        let procs = driver.list_processes(opts).unwrap();
         let self_pid = std::process::id();
-        assert!(procs.iter().any(|p| p.pid == self_pid));
+        assert!(procs.processes.iter().any(|p| p.pid == self_pid));
     }
+
+    #[test]
+    fn test_list_sorted_by_memory_desc() {
+        let driver = ProcessDriver::new();
+        let opts = ListOpts {
+            sort_by: Some("memory".into()),
+            order: Some("desc".into()),
+            limit: Some(10),
+            ..Default::default()
+        };
+        let procs = driver.list_processes(opts).unwrap();
+        assert!(procs.processes.len() <= 10);
+        if procs.processes.len() > 1 {
+            for i in 0..procs.processes.len() - 1 {
+                assert!(procs.processes[i].memory_mb >= procs.processes[i + 1].memory_mb);
+            }
+        }
+    }
+
+    #[test]
+    fn test_list_filtered_by_name_contains() {
+        let driver = ProcessDriver::new();
+        // Use a name that is likely to exist, like "cargo" or "rustc" or "sh"
+        let opts = ListOpts {
+            name_contains: Some("cargo".into()),
+            ..Default::default()
+        };
+        let procs = driver.list_processes(opts).unwrap();
+        for p in procs.processes {
+            assert!(
+                p.name.to_lowercase().contains("cargo")
+                    || p.command.to_lowercase().contains("cargo")
+            );
+        }
+    }
+
+    #[test]
+    fn test_list_limit_capped_at_500() {
+        let driver = ProcessDriver::new();
+        let opts = ListOpts {
+            limit: Some(1000),
+            ..Default::default()
+        };
+        let procs = driver.list_processes(opts).unwrap();
+        assert!(procs.processes.len() <= 500);
+    }
+
+    #[test]
+    fn test_invalid_sort_by_rejected() {
+        let driver = ProcessDriver::new();
+        let opts = ListOpts {
+            sort_by: Some("invalid".into()),
+            ..Default::default()
+        };
+        let res = driver.list_processes(opts);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_sort_by_aliases_accepted() {
+        let driver = ProcessDriver::new();
+        for alias in [
+            "cpu_percent",
+            "cpu_usage",
+            "memory_mb",
+            "mem",
+            "started",
+            "command",
+        ] {
+            let opts = ListOpts {
+                sort_by: Some(alias.into()),
+                limit: Some(1),
+                ..Default::default()
+            };
+            assert!(
+                driver.list_processes(opts).is_ok(),
+                "alias '{}' should be accepted",
+                alias
+            );
+        }
+    }
+}
+
+#[derive(Default, Debug, serde::Deserialize)]
+pub struct ListOpts {
+    pub sort_by: Option<String>,
+    pub order: Option<String>,
+    pub limit: Option<usize>,
+    pub name_contains: Option<String>,
+    pub min_memory_mb: Option<u64>,
+    pub min_cpu_percent: Option<f32>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ProcessListResult {
+    pub processes: Vec<ProcessEntry>,
+    pub total_matched: usize,
+    pub returned: usize,
 }

@@ -92,16 +92,27 @@ pub trait LLMCore: Send + Sync {
     /// The default implementation uses a characters/4 heuristic; adapters with
     /// access to a real tokenizer can override this for higher accuracy.
     fn estimate_tokens(&self, context: &ContextWindow, tools: &[ToolManifest]) -> u64 {
-        let content_chars: usize = context
-            .active_entries()
-            .iter()
-            .map(|e| e.content.len())
-            .sum();
+        let mut content_chars: usize = 0;
+        let mut image_units: u64 = 0;
+        for e in context.active_entries() {
+            for p in &e.parts {
+                match p {
+                    agentos_types::ContentPart::Text { text } => content_chars += text.len(),
+                    agentos_types::ContentPart::Image { .. } => image_units += 1,
+                }
+            }
+        }
         let tool_chars: usize = tools
             .iter()
             .map(|t| t.manifest.description.len() + t.manifest.name.len() + 100)
             .sum();
-        ((content_chars + tool_chars) as f64 / 4.0).ceil() as u64
+        let base = ((content_chars + tool_chars) as f64 / 4.0).ceil() as u64;
+        base.saturating_add(image_units.saturating_mul(1500))
+    }
+
+    /// Whether this adapter emits native image blocks (`supports_images` cap).
+    fn supports_images(&self) -> bool {
+        self.capabilities().supports_images
     }
 
     /// Get the model's capabilities (context window size, etc.)
@@ -125,13 +136,15 @@ mod tests {
         ToolCapabilities, ToolExecutor, ToolInfo, ToolOutputs, ToolSandbox, ToolSchema,
     };
     use agentos_types::{
-        ContextCategory, ContextEntry, ContextPartition, ContextRole, ContextWindow,
+        ContentPart, ContextCategory, ContextEntry, ContextPartition, ContextRole, ContextWindow,
     };
 
     fn make_entry(role: ContextRole, content: &str) -> ContextEntry {
         ContextEntry {
             role,
-            content: content.to_string(),
+            parts: vec![ContentPart::Text {
+                text: content.to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,
@@ -169,6 +182,7 @@ mod tests {
                 trust_tier: TrustTier::Core,
                 tags: None,
                 capability_tags: vec![],
+                group: String::new(),
             },
             capabilities_required: ToolCapabilities {
                 permissions: vec![],
@@ -191,6 +205,8 @@ mod tests {
             executor: ToolExecutor::default(),
             fallbacks: vec![],
             risk_class: Default::default(),
+            usage_hints: None,
+            tags: vec![],
         };
         // name(11) + description(12) + overhead(100) = 123 chars → ceil(123/4) = 31
         let estimate = mock.estimate_tokens(&ctx, &[manifest]);

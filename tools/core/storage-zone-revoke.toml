@@ -1,3 +1,5 @@
+tags = ["write"]
+
 [manifest]
 name = "storage-zone-revoke"
 version = "1.0.0"

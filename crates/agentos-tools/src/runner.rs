@@ -1,13 +1,20 @@
 use crate::a2a_tools::A2ADelegateTool;
 use crate::agent_call::AgentCallTool;
+use crate::agent_inbox_dismiss::AgentInboxDismissTool;
+use crate::agent_inbox_list::AgentInboxListTool;
+use crate::agent_inbox_read::AgentInboxReadTool;
 use crate::agent_list::AgentListTool;
 use crate::agent_message::AgentMessageTool;
+use crate::agent_messages_dismiss::AgentMessagesDismissTool;
+use crate::agent_messages_list::AgentMessagesListTool;
+use crate::agent_messages_read::AgentMessagesReadTool;
 use crate::archival_insert::ArchivalInsert;
 use crate::archival_search::ArchivalSearch;
 use crate::ask_user::AskUserTool;
 use crate::audio::AudioTool;
 use crate::bluetooth::BluetoothTool;
 use crate::cancel_agent::CancelAgentTool;
+use crate::channel_send::ChannelSendTool;
 use crate::context_memory_read::ContextMemoryReadTool;
 use crate::context_memory_update::ContextMemoryUpdateTool;
 use crate::coordination::{AwaitAgentsTool, SpawnAgentTool, VerifyOutputTool};
@@ -30,6 +37,7 @@ use crate::file_move::FileMove;
 use crate::file_reader::FileReader;
 use crate::file_writer::FileWriter;
 use crate::hardware_info::HardwareInfoTool;
+use crate::host_package::{resolve_escalator, EscalatorPolicy, HostPackageInstallTool};
 use crate::http_client::HttpClientTool;
 use crate::log_reader::LogReaderTool;
 use crate::memory_block_delete::MemoryBlockDeleteTool;
@@ -51,7 +59,9 @@ use crate::procedure_list::ProcedureList;
 use crate::procedure_search::ProcedureSearch;
 use crate::process_manager::ProcessManagerTool;
 use crate::raw_usb::RawUsbTool;
+use crate::schedule_control::ScheduleControlTool;
 use crate::schedule_once::{CancelOnceJobTool, ListOnceJobsTool, ScheduleOnceTool};
+use crate::schedule_recurring::ScheduleRecurringTool;
 use crate::set_timer::{CancelTimerTool, ListTimersTool, SetTimerTool};
 use crate::shell_exec::ShellExec;
 use crate::sys_monitor::SysMonitorTool;
@@ -62,6 +72,7 @@ use crate::task_status::TaskStatusTool;
 use crate::think::ThinkTool;
 use crate::traits::{AgentTool, ToolExecutionContext};
 use crate::usb_storage::UsbStorageTool;
+use crate::user_file_reader::UserFileReader;
 use crate::web_fetch::WebFetch;
 use crate::web_search::WebSearchTool;
 use crate::webcam::WebcamTool;
@@ -186,6 +197,15 @@ impl ToolRunner {
         self.register(Box::new(ContextMemoryUpdateTool::new()));
         self.register(Box::new(DataParser::new()));
         self.register(Box::new(ShellExec::new()));
+        // host-package-install is registered with an empty allowlist + no
+        // escalator by default. Operator must opt in by setting
+        // [tools.host_package].enabled = true and rebuilding the runner with
+        // a real config. Until then any call returns an explanatory error.
+        self.register(Box::new(HostPackageInstallTool::new(
+            Vec::new(),
+            Vec::new(),
+            resolve_escalator(&EscalatorPolicy::None),
+        )));
         self.register(Box::new(AgentMessageTool::new()));
         self.register(Box::new(TaskDelegate::new()));
         self.register(Box::new(TaskSpawnAsyncTool::new()));
@@ -212,10 +232,18 @@ impl ToolRunner {
             Err(e) => tracing::error!("Failed to initialize web-fetch tool: {}", e),
         }
         self.register(Box::new(WebSearchTool::new()));
+        self.register(Box::new(UserFileReader::new()));
         self.register(Box::new(FileDiff::new()));
         self.register(Box::new(EscalationStatusTool::new()));
         self.register(Box::new(AgentListTool::new()));
+        self.register(Box::new(AgentInboxListTool::new()));
+        self.register(Box::new(AgentInboxReadTool::new()));
+        self.register(Box::new(AgentInboxDismissTool::new()));
+        self.register(Box::new(AgentMessagesListTool::new()));
+        self.register(Box::new(AgentMessagesReadTool::new()));
+        self.register(Box::new(AgentMessagesDismissTool::new()));
         self.register(Box::new(NotifyUserTool::new()));
+        self.register(Box::new(ChannelSendTool::new()));
         self.register(Box::new(AskUserTool::new()));
         self.register(Box::new(TaskStatusTool::new()));
         self.register(Box::new(TaskListTool::new()));
@@ -236,6 +264,8 @@ impl ToolRunner {
         self.register(Box::new(CancelTimerTool::new()));
         self.register(Box::new(ListTimersTool::new()));
         self.register(Box::new(ScheduleOnceTool::new()));
+        self.register(Box::new(ScheduleRecurringTool::new()));
+        self.register(Box::new(ScheduleControlTool::new()));
         self.register(Box::new(CancelOnceJobTool::new()));
         self.register(Box::new(ListOnceJobsTool::new()));
 
@@ -300,11 +330,60 @@ impl ToolRunner {
         )));
     }
 
-    /// Register the agent-manual tool with a snapshot of tool summaries.
+    /// Register the agent-manual tool with a shared tool catalogue.
     /// Called by the kernel after the tool registry is fully loaded, so the
     /// manual has an accurate view of all available tools.
-    pub fn register_agent_manual(&mut self, tool_summaries: Vec<crate::agent_manual::ToolSummary>) {
+    pub fn register_agent_manual(
+        &mut self,
+        tool_summaries: crate::agent_manual::SharedToolSummaries,
+    ) {
         self.register(Box::new(crate::agent_manual::AgentManualTool::new(
+            tool_summaries,
+        )));
+    }
+
+    /// Register the agent-manual tool with both the tool catalogue and a live
+    /// view of connected channels. The manual filters per-platform sections to
+    /// match what the operator has actually wired up.
+    pub fn register_agent_manual_with_channels(
+        &mut self,
+        tool_summaries: crate::agent_manual::SharedToolSummaries,
+        connected_channels: crate::agent_manual::SharedConnectedChannels,
+    ) {
+        self.register(Box::new(
+            crate::agent_manual::AgentManualTool::new_with_channels(
+                tool_summaries,
+                connected_channels,
+            ),
+        ));
+    }
+
+    /// Register the list-tools tool with a shared tool catalogue.
+    pub fn register_list_tools(
+        &mut self,
+        tool_summaries: crate::agent_manual::SharedToolSummaries,
+    ) {
+        self.register(Box::new(crate::list_tools::ListToolsTool::new(
+            tool_summaries,
+        )));
+    }
+
+    /// Register the describe-tool tool with a shared tool catalogue.
+    pub fn register_describe_tool(
+        &mut self,
+        tool_summaries: crate::agent_manual::SharedToolSummaries,
+    ) {
+        self.register(Box::new(crate::describe_tool::DescribeToolTool::new(
+            tool_summaries,
+        )));
+    }
+
+    /// Register the search-tools tool with a shared tool catalogue.
+    pub fn register_search_tools(
+        &mut self,
+        tool_summaries: crate::agent_manual::SharedToolSummaries,
+    ) {
+        self.register(Box::new(crate::search_tools::SearchToolsTool::new(
             tool_summaries,
         )));
     }
@@ -315,8 +394,64 @@ impl ToolRunner {
     /// can report the complete tool list to the calling agent.  The list of
     /// available names can be obtained from `self.list_tools()` before calling
     /// this method.
-    pub fn register_agent_self(&mut self, tool_names: Vec<String>) {
-        self.register(Box::new(crate::agent_self::AgentSelfTool::new(tool_names)));
+    pub fn register_agent_self(&mut self, tool_count: usize) {
+        self.register(Box::new(crate::agent_self::AgentSelfTool::new(tool_count)));
+    }
+
+    /// Suggest up to `limit` registered tool names closest to `name` by
+    /// case-insensitive Levenshtein distance, with a substring tie-breaker.
+    /// Used to enrich `ToolNotFound` errors so a model that hallucinates
+    /// a tool name (`user-file-reader` vs `file-reader`) gets back a
+    /// usable hint in one round-trip instead of looping.
+    fn suggest_close_tool_names(&self, name: &str, limit: usize) -> Vec<String> {
+        fn levenshtein(a: &str, b: &str) -> usize {
+            let a: Vec<char> = a.chars().collect();
+            let b: Vec<char> = b.chars().collect();
+            let (n, m) = (a.len(), b.len());
+            if n == 0 {
+                return m;
+            }
+            if m == 0 {
+                return n;
+            }
+            let mut prev: Vec<usize> = (0..=m).collect();
+            let mut curr = vec![0usize; m + 1];
+            for i in 1..=n {
+                curr[0] = i;
+                for j in 1..=m {
+                    let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+                    curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+                }
+                std::mem::swap(&mut prev, &mut curr);
+            }
+            prev[m]
+        }
+
+        let needle = name.to_lowercase();
+        let mut all: Vec<String> = self.tools.keys().cloned().collect();
+        if let Ok(dynamic) = self.dynamic_tools.read() {
+            all.extend(dynamic.keys().cloned());
+        }
+
+        let mut scored: Vec<(usize, bool, &String)> = all
+            .iter()
+            .map(|cand| {
+                let cand_lower = cand.to_lowercase();
+                let dist = levenshtein(&needle, &cand_lower);
+                let contains = cand_lower.contains(&needle) || needle.contains(&cand_lower);
+                (dist, !contains, cand)
+            })
+            .collect();
+        scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        // Reject suggestions that are wildly different (more than half the chars).
+        let max_dist = (needle.len() / 2).max(3);
+        scored
+            .into_iter()
+            .filter(|(d, _, _)| *d <= max_dist)
+            .take(limit)
+            .map(|(_, _, s)| s.clone())
+            .collect()
     }
 
     /// Execute a tool by name. Returns the JSON result.
@@ -334,6 +469,42 @@ impl ToolRunner {
         // exclusive access across concurrent agents.
         context.file_lock_registry = Some(self.file_lock_registry.clone());
 
+        // Auto-correct `_` ↔ `-` typos before lookup. Small models often emit
+        // `describe_tool` for `describe-tool` (Python-naming bias). Re-resolve
+        // against the actual registry; only takes effect if the alternate
+        // spelling exists. Saves a wasted iteration for every typo.
+        let resolved_name: String = if !self.tools.contains_key(tool_name)
+            && !self
+                .dynamic_tools
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(tool_name)
+        {
+            let alternates = [tool_name.replace('_', "-"), tool_name.replace('-', "_")];
+            alternates
+                .into_iter()
+                .find(|alt| {
+                    alt != tool_name
+                        && (self.tools.contains_key(alt.as_str())
+                            || self
+                                .dynamic_tools
+                                .read()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .contains_key(alt.as_str()))
+                })
+                .unwrap_or_else(|| tool_name.to_string())
+        } else {
+            tool_name.to_string()
+        };
+        if resolved_name != tool_name {
+            tracing::info!(
+                requested = tool_name,
+                resolved = %resolved_name,
+                "Tool name auto-corrected from `_`/`-` typo"
+            );
+        }
+        let tool_name = resolved_name.as_str();
+
         // Check static tools first; fall back to dynamic (runtime-registered) tools.
         // The Arc clone releases the RwLock guard before any await point.
         let dynamic: Option<Arc<dyn AgentTool>> = if !self.tools.contains_key(tool_name) {
@@ -349,7 +520,15 @@ impl ToolRunner {
             Some(t) => t.as_ref(),
             None => match dynamic.as_deref() {
                 Some(t) => t,
-                None => return Err(AgentOSError::ToolNotFound(tool_name.to_string())),
+                None => {
+                    let suggestions = self.suggest_close_tool_names(tool_name, 3);
+                    let label = if suggestions.is_empty() {
+                        tool_name.to_string()
+                    } else {
+                        format!("{tool_name} (did you mean: {}?)", suggestions.join(", "))
+                    };
+                    return Err(AgentOSError::ToolNotFound(label));
+                }
             },
         };
 

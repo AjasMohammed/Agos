@@ -1,0 +1,28 @@
+[node]
+id = "wait"
+version = 1
+display_name = "Wait"
+description = "Pause workflow execution for a fixed duration before continuing."
+category = "core"
+icon = "clock"
+color = "#94a3b8"
+risk_class = "readonly_scoped"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "seconds"
+display_name = "Wait Duration (seconds)"
+type = "number"
+required = true
+default = 5
+description = "Number of seconds to pause before running the next node."
+
+[node.execute]
+kind = "builtin"
+name = "wait"

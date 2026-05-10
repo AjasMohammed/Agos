@@ -61,6 +61,9 @@ pub trait KernelService: Send + Sync {
 
     // ── Chat ────────────────────────────────────────────────────────────────
 
+    /// Whether the agent's active LLM adapter accepts image parts (vision).
+    async fn agent_supports_images(&self, agent_name: &str) -> Result<bool, ApiError>;
+
     async fn chat_send(&self, req: ChatRequest) -> Result<ChatResponse, ApiError>;
 
     /// Streaming chat: spawns inference and sends `ChatStreamEvent`s to the
@@ -110,6 +113,10 @@ pub trait KernelService: Send + Sync {
         id: NotificationID,
         text: String,
     ) -> Result<(), ApiError>;
+
+    async fn dismiss_notification(&self, id: NotificationID) -> Result<bool, ApiError>;
+
+    async fn clear_read_notifications(&self) -> Result<usize, ApiError>;
 
     async fn get_unread_count(&self) -> Result<u64, ApiError>;
 

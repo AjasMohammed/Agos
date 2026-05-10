@@ -1,5 +1,6 @@
 use agentos_bus::client::BusClient;
 use agentos_bus::message::{KernelCommand, KernelResponse};
+use agentos_types::reject_traversal;
 use clap::Subcommand;
 
 #[derive(Subcommand)]
@@ -66,12 +67,12 @@ pub async fn handle(client: &mut BusClient, command: PipelineCommands) -> anyhow
     match command {
         PipelineCommands::Install { path } => {
             // Reject paths that could escape the working directory via path traversal.
-            if path.contains("..") {
-                anyhow::bail!(
+            reject_traversal(&path).map_err(|_| {
+                anyhow::anyhow!(
                     "Invalid pipeline path '{}': path traversal ('..') is not allowed",
                     path
-                );
-            }
+                )
+            })?;
             let yaml = std::fs::read_to_string(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to read pipeline file '{}': {}", path, e))?;
 

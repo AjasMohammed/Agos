@@ -1,10 +1,23 @@
 {% extends "base.html" %}
 {% block content %}
-<section>
-  <hgroup>
-    <h2>Notifications</h2>
-    <p>Messages from your agents — {{ unread_count }} unread</p>
-  </hgroup>
+<section aria-labelledby="notifications-title">
+  <div class="page-header">
+    <div>
+      <h1 id="notifications-title">Notifications</h1>
+      <p class="page-meta">Messages from agents and the kernel — {{ unread_count }} unread</p>
+    </div>
+    <div class="notification-actions">
+      <button type="button"
+              class="outline secondary"
+              hx-delete="/notifications/read"
+              hx-confirm="Clear all read notifications?"
+              hx-target="#notification-list"
+              hx-swap="innerHTML"
+              {% if notifications|length == 0 %}disabled{% endif %}>
+        Clear read
+      </button>
+    </div>
+  </div>
 
   <!-- Real-time SSE connection.  New notifications arrive as "notification-new"
        events; the browser uses HTMX to prepend the rendered HTML row. -->
@@ -12,19 +25,13 @@
        sse-connect="/notifications/stream"
        sse-swap="notification-reload"
        hx-trigger="sse:notification-reload"
-       hx-get="/notifications"
+       hx-get="/notifications?partial=list"
        hx-target="#notification-list"
        hx-swap="innerHTML">
   </div>
 
-  <div id="notification-list">
-    {% for n in notifications %}
-      {% include "notifications/_notification_row.html" %}
-    {% else %}
-    <article>
-      <p>No notifications yet. Your agents will send messages here.</p>
-    </article>
-    {% endfor %}
+  <div id="notification-list" class="notification-list">
+    {% include "notifications/_notification_list.html" %}
   </div>
 </section>
 {% endblock %}

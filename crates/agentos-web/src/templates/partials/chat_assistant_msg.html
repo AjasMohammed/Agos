@@ -1,9 +1,9 @@
 <div class="chat-row chat-row-agent" data-msg-id="{{ msg.id|default('') }}">
     <div class="chat-agent-avatar" aria-hidden="true">{{ agent_name[:1]|upper }}</div>
     <div class="chat-agent-column">
-        <div class="chat-agent-name muted">{{ agent_name }}</div>
+        <div class="chat-agent-name">{{ agent_name }}</div>
         <div class="chat-bubble chat-bubble-agent">
-            <div class="chat-bubble-content-agent markdown-content">{{ msg.content|markdown }}</div>
+            <div class="chat-bubble-content-agent markdown-content" data-raw-markdown="{{ msg.content }}">{{ msg.content|markdown }}</div>
             <div class="chat-bubble-meta chat-bubble-meta-left">
                 <span>{{ msg.created_at|relative_time }}</span>
                 {% if msg.tokens_used %}<span>· {{ msg.tokens_used }} tokens</span>{% endif %}

@@ -43,7 +43,9 @@ fn bench_audit_append(c: &mut Criterion) {
                 reversible: false,
                 rollback_ref: None,
             };
-            black_box(audit_log.append(entry).expect("append audit entry"));
+            audit_log
+                .append(black_box(entry))
+                .expect("append audit entry");
         });
     });
 

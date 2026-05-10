@@ -42,6 +42,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 libc = { workspace = true }
 subtle = "2"
+zeroize = { workspace = true }
 
 [features]
 default = []

@@ -59,6 +59,15 @@ pub struct AgentTask {
     /// ownership-based status queries across task boundaries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawner_agent_id: Option<AgentID>,
+    /// Optional task-scoped tool category allowlist. When `Some(list)`, only
+    /// tools whose `ToolSummary.category` is in `list` are visible via the
+    /// paginated manual surface (`agent-manual`, `list-tools`, `search-tools`,
+    /// `describe-tool`). `None` (default) = no restriction.
+    /// Sub-agent spawn must verify the requested allowlist is a subset of the
+    /// parent's allowlist (narrow-only); widening is rejected as a permission
+    /// escalation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_categories: Option<Vec<String>>,
 }
 
 /// Controls how much extended thinking budget the LLM is given for a task.
@@ -176,6 +185,7 @@ impl Default for AgentTask {
             parent_task_id: None,
             spawn_depth: 0,
             spawner_agent_id: None,
+            tool_categories: None,
             is_team_coordinator: false,
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,

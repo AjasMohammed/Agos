@@ -1,0 +1,69 @@
+[node]
+id = "agent-task"
+version = 1
+display_name = "Agent Task"
+description = "Delegate a task to a connected agent. Choose the agent and provide the task prompt."
+category = "core"
+icon = "cpu"
+color = "#6366f1"
+risk_class = "exec_capable"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "agent_name"
+display_name = "Agent"
+type = "resource_picker"
+required = true
+description = "The agent to run the task on."
+
+[[node.properties]]
+name = "task"
+display_name = "Task Prompt"
+type = "template"
+required = true
+description = "The task to send to the agent. Use {{variable}} for data from previous nodes, @keyname for secrets."
+placeholder = "Summarize the following: {{input}}"
+
+[[node.properties]]
+name = "timeout_minutes"
+display_name = "Timeout (minutes)"
+type = "number"
+required = false
+description = "Maximum time to wait for the agent to complete the task."
+
+[node.properties.default]
+timeout_minutes = 5
+
+[[node.properties]]
+name = "thinking_level"
+display_name = "Thinking Level"
+type = "options"
+required = false
+description = "How much extended reasoning the agent should use."
+
+  [[node.properties.options]]
+  value = "off"
+  label = "Off"
+
+  [[node.properties.options]]
+  value = "low"
+  label = "Low"
+
+  [[node.properties.options]]
+  value = "medium"
+  label = "Medium"
+
+  [[node.properties.options]]
+  value = "high"
+  label = "High"
+
+[node.execute]
+kind = "agent"
+agent_property = "agent_name"
+task_template = "{{task}}"

@@ -15,11 +15,10 @@ use tower_http::trace::TraceLayer;
 use crate::auth::AuthToken;
 use crate::handlers::{
     a2a, agent_convo, agent_detail, agents, audit, channels, chat, config_page, connectors, costs,
-    dashboard, doctor, escalations, events, events_log, files, hal_page, identity_page,     logs,
-    manual_page,
-    management, marketplace, mcp_page, notifications, oauth, observability, pipeline_ui, pipelines,
-    plugins, resources_page, roles, schedules, scratchpad, secrets, tasks, teams, tools, webhooks,
-    webhooks_page,
+    dashboard, doctor, escalations, events, events_log, files, hal_page, identity_page, logs,
+    management, manual_page, marketplace, mcp_page, notifications, oauth, observability,
+    pipeline_ui, pipelines, plugins, resources_page, roles, schedules, scratchpad, secrets, tasks,
+    teams, tools, webhooks, webhooks_page,
 };
 use crate::state::AppState;
 
@@ -30,11 +29,12 @@ async fn add_security_headers(request: Request<axum::body::Body>, next: Next) ->
     headers.insert(
         axum::http::HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static(
-            // TODO: remove 'unsafe-inline' once all inline <script> blocks in templates
-            // (Alpine.js components, log terminal, cost chart) are moved to /static/js/ files.
-            // style-src 'unsafe-inline' is also required while Alpine.js and Pico CSS
-            // inject inline style attributes at runtime.
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; \
+            // 'unsafe-eval' is required by the standard Alpine.js build, which compiles
+            // x-data / x-show / @click expression strings via `new Function(...)`. The
+            // CSP-friendly Alpine build (alpinejs/csp) avoids this but disallows inline
+            // expressions in templates — switching would require rewriting every template
+            // that embeds an Alpine component.
+            "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; \
              style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
              font-src 'self' https://fonts.gstatic.com; \
              img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
@@ -301,6 +301,7 @@ pub fn build_router(
             axum::routing::post(files::upload_api)
                 .layer(axum::extract::DefaultBodyLimit::max(101 * 1024 * 1024)),
         )
+        .route("/api/files/search", axum::routing::get(files::search_api))
         // Chat (session-based, separate from the task system)
         .route("/chat", axum::routing::get(chat::list))
         .route("/chat/new", axum::routing::post(chat::new_session))
@@ -322,6 +323,7 @@ pub fn build_router(
             axum::routing::get(chat::export_session),
         )
         .route("/chat/{session_id}/send", axum::routing::post(chat::send))
+        .route("/chat/{session_id}/stop", axum::routing::post(chat::stop))
         .route(
             "/chat/{session_id}/stream",
             axum::routing::get(chat::message_stream),
@@ -337,8 +339,13 @@ pub fn build_router(
             axum::routing::get(notifications::unread_count),
         )
         .route(
+            "/notifications/read",
+            axum::routing::delete(notifications::clear_read_notifications),
+        )
+        .route(
             "/notifications/{id}",
-            axum::routing::get(notifications::get_notification),
+            axum::routing::get(notifications::get_notification)
+                .delete(notifications::dismiss_notification),
         )
         .route(
             "/notifications/{id}/respond",
@@ -415,6 +422,7 @@ pub fn build_router(
         )
         .route("/doctor", axum::routing::get(doctor::page))
         .route("/manual", axum::routing::get(manual_page::page))
+        .route("/manual/view", axum::routing::get(manual_page::view))
         .route("/scratchpad", axum::routing::get(scratchpad::page))
         .route(
             "/agents/{name}/scratchpad",

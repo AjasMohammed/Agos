@@ -1,3 +1,4 @@
+use crate::media::{gemini_user_parts, ImageResolver, NoopImageResolver};
 use crate::tool_helpers;
 use crate::traits::LLMCore;
 use crate::types::{
@@ -12,6 +13,7 @@ use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -24,6 +26,9 @@ pub struct GeminiCore {
     pricing: ModelPricing,
     retry_policy: crate::retry::RetryPolicy,
     circuit_breaker: crate::retry::CircuitBreaker,
+    /// Per-instance in-flight cap for outbound requests.
+    concurrency: Arc<tokio::sync::Semaphore>,
+    image_resolver: Arc<dyn ImageResolver>,
 }
 
 impl GeminiCore {
@@ -67,7 +72,14 @@ impl GeminiCore {
             pricing,
             retry_policy: crate::retry::RetryPolicy::default(),
             circuit_breaker: crate::retry::CircuitBreaker::default(),
+            concurrency: crate::retry::default_concurrency_limiter(),
+            image_resolver: Arc::new(NoopImageResolver),
         }
+    }
+
+    pub fn with_image_resolver(mut self, resolver: Arc<dyn ImageResolver>) -> Self {
+        self.image_resolver = resolver;
+        self
     }
 
     /// Override the pricing for this adapter instance.
@@ -88,8 +100,8 @@ impl GeminiCore {
                     if let Some(name) = tool_name {
                         // Native Gemini functionResponse format.
                         // Parse content as JSON for structured response, fallback to wrapper.
-                        let response_val = serde_json::from_str::<Value>(&entry.content)
-                            .unwrap_or_else(|_| json!({"result": entry.content}));
+                        let response_val = serde_json::from_str::<Value>(&entry.text())
+                            .unwrap_or_else(|_| json!({"result": entry.text()}));
                         contents.push(json!({
                             "role": "user",
                             "parts": [{
@@ -103,14 +115,19 @@ impl GeminiCore {
                         // Legacy fallback.
                         contents.push(json!({
                             "role": "user",
-                            "parts": [{"text": format!("Tool Result:\n{}", entry.content)}]
+                            "parts": [{"text": format!("Tool Result:\n{}", entry.text())}]
                         }));
                     }
                 }
                 ContextRole::User => {
+                    let parts = gemini_user_parts(
+                        entry,
+                        self.capabilities.supports_images,
+                        &self.image_resolver,
+                    );
                     contents.push(json!({
                         "role": "user",
-                        "parts": [{"text": entry.content.clone()}]
+                        "parts": parts,
                     }));
                 }
                 ContextRole::Assistant => {
@@ -124,8 +141,8 @@ impl GeminiCore {
                         .and_then(|m| m.assistant_tool_calls.as_ref())
                     {
                         let mut parts: Vec<Value> = Vec::new();
-                        if !entry.content.is_empty() {
-                            parts.push(json!({"text": entry.content.clone()}));
+                        if !entry.text().is_empty() {
+                            parts.push(json!({"text": entry.text()}));
                         }
                         for call in calls {
                             if let Some(name) = call.get("tool_name").and_then(|v| v.as_str()) {
@@ -141,7 +158,7 @@ impl GeminiCore {
                     } else {
                         contents.push(json!({
                             "role": "model",
-                            "parts": [{"text": entry.content.clone()}]
+                            "parts": [{"text": entry.text()}]
                         }));
                     }
                 }
@@ -276,6 +293,14 @@ impl LLMCore for GeminiCore {
             self.model,
         );
 
+        let prepared = crate::media::prepare_for_inference(
+            context,
+            self.capabilities.supports_images,
+            self.image_resolver.clone(),
+            &self.client,
+        )
+        .await;
+        let context = &prepared;
         let contents = self.format_contents(context);
 
         // If options disable tools, exclude them.
@@ -294,7 +319,7 @@ impl LLMCore for GeminiCore {
         if let Some(sys) = active
             .iter()
             .find(|e| e.role == ContextRole::System)
-            .map(|e| e.content.as_str())
+            .map(|e| e.text())
         {
             body["systemInstruction"] = json!({"parts": [{"text": sys}]});
         }
@@ -339,6 +364,7 @@ impl LLMCore for GeminiCore {
             "gemini",
             &self.retry_policy,
             &self.circuit_breaker,
+            Some(&self.concurrency),
             || {
                 self.client
                     .post(&url)
@@ -479,6 +505,14 @@ impl LLMCore for GeminiCore {
             self.model,
         );
 
+        let prepared = crate::media::prepare_for_inference(
+            context,
+            self.capabilities.supports_images,
+            self.image_resolver.clone(),
+            &self.client,
+        )
+        .await;
+        let context = &prepared;
         let contents = self.format_contents(context);
         let (function_declarations, intent_by_tool) = Self::build_gemini_tools(tools);
 
@@ -488,7 +522,7 @@ impl LLMCore for GeminiCore {
         if let Some(sys) = active
             .iter()
             .find(|e| e.role == ContextRole::System)
-            .map(|e| e.content.as_str())
+            .map(|e| e.text())
         {
             body["systemInstruction"] = json!({ "parts": [{"text": sys}] });
         }
@@ -684,7 +718,9 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         ctx.push(ContextEntry {
             role: ContextRole::System,
-            content: "System".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "System".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 1.0,
@@ -696,7 +732,9 @@ mod tests {
         });
         ctx.push(ContextEntry {
             role: ContextRole::User,
-            content: "User".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "User".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,
@@ -708,7 +746,9 @@ mod tests {
         });
         ctx.push(ContextEntry {
             role: ContextRole::Assistant,
-            content: "Assistant".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "Assistant".to_string(),
+            }],
             timestamp: chrono::Utc::now(),
             metadata: None,
             importance: 0.5,
@@ -766,7 +806,9 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: r#"{"status": "ok"}"#.to_string(),
+            parts: vec![ContentPart::Text {
+                text: r#"{"status": "ok"}"#.to_string(),
+            }],
             metadata: Some(ContextMetadata {
                 tool_name: Some("file-reader".to_string()),
                 tool_id: None,
@@ -802,7 +844,9 @@ mod tests {
         let mut ctx = ContextWindow::new(5);
         ctx.push(ContextEntry {
             role: ContextRole::ToolResult,
-            content: "plain text result".to_string(),
+            parts: vec![ContentPart::Text {
+                text: "plain text result".to_string(),
+            }],
             metadata: Some(ContextMetadata {
                 tool_name: Some("shell".to_string()),
                 tool_id: None,

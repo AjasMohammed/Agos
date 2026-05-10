@@ -148,12 +148,15 @@ async fn validate_csrf(
     }
 
     // --- Try _csrf field in form body (plain HTML form fallback) ---
-    let is_form = request
+    let content_type = request
         .headers()
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .map(|ct| ct.starts_with("application/x-www-form-urlencoded"))
-        .unwrap_or(false);
+        .unwrap_or("")
+        .to_string();
+
+    let is_form = content_type.starts_with("application/x-www-form-urlencoded");
+    let is_multipart = content_type.starts_with("multipart/form-data");
 
     if is_form {
         let (parts, body) = request.into_parts();
@@ -181,6 +184,17 @@ async fn validate_csrf(
                 return (StatusCode::BAD_REQUEST, "Request body too large").into_response();
             }
         }
+    }
+
+    // Multipart requests (file uploads) MUST use the X-CSRF-Token header.
+    // We cannot extract _csrf from a multipart body without consuming it.
+    if is_multipart {
+        tracing::warn!(path = %path, method = %method, "CSRF token missing on multipart request — X-CSRF-Token header required");
+        return (
+            StatusCode::FORBIDDEN,
+            "CSRF token missing — file uploads require X-CSRF-Token header",
+        )
+            .into_response();
     }
 
     // No token in header and not a form submission — reject.

@@ -1,149 +1,184 @@
 {% extends "base.html" %}
 {% block content %}
 
-<div class="page-header">
-    <div>
-        <h1>{{ session_title|default("Chat") }} <code class="id-long">{{ session_id[:8] }}</code></h1>
-        <p class="page-meta">with <strong>{{ agent_name }}</strong></p>
-    </div>
-    <div class="page-header-actions">
-        <a href="/chat/{{ session_id }}/export" role="button" class="outline secondary btn-sm">Export</a>
-        <form method="post" action="/chat/{{ session_id }}/fork" style="display:inline">
-            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-            <button type="submit" class="outline secondary btn-sm">Fork</button>
-        </form>
-        <form method="post" action="/chat/{{ session_id }}/delete" style="display:inline">
-            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-            <button type="submit" class="outline secondary btn-sm"
-                    onclick="return confirm('Delete this chat session?');">Delete</button>
-        </form>
-        <a href="/chat" role="button" class="outline secondary btn-sm">← Chat</a>
-    </div>
-</div>
+<div class="chat-convo-layout">
 
-<form method="post" action="/chat/{{ session_id }}/rename" class="chat-rename-form">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <label for="chat-title-input">Session Title
-        <input id="chat-title-input" type="text" name="title"
-               value="{{ session_title|default("") }}" maxlength="120"
-               placeholder="Optional title">
-    </label>
-    <button type="submit" class="outline secondary btn-sm">Rename</button>
-</form>
-
-<div id="chat-messages-list" class="chat-conversation-area">
-    {% if messages|length == 0 %}
-    {% include "partials/chat_empty_state.html" %}
-    {% else %}
-    {% for msg in messages %}
-        {% if msg.role == "user" %}
-            {% include "partials/chat_user_msg.html" %}
-        {% elif msg.role == "tool" %}
-            {% include "partials/chat_tool_call.html" %}
-        {% else %}
-            {% include "partials/chat_assistant_msg.html" %}
-        {% endif %}
-    {% endfor %}
-    {% endif %}
-
-    {% if needs_stream_reconnect %}
-        {% include "partials/chat_stream_target.html" %}
-    {% endif %}
-</div>
-
-<div class="chat-reply-area">
-    <form id="chat-reply-form" hx-post="/chat/{{ session_id }}/send"
-          hx-target="#chat-messages-list"
-          hx-swap="beforeend"
-          hx-disabled-elt="find textarea, find button"
-          class="chat-compose-form"
-          x-data="{
-              fileIds: [],
-              fileChips: [],
-              uploading: false,
-              uploadError: '',
-              async attachFile(input) {
-                  const file = input.files[0];
-                  if (!file) return;
-                  input.value = '';
-                  if (file.size > 100 * 1024 * 1024) {
-                      this.uploadError = 'File too large (max 100 MiB)';
-                      return;
-                  }
-                  this.uploading = true;
-                  this.uploadError = '';
-                  const csrfToken = document.querySelector('meta[name=csrf-token]')?.content ?? '';
-                  const fd = new FormData();
-                  fd.append('file', file);
-                  try {
-                      const r = await fetch('/api/files/upload', {
-                          method: 'POST',
-                          headers: { 'X-CSRF-Token': csrfToken },
-                          body: fd,
-                      });
-                      if (!r.ok) {
-                          const msg = await r.text();
-                          this.uploadError = msg || \`Upload failed (HTTP \${r.status})\`;
-                      } else {
-                          let data;
-                          try { data = await r.json(); } catch(_) { this.uploadError = 'Malformed upload response'; this.uploading = false; return; }
-                          if (!this.fileIds.includes(data.id)) {
-                              this.fileIds.push(data.id);
-                              this.fileChips.push({ id: data.id, name: data.original_name.substring(0, 60) });
-                          }
-                      }
-                  } catch(e) {
-                      this.uploadError = 'Upload failed (network error)';
-                  }
-                  this.uploading = false;
-              },
-              removeFile(id) {
-                  this.fileIds = this.fileIds.filter(x => x !== id);
-                  this.fileChips = this.fileChips.filter(x => x.id !== id);
-              },
-              afterSend(event) {
-                  if (event.detail.successful) {
-                      this.fileIds = [];
-                      this.fileChips = [];
-                      this.uploadError = '';
-                  }
-              }
-          }"
-          @htmx:afterRequest="afterSend($event)">
-        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <input type="hidden" name="file_ids" :value="fileIds.join(',')">
-        <label for="reply-message">Continue the conversation
-            <textarea id="reply-message" name="message" rows="3"
-                      placeholder="Reply to {{ agent_name }}… or use @filename to reference an uploaded file"
-                      onkeydown="if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); this.form.requestSubmit(); }"></textarea>
-        </label>
-
-        <!-- File attachment chips -->
-        <div x-show="fileChips.length > 0" class="chat-attach-chips">
-            <template x-for="chip in fileChips" :key="chip.id">
-                <span class="chat-attach-chip">
-                    <span x-text="chip.name"></span>
-                    <button type="button" @click="removeFile(chip.id)" aria-label="Remove attachment">×</button>
-                </span>
-            </template>
+    <header class="chat-shell-header">
+        <a href="/chat" role="button" class="outline secondary btn-sm chat-back-link">All chats</a>
+        <div class="chat-title-stack">
+            <p class="chat-eyebrow">Live chat</p>
+            <h1>{{ session_title|default("Untitled chat") }}</h1>
+            <p class="page-meta">
+                <span class="badge badge-active">Connected</span>
+                <span>{{ agent_name }}</span>
+                <code class="id-long">{{ session_id[:8] }}</code>
+            </p>
         </div>
-        <div x-show="uploadError" x-text="uploadError" class="chat-attach-error"></div>
 
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-            <label class="chat-attach-btn" :class="{ 'uploading': uploading }" title="Attach a file">
-                <input type="file" style="display:none" @change="attachFile($el)" :disabled="uploading">
-                <span x-show="!uploading">+ Attach</span>
-                <span x-show="uploading">Uploading…</span>
+        <div class="chat-header-cluster">
+            <div class="chat-session-pills" aria-label="Session usage">
+                <span><strong id="chat-total-tokens">{{ total_tokens_used }}</strong> tokens</span>
+                <span><strong id="chat-total-tools">{{ total_tool_calls }}</strong> tools</span>
+                <span><strong id="chat-total-cost">{% if total_cost_usd %}${{ total_cost_usd }}{% else %}--{% endif %}</strong> cost</span>
+            </div>
+            <div class="chat-header-actions" aria-label="Session actions">
+                <a href="/chat/{{ session_id }}/export" role="button" class="outline secondary btn-sm">Export</a>
+                <form method="post" action="/chat/{{ session_id }}/fork" class="chat-inline-form">
+                    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                    <button type="submit" class="outline secondary btn-sm">Fork</button>
+                </form>
+                <form method="post" action="/chat/{{ session_id }}/delete" class="chat-inline-form">
+                    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                    <button type="submit" class="outline secondary btn-sm"
+                            onclick="return confirm('Delete this chat session?');">Delete</button>
+                </form>
+            </div>
+        </div>
+    </header>
+
+    <details class="chat-title-editor">
+        <summary>Rename this session</summary>
+        <form method="post" action="/chat/{{ session_id }}/rename" class="chat-rename-form">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <label for="chat-title-input">Session title
+                <input id="chat-title-input" type="text" name="title"
+                       value="{{ session_title|default("") }}" maxlength="120"
+                       placeholder="Give this chat a short title">
             </label>
-            <button type="submit">Send →</button>
+            <button type="submit" class="outline secondary btn-sm">Rename</button>
+        </form>
+    </details>
+
+    <section class="chat-session-shell">
+        <div class="chat-conversation-panel">
+            <div id="chat-messages-list" class="chat-conversation-area" role="log" aria-live="polite" aria-label="Chat messages">
+                {% if messages|length == 0 %}
+                {% include "partials/chat_empty_state.html" %}
+                {% else %}
+                {% for msg in messages %}
+                    {% if msg.role == "user" %}
+                        {% include "partials/chat_user_msg.html" %}
+                    {% elif msg.role == "tool" %}
+                        {% include "partials/chat_tool_call.html" %}
+                    {% else %}
+                        {% include "partials/chat_assistant_msg.html" %}
+                    {% endif %}
+                {% endfor %}
+                {% endif %}
+
+                {% if needs_stream_reconnect %}
+                    {% include "partials/chat_stream_target.html" %}
+                {% endif %}
+            </div>
         </div>
-    </form>
+
+        <div class="chat-reply-area">
+            <form id="chat-reply-form" hx-post="/chat/{{ session_id }}/send"
+              hx-target="#chat-messages-list"
+              hx-swap="beforeend"
+              hx-disabled-elt="find textarea, find button"
+              class="chat-compose-form chat-compose-dock"
+              x-data="{
+                  fileIds: [],
+                  fileChips: [],
+                  uploading: false,
+                  uploadError: '',
+                  async attachFile(input) {
+                      const file = input.files[0];
+                      if (!file) return;
+                      input.value = '';
+                      if (file.size > 100 * 1024 * 1024) {
+                          this.uploadError = 'File too large (max 100 MiB)';
+                          return;
+                      }
+                      this.uploading = true;
+                      this.uploadError = '';
+                      const csrfToken = document.querySelector('meta[name=csrf-token]')?.content ?? '';
+                      const fd = new FormData();
+                      fd.append('file', file);
+                      fd.append('scope', 'session:{{ session_id }}');
+                      try {
+                          const r = await fetch('/api/files/upload', {
+                              method: 'POST',
+                              headers: { 'X-CSRF-Token': csrfToken },
+                              body: fd,
+                              credentials: 'same-origin',
+                          });
+                          if (!r.ok) {
+                              const msg = await r.text();
+                              this.uploadError = msg || `Upload failed (HTTP ${r.status})`;
+                          } else {
+                              let data;
+                              try { data = await r.json(); } catch(_) { this.uploadError = 'Malformed upload response'; this.uploading = false; return; }
+                              if (!this.fileIds.includes(data.id)) {
+                                  this.fileIds = [...this.fileIds, data.id];
+                                  this.fileChips = [...this.fileChips, { id: data.id, name: data.original_name.substring(0, 60) }];
+                              }
+                          }
+                      } catch(e) {
+                          this.uploadError = 'Upload failed (network error)';
+                      }
+                      this.uploading = false;
+                  },
+                  removeFile(id) {
+                      this.fileIds = this.fileIds.filter(x => x !== id);
+                      this.fileChips = this.fileChips.filter(x => x.id !== id);
+                  },
+                  afterSend(event) {
+                      if (event.detail.successful) {
+                          this.fileIds = [];
+                          this.fileChips = [];
+                          this.uploadError = '';
+                      }
+                  }
+              }"
+              @htmx:afterRequest="afterSend($event)">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="file_ids" :value="fileIds.join(',')">
+                <div class="chat-compose-topline">
+                    <div>
+                        <strong>Message {{ agent_name }}</strong>
+                    </div>
+                    <span class="muted">Ctrl/Cmd + Enter to send</span>
+                </div>
+                <label for="reply-message" class="chat-compose-textarea-wrap">
+                    <textarea id="reply-message" name="message" rows="3"
+                          data-autoresize data-file-mention data-session-id="{{ session_id }}"
+                          placeholder="Reply to {{ agent_name }}, or use @filename to reference an uploaded file"
+                          onkeydown="if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); this.form.requestSubmit(); }"></textarea>
+                </label>
+
+                <template x-if="fileChips.length > 0">
+                    <div class="chat-attach-chips">
+                        <template x-for="chip in fileChips" :key="chip.id">
+                            <span class="chat-attach-chip">
+                                <span x-text="chip.name"></span>
+                                <button type="button" @click.stop="removeFile(chip.id)" aria-label="Remove attachment">&times;</button>
+                            </span>
+                        </template>
+                    </div>
+                </template>
+                <div x-show="uploadError" x-text="uploadError" class="chat-attach-error"></div>
+
+                <div class="chat-compose-actions">
+                    <label class="chat-attach-btn" :class="{ 'uploading': uploading }" title="Attach a file">
+                        <input type="file" class="chat-file-input" @change="attachFile($el)" :disabled="uploading">
+                        <span x-show="!uploading">+ Attach</span>
+                        <span x-show="uploading">Uploading…</span>
+                    </label>
+                    <button type="submit">Send</button>
+                </div>
+            </form>
+        </div>
+    </section>
+
 </div>
 
 <script src="/static/js/vendor/marked.min.js"></script>
 <script src="/static/js/vendor/dompurify.min.js"></script>
 <script src="/static/js/vendor/highlight.min.js"></script>
 <script src="/static/js/chat-page.js"></script>
-<script src="/static/js/chat-stream.js"></script>
+<script src="/static/js/chat-stream.js?v=4"></script>
+<script src="/static/js/file-mention.js"></script>
 
 {% endblock %}

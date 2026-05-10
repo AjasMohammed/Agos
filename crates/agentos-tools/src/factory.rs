@@ -19,6 +19,7 @@ const STATELESS_TOOL_NAMES: &[&str] = &[
     "datetime",
     "think",
     "file-reader",
+    "user-file-reader",
     "file-writer",
     "file-editor",
     "file-glob",
@@ -57,8 +58,12 @@ const HAL_TOOL_NAMES: &[&str] = &[
     "hardware-info",
     "sys-monitor",
     "process-manager",
+    "system-mounts",
+    "system-open-files",
+    "system-services",
     "log-reader",
     "network-monitor",
+    "network-sockets",
     "printer",
     "raw-usb",
     "usb-storage",
@@ -74,8 +79,10 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "task-status",
     "task-list",
     "shell-exec",
+    "host-package-install",
     "escalation-status",
     "notify-user",
+    "channel-send",
     "ask-user",
     "spawn-agent",
     "await-agents",
@@ -109,11 +116,115 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "cancel-timer",
     "list-timers",
     "schedule-once",
+    "schedule-recurring",
+    "schedule-control",
     "cancel-once-job",
     "list-once-jobs",
+    // Agent inbox + agent-to-agent message inboxes — kernel-context, mutate
+    // SQLite state owned by the kernel; never sandboxed.
+    "agent-inbox-list",
+    "agent-inbox-read",
+    "agent-inbox-dismiss",
+    "agent-messages-list",
+    "agent-messages-read",
+    "agent-messages-dismiss",
 ];
 
 const SPECIAL_CONTEXT_TOOL_NAMES: &[&str] = &["agent-manual", "agent-self"];
+
+/// Discovery / introspection tools whose calls should NOT be replayed into the
+/// LLM history on subsequent chat turns. They are scaffolding the model uses
+/// to find real tools; replaying them just refloods the context with
+/// already-explored manuals. Real action tool calls (e.g. `gmail_send`,
+/// `shell-exec`) are replayed so the model remembers what it has done.
+///
+/// Also used by the kernel-side meta-tool streak guard to detect
+/// tool-discovery loops: a streak of 4+ consecutive iterations where
+/// every call is one of these names triggers an abort.
+pub const META_TOOL_NAMES: &[&str] = &[
+    "agent-manual",
+    "agent-self",
+    "search-tools",
+    "describe-tool",
+    "list-tools",
+    "tool-detail",
+    "tool-info",
+];
+
+/// Default tool inventory exposed inline to the LLM in the chat (webui) flow.
+///
+/// Chat does not carry a `capability_token.allowed_tools` filter, so without
+/// this slim list the kernel inlines all 100+ manifests per turn (~12k tokens).
+/// Anything outside this set is reachable on demand via `agent-manual` (which
+/// paginates the full registry).
+pub const CHAT_DEFAULT_TOOL_NAMES: &[&str] = &[
+    // Discovery / introspection — required so the agent can find anything else.
+    "agent-manual",
+    "agent-self",
+    "agent-list",
+    "list-tools",
+    "search-tools",
+    "describe-tool",
+    // Filesystem
+    "file-reader",
+    "file-writer",
+    "file-editor",
+    "file-glob",
+    "file-grep",
+    "file-delete",
+    "file-move",
+    "file-diff",
+    // Memory
+    "memory-search",
+    "memory-write",
+    "memory-read",
+    "memory-stats",
+    "archival-search",
+    "episodic-list",
+    "procedure-search",
+    "context-memory-read",
+    "context-memory-update",
+    // Network — basic web access so chat agents can fetch live info.
+    "web-search",
+    "web-fetch",
+    // Utility
+    "datetime",
+    "think",
+    "data-parser",
+    // Comms
+    "notify-user",
+    "ask-user",
+    "agent-message",
+    "schedule-recurring",
+    "schedule-control",
+    "list-my-schedules",
+    "get-schedule-runs",
+    // Agent inbox — async callbacks (scheduled tasks, sub-agents, events)
+    "agent-inbox-list",
+    "agent-inbox-read",
+    "agent-inbox-dismiss",
+    // Agent direct messages
+    "agent-messages-list",
+    "agent-messages-read",
+    "agent-messages-dismiss",
+    // Shell (sandboxed)
+    "shell-exec",
+    // Host introspection — system_prompt.rs steers the LLM toward these as
+    // alternatives to running `ps`/`netstat`/`mount`/`systemctl` inside the
+    // shell-exec sandbox (which sees an isolated PID + network namespace).
+    "process-manager",
+    "network-monitor",
+    "network-sockets",
+    "system-mounts",
+    "system-open-files",
+    "system-services",
+    "hardware-info",
+];
+
+/// True if `name` is part of the default chat tool inventory.
+pub fn is_chat_default_tool(name: &str) -> bool {
+    CHAT_DEFAULT_TOOL_NAMES.contains(&name)
+}
 
 pub fn tool_category(name: &str) -> Option<ToolCategory> {
     if STATELESS_TOOL_NAMES.contains(&name) {
@@ -356,8 +467,12 @@ fn build_hal_tool(name: &str) -> Result<Option<Box<dyn AgentTool>>, AgentOSError
         "hardware-info" => Box::new(crate::hardware_info::HardwareInfoTool::new()),
         "sys-monitor" => Box::new(crate::sys_monitor::SysMonitorTool::new()),
         "process-manager" => Box::new(crate::process_manager::ProcessManagerTool::new()),
+        "system-mounts" => Box::new(crate::system_mounts::SystemMountsTool::new()),
+        "system-open-files" => Box::new(crate::system_open_files::SystemOpenFilesTool::new()),
+        "system-services" => Box::new(crate::system_services::SystemServicesTool::new()),
         "log-reader" => Box::new(crate::log_reader::LogReaderTool::new()),
         "network-monitor" => Box::new(crate::network_monitor::NetworkMonitorTool::new()),
+        "network-sockets" => Box::new(crate::network_sockets::NetworkSocketsTool::new()),
         "printer" => Box::new(crate::printer::PrinterTool::new()),
         "raw-usb" => Box::new(crate::raw_usb::RawUsbTool::new()),
         "usb-storage" => Box::new(crate::usb_storage::UsbStorageTool::new()),
@@ -475,6 +590,7 @@ mod tests {
             "agent-manual",
             "agent-self",
             "notify-user",
+            "channel-send",
             "ask-user",
         ] {
             let result = build_single_tool(name, tmp.path()).unwrap();
@@ -494,12 +610,36 @@ mod tests {
     }
 
     #[test]
+    fn test_host_introspection_tools_in_chat_default() {
+        // The system prompt's "Host Inspection — Tool Selection" block tells
+        // the LLM to call these tools instead of `shell-exec ps/netstat/...`.
+        // They must be in CHAT_DEFAULT_TOOL_NAMES, otherwise the chat agent
+        // gets `Tool not found` and falls back to the sandboxed shell whose
+        // PID/network namespaces hide the host.
+        for name in [
+            "process-manager",
+            "network-monitor",
+            "network-sockets",
+            "system-mounts",
+            "system-open-files",
+            "system-services",
+            "hardware-info",
+        ] {
+            assert!(
+                is_chat_default_tool(name),
+                "host introspection tool '{}' must be in CHAT_DEFAULT_TOOL_NAMES",
+                name
+            );
+        }
+    }
+
+    #[test]
     fn test_factory_classifies_all_non_kernel_tools_registered_by_runner() {
         let tmp = TempDir::new().unwrap();
         let mut runner = crate::ToolRunner::new(tmp.path()).unwrap();
-        runner.register_agent_manual(Vec::new());
-        let tool_names = runner.list_tools();
-        runner.register_agent_self(tool_names);
+        runner.register_agent_manual(std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())));
+        let tool_count = runner.list_tools().len();
+        runner.register_agent_self(tool_count);
         let registered_tools: BTreeSet<String> = runner.list_tools().into_iter().collect();
         let explicitly_non_sandboxable: BTreeSet<String> = KERNEL_CONTEXT_TOOL_NAMES
             .iter()

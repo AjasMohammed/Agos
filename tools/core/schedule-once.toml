@@ -1,7 +1,9 @@
+tags = ["meta", "write"]
+
 [manifest]
 name        = "schedule-once"
-version     = "1.0.0"
-description = "Schedule a one-shot task at an absolute datetime or relative delay. Use fire_at (ISO 8601) for a specific moment, or delay_secs for a relative offset."
+version     = "1.1.0"
+description = "Schedule a one-shot action at an absolute datetime or relative delay. Supports three modes: 'task' (run an LLM prompt), 'notify' (deliver a user notification directly), or 'tool' (invoke a single tool with fixed args). Use fire_at (ISO 8601) for a specific moment, or delay_secs for a relative offset."
 author      = "agentos-core"
 trust_tier  = "core"
 group       = "scheduling"
@@ -19,15 +21,42 @@ output = "ScheduleOnceResult"
 
 [input_schema]
 type = "object"
-required = ["name", "task_prompt"]
 
 [input_schema.properties.name]
 type        = "string"
-description = "Unique name for this once-job (used to cancel or identify it)"
+description = "Optional unique name for this once-job (used to cancel or identify it). When omitted, the kernel auto-generates 'auto-<mode>-<8hex>'."
+
+[input_schema.properties.mode]
+type        = "string"
+enum        = ["task", "notify", "tool"]
+description = "Action to take when the job fires. 'task' runs an LLM prompt (default), 'notify' delivers a user notification without involving the LLM, 'tool' invokes a single tool directly."
+default     = "task"
 
 [input_schema.properties.task_prompt]
 type        = "string"
-description = "Task prompt to run on the agent when the job fires"
+description = "Task prompt to run on the agent when the job fires (required when mode='task')"
+
+[input_schema.properties.notify_subject]
+type        = "string"
+description = "Notification subject line (required when mode='notify')"
+
+[input_schema.properties.notify_body]
+type        = "string"
+description = "Notification body text (required when mode='notify')"
+
+[input_schema.properties.notify_priority]
+type        = "string"
+enum        = ["info", "warning", "urgent", "critical"]
+description = "Notification priority level (optional when mode='notify', default 'info')"
+default     = "info"
+
+[input_schema.properties.tool]
+type        = "string"
+description = "Name of the tool to invoke when the job fires (required when mode='tool')"
+
+[input_schema.properties.tool_args]
+type        = "object"
+description = "Fixed argument payload passed to the tool (optional when mode='tool')"
 
 [input_schema.properties.agent_name]
 type        = "string"

@@ -4,6 +4,7 @@ use crate::chat_inflight::InFlightInference;
 use crate::handlers::files;
 use crate::state::AppState;
 use agentos_kernel::kernel::ChatStreamEvent;
+use agentos_types::ContentPart;
 use axum::extract::{Extension, Form, Path, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
@@ -57,16 +58,27 @@ fn spawn_streaming_inference(
     agent_name: String,
     history: Vec<(String, String)>,
     user_msg: String,
+    user_parts: Option<Vec<ContentPart>>,
     inflight_handle: Arc<InFlightInference>,
 ) {
+    let mut total_len = 0;
+    for (idx, (role, text)) in history.iter().enumerate() {
+        total_len += text.len();
+        tracing::info!(target: "agentos::chat::debug", "History [{}] {}: {} chars", idx, role, text.len());
+    }
+    tracing::info!(target: "agentos::chat::debug", "New User Msg: {} chars", user_msg.len());
+    tracing::info!(target: "agentos::chat::debug", "Total Context Est: {} chars", total_len + user_msg.len());
+    tracing::info!(target: "agentos::chat::debug", "\n=== FULL LLM INPUT DUMP ===\nHistory: {:#?}\nNew Message: {}\n===========================\n", history, user_msg);
+
     let kernel = state.kernel.clone();
     let chat_store = Arc::clone(&state.chat_store);
     let inflight_map = Arc::clone(&state.inflight_chat);
 
-    tokio::spawn(async move {
+    let inflight_for_task = Arc::clone(&inflight_handle);
+    let task = tokio::spawn(async move {
         let (kernel_tx, mut kernel_rx) = tokio::sync::mpsc::channel::<ChatStreamEvent>(64);
         let forwarder = {
-            let inflight = Arc::clone(&inflight_handle);
+            let inflight = Arc::clone(&inflight_for_task);
             tokio::spawn(async move {
                 while let Some(event) = kernel_rx.recv().await {
                     inflight.push(event).await;
@@ -75,7 +87,14 @@ fn spawn_streaming_inference(
         };
 
         let result = kernel
-            .chat_infer_streaming(&agent_name, &history, &user_msg, kernel_tx)
+            .chat_infer_streaming(
+                &agent_name,
+                &history,
+                &user_msg,
+                user_parts,
+                kernel_tx,
+                Some(&session_id),
+            )
             .await;
         let _ = forwarder.await;
 
@@ -97,8 +116,19 @@ fn spawn_streaming_inference(
                 let store = Arc::clone(&chat_store);
                 let sid = session_id.clone();
                 let answer = inf.answer.clone();
+                let tokens_used = inf.tokens_used;
+                let cost_usd = inf.cost_usd;
                 match tokio::task::spawn_blocking(move || {
-                    store.add_message(&sid, "assistant", &answer, None)
+                    store.add_assistant_message(
+                        &sid,
+                        &answer,
+                        Some(tokens_used),
+                        if cost_usd.is_finite() && cost_usd > 0.0 {
+                            Some(cost_usd)
+                        } else {
+                            None
+                        },
+                    )
                 })
                 .await
                 {
@@ -116,38 +146,85 @@ fn spawn_streaming_inference(
                 );
             }
             Err(e) => {
-                inflight_handle
+                inflight_for_task
                     .push(ChatStreamEvent::Error { message: e.clone() })
                     .await;
                 tracing::error!("Streaming chat inference failed: {e}");
             }
         }
 
-        inflight_handle.mark_done().await;
+        inflight_for_task.mark_done().await;
         inflight_map.schedule_cleanup(session_id);
     });
+    inflight_handle.set_task_handle(task);
 }
 
-/// Build LLM user text: optional attached files, then @mentions, then message body.
+/// Build LLM user content: optional attached files, then @mentions, then message body.
+/// Returns display text for logging/history and optional multimodal parts for the kernel.
 async fn expand_user_message_for_llm(
     content: &str,
     file_ids: Option<&str>,
     state: &AppState,
     owner_principal: &str,
-) -> String {
-    let with_mentions =
-        files::resolve_at_mentions(content, state, owner_principal).await;
-    let file_ctx = match file_ids {
-        Some(ids) if !ids.trim().is_empty() => {
-            files::resolve_file_ids_to_context(ids, state, owner_principal).await
+    session_id: Option<&str>,
+    agent_name: &str,
+) -> (String, Option<Vec<ContentPart>>) {
+    let supports_images = {
+        let reg = state.kernel.agent_registry.read().await;
+        match reg.get_by_name(agent_name) {
+            Some(agent) => {
+                let aid = agent.id;
+                drop(reg);
+                state
+                    .kernel
+                    .active_llms
+                    .read()
+                    .await
+                    .get(&aid)
+                    .map(|llm| llm.supports_images())
+                    .unwrap_or(false)
+            }
+            None => false,
         }
-        _ => String::new(),
     };
-    if file_ctx.is_empty() {
-        with_mentions
-    } else {
-        format!("{file_ctx}\n---\n{with_mentions}")
+
+    let with_mentions =
+        files::resolve_at_mentions(content, state, owner_principal, session_id).await;
+
+    let file_parts = match file_ids {
+        Some(ids) if !ids.trim().is_empty() => {
+            files::resolve_file_ids_to_context(ids, state, owner_principal, supports_images).await
+        }
+        _ => Vec::new(),
+    };
+
+    if file_parts.is_empty() {
+        return (with_mentions, None);
     }
+
+    let mut parts: Vec<ContentPart> = vec![ContentPart::Text {
+        text: with_mentions,
+    }];
+    parts.extend(file_parts);
+
+    let display = parts_display_for_chat_log(&parts);
+    (display, Some(parts))
+}
+
+fn parts_display_for_chat_log(parts: &[ContentPart]) -> String {
+    let mut s = String::new();
+    for p in parts {
+        match p {
+            ContentPart::Text { text } => s.push_str(text),
+            ContentPart::Image { .. } => {
+                if !s.is_empty() && !s.ends_with('\n') {
+                    s.push('\n');
+                }
+                s.push_str("[image attachment]\n");
+            }
+        }
+    }
+    s
 }
 
 /// GET /chat — session list + new session compose form.
@@ -252,16 +329,30 @@ pub async fn rename_session(
 pub async fn delete_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
     if uuid::Uuid::parse_str(&session_id).is_err() {
         return (StatusCode::BAD_REQUEST, "Invalid session ID").into_response();
     }
+    let is_htmx = headers.get("HX-Request").and_then(|v| v.to_str().ok()) == Some("true");
     let store = Arc::clone(&state.chat_store);
     let sid = session_id.clone();
     match tokio::task::spawn_blocking(move || store.delete_session(&sid)).await {
-        Ok(Ok(())) => Redirect::to("/chat").into_response(),
+        Ok(Ok(())) => {
+            state.kernel.forget_chat_session_dedup(&session_id).await;
+            if is_htmx {
+                StatusCode::OK.into_response()
+            } else {
+                Redirect::to("/chat").into_response()
+            }
+        }
         Ok(Err(rusqlite::Error::QueryReturnedNoRows)) => {
-            (StatusCode::NOT_FOUND, "Session not found").into_response()
+            if is_htmx {
+                // Already deleted (double-click) — row is already gone, treat as success.
+                StatusCode::OK.into_response()
+            } else {
+                (StatusCode::NOT_FOUND, "Session not found").into_response()
+            }
         }
         Ok(Err(e)) => {
             tracing::error!(session_id = %session_id, error = %e, "Failed to delete session");
@@ -449,8 +540,15 @@ pub async fn new_session(
 
     // Resolve @mentions and attached file IDs into LLM context.
     // The original message is what gets stored in the DB; the expanded version goes to inference.
-    let llm_message =
-        expand_user_message_for_llm(&message, file_ids_opt, &state, &principal).await;
+    let (llm_message, user_parts) = expand_user_message_for_llm(
+        &message,
+        file_ids_opt,
+        &state,
+        &principal,
+        None,
+        &agent_name,
+    )
+    .await;
 
     // Create session and persist the first user message atomically.
     let session_id = {
@@ -497,6 +595,7 @@ pub async fn new_session(
         agent_name.clone(),
         Vec::new(),
         llm_message,
+        user_parts,
         inflight,
     );
 
@@ -538,9 +637,6 @@ pub async fn send(
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
-    let llm_message =
-        expand_user_message_for_llm(&message, file_ids_opt, &state, &principal).await;
-
     let session = {
         let store = Arc::clone(&state.chat_store);
         let sid = session_id.clone();
@@ -550,6 +646,16 @@ pub async fn send(
             _ => return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response(),
         }
     };
+
+    let (llm_message, user_parts) = expand_user_message_for_llm(
+        &message,
+        file_ids_opt,
+        &state,
+        &principal,
+        Some(&session_id),
+        &session.agent_name,
+    )
+    .await;
 
     // Reserve the slot BEFORE persisting so two concurrent /send requests for the same
     // session cannot both kick off an inference or double-persist a user message.
@@ -579,18 +685,234 @@ pub async fn send(
         }
     };
 
-    let mut history: Vec<(String, String)> = Vec::new();
-    for m in prior_msgs {
-        if m.role != "user" && m.role != "assistant" {
-            continue;
+    // Replay non-meta tool calls into the LLM history so the model remembers
+    // what it has already done in prior turns. Without this, follow-up
+    // messages start blind and the model rediscovers the same tool via
+    // `agent-manual`/`describe-tool` every turn (see logs 2026-05-08T08:04).
+    // Meta tools are skipped — they're discovery scaffolding, not actions.
+    const MAX_SUMMARIES_PER_TURN: usize = 5;
+    const MAX_SUMMARY_BYTES_PER_TURN: usize = 2048;
+    const REDACTED_TOOL_NAMES: &[&str] = &[
+        "vault-set",
+        "vault-get",
+        "vault-list",
+        "secrets-set",
+        "secrets-get",
+        "secrets-list",
+        "mcp-oauth-store",
+        // Env / shell tools commonly carry credentials in args.
+        "shell-exec",
+        "proc-spawn",
+        "host-package-install",
+        // Network tools whose args / results frequently contain auth headers,
+        // signed URLs, or response bodies returning bearer tokens.
+        "net-http",
+        "web-fetch",
+        "http-client",
+    ];
+    // Whole-key match (case-insensitive). Substring matching previously caught
+    // `auth` inside `author` and similar false positives. JSON keys are usually
+    // snake_case; we also tokenize on `-`, `_` and dot to handle headers like
+    // `Authorization` and dotted paths like `headers.authorization`.
+    const SENSITIVE_KEY_TOKENS: &[&str] = &[
+        "token",
+        "secret",
+        "secrets",
+        "api_key",
+        "apikey",
+        "password",
+        "passwd",
+        "passphrase",
+        "authorization",
+        "cookie",
+        "credential",
+        "credentials",
+        "private_key",
+        "privatekey",
+        "bearer",
+        "access_key",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "x-api-key",
+        "set-cookie",
+    ];
+    fn truncate_str(s: &str, max_chars: usize) -> String {
+        if s.chars().count() <= max_chars {
+            return s.to_string();
         }
-        let text = if m.role == "user" {
-            expand_user_message_for_llm(&m.content, m.file_ids.as_deref(), &state, &principal)
-                .await
-        } else {
-            m.content
+        let mut out: String = s.chars().take(max_chars).collect();
+        out.push('…');
+        out
+    }
+    fn key_is_sensitive(key: &str, tokens: &[&str]) -> bool {
+        let lower = key.to_ascii_lowercase();
+        if tokens.iter().any(|t| t.eq_ignore_ascii_case(&lower)) {
+            return true;
+        }
+        // Tokenize on common separators and check exact-match against any
+        // token. Catches `headers.Authorization`, `auth_token`, `x-api-key`.
+        for piece in lower.split(['.', '_', '-', ' ']) {
+            if tokens.iter().any(|t| t.eq_ignore_ascii_case(piece)) {
+                return true;
+            }
+        }
+        false
+    }
+    fn redact_json_in_place(v: &mut serde_json::Value, sensitive_tokens: &[&str]) {
+        match v {
+            serde_json::Value::Object(map) => {
+                for (k, val) in map.iter_mut() {
+                    if key_is_sensitive(k, sensitive_tokens) {
+                        *val = serde_json::Value::String("[redacted]".to_string());
+                    } else {
+                        redact_json_in_place(val, sensitive_tokens);
+                    }
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for item in arr.iter_mut() {
+                    redact_json_in_place(item, sensitive_tokens);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn render_redacted(raw: &str, sensitive_tokens: &[&str]) -> String {
+        match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(mut v) => {
+                redact_json_in_place(&mut v, sensitive_tokens);
+                v.to_string()
+            }
+            Err(_) => raw.replace('\n', "\\n").replace('\r', "\\r"),
+        }
+    }
+
+    let mut history: Vec<(String, String)> = Vec::new();
+    let mut pending_tool_summaries: Vec<String> = Vec::new();
+    let mut pending_tool_summaries_bytes: usize = 0;
+    // Most recent meta-tool (agent-manual / search-tools / describe-tool / list-tools)
+    // result *within the current block*. Keeping just the latest one is enough to
+    // remind the model what it just discovered without bloating context with stale
+    // exploration. Reset on each flush.
+    let mut pending_meta_summary: Option<String> = None;
+    const MAX_META_RESULT_CHARS: usize = 600;
+    let flush_to_assistant = |history: &mut Vec<(String, String)>,
+                              pending: &mut Vec<String>,
+                              pending_bytes: &mut usize,
+                              meta_pending: &mut Option<String>,
+                              assistant_content: Option<String>| {
+        let mut all: Vec<String> = Vec::with_capacity(pending.len() + 1);
+        all.append(pending);
+        if let Some(meta) = meta_pending.take() {
+            all.push(meta);
+        }
+        *pending_bytes = 0;
+        if all.is_empty() {
+            if let Some(content) = assistant_content {
+                history.push(("assistant".to_string(), content));
+            }
+            return;
+        }
+        let prefix = all.join("\n");
+        let merged = match assistant_content {
+            Some(content) if content.is_empty() => prefix,
+            Some(content) => format!("{prefix}\n\n{content}"),
+            None => prefix,
         };
-        history.push((m.role, text));
+        history.push(("assistant".to_string(), merged));
+    };
+    for m in prior_msgs {
+        match m.role.as_str() {
+            "tool" => {
+                let name = match m.tool_name.as_deref() {
+                    Some(n) if !n.is_empty() => n,
+                    _ => continue,
+                };
+                let args_raw = m.tool_payload_json.as_deref().unwrap_or("{}");
+                let result_raw = m.tool_result_json.as_deref().unwrap_or("");
+                let (args_rendered, result_rendered) = if REDACTED_TOOL_NAMES.contains(&name) {
+                    ("[redacted]".to_string(), "[redacted]".to_string())
+                } else {
+                    (
+                        render_redacted(args_raw, SENSITIVE_KEY_TOKENS),
+                        render_redacted(result_raw, SENSITIVE_KEY_TOKENS),
+                    )
+                };
+                let status = if m.tool_success.unwrap_or(true) {
+                    "ok"
+                } else {
+                    "FAILED"
+                };
+                if agentos_tools::META_TOOL_NAMES.contains(&name) {
+                    // Keep ONLY the most recent meta-tool result per block. The
+                    // result_short slice is capped tighter than non-meta calls
+                    // because the model just needs the discovered tool list,
+                    // not the whole catalogue. Without this, follow-up turns
+                    // see no record of what the prior turn already discovered
+                    // and rerun `agent-manual`/`search-tools` from scratch.
+                    let args_short = truncate_str(&args_rendered, 120);
+                    let result_short = truncate_str(&result_rendered, MAX_META_RESULT_CHARS);
+                    pending_meta_summary = Some(format!(
+                        "[Prior discovery: {name} ({status}) args=`{args_short}` result=`{result_short}`]"
+                    ));
+                    continue;
+                }
+                if pending_tool_summaries.len() >= MAX_SUMMARIES_PER_TURN
+                    || pending_tool_summaries_bytes >= MAX_SUMMARY_BYTES_PER_TURN
+                {
+                    continue;
+                }
+                let args_short = truncate_str(&args_rendered, 200);
+                let result_short = truncate_str(&result_rendered, 400);
+                let line = format!(
+                    "[Prior tool call: {name} ({status}) args=`{args_short}` result=`{result_short}`]"
+                );
+                pending_tool_summaries_bytes += line.len();
+                pending_tool_summaries.push(line);
+            }
+            "user" => {
+                if !pending_tool_summaries.is_empty() || pending_meta_summary.is_some() {
+                    flush_to_assistant(
+                        &mut history,
+                        &mut pending_tool_summaries,
+                        &mut pending_tool_summaries_bytes,
+                        &mut pending_meta_summary,
+                        None,
+                    );
+                }
+                let text = expand_user_message_for_llm(
+                    &m.content,
+                    m.file_ids.as_deref(),
+                    &state,
+                    &principal,
+                    Some(&session_id),
+                    &session.agent_name,
+                )
+                .await
+                .0;
+                history.push(("user".to_string(), text));
+            }
+            "assistant" => {
+                flush_to_assistant(
+                    &mut history,
+                    &mut pending_tool_summaries,
+                    &mut pending_tool_summaries_bytes,
+                    &mut pending_meta_summary,
+                    Some(m.content),
+                );
+            }
+            _ => continue,
+        }
+    }
+    if !pending_tool_summaries.is_empty() || pending_meta_summary.is_some() {
+        flush_to_assistant(
+            &mut history,
+            &mut pending_tool_summaries,
+            &mut pending_tool_summaries_bytes,
+            &mut pending_meta_summary,
+            None,
+        );
     }
 
     // Persist the user message now that the slot is reserved.
@@ -627,6 +949,7 @@ pub async fn send(
         session.agent_name.clone(),
         history,
         llm_message,
+        user_parts,
         Arc::clone(&inflight),
     );
 
@@ -645,6 +968,7 @@ pub async fn send(
     let html = format!(
         r#"<div class="chat-row chat-row-user">
     <div class="chat-bubble chat-bubble-user">
+        <div class="chat-speaker-tag">You</div>
         <div class="chat-bubble-content">{user_msg}</div>
     </div>
 </div>
@@ -656,13 +980,21 @@ pub async fn send(
         <div class="chat-thinking-dots"><span></span><span></span><span></span></div>
         <span class="muted">Thinking...</span>
     </div>
-    <div class="chat-activity-list" data-role="chat-activity-list"></div>
     <div data-role="chat-stream-response" class="chat-row chat-row-agent" style="display:none;">
         <div class="chat-agent-avatar" aria-hidden="true">{agent_initial}</div>
         <div class="chat-agent-column">
-            <div class="chat-agent-name muted">{agent_name}</div>
+            <div class="chat-agent-name">{agent_name}</div>
             <div class="chat-bubble chat-bubble-agent">
-                <div data-role="chat-stream-text" class="chat-bubble-content-agent chat-streaming chat-stream-markdown markdown-content"></div>
+                <div data-role="chat-stream-content" class="chat-stream-content chat-streaming"></div>
+                <div class="chat-bubble-meta chat-bubble-meta-left chat-stream-meta" data-role="chat-stream-meta" style="display:none;">
+                    <span data-role="chat-stream-time">Streaming...</span>
+                    <span data-role="chat-stream-tokens"></span>
+                    <span data-role="chat-stream-cost"></span>
+                    <button class="chat-msg-action" type="button"
+                            data-role="chat-stream-stop"
+                            data-stop-url="/chat/{session_id}/stop">Stop</button>
+                    <button class="chat-msg-action" type="button" data-role="chat-stream-copy">Copy</button>
+                </div>
             </div>
         </div>
     </div>
@@ -673,6 +1005,44 @@ pub async fn send(
         agent_initial = html_escape(&agent_initial),
     );
     Html(html).into_response()
+}
+
+/// POST /chat/{session_id}/stop — abort the in-flight streaming response for a chat.
+pub async fn stop(State(state): State<AppState>, Path(session_id): Path<String>) -> Response {
+    if uuid::Uuid::parse_str(&session_id).is_err() {
+        return (StatusCode::BAD_REQUEST, "Invalid session ID").into_response();
+    }
+
+    let Some(inflight) = state.inflight_chat.get(&session_id) else {
+        return (StatusCode::CONFLICT, "No response is currently streaming").into_response();
+    };
+
+    let stopped_message = "_Stopped by user._";
+    let stopped = inflight.cancel(stopped_message).await;
+    if stopped {
+        let store = Arc::clone(&state.chat_store);
+        let sid = session_id.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            store.add_assistant_message(&sid, stopped_message, None, None)
+        })
+        .await
+        .unwrap_or_else(|join_err| {
+            tracing::error!(error = %join_err, "Stopping chat failed while persisting stop marker");
+            Ok(())
+        }) {
+            tracing::error!(session_id = %session_id, error = %e, "Failed to persist chat stop marker");
+        }
+        state.inflight_chat.schedule_cleanup(session_id);
+    }
+
+    let mut response = StatusCode::OK.into_response();
+    response.headers_mut().insert(
+        "HX-Trigger",
+        axum::http::HeaderValue::from_static(
+            r#"{"showToast":{"message":"Chat stopped","type":"info"}}"#,
+        ),
+    );
+    response
 }
 
 /// GET /chat/{session_id}/stream — SSE endpoint that attaches to an in-flight inference.
@@ -734,11 +1104,20 @@ pub async fn message_stream(
                 success,
             },
             ChatStreamEvent::Done {
-                answer, iterations, ..
+                answer,
+                iterations,
+                tokens_used,
+                cost_usd,
+                ..
             } => ChatStreamFrame::Done {
                 answer,
                 iterations,
-                tokens_used: None,
+                tokens_used: Some(tokens_used),
+                cost_usd: if cost_usd.is_finite() && cost_usd > 0.0 {
+                    Some(cost_usd)
+                } else {
+                    None
+                },
             },
             ChatStreamEvent::Error { message } => ChatStreamFrame::Error { message },
         };
@@ -781,13 +1160,34 @@ pub async fn conversation(
             .unwrap_or_default()
     };
 
-    // If the last entry is a user message (with no assistant reply yet) AND
-    // an in-flight inference exists, reconnect to the streaming endpoint.
-    let needs_stream_reconnect = timeline_entries
-        .last()
-        .map(|e| matches!(e, TimelineEntry::User { .. }))
-        .unwrap_or(false)
-        && state.inflight_chat.get(&session_id).is_some();
+    // If an in-flight inference exists, always render the client-side stream target.
+    // The in-memory stream buffer is the source of truth while generation is running;
+    // the persisted timeline can temporarily lag or have a shape that is not simply
+    // "last row is user", especially around tool calls and reconnects.
+    let needs_stream_reconnect = state
+        .inflight_chat
+        .get(&session_id)
+        .map(|inflight| !inflight.is_done())
+        .unwrap_or(false);
+
+    let total_tokens_used: u64 = timeline_entries
+        .iter()
+        .map(|e| match e {
+            TimelineEntry::Assistant { tokens_used, .. } => tokens_used.unwrap_or(0),
+            _ => 0,
+        })
+        .sum();
+    let total_tool_calls = timeline_entries
+        .iter()
+        .filter(|e| matches!(e, TimelineEntry::Tool { .. }))
+        .count();
+    let total_cost_usd: f64 = timeline_entries
+        .iter()
+        .map(|e| match e {
+            TimelineEntry::Assistant { cost_usd, .. } => cost_usd.unwrap_or(0.0),
+            _ => 0.0,
+        })
+        .sum();
 
     let messages: Vec<_> = timeline_entries
         .into_iter()
@@ -814,7 +1214,7 @@ pub async fn conversation(
                 content,
                 created_at,
                 tokens_used,
-                cost_usd,
+                cost_usd => cost_usd.map(|v| format!("{:.6}", v)),
             },
             TimelineEntry::Tool {
                 id,
@@ -860,6 +1260,9 @@ pub async fn conversation(
         session_title => session.title.clone(),
         agent_initial,
         messages,
+        total_tokens_used,
+        total_tool_calls,
+        total_cost_usd => if total_cost_usd > 0.0 { format!("{:.6}", total_cost_usd) } else { String::new() },
         needs_stream_reconnect,
         csrf_token,
     };

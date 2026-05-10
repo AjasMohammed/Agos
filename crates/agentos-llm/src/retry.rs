@@ -1,8 +1,33 @@
 use agentos_types::AgentOSError;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use tokio::time::sleep;
 use tracing::{debug, warn};
+
+/// Default per-provider in-flight request cap. Set to 8 — enough for
+/// reasonable parallelism (batch tasks, multiple chat sessions) while
+/// preventing one runaway loop from saturating an upstream that's
+/// already rate-limiting (observed in 2026-05-08 logs: a single
+/// `provider="custom"` endpoint returned 5 distinct 429 storms within
+/// 30 minutes once two chat sessions ran concurrently).
+pub const DEFAULT_PROVIDER_CONCURRENCY: usize = 8;
+
+/// Max time a caller will block waiting for a permit before giving up
+/// with a typed error. Bounded so a long `Retry-After: 60s` storm
+/// cannot stall an entire chat session indefinitely — the queued
+/// caller surfaces a clear "provider saturated" message after this
+/// window and the user/loop can fall through to a different provider.
+pub const CONCURRENCY_ACQUIRE_TIMEOUT_SECS: u64 = 30;
+
+/// Construct a fresh per-provider concurrency limiter. Adapters should
+/// store one of these per instance and pass `&self.concurrency` to
+/// every [`send_with_retry`] call so retries hold the permit and other
+/// callers wait their turn instead of stacking up additional 429s.
+pub fn default_concurrency_limiter() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(DEFAULT_PROVIDER_CONCURRENCY))
+}
 
 /// Configuration for retry behavior.
 #[derive(Debug, Clone)]
@@ -65,9 +90,55 @@ pub fn is_retryable_status(status: u16) -> bool {
     matches!(status, 408 | 429 | 500 | 502 | 503 | 504 | 529)
 }
 
-/// Parse `retry-after` header value to a Duration.
+/// Parse `Retry-After` header to a Duration. Accepts the two spec
+/// forms (RFC 9110 §10.2.3): an integer "delta-seconds" *or* an
+/// HTTP-date. Anything we cannot interpret returns `None`, which lets
+/// the caller fall back to the policy's exponential schedule rather
+/// than misinterpreting a malformed header as zero delay.
 pub fn parse_retry_after(value: &str) -> Option<Duration> {
-    value.trim().parse::<u64>().ok().map(Duration::from_secs)
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Form 1: delta-seconds (integer).
+    if let Ok(secs) = trimmed.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    // Form 2: HTTP-date. chrono parses RFC 1123 / RFC 850 / asctime.
+    type DateParser = fn(&str) -> chrono::ParseResult<chrono::DateTime<chrono::Utc>>;
+    let parsers: &[DateParser] = &[
+        |s| chrono::DateTime::parse_from_rfc2822(s).map(|dt| dt.with_timezone(&chrono::Utc)),
+        |s| {
+            chrono::NaiveDateTime::parse_from_str(s, "%A, %d-%b-%y %H:%M:%S GMT").map(|naive| {
+                chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc)
+            })
+        },
+        |s| {
+            chrono::NaiveDateTime::parse_from_str(s, "%a %b %e %H:%M:%S %Y").map(|naive| {
+                chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc)
+            })
+        },
+    ];
+    for parse in parsers {
+        if let Ok(target) = parse(trimmed) {
+            let now = chrono::Utc::now();
+            if target >= now {
+                // `to_std()` only fails on negative spans, which the
+                // `>=` already guards against; falls back to 0 instead
+                // of returning `None` so the caller doesn't reset to
+                // the exponential schedule on the rare exact-equal case.
+                return Some(
+                    target
+                        .signed_duration_since(now)
+                        .to_std()
+                        .unwrap_or(Duration::from_secs(0)),
+                );
+            }
+            // Past timestamp ⇒ retry immediately.
+            return Some(Duration::from_secs(0));
+        }
+    }
+    None
 }
 
 /// Simple circuit breaker that tracks consecutive failures.
@@ -139,12 +210,56 @@ impl Default for CircuitBreaker {
 ///
 /// The `build_request` closure is called for each attempt (since `reqwest::RequestBuilder`
 /// is not cloneable). Returns the successful `reqwest::Response` or the last error.
+///
+/// Without a `concurrency` limiter, parallel callers all race against
+/// the same upstream and any rate-limit response is multiplied by the
+/// number of in-flight requests. Pass an `Arc<Semaphore>` shared across
+/// the adapter instance so retries inherit the permit and other callers
+/// queue rather than pile on. See [`default_concurrency_limiter`].
 pub async fn send_with_retry(
     provider: &str,
     policy: &RetryPolicy,
     breaker: &CircuitBreaker,
+    concurrency: Option<&Arc<Semaphore>>,
     build_request: impl Fn() -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, AgentOSError> {
+    // Acquire an in-flight slot for this provider before checking the
+    // breaker — if we are over the concurrency cap we'd rather queue
+    // than race ahead and trip the breaker on a 429. The permit is
+    // held across all retries, so per-call backoff is honoured but no
+    // additional caller can stomp the same upstream window.
+    let _permit = if let Some(sem) = concurrency {
+        match tokio::time::timeout(
+            Duration::from_secs(CONCURRENCY_ACQUIRE_TIMEOUT_SECS),
+            Arc::clone(sem).acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(p)) => Some(p),
+            Ok(Err(e)) => {
+                return Err(AgentOSError::LLMError {
+                    provider: provider.to_string(),
+                    reason: format!("concurrency semaphore closed for provider {provider}: {e}"),
+                });
+            }
+            Err(_) => {
+                // Bounded queue prevents a slow upstream from stalling
+                // every caller indefinitely. Surface a typed error so
+                // the caller can log it and (eventually) fall through
+                // to a different provider in the fallback chain.
+                return Err(AgentOSError::LLMError {
+                    provider: provider.to_string(),
+                    reason: format!(
+                        "provider {provider} concurrency saturated — \
+                         no permit available within {CONCURRENCY_ACQUIRE_TIMEOUT_SECS}s"
+                    ),
+                });
+            }
+        }
+    } else {
+        None
+    };
+
     if !breaker.can_attempt() {
         return Err(AgentOSError::LLMError {
             provider: provider.to_string(),
@@ -337,6 +452,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_retry_after_http_date() {
+        // RFC 9110 §10.2.3 form 2: HTTP-date.
+        let future = chrono::Utc::now() + chrono::Duration::seconds(45);
+        let s = future.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let parsed = parse_retry_after(&s).expect("HTTP-date should parse");
+        // Allow 5s clock drift / parser rounding.
+        assert!(
+            parsed.as_secs() >= 40 && parsed.as_secs() <= 50,
+            "got {:?}",
+            parsed
+        );
+    }
+
+    #[test]
+    fn test_parse_retry_after_past_http_date_returns_zero() {
+        // Past timestamp ⇒ retry immediately.
+        let past = chrono::Utc::now() - chrono::Duration::seconds(60);
+        let s = past.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        assert_eq!(parse_retry_after(&s), Some(Duration::from_secs(0)));
+    }
+
+    #[test]
     fn test_circuit_breaker_trips_after_threshold() {
         let cb = CircuitBreaker::new(3, Duration::from_secs(60));
         assert!(cb.can_attempt());
@@ -386,5 +523,28 @@ mod tests {
     fn test_is_retryable_status_includes_408_504() {
         assert!(is_retryable_status(408));
         assert!(is_retryable_status(504));
+    }
+
+    /// Regression test for the per-provider concurrency cap. Two
+    /// `acquire_owned` calls on a 1-permit semaphore must serialise:
+    /// the second waits until the first releases. Proves
+    /// `send_with_retry` (which acquires the same way) will queue
+    /// excess callers instead of stacking up additional 429s on the
+    /// upstream during a rate-limit storm.
+    #[tokio::test]
+    async fn concurrency_limiter_serialises_callers() {
+        let sem = Arc::new(Semaphore::new(1));
+        let p1 = Arc::clone(&sem).acquire_owned().await.unwrap();
+        // Second acquisition must not complete while p1 is held.
+        let sem2 = Arc::clone(&sem);
+        let race = tokio::spawn(async move { sem2.acquire_owned().await.unwrap() });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!race.is_finished(), "second acquire jumped the queue");
+        drop(p1);
+        // After release, the queued acquire should resolve quickly.
+        let _p2 = tokio::time::timeout(Duration::from_millis(200), race)
+            .await
+            .expect("p2 acquired after p1 released")
+            .expect("join ok");
     }
 }

@@ -212,6 +212,26 @@ impl CheckpointStore {
         .context("Checkpoint prune task failed")?
     }
 
+    /// Delete every checkpoint row owned by `agent_id`. Returns the number of rows removed.
+    pub async fn delete_for_agent(&self, agent_id: &AgentID) -> anyhow::Result<usize> {
+        let conn = self.conn.clone();
+        let agent_id = agent_id.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Checkpoint DB mutex poisoned"))?;
+            let deleted = guard
+                .execute(
+                    "DELETE FROM checkpoints WHERE agent_id = ?1",
+                    params![agent_id],
+                )
+                .context("Failed to delete checkpoints for agent")?;
+            Ok(deleted)
+        })
+        .await
+        .context("Checkpoint delete_for_agent task failed")?
+    }
+
     pub async fn delete_for_task(&self, task_id: &TaskID) -> anyhow::Result<()> {
         let conn = self.conn.clone();
         let task_id = task_id.to_string();
@@ -376,5 +396,45 @@ mod tests {
         assert_eq!(loaded.agent_id, record.agent_id);
         assert_eq!(loaded.step_num, 2);
         assert_eq!(loaded.state_blob, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn persisted_task_context_legacy_entry_content_field() {
+        use crate::context::PersistedTaskContext;
+
+        let json = r#"{
+            "window": {
+                "id": "550e8400-e29b-41d4-a716-446655440001",
+                "entries": [
+                    {
+                        "role": "User",
+                        "content": "checkpoint legacy blob",
+                        "timestamp": "2020-06-01T12:00:00Z",
+                        "metadata": null,
+                        "importance": 0.5,
+                        "pinned": false,
+                        "reference_count": 0,
+                        "partition": "Active",
+                        "category": "history",
+                        "is_summary": false
+                    }
+                ],
+                "max_entries": 80,
+                "overflow_strategy": "fifo_eviction",
+                "needs_checkpoint": false
+            },
+            "agent_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+            "injected_sub_agents": []
+        }"#;
+
+        let ctx: PersistedTaskContext =
+            serde_json::from_str(json).expect("legacy checkpoint payload");
+        assert_eq!(ctx.window.entries.len(), 1);
+        assert_eq!(
+            ctx.window.entries[0].parts,
+            vec![agentos_types::ContentPart::Text {
+                text: "checkpoint legacy blob".into(),
+            }]
+        );
     }
 }

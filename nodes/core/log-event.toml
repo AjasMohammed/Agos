@@ -1,0 +1,47 @@
+[node]
+id = "log-event"
+version = 1
+display_name = "Log Event"
+description = "Write a structured entry to the AgentOS audit log. Useful for workflow observability."
+category = "core"
+icon = "file-text"
+color = "#64748b"
+risk_class = "readonly_scoped"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "message"
+display_name = "Message"
+type = "template"
+required = true
+placeholder = "Workflow reached checkpoint: {{input}}"
+description = "Message to write to the audit log."
+
+[[node.properties]]
+name = "level"
+display_name = "Level"
+type = "options"
+required = false
+default = "info"
+
+  [[node.properties.options]]
+  value = "info"
+  label = "Info"
+
+  [[node.properties.options]]
+  value = "warn"
+  label = "Warning"
+
+  [[node.properties.options]]
+  value = "error"
+  label = "Error"
+
+[node.execute]
+kind = "builtin"
+name = "log"

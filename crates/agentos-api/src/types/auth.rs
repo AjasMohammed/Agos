@@ -1,20 +1,21 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TokenRequest {
-    pub api_key: String,
+    pub api_key: Zeroizing<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RefreshRequest {
-    pub refresh_token: String,
+    pub refresh_token: Zeroizing<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
-    pub access_token: String,
-    pub refresh_token: String,
+    pub access_token: Zeroizing<String>,
+    pub refresh_token: Zeroizing<String>,
     pub expires_in: u64,
     pub token_type: String,
 }

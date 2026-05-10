@@ -33,6 +33,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             events: Default::default(),
             sandbox_policy: Default::default(),
             max_concurrent_sandbox_children: 4,
+            context_compaction: Default::default(),
         },
         routing: Default::default(),
         secrets: SecretsSettings {
@@ -65,6 +66,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             data_dir: temp_dir.path().join("data").to_string_lossy().to_string(),
             crl_path: None,
             workspace: Default::default(),
+            host_package: Default::default(),
         },
         bus: BusSettings {
             socket_path: temp_dir
@@ -98,5 +100,6 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         otel: Default::default(),
         context: Default::default(),
         api: Default::default(),
+        chat: Default::default(),
     }
 }

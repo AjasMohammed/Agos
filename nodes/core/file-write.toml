@@ -1,0 +1,51 @@
+[node]
+id = "file-write"
+version = 1
+display_name = "File Write"
+description = "Write or append content to a file in the agent's data directory."
+category = "files"
+icon = "file-plus"
+color = "#64748b"
+risk_class = "write_scoped"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "path"
+display_name = "File Path"
+type = "template"
+required = true
+placeholder = "output/result.txt"
+description = "Path to write to, relative to the agent data directory."
+
+[[node.properties]]
+name = "content"
+display_name = "Content"
+type = "template"
+required = true
+placeholder = "{{input}}"
+description = "Content to write. Use {{var}} to include workflow outputs."
+
+[[node.properties]]
+name = "mode"
+display_name = "Write Mode"
+type = "options"
+required = false
+default = "overwrite"
+
+  [[node.properties.options]]
+  value = "overwrite"
+  label = "Overwrite"
+
+  [[node.properties.options]]
+  value = "append"
+  label = "Append"
+
+[node.execute]
+kind = "tool"
+tool_id = "file-write"

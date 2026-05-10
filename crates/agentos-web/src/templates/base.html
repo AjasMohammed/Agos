@@ -1,22 +1,28 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ page_title }} - AgentOS</title>
+    <title>{% block title %}{{ page_title }}{% endblock %} - AgentOS</title>
     <meta name="csrf-token" content="{{ csrf_token }}">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
+    <link rel="icon" type="image/png" href="/static/logo.png">
     <link rel="stylesheet" href="/static/css/pico.min.css">
-    <link rel="stylesheet" href="/static/css/app.css?v=3">
-    <script src="/static/js/htmx.min.js"></script>
-    <script src="/static/js/sse.js" defer></script>
-    <script src="/static/js/alpine.min.js" defer></script>
-    <script src="/static/js/app.js" defer></script>
+    <link rel="stylesheet" href="/static/css/app.css?v=17">
     <script src="/static/js/csrf.js" defer></script>
+    <script src="/static/js/htmx.min.js" defer></script>
+    <script src="/static/js/sse.js" defer></script>
+    <script src="/static/js/app.js" defer></script>
+    <script src="/static/js/nav-active.js" defer></script>
+    <script src="/static/js/notification-bell.js" defer></script>
+    <script src="/static/js/alpine.min.js" defer></script>
+    {% block head_extra %}{% endblock %}
 </head>
-<body x-data="{ sidebarOpen: false }" @keydown.escape="sidebarOpen = false">
+<body x-data="{ sidebarOpen: false, sidebarCollapsed: localStorage.getItem('aosSidebarCollapsed') === 'true' }"
+      :class="{ 'sidebar-collapsed': sidebarCollapsed }"
+      @keydown.escape="sidebarOpen = false">
     <a href="#main-content" class="skip-link">Skip to main content</a>
 
     <!-- Keyboard nav initializer (hidden) -->
@@ -26,7 +32,17 @@
     <aside class="sidebar" :class="{ 'sidebar-open': sidebarOpen }"
            aria-label="Main navigation" role="navigation">
         <div class="sidebar-brand">
-            <a href="/"><strong>AgentOS</strong></a>
+            <a href="/" class="brand-link" aria-label="AgentOS dashboard">
+                <img src="/static/logo.png" alt="" class="brand-logo">
+                <strong class="brand-wordmark">AgentOS</strong>
+            </a>
+            <button type="button"
+                    class="sidebar-collapse-btn"
+                    @click="sidebarCollapsed = !sidebarCollapsed; localStorage.setItem('aosSidebarCollapsed', sidebarCollapsed ? 'true' : 'false')"
+                    :aria-expanded="(!sidebarCollapsed).toString()"
+                    aria-label="Collapse sidebar">
+                <span aria-hidden="true">&lsaquo;</span>
+            </button>
         </div>
         <nav>
             <ul class="sidebar-nav">
@@ -41,6 +57,7 @@
                     <li><a href="/chat" data-nav="/chat">Chat</a></li>
                     <li><a href="/agent-chat" data-nav="/agent-chat">Agent Chat</a></li>
                     <li><a href="/files" data-nav="/files">Files</a></li>
+                    <li><a href="/workflows" data-nav="/workflows">Workflows</a></li>
                     <li><a href="/pipelines" data-nav="/pipelines">Pipelines</a></li>
                     <li><a href="/escalations" data-nav="/escalations">Escalations</a></li>
                 </ul>
@@ -97,7 +114,7 @@
          x-transition:enter="fade-enter" x-transition:leave="fade-leave"></div>
 
     <!-- Main wrapper (topbar + content + footer) -->
-    <div class="main-wrapper">
+    <div class="main-wrapper" :class="{ 'sidebar-is-collapsed': sidebarCollapsed }">
         <!-- Topbar -->
         <header class="topbar">
             <div class="topbar-left">
@@ -105,6 +122,13 @@
                         aria-label="Toggle navigation"
                         :aria-expanded="sidebarOpen.toString()">
                     &#9776;
+                </button>
+                <button class="topbar-sidebar-toggle"
+                        type="button"
+                        @click="sidebarCollapsed = !sidebarCollapsed; localStorage.setItem('aosSidebarCollapsed', sidebarCollapsed ? 'true' : 'false')"
+                        :aria-expanded="(!sidebarCollapsed).toString()"
+                        aria-label="Toggle sidebar width">
+                    <span aria-hidden="true">Menu</span>
                 </button>
                 {% if breadcrumbs %}
                 <nav aria-label="Breadcrumb" class="breadcrumb-nav">
@@ -122,7 +146,7 @@
             <div class="topbar-right">
                 <!-- SSE connection status indicator -->
                 <span class="connection-indicator" x-data="sseStatus()" x-init="init()" @destroy="destroy()">
-                    <span class="connection-dot" :class="state" :title="label" x-text=""></span>
+                    <span class="connection-dot" :class="state" :title="label"></span>
                     <span x-text="label" style="user-select:none"></span>
                 </span>
 
@@ -133,8 +157,9 @@
                        style="position:relative;padding-right:0.25rem">
                         Alerts
                         <span x-show="unreadCount > 0"
+                              x-cloak
                               x-text="unreadCount"
-                              style="position:absolute;top:-4px;right:-8px;background:var(--pico-color-red-500,#e53e3e);color:#fff;border-radius:50%;padding:1px 5px;font-size:0.7rem;min-width:1.1rem;text-align:center"
+                              style="position:absolute;top:-6px;right:-10px;background:var(--aos-red);color:#fff;border:2px solid var(--aos-black);border-radius:0;padding:1px 5px;font-size:0.7rem;font-weight:700;min-width:1.1rem;text-align:center;box-shadow:2px 2px 0 0 var(--aos-black)"
                               aria-live="polite"
                               aria-label="unread notifications"></span>
                     </a>
@@ -158,98 +183,5 @@
     <!-- Keyboard shortcuts help modal -->
     {% include "partials/shortcuts_modal.html" %}
 
-    <script>
-    (function () {
-        var path = window.location.pathname;
-        document.querySelectorAll('[data-nav]').forEach(function (a) {
-            var href = a.getAttribute('data-nav');
-            var active = href === '/' ? path === '/' : path === href || path.startsWith(href + '/');
-            if (active) {
-                a.classList.add('nav-active');
-                a.setAttribute('aria-current', 'page');
-                // Auto-open the collapsible section containing the active link.
-                var section = a.closest('details.nav-section');
-                if (section) section.setAttribute('open', '');
-            }
-        });
-    }());
-    </script>
-    <script>
-    function notificationBell() {
-        return {
-            unreadCount: 0,
-            evtSource: null,
-            _retries: 0,
-            _maxRetries: 5,
-            _retryTimer: null,
-            init() {
-                var self = this;
-                // Fetch current unread count immediately so the bell is accurate on load.
-                fetch('/notifications/unread-count')
-                    .then(function (r) { return r.ok ? r.json() : null; })
-                    .then(function (data) { if (data) { self.unreadCount = data.count; } })
-                    .catch(function () {});
-                self._connect();
-            },
-            _connect() {
-                var self = this;
-                if (self.evtSource) {
-                    self.evtSource.close();
-                    self.evtSource = null;
-                }
-                self.evtSource = new EventSource('/notifications/stream');
-                self.evtSource.addEventListener('notification-new', function (e) {
-                    self.unreadCount += 1;
-                    try {
-                        var data = JSON.parse(e.data);
-                        window.dispatchEvent(new CustomEvent('showToast', {
-                            detail: {
-                                message: data.subject || 'New notification',
-                                type: data.priority === 'critical' ? 'error'
-                                    : data.priority === 'urgent' ? 'warning'
-                                    : 'info'
-                            }
-                        }));
-                    } catch (_) {}
-                });
-                self.evtSource.addEventListener('notification-reload', function () {
-                    fetch('/notifications/unread-count')
-                        .then(function (r) { return r.ok ? r.json() : null; })
-                        .then(function (data) { if (data) { self.unreadCount = data.count; } })
-                        .catch(function () {});
-                });
-                self.evtSource.onopen = function () {
-                    self._retries = 0;
-                };
-                self.evtSource.onerror = function () {
-                    // Close immediately to stop the browser's built-in auto-reconnect
-                    // which can saturate connection limits and freeze the page.
-                    if (self.evtSource) {
-                        self.evtSource.close();
-                        self.evtSource = null;
-                    }
-                    if (self._retries < self._maxRetries) {
-                        self._retries++;
-                        var delay = Math.min(1000 * Math.pow(2, self._retries), 30000);
-                        self._retryTimer = setTimeout(function () {
-                            self._retryTimer = null;
-                            self._connect();
-                        }, delay);
-                    }
-                };
-            },
-            destroy() {
-                if (this._retryTimer) {
-                    clearTimeout(this._retryTimer);
-                    this._retryTimer = null;
-                }
-                if (this.evtSource) {
-                    this.evtSource.close();
-                    this.evtSource = null;
-                }
-            }
-        };
-    }
-    </script>
 </body>
 </html>

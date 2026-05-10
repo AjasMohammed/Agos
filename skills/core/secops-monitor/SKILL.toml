@@ -16,11 +16,11 @@ default_provider = "anthropic"
 default_model = "claude-haiku-4-5"
 
 [tools]
-required = ["audit-query", "memory-search", "notify-user"]
+required = ["file-reader", "shell-exec", "memory-search", "notify-user"]
 optional = ["memory-write"]
 
 [permissions]
-required = ["audit:read", "memory:read", "memory:write", "notification:write"]
+required = ["fs.user_data:rw", "process.exec:x", "memory.semantic:r", "memory.episodic:r", "memory.semantic:w", "memory.episodic:w", "user.notify:w"]
 
 [budget]
 max_cost_per_run = 0.25

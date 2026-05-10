@@ -1,0 +1,28 @@
+[node]
+id = "file-read"
+version = 1
+display_name = "File Read"
+description = "Read the contents of a file from the agent's allowed directory."
+category = "files"
+icon = "file"
+color = "#64748b"
+risk_class = "readonly_scoped"
+
+[[node.inputs]]
+kind = "main"
+required = true
+
+[[node.outputs]]
+kind = "main"
+
+[[node.properties]]
+name = "path"
+display_name = "File Path"
+type = "template"
+required = true
+placeholder = "data/report.txt"
+description = "Path to the file to read, relative to the agent data directory."
+
+[node.execute]
+kind = "tool"
+tool_id = "file-read"

@@ -602,13 +602,16 @@ mod tests {
         }
     }
 
+    type AgentResponseFn = Box<dyn Fn(&str, &str) -> Result<String, AgentOSError> + Send + Sync>;
+    type ToolResponseFn =
+        Box<dyn Fn(&str, &serde_json::Value) -> Result<String, AgentOSError> + Send + Sync>;
+
     /// Mock executor that records calls and returns configurable results.
     struct MockExecutor {
         agent_calls: Mutex<Vec<(String, String)>>,
         tool_calls: Mutex<Vec<(String, serde_json::Value)>>,
-        agent_response: Box<dyn Fn(&str, &str) -> Result<String, AgentOSError> + Send + Sync>,
-        tool_response:
-            Box<dyn Fn(&str, &serde_json::Value) -> Result<String, AgentOSError> + Send + Sync>,
+        agent_response: AgentResponseFn,
+        tool_response: ToolResponseFn,
     }
 
     impl MockExecutor {
