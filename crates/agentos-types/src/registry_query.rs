@@ -106,7 +106,7 @@ impl TaskQuery for TaskSnapshot {
             .filter(|t| &t.agent_id == agent_id)
             .cloned()
             .collect();
-        results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        results.sort_by_key(|t| std::cmp::Reverse(t.created_at));
         results.truncate(limit.min(100));
         results
     }
@@ -119,7 +119,7 @@ impl TaskQuery for TaskSnapshot {
             .filter(|t| active.contains(&t.status.as_str()))
             .cloned()
             .collect();
-        results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        results.sort_by_key(|t| std::cmp::Reverse(t.created_at));
         results.truncate(limit.min(100));
         results
     }
