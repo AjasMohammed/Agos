@@ -651,7 +651,10 @@ impl Kernel {
                     }
                     consecutive_push_failures += 1;
                     if consecutive_push_failures >= 3 {
-                        anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                        anyhow::bail!(
+                            "Task aborted: {} consecutive context push failures — agent context is unreliable",
+                            consecutive_push_failures
+                        );
                     }
                 } else {
                     consecutive_push_failures = 0;
@@ -844,7 +847,10 @@ impl Kernel {
                             }
                             consecutive_push_failures += 1;
                             if consecutive_push_failures >= 3 {
-                                anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                                anyhow::bail!(
+                                    "Task aborted: {} consecutive context push failures — agent context is unreliable",
+                                    consecutive_push_failures
+                                );
                             }
                         } else {
                             consecutive_push_failures = 0;
@@ -941,7 +947,10 @@ impl Kernel {
                     tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                     consecutive_push_failures += 1;
                     if consecutive_push_failures >= 3 {
-                        anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                        anyhow::bail!(
+                            "Task aborted: {} consecutive context push failures — agent context is unreliable",
+                            consecutive_push_failures
+                        );
                     }
                 } else {
                     consecutive_push_failures = 0;
@@ -992,7 +1001,10 @@ impl Kernel {
                         tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                         consecutive_push_failures += 1;
                         if consecutive_push_failures >= 3 {
-                            anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                            anyhow::bail!(
+                                "Task aborted: {} consecutive context push failures — agent context is unreliable",
+                                consecutive_push_failures
+                            );
                         }
                     } else {
                         consecutive_push_failures = 0;
@@ -1041,7 +1053,10 @@ impl Kernel {
                         tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                         consecutive_push_failures += 1;
                         if consecutive_push_failures >= 3 {
-                            anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                            anyhow::bail!(
+                                "Task aborted: {} consecutive context push failures — agent context is unreliable",
+                                consecutive_push_failures
+                            );
                         }
                     } else {
                         consecutive_push_failures = 0;
@@ -1101,7 +1116,10 @@ impl Kernel {
                         tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                         consecutive_push_failures += 1;
                         if consecutive_push_failures >= 3 {
-                            anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                            anyhow::bail!(
+                                "Task aborted: {} consecutive context push failures — agent context is unreliable",
+                                consecutive_push_failures
+                            );
                         }
                     } else {
                         consecutive_push_failures = 0;
@@ -1138,7 +1156,10 @@ impl Kernel {
                     tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                     consecutive_push_failures += 1;
                     if consecutive_push_failures >= 3 {
-                        anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                        anyhow::bail!(
+                            "Task aborted: {} consecutive context push failures — agent context is unreliable",
+                            consecutive_push_failures
+                        );
                     }
                 } else {
                     consecutive_push_failures = 0;
@@ -1191,7 +1212,10 @@ impl Kernel {
                     tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                     consecutive_push_failures += 1;
                     if consecutive_push_failures >= 3 {
-                        anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                        anyhow::bail!(
+                            "Task aborted: {} consecutive context push failures — agent context is unreliable",
+                            consecutive_push_failures
+                        );
                     }
                 }
                 // Note: no else-reset here because `break` follows immediately —
@@ -1892,12 +1916,30 @@ impl Kernel {
                         &scan,
                     );
                     let tainted_result = serde_json::json!({ "output": wrapped });
+                    // Phase 3 — Teaching envelope: wrap success results with
+                    // manifest-derived `_meta` (use_for / prefer_over /
+                    // related_tools) so the model learns the ecosystem from
+                    // each call. Backward-compatible: tools without
+                    // `usage_hints` declared get raw `tainted_result`.
+                    let enriched_result = {
+                        let registry = self.tool_registry.read().await;
+                        let hints = registry
+                            .get_by_name(&outcome.tool_call.tool_name)
+                            .and_then(|t| t.manifest.usage_hints.as_ref())
+                            .cloned();
+                        drop(registry);
+                        Self::wrap_with_manifest_meta(
+                            tainted_result,
+                            &outcome.tool_call.tool_name,
+                            hints.as_ref(),
+                        )
+                    };
                     if let Err(e) = self
                         .context_manager
                         .push_tool_result(
                             &task.id,
                             &outcome.tool_call.tool_name,
-                            &tainted_result,
+                            &enriched_result,
                             outcome.tool_call.id.clone(),
                         )
                         .await
@@ -2127,8 +2169,15 @@ impl Kernel {
 
         // Setup task context: system prompt, context window, user prompt, injection scan,
         // and adaptive retrieval plan. Returns Err if task should be aborted.
+        // `retrieval_plan` is the seed plan classified from `task.original_prompt`;
+        // it gets replaced in-loop when the conversation tail shifts (Phase 2).
         let (system_prompt, tools_desc, agent_directory, retrieval_plan) =
             self.setup_task_context(task, task_trace_id).await?;
+        let mut current_retrieval_plan = retrieval_plan;
+        // Seed last-query hash to the original prompt's hash so the first
+        // iteration uses the seed plan without an unnecessary refresh trigger.
+        let mut last_retrieval_query_hash: Option<u64> =
+            Some(Self::hash_query(&task.original_prompt));
 
         // Build the structured tool manifest list once per task so adapters that
         // support native function calling (e.g. OpenAI) can receive schema metadata.
@@ -2165,6 +2214,9 @@ impl Kernel {
         let mut refresh_knowledge_blocks = true;
         let mut context_warning_emitted = false;
         let mut tool_not_found_suggest_count: u32 = 0;
+        // Wall-clock start of the executor loop — used in the per-turn system
+        // reminder so the model can see how long the task has been running.
+        let task_start = std::time::Instant::now();
 
         // Cadence-gated context compactor. Reads tunables from
         // `[kernel.context_compaction]` so operators can adjust without a
@@ -2274,6 +2326,34 @@ impl Kernel {
                 }
             };
 
+            // Phase 2 — Auto-RAG dynamic refresh.
+            // Re-classify retrieval against the current conversation tail (last
+            // user message + last tool result) so a topic pivot mid-task triggers
+            // a fresh memory search instead of forever using `task.original_prompt`
+            // as the query. The change-key (hash) intentionally excludes the
+            // tool-result snippet — otherwise every successful tool call would
+            // mutate the snippet and re-fire classify even on a single-topic
+            // conversation. Only the latest user message decides "topic shifted".
+            {
+                let (dynamic_query, change_key) =
+                    Self::build_dynamic_retrieval_query(&raw_context, &task.original_prompt);
+                let change_hash = Self::hash_query(&change_key);
+                if last_retrieval_query_hash != Some(change_hash) {
+                    let dynamic_plan = self.retrieval_gate.classify(&dynamic_query);
+                    if !dynamic_plan.is_empty() {
+                        tracing::debug!(
+                            task_id = %task.id,
+                            iteration,
+                            queries = dynamic_plan.queries.len(),
+                            "Conversation tail shifted — refreshing retrieval plan"
+                        );
+                        current_retrieval_plan = dynamic_plan;
+                        refresh_knowledge_blocks = true;
+                    }
+                    last_retrieval_query_hash = Some(change_hash);
+                }
+            }
+
             if refresh_knowledge_blocks {
                 let refresh_start = std::time::Instant::now();
                 knowledge_blocks.clear();
@@ -2291,10 +2371,10 @@ impl Kernel {
                 // even when retrieval runs against empty stores.
                 let is_event_triggered = task.trigger_source.is_some();
 
-                if !retrieval_plan.is_empty() && !is_event_triggered {
+                if !current_retrieval_plan.is_empty() && !is_event_triggered {
                     let outcome = self
                         .retrieval_executor
-                        .execute(&retrieval_plan, Some(&task.agent_id))
+                        .execute(&current_retrieval_plan, Some(&task.agent_id))
                         .await;
 
                     // Only emit MemorySearchFailed for actual infrastructure errors,
@@ -2315,7 +2395,7 @@ impl Kernel {
                                 "agent_id": task.agent_id.to_string(),
                                 "task_id": task.id.to_string(),
                                 "search_type": "adaptive_retrieval",
-                                "query_count": retrieval_plan.queries.len(),
+                                "query_count": current_retrieval_plan.queries.len(),
                                 "errors": outcome.errors(),
                                 "partial_results": outcome.result_count() > 0,
                             }),
@@ -2335,12 +2415,12 @@ impl Kernel {
                     tracing::debug!(
                         task_id = %task.id,
                         iteration,
-                        retrieval_queries = retrieval_plan.queries.len(),
+                        retrieval_queries = current_retrieval_plan.queries.len(),
                         retrieval_results = retrieved.len(),
                         retrieval_blocks = knowledge_blocks.len(),
                         "Adaptive retrieval complete"
                     );
-                } else if is_event_triggered && !retrieval_plan.is_empty() {
+                } else if is_event_triggered && !current_retrieval_plan.is_empty() {
                     tracing::debug!(
                         task_id = %task.id,
                         chain_depth,
@@ -2419,6 +2499,18 @@ impl Kernel {
                 crate::metrics::record_retrieval_refresh_decision(false);
             }
 
+            // Build the per-turn reminder BEFORE `raw_context` is consumed by the
+            // history filter below. The reminder cites the most recent tool
+            // outcomes; `compiled_context` after the compactor may have evicted
+            // them on long tasks, so we walk the unfiltered persistent context.
+            let reminder_text = Self::build_turn_reminder(
+                task,
+                completed_iterations,
+                tool_call_count,
+                task_start.elapsed(),
+                &raw_context,
+            );
+
             // Filter history: only non-system Active entries
             let mut history: Vec<ContextEntry> = raw_context
                 .entries
@@ -2433,7 +2525,7 @@ impl Kernel {
             scrub_meta_tool_results(&mut history);
 
             // Compile the optimized context window
-            let compiled_context =
+            let mut compiled_context =
                 self.context_compiler
                     .compile(crate::context_compiler::CompilationInputs {
                         system_prompt: system_prompt.clone(),
@@ -2443,6 +2535,30 @@ impl Kernel {
                         history,
                         task_prompt: task.original_prompt.clone(),
                     });
+
+            // Per-turn system reminder: re-inject world-state at the tail of the
+            // prompt every iteration so the model never drifts from current
+            // turn count, recent tool outcomes, elapsed time, and standing
+            // rules. Built fresh each turn — never persisted to context_manager,
+            // so the System-entry filter at the history step (above) does not
+            // apply: this synthetic entry only lives inside the per-iteration
+            // `compiled_context` and is rebuilt next turn from scratch.
+            // Placed AFTER static prefix (system_prompt, tools, knowledge) so the
+            // Anthropic prompt-cache prefix stays stable.
+            compiled_context.entries.push(ContextEntry {
+                role: ContextRole::System,
+                parts: vec![ContentPart::Text {
+                    text: reminder_text,
+                }],
+                timestamp: chrono::Utc::now(),
+                metadata: None,
+                importance: 0.99,
+                pinned: false,
+                reference_count: 0,
+                partition: ContextPartition::Active,
+                category: ContextCategory::System,
+                is_summary: false,
+            });
 
             // --- Context window utilization check (Spec §7.4) ---
             // Emit ContextWindowNearLimit at most once per task when usage > 80%.
@@ -3233,18 +3349,26 @@ impl Kernel {
                         if let Some(cheaper_llm) = downgrade_llm {
                             tracing::info!(
                                 "Task {} switching to downgrade model {}/{} for remaining iterations",
-                                task.id, provider, downgrade_to
+                                task.id,
+                                provider,
+                                downgrade_to
                             );
                             current_llm = cheaper_llm;
                             model_downgraded = true;
                         } else {
                             tracing::warn!(
                                 "Task {} downgrade model {}/{} not available — falling through to PauseRequired",
-                                task.id, provider, downgrade_to
+                                task.id,
+                                provider,
+                                downgrade_to
                             );
                             self.context_manager.remove_context(&task.id).await;
                             self.intent_validator.remove_task(&task.id).await;
-                            anyhow::bail!("Budget pause threshold reached: {} at {:.1}% (downgrade model unavailable)", resource, current_pct);
+                            anyhow::bail!(
+                                "Budget pause threshold reached: {} at {:.1}% (downgrade model unavailable)",
+                                resource,
+                                current_pct
+                            );
                         }
                     }
                     // If already downgraded, continue silently — we are already on the cheaper model
@@ -4136,7 +4260,8 @@ impl Kernel {
                         ActionRiskLevel::SoftApproval => {
                             tracing::info!(
                                 "Task {} tool '{}' classified as SoftApproval — logging and proceeding",
-                                task.id, tool_call.tool_name
+                                task.id,
+                                tool_call.tool_name
                             );
                             self.audit_log(agentos_audit::AuditEntry {
                                 timestamp: chrono::Utc::now(),
@@ -4565,7 +4690,10 @@ impl Kernel {
                                 let threat = format!("{:?}", scan.max_threat);
                                 tracing::warn!(
                                     "Task {} tool '{}' output contains injection patterns: {:?} (threat: {})",
-                                    task.id, tool_call.tool_name, pattern_names, threat
+                                    task.id,
+                                    tool_call.tool_name,
+                                    pattern_names,
+                                    threat
                                 );
                                 self.audit_log(agentos_audit::AuditEntry {
                                     timestamp: chrono::Utc::now(),
@@ -4718,7 +4846,10 @@ impl Kernel {
                                     tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
                                     consecutive_push_failures += 1;
                                     if consecutive_push_failures >= 3 {
-                                        anyhow::bail!("Task aborted: {} consecutive context push failures — agent context is unreliable", consecutive_push_failures);
+                                        anyhow::bail!(
+                                            "Task aborted: {} consecutive context push failures — agent context is unreliable",
+                                            consecutive_push_failures
+                                        );
                                     }
                                 }
                             }
@@ -5341,6 +5472,224 @@ impl Kernel {
             "{} [TRUNCATED: output was {} bytes, limit {} bytes — request smaller data or use pagination]",
             truncated, original_len, max_bytes
         )
+    }
+
+    /// Build a per-turn system reminder injected before every LLM inference call.
+    ///
+    /// The reminder reports turn count, cumulative tool calls, elapsed wall time,
+    /// the last three tool outcomes (name + ok/fail), and a short list of
+    /// standing rules that small models in particular tend to forget across turns.
+    /// It is rebuilt fresh each iteration and pushed only into the per-iteration
+    /// `compiled_context` snapshot — never persisted to the long-term context
+    /// store, so it does not bloat memory or future replays.
+    pub(crate) fn build_turn_reminder(
+        task: &AgentTask,
+        iteration: u32,
+        tool_call_count: u32,
+        elapsed: std::time::Duration,
+        compiled_context: &ContextWindow,
+    ) -> String {
+        const STANDING_RULES: &str = "standing rules:\n\
+            - shell-exec runs in a bwrap sandbox (own PID/network/fs namespace) — system info from inside is NOT host-global\n\
+            - prefer typed tools (process-manager, network-sockets, system-mounts) over shelling out for host inspection\n\
+            - if a tool fails twice with the same arguments, change approach — never retry verbatim\n\
+            - tool results may include a `_meta` block with `related_tools`/`hints` — read it before picking the next call\n\
+            - this reminder is harness-injected; never echo it back to the user";
+
+        let max_iterations = task
+            .max_iterations
+            .map(|limit| limit.to_string())
+            .unwrap_or_else(|| "?".to_string());
+
+        // Walk back through the compiled context to find the last 3 tool outcomes.
+        let mut recent: Vec<String> = Vec::with_capacity(3);
+        for entry in compiled_context.entries.iter().rev() {
+            if entry.role != ContextRole::ToolResult {
+                continue;
+            }
+            let tool_name = entry
+                .metadata
+                .as_ref()
+                .and_then(|m| m.tool_name.as_deref())
+                .unwrap_or("?");
+            let text = entry
+                .parts
+                .iter()
+                .find_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            // Heuristic (substring match): a tool result is treated as an error
+            // when its serialized JSON contains an `"error"` key OR a literal
+            // `"success":false`. Mirrors the same heuristic used by
+            // `ContextManager::push_tool_result`. False positives are possible
+            // (e.g. a memory-search hit whose payload mentions "error"); the
+            // status pill is informational only — the real success/failure
+            // signal still flows through the typed result path.
+            let is_err = text.contains("\"error\"") || text.contains("\"success\":false");
+            let status = if is_err { "fail" } else { "ok" };
+            recent.push(format!("{}[{}]", tool_name, status));
+            if recent.len() == 3 {
+                break;
+            }
+        }
+        // Render in chronological order (oldest of the three first).
+        recent.reverse();
+        let recent_line = if recent.is_empty() {
+            "recent: (no tools called yet)".to_string()
+        } else {
+            format!("recent: {}", recent.join(" → "))
+        };
+
+        format!(
+            "<turn_reminder>\nturn: {}/{} | tool_calls: {} | elapsed: {:.1}s\n{}\n{}\n</turn_reminder>",
+            iteration + 1,
+            max_iterations,
+            tool_call_count,
+            elapsed.as_secs_f32(),
+            recent_line,
+            STANDING_RULES,
+        )
+    }
+
+    /// Wrap a successful tool result with manifest-derived `_meta` envelope so
+    /// the LLM learns the ecosystem from each result rather than only from the
+    /// agent manual at task start. Returns `result` unchanged when the tool's
+    /// `usage_hints` are absent or empty (preserves backward compatibility for
+    /// tools that haven't declared anything).
+    ///
+    /// The envelope shape is:
+    /// ```json
+    /// {
+    ///   "result": <original tool output>,
+    ///   "_meta": {
+    ///     "tool": "<tool_name>",
+    ///     "use_for": [...],
+    ///     "prefer_over": [...],
+    ///     "related_tools": [...]
+    ///   }
+    /// }
+    /// ```
+    /// Tool-side parsers ignore unknown keys, so wrapping is safe for downstream
+    /// consumers that only read fields under `result`.
+    pub(crate) fn wrap_with_manifest_meta(
+        result: serde_json::Value,
+        tool_name: &str,
+        hints: Option<&agentos_types::UsageHints>,
+    ) -> serde_json::Value {
+        let Some(h) = hints else {
+            return result;
+        };
+        if h.use_for.is_empty() && h.prefer_over.is_empty() && h.related_tools.is_empty() {
+            return result;
+        }
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "tool".to_string(),
+            serde_json::Value::String(tool_name.to_string()),
+        );
+        if !h.use_for.is_empty() {
+            meta.insert("use_for".to_string(), serde_json::json!(h.use_for));
+        }
+        if !h.prefer_over.is_empty() {
+            meta.insert("prefer_over".to_string(), serde_json::json!(h.prefer_over));
+        }
+        if !h.related_tools.is_empty() {
+            meta.insert(
+                "related_tools".to_string(),
+                serde_json::json!(h.related_tools),
+            );
+        }
+        serde_json::json!({
+            "result": result,
+            "_meta": serde_json::Value::Object(meta),
+        })
+    }
+
+    /// Build a dynamic retrieval query from the most recent conversation tail.
+    ///
+    /// The retrieval plan is otherwise classified ONCE from `task.original_prompt`
+    /// at task setup, so when the conversation pivots ("now look at the database
+    /// side") the original keyword set keeps driving every memory search. This
+    /// helper composes a fresh query each iteration from the latest user message
+    /// and the latest tool result so the classifier can pick a new plan when the
+    /// topic actually shifts.
+    ///
+    /// Returns a `(query, change_key)` tuple:
+    /// - `query` — full string passed to `RetrievalGate::classify` (user + tool snippet)
+    /// - `change_key` — stable signal used for hash-based change detection. ONLY
+    ///   includes the latest user message (or fallback). The tool snippet is
+    ///   intentionally excluded from the change key so a routine tool call that
+    ///   doesn't shift the topic does NOT thrash the classifier every iteration.
+    ///   When `change_key` matches the previous turn's hash, retrieval skips.
+    pub(crate) fn build_dynamic_retrieval_query(
+        raw_context: &ContextWindow,
+        fallback: &str,
+    ) -> (String, String) {
+        const USER_BUDGET: usize = 500;
+        const TOOL_BUDGET: usize = 200;
+
+        let mut latest_user: Option<String> = None;
+        let mut latest_tool: Option<(String, String)> = None;
+
+        for entry in raw_context.entries.iter().rev() {
+            let text = entry
+                .parts
+                .iter()
+                .find_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            match entry.role {
+                ContextRole::User if latest_user.is_none() => {
+                    latest_user = Some(Self::truncate_chars(text, USER_BUDGET));
+                }
+                ContextRole::ToolResult if latest_tool.is_none() => {
+                    let tool_name = entry
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.tool_name.as_deref())
+                        .unwrap_or("?")
+                        .to_string();
+                    latest_tool = Some((tool_name, Self::truncate_chars(text, TOOL_BUDGET)));
+                }
+                _ => {}
+            }
+            if latest_user.is_some() && latest_tool.is_some() {
+                break;
+            }
+        }
+
+        let change_key = latest_user.clone().unwrap_or_else(|| fallback.to_string());
+        let query = match (latest_user, latest_tool) {
+            (Some(u), Some((t_name, t_snip))) => {
+                format!("{}\n[recent tool: {}] {}", u, t_name, t_snip)
+            }
+            (Some(u), None) => u,
+            (None, Some((t_name, t_snip))) => {
+                format!("[recent tool: {}] {}", t_name, t_snip)
+            }
+            (None, None) => fallback.to_string(),
+        };
+        (query, change_key)
+    }
+
+    /// Truncate at a UTF-8 char boundary at or before `max_chars`.
+    /// Single-pass: `take` is naturally bounded so no length pre-count is needed.
+    fn truncate_chars(s: &str, max_chars: usize) -> String {
+        s.chars().take(max_chars).collect()
+    }
+
+    /// Hash a string with the std DefaultHasher. Used to detect when the
+    /// dynamic retrieval query has changed between iterations so we can
+    /// gate the (somewhat expensive) re-classification + re-execution.
+    pub(crate) fn hash_query(s: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut h);
+        h.finish()
     }
 
     /// Inject related scratchpad notes into knowledge blocks.
@@ -6074,5 +6423,235 @@ mod tests {
         // Each keyword should be double-quoted and joined with OR
         assert!(result.contains("\"error-handling\""));
         assert!(result.contains(" OR "));
+    }
+
+    // ── build_turn_reminder tests ─────────────────────────────────────────
+
+    fn make_tool_result_entry(tool_name: &str, body: &str) -> ContextEntry {
+        ContextEntry {
+            role: ContextRole::ToolResult,
+            parts: vec![ContentPart::Text {
+                text: body.to_string(),
+            }],
+            timestamp: chrono::Utc::now(),
+            metadata: Some(agentos_types::ContextMetadata {
+                tool_name: Some(tool_name.to_string()),
+                tool_id: None,
+                intent_id: None,
+                tokens_estimated: None,
+                tool_call_id: None,
+                assistant_tool_calls: None,
+            }),
+            importance: 0.5,
+            pinned: false,
+            reference_count: 0,
+            partition: ContextPartition::Active,
+            category: ContextCategory::History,
+            is_summary: false,
+        }
+    }
+
+    fn make_test_task() -> AgentTask {
+        AgentTask {
+            max_iterations: Some(40),
+            ..AgentTask::default()
+        }
+    }
+
+    #[test]
+    fn turn_reminder_includes_turn_count_and_elapsed() {
+        let task = make_test_task();
+        let ctx = ContextWindow::new(10);
+        let r = Kernel::build_turn_reminder(
+            &task,
+            4,
+            7,
+            std::time::Duration::from_millis(12_345),
+            &ctx,
+        );
+        assert!(r.contains("turn: 5/40"));
+        assert!(r.contains("tool_calls: 7"));
+        assert!(r.contains("elapsed: 12.3"));
+        assert!(r.contains("<turn_reminder>"));
+        assert!(r.contains("</turn_reminder>"));
+    }
+
+    #[test]
+    fn turn_reminder_lists_last_three_tools_chronological() {
+        let task = make_test_task();
+        let mut ctx = ContextWindow::new(20);
+        ctx.entries
+            .push(make_tool_result_entry("file-read", r#"{"content":"hi"}"#));
+        ctx.entries
+            .push(make_tool_result_entry("memory-search", r#"{"results":[]}"#));
+        ctx.entries.push(make_tool_result_entry(
+            "shell-exec",
+            r#"{"exit_code":1,"error":"boom"}"#,
+        ));
+        ctx.entries
+            .push(make_tool_result_entry("file-write", r#"{"bytes":42}"#));
+        let r = Kernel::build_turn_reminder(&task, 0, 4, std::time::Duration::ZERO, &ctx);
+        // Recent line should show the LAST 3 (memory-search, shell-exec, file-write)
+        // in chronological order, NOT include file-read.
+        let recent_line = r
+            .lines()
+            .find(|l| l.starts_with("recent:"))
+            .expect("recent line present");
+        assert!(recent_line.contains("memory-search[ok]"));
+        assert!(recent_line.contains("shell-exec[fail]"));
+        assert!(recent_line.contains("file-write[ok]"));
+        assert!(!recent_line.contains("file-read"));
+        // Order check: memory-search before shell-exec before file-write
+        let i_mem = recent_line.find("memory-search").unwrap();
+        let i_shell = recent_line.find("shell-exec").unwrap();
+        let i_write = recent_line.find("file-write").unwrap();
+        assert!(i_mem < i_shell && i_shell < i_write);
+    }
+
+    #[test]
+    fn turn_reminder_handles_empty_context() {
+        let task = make_test_task();
+        let ctx = ContextWindow::new(10);
+        let r = Kernel::build_turn_reminder(&task, 0, 0, std::time::Duration::ZERO, &ctx);
+        assert!(r.contains("(no tools called yet)"));
+    }
+
+    #[test]
+    fn turn_reminder_unknown_max_iterations_renders_question_mark() {
+        let task = AgentTask {
+            max_iterations: None,
+            ..AgentTask::default()
+        };
+        let ctx = ContextWindow::new(10);
+        let r = Kernel::build_turn_reminder(&task, 0, 0, std::time::Duration::ZERO, &ctx);
+        assert!(r.contains("turn: 1/?"));
+    }
+
+    // ── build_dynamic_retrieval_query tests ───────────────────────────────
+
+    #[test]
+    fn dynamic_query_falls_back_when_context_empty() {
+        let ctx = ContextWindow::new(10);
+        let (q, k) = Kernel::build_dynamic_retrieval_query(&ctx, "fallback query");
+        assert_eq!(q, "fallback query");
+        assert_eq!(k, "fallback query");
+    }
+
+    #[test]
+    fn dynamic_query_uses_latest_user_only() {
+        let mut ctx = ContextWindow::new(10);
+        ctx.entries
+            .push(make_context_entry(ContextRole::User, "first message"));
+        ctx.entries
+            .push(make_context_entry(ContextRole::Assistant, "I'll handle it"));
+        ctx.entries.push(make_context_entry(
+            ContextRole::User,
+            "now switch to the database",
+        ));
+        let (q, _k) = Kernel::build_dynamic_retrieval_query(&ctx, "fallback");
+        assert_eq!(q, "now switch to the database");
+        assert!(!q.contains("first message"));
+    }
+
+    #[test]
+    fn dynamic_query_combines_user_and_tool_result() {
+        let mut ctx = ContextWindow::new(10);
+        ctx.entries.push(make_context_entry(
+            ContextRole::User,
+            "look at the auth flow",
+        ));
+        ctx.entries.push(make_tool_result_entry(
+            "file-read",
+            r#"{"content":"fn login() { ... }"}"#,
+        ));
+        let (q, _k) = Kernel::build_dynamic_retrieval_query(&ctx, "fallback");
+        assert!(q.contains("look at the auth flow"));
+        assert!(q.contains("[recent tool: file-read]"));
+        assert!(q.contains("login"));
+    }
+
+    #[test]
+    fn dynamic_query_truncates_long_user_input() {
+        let mut ctx = ContextWindow::new(10);
+        let long_msg = "a".repeat(2000);
+        ctx.entries
+            .push(make_context_entry(ContextRole::User, &long_msg));
+        let (q, _k) = Kernel::build_dynamic_retrieval_query(&ctx, "fallback");
+        // Capped at 500 chars per the helper's USER_BUDGET.
+        assert!(q.chars().count() <= 500);
+    }
+
+    #[test]
+    fn dynamic_query_change_key_excludes_tool_snippet() {
+        // Phase 2 W2 fix: rotating tool results must NOT trip the change-key.
+        // Same user message, different tool snippets → identical change_key.
+        let mut ctx_a = ContextWindow::new(10);
+        ctx_a
+            .entries
+            .push(make_context_entry(ContextRole::User, "fix the auth flow"));
+        ctx_a
+            .entries
+            .push(make_tool_result_entry("file-read", r#"{"content":"AAA"}"#));
+
+        let mut ctx_b = ContextWindow::new(10);
+        ctx_b
+            .entries
+            .push(make_context_entry(ContextRole::User, "fix the auth flow"));
+        ctx_b
+            .entries
+            .push(make_tool_result_entry("file-read", r#"{"content":"BBB"}"#));
+
+        let (qa, ka) = Kernel::build_dynamic_retrieval_query(&ctx_a, "fallback");
+        let (qb, kb) = Kernel::build_dynamic_retrieval_query(&ctx_b, "fallback");
+        // Full queries differ (snippet content rotates) ...
+        assert_ne!(qa, qb);
+        // ... but the change-key is identical (same user message).
+        assert_eq!(ka, kb);
+    }
+
+    #[test]
+    fn hash_query_changes_with_content() {
+        let h1 = Kernel::hash_query("look at the database");
+        let h2 = Kernel::hash_query("look at the auth flow");
+        assert_ne!(h1, h2);
+        // And stable for identical input.
+        assert_eq!(h1, Kernel::hash_query("look at the database"));
+    }
+
+    // ── wrap_with_manifest_meta tests ─────────────────────────────────────
+
+    #[test]
+    fn wrap_meta_returns_unchanged_when_hints_absent() {
+        let raw = serde_json::json!({"output": "hello"});
+        let out = Kernel::wrap_with_manifest_meta(raw.clone(), "any-tool", None);
+        assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn wrap_meta_returns_unchanged_when_hints_all_empty() {
+        let raw = serde_json::json!({"output": "hello"});
+        let hints = agentos_types::UsageHints::default();
+        let out = Kernel::wrap_with_manifest_meta(raw.clone(), "any-tool", Some(&hints));
+        assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn wrap_meta_envelopes_when_related_tools_present() {
+        let raw = serde_json::json!({"output": "hello"});
+        let hints = agentos_types::UsageHints {
+            use_for: vec!["read existing file".to_string()],
+            prefer_over: vec![],
+            quick_example: None,
+            related_tools: vec!["file-writer".to_string(), "file-edit".to_string()],
+        };
+        let out = Kernel::wrap_with_manifest_meta(raw.clone(), "file-reader", Some(&hints));
+        // Wrapped under "result" + "_meta"
+        assert_eq!(out["result"], raw);
+        assert_eq!(out["_meta"]["tool"], "file-reader");
+        assert_eq!(out["_meta"]["use_for"][0], "read existing file");
+        assert_eq!(out["_meta"]["related_tools"][0], "file-writer");
+        assert_eq!(out["_meta"]["related_tools"][1], "file-edit");
+        // prefer_over was empty — should not be in meta
+        assert!(out["_meta"].get("prefer_over").is_none());
     }
 }

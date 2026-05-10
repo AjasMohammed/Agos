@@ -147,6 +147,9 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
              `<think>...</think>` for internal reasoning that should not be shown. \
              Tool calls go in their own ```json blocks (see ## Tools) and run \
              before the `<final>` block.\n\
+             When referencing a file or location inside `<final>`, use `path:line` \
+             (e.g. `crates/agentos-kernel/src/run_loop.rs:142`) so the UI can render \
+             a clickable link. Avoid pasting whole-file contents \u{2014} cite the location.\n\
              \n\
              Example (single turn):\n\
              <think>I should check the weather first before answering.</think>\n\
@@ -168,7 +171,8 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
     prompt.push_str(
         "\n\n## Execution\n\
          - You run in iterations: respond \u{2192} tools execute \u{2192} results injected \u{2192} respond again.\n\
-         - Plan before acting. Your task has an iteration limit — use iterations efficiently.\n\
+         - Plan before acting. Your task has an iteration limit — use iterations efficiently. \
+           Call `agent-self` to check remaining iterations and budget.\n\
          - If a tool fails, read the error and adjust before retrying.\n\
          - Tool outputs > 256 KB are truncated ([TRUNCATED]). Request smaller data or paginate.\n\
          - If a tool returns 'awaiting_approval', your task is paused for human review.\n\
@@ -178,20 +182,50 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
            Prefer fewer tool calls — batch or combine operations where possible.",
     );
 
-    // ── User adaptation ──────────────────────────────────────────
-    prompt.push_str(
-        "\n\n## User Adaptation\n\
-         Notice user behavior, preferences, style, goals, and needs. \
-         Adapt detail, pace, tone, proactivity, and tool use. \
-         Treat patterns as hypotheses; revise when evidence changes.",
-    );
-
     // ── Tool result contract (anti-verify preamble) ──────────────
+    // Placed adjacent to Execution because these rules govern the loop:
+    // ignoring them is the dominant failure mode for small models (re-reads
+    // to verify, identical-payload retries, ignored STOP directives).
     prompt.push_str(
         "\n\n## Tool Result Contract\n\
          No error = success. Never re-read to verify a write. Never send the same payload twice. \
          If kernel returns `kernel_directive: STOP`, do not retry that tool; finalize from existing context. \
          Two consecutive identical rejections end the task.",
+    );
+
+    // ── User adaptation ──────────────────────────────────────────
+    // Skipped for sub-agents: they emit to a parent agent, not a user, so
+    // observed signals are not user preferences and should not be persisted
+    // to user-pref memory tiers. Parent agent owns user adaptation.
+    if ctx.sub_agent.is_none() {
+        prompt.push_str(
+            "\n\n## User Adaptation\n\
+             Observe and persist user behavior, preferences, style, goals, and recurring needs.\n\
+             - Notice: tone (formal/casual), detail level, pacing, format (bullets vs prose), \
+               domain expertise, recurring goals, ignored vs accepted suggestions, name/locale/timezone.\n\
+             - Persist stable prefs via `context-memory-update` (durable prefs) or `memory-write` (single facts). \
+               Read first with `context-memory-read` / `memory-search` when prior context may matter — \
+               do not assume; recall.\n\
+             - Treat patterns as hypotheses. If a new turn contradicts a stored pref, \
+               update or delete the memory (`memory-delete` then rewrite) — never silently ignore.\n\
+             - Don't store fleeting moods, one-off task details, or sensitive secrets. \
+               Confirm before persisting anything irreversible or identity-bearing.",
+        );
+    }
+
+    // ── Grounding & anti-hallucination ───────────────────────────
+    prompt.push_str(
+        "\n\n## Grounding & Anti-Hallucination\n\
+         - Only call tools that appear in your tool list, or that you have just resolved via \
+           `search-tools` + `describe-tool`. Never invent a tool name, payload field, or argument shape.\n\
+         - If a needed tool isn't visible: `search-tools(query=...)` → `describe-tool(name=...)` → call. \
+           If still unavailable, say so explicitly — do not fabricate or simulate the call.\n\
+         - Quote tool output verbatim when reporting concrete facts (numbers, IDs, names, paths, errors). \
+           Don't paraphrase data into something prettier that loses fidelity or invents detail.\n\
+         - For any factual claim you did not just observe via a tool, memory, or the user's message: \
+           either retrieve it (tool/memory) or mark uncertainty (\"I don't know\" / \"needs verification\"). \
+           Plausible-sounding guesses are forbidden.\n\
+         - Never write what a tool output \"would have been\". Either call the tool or state that you can't.",
     );
 
     // ── Host inspection (compact — full prose in `agent-manual section=hal`) ──
@@ -243,16 +277,28 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
     );
 
     // ── Coordination ─────────────────────────────────────────────
+    // The "Spawn when:" cost heuristic is omitted at max spawn depth — the
+    // agent cannot spawn further children, so spawn-cost guidance is dead
+    // weight. The Sub-Agent Context block already states this constraint.
+    let at_max_depth = ctx
+        .sub_agent
+        .as_ref()
+        .is_some_and(|sa| sa.spawn_depth >= MAX_SPAWN_DEPTH);
     prompt.push_str(
         "\n\n## Coordination\n\
          - `spawn-agent` \u{2014} create a child task on another agent. `await-agents` \u{2014} collect results.\n\
          - `task-delegate` / `agent-message` \u{2014} delegate work or message peers.\n\
          - Child results are auto-injected into your context on completion.\n\
-         - Max spawn depth: 5. Plan agent hierarchies accordingly.\n\
-         - Spawn when: work is parallelizable and each part needs >2 tool calls, or requires a specialist agent. \
-           Do not spawn for tasks you can complete in 1\u{2013}3 calls — each child agent consumes budget. \
-           Spawn narrow (specific prompt + tight scope), not broad.",
+         - Max spawn depth: 5. Plan agent hierarchies accordingly.",
     );
+    if !at_max_depth {
+        prompt.push_str(
+            "\n\
+             - Spawn when: work is parallelizable and each part needs >2 tool calls, or requires a specialist agent. \
+               Do not spawn for tasks you can complete in 1\u{2013}3 calls — each child agent consumes budget. \
+               Spawn narrow (specific prompt + tight scope), not broad.",
+        );
+    }
 
     // ── Channels (only when at least one is connected) ───────────
     if !ctx.connected_channels.is_empty() {
@@ -423,6 +469,73 @@ mod tests {
             }),
         });
         assert!(prompt.contains("maximum depth and cannot spawn further"));
+        // Spawn-cost heuristic is dropped at max depth — model cannot spawn anyway.
+        assert!(
+            !prompt.contains("consumes budget"),
+            "spawn-cost paragraph should be omitted at max depth"
+        );
+    }
+
+    #[test]
+    fn test_sub_agent_skips_user_adaptation() {
+        let prompt = build_system_prompt(&SystemPromptContext {
+            agent_name: "child".into(),
+            agent_description: String::new(),
+            agent_roles: vec![],
+            custom_instructions: None,
+            enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: vec![],
+            sub_agent: Some(SubAgentContext {
+                parent_task_id: "parent-1".into(),
+                spawn_depth: 1,
+            }),
+        });
+        // Sub-agents emit to a parent, not a user — user-pref persistence is the
+        // parent's responsibility. Including it here pollutes user-pref memory.
+        // (`context-memory-update` is still mentioned in the Memory section as
+        // a tool reference; we assert on the section header + directive instead.)
+        assert!(!prompt.contains("## User Adaptation"));
+        assert!(!prompt.contains("Persist stable prefs"));
+        assert!(!prompt.contains("Observe and persist user behavior"));
+        // But sub-agents at depth 1 still get the spawn-cost heuristic.
+        assert!(prompt.contains("consumes budget"));
+    }
+
+    #[test]
+    fn test_final_tag_includes_path_line_convention() {
+        let prompt = build_system_prompt(&SystemPromptContext {
+            agent_name: "strict".into(),
+            agent_description: String::new(),
+            agent_roles: vec![],
+            custom_instructions: None,
+            sub_agent: None,
+            enforce_final_tag: true,
+            timezone: String::new(),
+            connected_channels: vec![],
+        });
+        assert!(prompt.contains("path:line"));
+        assert!(prompt.contains("clickable link"));
+    }
+
+    #[test]
+    fn test_tool_result_contract_immediately_follows_execution() {
+        // Loop-safety rules live next to Execution because they govern the
+        // same behavior; separating them dilutes the signal.
+        let prompt = default_prompt();
+        let exec = prompt
+            .find("## Execution")
+            .expect("Execution section missing");
+        let trc = prompt
+            .find("## Tool Result Contract")
+            .expect("Tool Result Contract section missing");
+        let grounding = prompt
+            .find("## Grounding & Anti-Hallucination")
+            .expect("Grounding section missing");
+        assert!(
+            exec < trc && trc < grounding,
+            "Tool Result Contract must sit between Execution and Grounding (exec={exec}, trc={trc}, grounding={grounding})"
+        );
     }
 
     fn default_prompt() -> String {
@@ -445,6 +558,7 @@ mod tests {
             "## Tools",
             "## Execution",
             "## User Adaptation",
+            "## Grounding & Anti-Hallucination",
             "## Tool Result Contract",
             "## Self-Discovery",
             "## Memory",
@@ -475,6 +589,28 @@ mod tests {
         // Coordination — spawn-cost heuristic
         assert!(prompt.contains("Spawn"), "spawn rule header");
         assert!(prompt.contains("consumes budget"), "spawn cost");
+        // User Adaptation — persistence directive
+        assert!(
+            prompt.contains("context-memory-update"),
+            "user-pref persistence tool"
+        );
+        assert!(
+            prompt.contains("Persist stable prefs"),
+            "persistence directive"
+        );
+        // Grounding — anti-hallucination guardrails
+        assert!(
+            prompt.contains("Never invent a tool name"),
+            "no-invent-tool rule"
+        );
+        assert!(
+            prompt.contains("Quote tool output verbatim"),
+            "verbatim-output rule"
+        );
+        assert!(
+            prompt.contains("mark uncertainty"),
+            "uncertainty-over-guessing rule"
+        );
     }
 
     #[test]
@@ -492,6 +628,8 @@ mod tests {
         assert!(!prompt.contains("## Output Format"));
         assert!(!prompt.contains("<final>"));
         assert!(!prompt.contains("<think>"));
+        // path:line convention lives inside Output Format — must also be gone.
+        assert!(!prompt.contains("path:line"));
     }
 
     #[test]

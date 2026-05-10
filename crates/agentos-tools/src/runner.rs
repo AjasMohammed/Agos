@@ -358,6 +358,35 @@ impl ToolRunner {
         ));
     }
 
+    /// Register the agent-manual tool with the full set of live snapshots:
+    /// tool catalogue, connected channels, and installed skills. Mirrors the
+    /// MCP server inventory pattern so the `skills` section can render the
+    /// real inventory + per-skill drill-down.
+    pub fn register_agent_manual_full(
+        &mut self,
+        tool_summaries: crate::agent_manual::SharedToolSummaries,
+        connected_channels: crate::agent_manual::SharedConnectedChannels,
+        installed_skills: crate::agent_manual::SharedInstalledSkills,
+    ) {
+        self.register(Box::new(crate::agent_manual::AgentManualTool::new_full(
+            tool_summaries,
+            connected_channels,
+            installed_skills,
+        )));
+    }
+
+    /// Register the skill-prompt tool. Reads the same `installed_skills`
+    /// snapshot the agent-manual `skills` section uses, so a chat agent can
+    /// fetch a skill's full system prompt + tool allowlist on demand.
+    pub fn register_skill_prompt(
+        &mut self,
+        installed_skills: crate::agent_manual::SharedInstalledSkills,
+    ) {
+        self.register(Box::new(crate::skill_prompt::SkillPromptTool::new(
+            installed_skills,
+        )));
+    }
+
     /// Register the list-tools tool with a shared tool catalogue.
     pub fn register_list_tools(
         &mut self,
