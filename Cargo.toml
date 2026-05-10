@@ -108,8 +108,8 @@ libc = "0.2"
 nix = { version = "0.29", features = ["fs"] }
 
 # WASM runtime
-wasmtime = { version = "43", features = ["async", "cranelift"] }
-wasmtime-wasi = "43"
+wasmtime = { version = "44.0.1", features = ["async", "cranelift"] }
+wasmtime-wasi = "44.0.1"
 
 # JSON Schema validation
 jsonschema = "0.28"
