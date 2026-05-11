@@ -52,3 +52,11 @@ syscalls = []
 
 [executor]
 type = "inline"
+
+[usage_hints]
+use_for = [
+  "ad-hoc commands without a typed equivalent",
+  "running build, format, or test invocations from inside the sandbox",
+]
+prefer_over = []
+related_tools = ["process-manager", "network-sockets", "system-mounts", "system-services"]

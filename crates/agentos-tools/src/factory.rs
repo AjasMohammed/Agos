@@ -165,6 +165,7 @@ pub const CHAT_DEFAULT_TOOL_NAMES: &[&str] = &[
     "list-tools",
     "search-tools",
     "describe-tool",
+    "skill-prompt",
     // Filesystem
     "file-reader",
     "file-writer",

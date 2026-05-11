@@ -15,10 +15,17 @@ impl Kernel {
             Ok((manifest, prompt)) => {
                 let name = manifest.skill.name.clone();
                 let version = manifest.skill.version.clone();
-                let mut registry = self.skill_registry.write().await;
-                match registry.install(manifest, prompt) {
+                let install_result = {
+                    let mut registry = self.skill_registry.write().await;
+                    registry.install(manifest, prompt)
+                };
+                match install_result {
                     Ok(()) => {
                         tracing::info!(skill = %name, version = %version, "Skill installed");
+                        // Keep the agent-manual's live skills snapshot in sync
+                        // with the registry. Same pattern channel register/
+                        // deregister uses — see `refresh_connected_channels_snapshot`.
+                        self.refresh_installed_skills_snapshot().await;
                         KernelResponse::Success {
                             data: Some(json!({
                                 "skill_name": name,
@@ -38,10 +45,14 @@ impl Kernel {
     }
 
     pub(crate) async fn cmd_skill_remove(&self, name: String) -> KernelResponse {
-        let mut registry = self.skill_registry.write().await;
-        match registry.remove(&name) {
+        let remove_result = {
+            let mut registry = self.skill_registry.write().await;
+            registry.remove(&name)
+        };
+        match remove_result {
             Ok(()) => {
                 tracing::info!(skill = %name, "Skill removed");
+                self.refresh_installed_skills_snapshot().await;
                 KernelResponse::Success { data: None }
             }
             Err(e) => KernelResponse::Error {

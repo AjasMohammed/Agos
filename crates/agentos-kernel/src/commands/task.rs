@@ -268,16 +268,26 @@ impl Kernel {
             Ok(_) => {
                 // Send cancel notification to user inbox (root tasks only).
                 if let Some(task) = task_snapshot {
-                    if task.parent_task.is_none() && self.config.notifications.notify_on_task_failed
+                    if Kernel::is_root_task(&task)
+                        && self.config.notifications.notify_on_task_failed
                     {
+                        let (last_tool, last_iter, obs_iter, obs_tools) =
+                            self.gather_task_progress(&task.id).await;
+                        let failure = crate::task_completion::FailureDetails {
+                            reason: "cancelled".to_string(),
+                            error_chain: vec!["Task was cancelled by user".to_string()],
+                            last_tool,
+                            last_iteration: last_iter,
+                        };
                         self.send_completion_notification(
                             &task,
                             TaskOutcome::Cancelled,
                             "Task was cancelled by user",
-                            None,
-                            None,
+                            obs_tools,
+                            obs_iter,
                             0,
                             TraceID::new(),
+                            Some(failure),
                         )
                         .await;
                     }
