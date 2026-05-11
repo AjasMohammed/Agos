@@ -3964,16 +3964,14 @@ mod tests {
         s.system_prompt = "SECRET-PROMPT-MARKER You are the Alert Builder.".into();
         let installed = vec![s];
 
-        let inventory =
-            AgentManualTool::section_skills(Some(&installed), &[], None).unwrap();
+        let inventory = AgentManualTool::section_skills(Some(&installed), &[], None).unwrap();
         assert!(
             !inventory.to_string().contains("SECRET-PROMPT-MARKER"),
             "skills inventory leaked system_prompt: {inventory}"
         );
 
         let drill =
-            AgentManualTool::section_skills(Some(&installed), &[], Some("alert-builder"))
-                .unwrap();
+            AgentManualTool::section_skills(Some(&installed), &[], Some("alert-builder")).unwrap();
         assert!(
             !drill.to_string().contains("SECRET-PROMPT-MARKER"),
             "skills drill-down leaked system_prompt: {drill}"
