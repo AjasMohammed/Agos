@@ -25,49 +25,49 @@ outputs = ["hardware.audio", "content.structured"]
 input  = "AudioIntent"
 output = "AudioResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 description = "Audio operation request"
 
-[input_schema.properties.action]
+[payload_schema.properties.action]
 type = "string"
 enum = ["list", "capture", "playback", "volume", "grant_capture_consent", "revoke_capture_consent", "list_capture_consents"]
 default = "list"
 description = "Audio action to execute."
 
-[input_schema.properties.source]
+[payload_schema.properties.source]
 type = "string"
 description = "Capture source id (for capture/consent actions)."
 
-[input_schema.properties.sink]
+[payload_schema.properties.sink]
 type = "string"
 description = "Playback sink id (optional for playback)."
 
-[input_schema.properties.node_id]
+[payload_schema.properties.node_id]
 type = "string"
 description = "Alternative audio node id for volume or playback/capture targeting."
 
-[input_schema.properties.duration_seconds]
+[payload_schema.properties.duration_seconds]
 type = "integer"
 minimum = 1
 maximum = 300
 description = "Capture duration in seconds."
 
-[input_schema.properties.output_path]
+[payload_schema.properties.output_path]
 type = "string"
 description = "Absolute output path for captured audio."
 
-[input_schema.properties.audio_path]
+[payload_schema.properties.audio_path]
 type = "string"
 description = "Absolute path to an audio file for playback."
 
-[input_schema.properties.volume]
+[payload_schema.properties.volume]
 type = "number"
 minimum = 0
 maximum = 1
 description = "Volume level between 0.0 and 1.0. Omit to read current level."
 
-[input_schema.properties.ttl_seconds]
+[payload_schema.properties.ttl_seconds]
 type = "integer"
 minimum = 1
 maximum = 3600
@@ -81,26 +81,14 @@ max_memory_mb = 256
 max_cpu_ms    = 20000
 syscalls      = []
 
-[examples]
-"List sources and sinks" = """
-{
-  "action": "list"
-}
-"""
+[[examples]]
+description = "List sources and sinks"
+payload = { action = "list" }
 
-"Capture 10 seconds from source audio:47" = """
-{
-  "action": "capture",
-  "source": "audio:47",
-  "duration_seconds": 10,
-  "output_path": "/tmp/agentos-capture.wav"
-}
-"""
+[[examples]]
+description = "Capture 10 seconds from source audio:47"
+payload = { action = "capture", source = "audio:47", duration_seconds = 10, output_path = "/tmp/agentos-capture.wav" }
 
-"Play back a local audio file" = """
-{
-  "action": "playback",
-  "audio_path": "/tmp/alert.wav",
-  "sink": "audio:62"
-}
-"""
+[[examples]]
+description = "Play back a local audio file"
+payload = { action = "playback", audio_path = "/tmp/alert.wav", sink = "audio:62" }

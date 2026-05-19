@@ -194,6 +194,73 @@ fn validate_package_name(name: &str) -> Result<(), AgentOSError> {
 }
 
 // ---------------------------------------------------------------------------
+// Workspace lookup trait (used by BuildProvider / ProcessProvider)
+// ---------------------------------------------------------------------------
+
+/// Snapshot of a managed workspace, returned to other capability providers
+/// that need to launch processes inside it.
+#[derive(Debug, Clone)]
+pub struct WorkspaceInfo {
+    pub root: PathBuf,
+    pub ecosystem: Ecosystem,
+}
+
+/// Pluggable lookup so non-`env` providers (build, proc) can resolve a
+/// workspace name to its path + ecosystem without depending on `EnvProvider`'s
+/// concrete type.
+#[async_trait]
+pub trait WorkspaceResolver: Send + Sync {
+    async fn resolve(&self, agent_id: agentos_types::AgentID, name: &str) -> Option<WorkspaceInfo>;
+}
+
+/// Build the env-var set a child process needs to see the workspace's
+/// installed packages.
+///
+/// The returned vector is intended for `Command::env_clear()` followed by
+/// `Command::env()` for each pair — we deliberately avoid inheriting the
+/// kernel's environment to keep secrets out of agent-spawned processes.
+///
+/// `PATH` order: `{ws}/venv/bin` → `{ws}/node_modules/.bin` → `{ws}/bin` →
+/// system PATH. Components that don't exist on disk are skipped so a Rust
+/// workspace doesn't get a phantom `venv/bin` entry.
+pub fn activated_env(ws: &WorkspaceInfo) -> Vec<(String, String)> {
+    let venv_bin = ws.root.join("venv").join("bin");
+    let node_bin = ws.root.join("node_modules").join(".bin");
+    let cargo_bin = ws.root.join("bin");
+
+    let mut path_parts: Vec<String> = Vec::new();
+    if venv_bin.is_dir() {
+        path_parts.push(venv_bin.to_string_lossy().into_owned());
+    }
+    if node_bin.is_dir() {
+        path_parts.push(node_bin.to_string_lossy().into_owned());
+    }
+    if cargo_bin.is_dir() {
+        path_parts.push(cargo_bin.to_string_lossy().into_owned());
+    }
+    let system_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+    path_parts.push(system_path);
+
+    let mut env = vec![
+        ("PATH".to_string(), path_parts.join(":")),
+        ("HOME".to_string(), ws.root.to_string_lossy().into_owned()),
+        // Locale defaults so subprocesses don't fail on UTF-8 stdout.
+        ("LANG".to_string(), "C.UTF-8".to_string()),
+        ("LC_ALL".to_string(), "C.UTF-8".to_string()),
+    ];
+
+    if matches!(ws.ecosystem, Ecosystem::Python) {
+        env.push((
+            "VIRTUAL_ENV".to_string(),
+            ws.root.join("venv").to_string_lossy().into_owned(),
+        ));
+        // Strip PYTHONHOME so the venv interpreter resolves correctly.
+        env.push(("PYTHONHOME".to_string(), String::new()));
+    }
+    env
+}
+
+// ---------------------------------------------------------------------------
 // EnvProvider
 // ---------------------------------------------------------------------------
 
@@ -208,6 +275,9 @@ pub struct EnvProvider {
     config: EnvConfig,
     /// Package allowlists per ecosystem.
     allowlists: HashMap<Ecosystem, PackageAllowlist>,
+    /// Optional SQLite-backed persistence. When set, every create / install /
+    /// destroy is written through; absent means in-memory only (tests).
+    store: Option<Arc<crate::workspace_store::WorkspaceStore>>,
 }
 
 impl EnvProvider {
@@ -217,12 +287,76 @@ impl EnvProvider {
             workspaces: Arc::new(RwLock::new(HashMap::new())),
             config,
             allowlists,
+            store: None,
         }
     }
 
     /// Create with default config and empty allowlists.
     pub fn with_defaults() -> Self {
         Self::new(EnvConfig::default(), HashMap::new())
+    }
+
+    /// Build an `EnvProvider` from the kernel `EnvSettings` block.
+    ///
+    /// Translates the flat config struct into the provider's internal
+    /// `EnvConfig` + `HashMap<Ecosystem, PackageAllowlist>` shape. Empty
+    /// allowlists are omitted so the curated check fails fast with a clear
+    /// "not on the curated allowlist" error.
+    pub fn from_config(settings: &crate::config::EnvSettings) -> Self {
+        let cfg = EnvConfig {
+            default_quota_bytes: settings.default_quota_bytes,
+            python_policy: settings.python_policy.clone(),
+            nodejs_policy: settings.nodejs_policy.clone(),
+            rust_policy: settings.rust_policy.clone(),
+            system_policy: settings.system_policy.clone(),
+            install_timeout_secs: settings.install_timeout_secs,
+        };
+        let mut allowlists = HashMap::new();
+        if !settings.python_allowlist.is_empty() {
+            allowlists.insert(
+                Ecosystem::Python,
+                PackageAllowlist {
+                    packages: settings.python_allowlist.clone(),
+                },
+            );
+        }
+        if !settings.nodejs_allowlist.is_empty() {
+            allowlists.insert(
+                Ecosystem::NodeJs,
+                PackageAllowlist {
+                    packages: settings.nodejs_allowlist.clone(),
+                },
+            );
+        }
+        if !settings.rust_allowlist.is_empty() {
+            allowlists.insert(
+                Ecosystem::Rust,
+                PackageAllowlist {
+                    packages: settings.rust_allowlist.clone(),
+                },
+            );
+        }
+        Self::new(cfg, allowlists)
+    }
+
+    /// Like `from_config`, but attaches a `WorkspaceStore` and pre-loads the
+    /// in-memory map from the DB. This is the constructor the kernel uses at
+    /// boot so workspaces survive restarts.
+    pub async fn from_config_with_store(
+        settings: &crate::config::EnvSettings,
+        store: Arc<crate::workspace_store::WorkspaceStore>,
+    ) -> anyhow::Result<Self> {
+        let mut provider = Self::from_config(settings);
+        provider.store = Some(store.clone());
+
+        let rows = store.load_all().await?;
+        let mut map = HashMap::new();
+        for ws in rows {
+            map.insert((ws.agent_id, ws.name.clone()), ws);
+        }
+        // No tokio lock held yet; replace the empty map wholesale.
+        *provider.workspaces.write().await = map;
+        Ok(provider)
     }
 
     /// Resolve workspace root path for an agent.
@@ -379,6 +513,11 @@ impl EnvProvider {
             packages_installed: vec![],
         };
 
+        if let Some(store) = &self.store {
+            if let Err(e) = store.upsert(&workspace).await {
+                tracing::warn!(error = %e, workspace = %name, "failed to persist workspace; in-memory state still consistent");
+            }
+        }
         ws.insert(key, workspace);
 
         Ok(CapabilityResult {
@@ -533,16 +672,23 @@ impl EnvProvider {
             installed_at: chrono::Utc::now(),
         };
 
-        {
+        let snapshot_for_store: Option<ManagedWorkspace> = {
             let mut ws = self.workspaces.write().await;
             if let Some(workspace) = ws.get_mut(&(context.agent_id, workspace_name.to_string())) {
                 workspace.packages_installed.push(installed.clone());
+                Some(workspace.clone())
             } else {
                 tracing::warn!(
                     workspace = workspace_name,
                     package = package,
                     "workspace was destroyed during package install; installed package is orphaned"
                 );
+                None
+            }
+        };
+        if let (Some(store), Some(snap)) = (self.store.as_ref(), snapshot_for_store) {
+            if let Err(e) = store.upsert(&snap).await {
+                tracing::warn!(error = %e, workspace = %workspace_name, package = %package, "failed to persist package install; in-memory state still consistent");
             }
         }
 
@@ -682,6 +828,15 @@ impl EnvProvider {
             workspace.root_path
         };
 
+        if let Some(store) = &self.store {
+            if let Err(e) = store
+                .remove(context.agent_id, workspace_name.to_string())
+                .await
+            {
+                tracing::warn!(error = %e, workspace = %workspace_name, "failed to delete workspace row; will be cleaned up on next boot reconciliation");
+            }
+        }
+
         // Remove directory tree
         let path_clone = root_path.clone();
         tokio::task::spawn_blocking(move || -> Result<(), AgentOSError> {
@@ -708,6 +863,18 @@ impl EnvProvider {
                 "path": root_path.to_string_lossy().to_string(),
             }),
         })
+    }
+}
+
+#[async_trait]
+impl WorkspaceResolver for EnvProvider {
+    async fn resolve(&self, agent_id: agentos_types::AgentID, name: &str) -> Option<WorkspaceInfo> {
+        let ws = self.workspaces.read().await;
+        ws.get(&(agent_id, name.to_string()))
+            .map(|w| WorkspaceInfo {
+                root: w.root_path.clone(),
+                ecosystem: w.ecosystem,
+            })
     }
 }
 
@@ -879,6 +1046,93 @@ mod tests {
         assert!(p
             .check_package_allowed(Ecosystem::Python, "anything")
             .is_ok());
+    }
+
+    #[test]
+    fn from_config_populates_allowlists() {
+        let settings = crate::config::EnvSettings {
+            python_allowlist: vec!["flask".into(), "requests".into()],
+            nodejs_allowlist: vec!["express".into()],
+            ..Default::default()
+        };
+        let p = EnvProvider::from_config(&settings);
+        assert!(p.check_package_allowed(Ecosystem::Python, "flask").is_ok());
+        assert!(p
+            .check_package_allowed(Ecosystem::Python, "requests")
+            .is_ok());
+        assert!(p
+            .check_package_allowed(Ecosystem::Python, "evil-pkg")
+            .is_err());
+        assert!(p
+            .check_package_allowed(Ecosystem::NodeJs, "express")
+            .is_ok());
+        // Rust allowlist empty → curated policy denies all
+        assert!(p.check_package_allowed(Ecosystem::Rust, "serde").is_err());
+    }
+
+    #[test]
+    fn from_config_empty_keeps_curated_locked() {
+        let settings = crate::config::EnvSettings::default();
+        let p = EnvProvider::from_config(&settings);
+        assert!(p.check_package_allowed(Ecosystem::Python, "flask").is_err());
+        assert!(p.check_package_allowed(Ecosystem::System, "curl").is_err());
+    }
+
+    #[tokio::test]
+    async fn workspace_state_survives_provider_restart() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("workspaces.db");
+        let settings = crate::config::EnvSettings::default();
+
+        let agent_id = AgentID::new();
+        let ctx = CapabilityContext {
+            agent_id,
+            task_id: TaskID::new(),
+            trace_id: TraceID::new(),
+            data_dir: tmp.path().to_path_buf(),
+            permissions: agentos_types::PermissionSet::default(),
+            workspace_paths: vec![],
+        };
+
+        // First provider — create a generic workspace via the action.
+        {
+            let store = Arc::new(
+                crate::workspace_store::WorkspaceStore::open(db_path.clone())
+                    .await
+                    .unwrap(),
+            );
+            let p = EnvProvider::from_config_with_store(&settings, store)
+                .await
+                .unwrap();
+            p.execute(
+                "create",
+                json!({"name":"survivor","ecosystem":"generic"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        }
+
+        // Second provider — fresh in-memory map, must load the row from disk.
+        let store2 = Arc::new(
+            crate::workspace_store::WorkspaceStore::open(db_path)
+                .await
+                .unwrap(),
+        );
+        let p2 = EnvProvider::from_config_with_store(&settings, store2)
+            .await
+            .unwrap();
+        let result = p2.execute("list", json!({}), &ctx).await.unwrap();
+        let names: Vec<String> = result.output["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "survivor"),
+            "workspace should survive provider restart; got {names:?}"
+        );
     }
 
     #[test]

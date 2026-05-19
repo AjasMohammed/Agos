@@ -17,11 +17,11 @@ outputs = ["status"]
 input  = "ThinkIntent"
 output = "ThinkResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["thought"]
 
-[input_schema.properties.thought]
+[payload_schema.properties.thought]
 type = "string"
 description = "Reasoning note to record in audit trail"
 

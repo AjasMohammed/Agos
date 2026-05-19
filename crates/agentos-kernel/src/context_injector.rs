@@ -76,6 +76,14 @@ impl Kernel {
             }
         };
 
+        let native_tool_calling = {
+            let active = self.active_llms.read().await;
+            active
+                .get(&task.agent_id)
+                .map(|llm| llm.supports_native_tool_calling())
+                .unwrap_or(false)
+        };
+
         let mut system_prompt = system_prompt::build_system_prompt(&SystemPromptContext {
             agent_name,
             agent_description,
@@ -87,6 +95,7 @@ impl Kernel {
             enforce_final_tag: false,
             timezone: system_prompt::local_timezone_str(),
             connected_channels,
+            native_tool_calling,
         });
         let inbox_segment = crate::agent_inbox_prompt::InboxPromptRenderer::new(
             self.agent_inbox.clone(),

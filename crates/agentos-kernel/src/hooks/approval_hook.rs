@@ -1,11 +1,100 @@
 use super::Hook;
+use crate::agent_registry::AgentRegistry;
+use crate::approval_policy_store::ApprovalPolicyMatcher;
+use crate::config::ApprovalConfig;
 use crate::escalation::{AutoAction, EscalationManager};
 use crate::kernel_action::EscalationReason;
 use crate::tool_registry::ToolRegistry;
-use agentos_types::{HookEvent, HookResult, RiskClass, TraceID};
+use agentos_types::{
+    AgentID, ApprovalDecision, ApprovalMode, HookEvent, HookResult, RiskClass, TraceID,
+};
 use async_trait::async_trait;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::RwLock;
+
+/// Hot-reloadable per-agent + global approval mode lookup.
+///
+/// The resolver is consulted on every `ToolPre` event, so the read path uses a
+/// `std::sync::RwLock` (sync, no `.await`) wrapped around the latest
+/// [`ApprovalConfig`]. The kernel's `ConfigWatcher` calls [`Self::reload`]
+/// when the config file changes.
+///
+/// Resolution order: `agent_overrides[<agent name>]` → `mode` (global).
+pub struct ApprovalModeResolver {
+    config: StdRwLock<ApprovalConfig>,
+    /// Agent registry used to resolve `AgentID -> display name` so per-agent
+    /// overrides (which are name-keyed for human readability in TOML) can
+    /// be looked up given only the `AgentID` from the hook event.
+    agent_registry: Arc<RwLock<AgentRegistry>>,
+}
+
+impl ApprovalModeResolver {
+    pub fn new(config: ApprovalConfig, agent_registry: Arc<RwLock<AgentRegistry>>) -> Arc<Self> {
+        Arc::new(Self {
+            config: StdRwLock::new(config),
+            agent_registry,
+        })
+    }
+
+    /// Resolve the active mode for `agent_id`. Falls back to the global mode
+    /// when the agent name can't be looked up or has no override. Uses the
+    /// registry's O(1) lookup by ID, not a scan.
+    pub async fn mode_for(&self, agent_id: &AgentID) -> ApprovalMode {
+        let agent_name = {
+            let reg = self.agent_registry.read().await;
+            reg.get_by_id(agent_id).map(|a| a.name.clone())
+        };
+        let cfg = match self.config.read() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("approval mode RwLock poisoned; falling back to ask_edit default");
+                return ApprovalMode::default();
+            }
+        };
+        if let Some(name) = agent_name {
+            if let Some(m) = cfg.agent_overrides.get(&name) {
+                return *m;
+            }
+        }
+        cfg.mode
+    }
+
+    /// Sync variant for callers that already know the agent display name
+    /// (e.g. CLI tooling). Avoids the async agent registry lookup.
+    pub fn mode_for_name(&self, agent_name: Option<&str>) -> ApprovalMode {
+        let cfg = match self.config.read() {
+            Ok(g) => g,
+            Err(_) => return ApprovalMode::default(),
+        };
+        if let Some(name) = agent_name {
+            if let Some(m) = cfg.agent_overrides.get(name) {
+                return *m;
+            }
+        }
+        cfg.mode
+    }
+
+    /// Replace the current config snapshot. Called by `ConfigWatcher` on
+    /// successful reload. On poison the write still succeeds (the poison is
+    /// only meaningful if some prior writer left invalid state mid-write;
+    /// here we're unconditionally overwriting).
+    pub fn reload(&self, new_config: ApprovalConfig) {
+        let mut guard = self.config.write().unwrap_or_else(|poisoned| {
+            tracing::error!("approval mode RwLock poisoned; overwriting through poison guard");
+            poisoned.into_inner()
+        });
+        *guard = new_config;
+    }
+
+    /// Snapshot the current config. Used by the CLI to render
+    /// `agentos approval mode get`.
+    pub fn snapshot(&self) -> ApprovalConfig {
+        match self.config.read() {
+            Ok(g) => g.clone(),
+            Err(_) => ApprovalConfig::default(),
+        }
+    }
+}
 
 /// Auto-approve rule: matches a specific risk class (and optional path prefix).
 #[derive(Debug, Clone)]
@@ -81,19 +170,31 @@ impl AutoApprovePolicy {
     }
 }
 
-/// Pre-hook that creates an escalation for high-risk tool calls.
+/// Pre-hook that decides whether a tool call may run, surfaces approval
+/// prompts, or hard-denies the call.
 ///
-/// If the tool's `risk_class` requires approval and the auto-approve policy
-/// does not match, this hook creates a `PendingEscalation` and returns
-/// `HookResult::Abort` — preventing the tool from executing until a human
-/// resolves the escalation via `agentos escalation resolve <id>`.
+/// Decision flow on every `ToolPre` event:
+/// 1. Look up the tool's `risk_class` (default `ExecCapable` for unknown
+///    tools — fail-closed).
+/// 2. Look up the active [`ApprovalMode`] for the agent via the resolver
+///    (agent-specific override → global default).
+/// 3. Apply the mode-vs-risk-class matrix: `ApprovalDecision::{Allow, Prompt, Deny}`.
+/// 4. If `Prompt`, ask the legacy `AutoApprovePolicy` for an upward override
+///    (e.g. a learned "allow always" entry) that can lift the prompt to Allow.
+/// 5. `Allow` → `HookResult::Continue`. `Deny` → `HookResult::Abort`.
+///    `Prompt` → create a blocking `PendingEscalation` and abort.
 ///
-/// **Unknown tools** default to `ExecCapable` (fail-closed) rather than
-/// `ReadonlyScoped` (fail-open), following the principle of least privilege.
+/// `ControlPlane` operations always prompt under non-`Deny` modes — kernel
+/// admin actions surface even when the operator opted into auto-approval.
 pub struct ApprovalHook {
     policy: AutoApprovePolicy,
     escalations: Arc<EscalationManager>,
     tool_registry: Arc<RwLock<ToolRegistry>>,
+    mode_resolver: Arc<ApprovalModeResolver>,
+    /// Operator-curated persistent policy. Lifts `Prompt → Allow` for
+    /// specific `(tool, payload, agent)` matches. `None` if the kernel
+    /// chose not to wire a policy matcher (e.g. early tests).
+    policy_matcher: Option<Arc<ApprovalPolicyMatcher>>,
 }
 
 impl ApprovalHook {
@@ -101,11 +202,15 @@ impl ApprovalHook {
         policy: AutoApprovePolicy,
         escalations: Arc<EscalationManager>,
         tool_registry: Arc<RwLock<ToolRegistry>>,
+        mode_resolver: Arc<ApprovalModeResolver>,
+        policy_matcher: Option<Arc<ApprovalPolicyMatcher>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             policy,
             escalations,
             tool_registry,
+            mode_resolver,
+            policy_matcher,
         })
     }
 }
@@ -141,9 +246,64 @@ impl Hook for ApprovalHook {
                 .unwrap_or(RiskClass::ExecCapable)
         };
 
-        // Check auto-approve policy.
-        if self.policy.should_auto_approve(&risk_class, input_json) {
+        // Mode-driven base decision (auto / ask_edit / ask_always / deny).
+        let mode = self.mode_resolver.mode_for(agent_id).await;
+        let base_decision = mode.decide(risk_class.clone());
+
+        // Allow: nothing to do.
+        if matches!(base_decision, ApprovalDecision::Allow) {
             return HookResult::Continue;
+        }
+
+        // Deny: hard-reject. No escalation, no waiting. Audited via the
+        // ToolPre/ToolPost hook chain; the Abort string flows through to the
+        // tool result.
+        if matches!(base_decision, ApprovalDecision::Deny) {
+            tracing::warn!(
+                tool = %tool_name,
+                agent_id = %agent_id,
+                ?risk_class,
+                %mode,
+                "Tool call denied by approval mode"
+            );
+            return HookResult::Abort(format!(
+                "Tool '{tool_name}' denied by approval mode `{mode}` \
+                 (risk class: {risk_class:?}). Change the mode with \
+                 `agentos approval mode set <auto|ask_edit|ask_always>` or \
+                 grant a per-agent override."
+            ));
+        }
+
+        // Prompt: legacy AutoApprovePolicy + learned-policy entries can still
+        // lift `Prompt → Allow` for specific (tool, payload) combinations.
+        //
+        // EXCEPTION: ControlPlane is the non-overridable floor (see
+        // `ApprovalMode::decide` docs). A learned "allow always" entry must
+        // NOT be able to silently let kernel-admin operations bypass human
+        // review — that defeats the whole point of marking a tool as
+        // ControlPlane. We skip both lift-to-allow paths for ControlPlane
+        // and proceed directly to the escalation create.
+        let is_control_plane = matches!(risk_class, RiskClass::ControlPlane);
+        if !is_control_plane {
+            if self.policy.should_auto_approve(&risk_class, input_json) {
+                return HookResult::Continue;
+            }
+            if let Some(matcher) = &self.policy_matcher {
+                let payload_path = serde_json::from_str::<serde_json::Value>(input_json)
+                    .ok()
+                    .as_ref()
+                    .and_then(|v| v.get("path"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if matcher.allows(tool_name, agent_id, payload_path.as_deref()) {
+                    tracing::info!(
+                        tool = %tool_name,
+                        agent_id = %agent_id,
+                        "Tool call allowed by learned approval policy"
+                    );
+                    return HookResult::Continue;
+                }
+            }
         }
 
         // Create a blocking escalation for human review.

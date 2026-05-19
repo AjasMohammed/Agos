@@ -140,9 +140,12 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         scratchpad: Default::default(),
         skills: Default::default(),
         otel: Default::default(),
+        approval: Default::default(),
         context: Default::default(),
         api: Default::default(),
         chat: Default::default(),
+        user_adaptation: Default::default(),
+        env: Default::default(),
     }
 }
 
@@ -738,6 +741,8 @@ Your agent name is: {}"#,
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,

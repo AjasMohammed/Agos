@@ -640,6 +640,47 @@ impl Kernel {
                                     // prevent unbounded pool growth for long-running kernels.
                                     kernel.background_pool.evict_terminal(3600).await;
 
+                                    // Auto-expire stale user-pref proposals (UPDATE status='expired',
+                                    // not DELETE — review history is preserved). Only runs when
+                                    // user adaptation is enabled.
+                                    if kernel.config.user_adaptation.enabled {
+                                        let store = Arc::clone(&kernel.user_pref_proposal_store);
+                                        let audit = Arc::clone(&kernel.audit);
+                                        let ttl_days = kernel.config.user_adaptation.proposal_ttl_days;
+                                        tokio::spawn(async move {
+                                            match store.mark_expired_older_than_days(ttl_days).await {
+                                                Ok(0) => {}
+                                                Ok(n) => {
+                                                    tracing::info!(
+                                                        expired = n,
+                                                        ttl_days,
+                                                        "Auto-expired stale user-pref proposals"
+                                                    );
+                                                    audit
+                                                        .append(agentos_audit::AuditEntry {
+                                                            timestamp: chrono::Utc::now(),
+                                                            trace_id: agentos_types::TraceID::new(),
+                                                            event_type: agentos_audit::AuditEventType::ProposalExpired,
+                                                            agent_id: None,
+                                                            task_id: None,
+                                                            tool_id: None,
+                                                            details: serde_json::json!({
+                                                                "expired_count": n,
+                                                                "ttl_days": ttl_days,
+                                                            }),
+                                                            severity: agentos_audit::AuditSeverity::Info,
+                                                            reversible: false,
+                                                            rollback_ref: None,
+                                                        })
+                                                        .ok();
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(error = %e, "user-pref proposal expiry sweep failed");
+                                                }
+                                            }
+                                        });
+                                    }
+
                                     // Drop chat-session dedup caches untouched for >24h.
                                     let evicted = kernel
                                         .sweep_chat_session_dedup(Duration::from_secs(24 * 3600))
@@ -1012,6 +1053,25 @@ impl Kernel {
                     // allowlist in place after the operator removes a package
                     // would be a security gap.
                     self.reload_host_package_policy().await;
+
+                    // Hot-reload the `[approval]` block. Re-parse the on-disk
+                    // config and replace the resolver's snapshot. Failures
+                    // here are logged but do not abort the reload — the
+                    // currently-installed approval policy keeps running.
+                    if let Some(resolver) = self.approval_mode_resolver.as_ref() {
+                        match crate::config::load_config(&self.config_path) {
+                            Ok(reloaded) => {
+                                resolver.reload(reloaded.approval);
+                                tracing::info!("Approval mode hot-reloaded from config");
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Approval mode hot-reload skipped: config re-parse failed"
+                                );
+                            }
+                        }
+                    }
 
                     // Fire ConfigReloaded hook — lets hooks (audit, metrics) observe the change.
                     self.hook_registry
@@ -1992,6 +2052,16 @@ impl Kernel {
             KernelCommand::ContextMemorySet { agent_id, content } => {
                 self.cmd_context_memory_set(agent_id, content).await
             }
+            KernelCommand::UserPrefsListPending { limit } => {
+                self.cmd_user_prefs_list_pending(limit).await
+            }
+            KernelCommand::UserPrefsAccept { proposal_id } => {
+                self.cmd_user_prefs_accept(proposal_id).await
+            }
+            KernelCommand::UserPrefsReject { proposal_id } => {
+                self.cmd_user_prefs_reject(proposal_id).await
+            }
+            KernelCommand::UserPrefsStats => self.cmd_user_prefs_stats().await,
 
             KernelCommand::ScratchListPages { agent_id } => {
                 self.cmd_scratch_list_pages(agent_id).await
@@ -2121,6 +2191,35 @@ impl Kernel {
             KernelCommand::ContainerList { agent_name } => {
                 self.cmd_container_list(agent_name).await
             }
+            KernelCommand::GrantWorkspace {
+                path,
+                agent_name,
+                mode,
+            } => self.cmd_grant_workspace(path, agent_name, mode).await,
+            KernelCommand::RevokeWorkspace { path, agent_name } => {
+                self.cmd_revoke_workspace(path, agent_name).await
+            }
+            KernelCommand::ListWorkspaceGrants { agent_name } => {
+                self.cmd_list_workspace_grants(agent_name).await
+            }
+            KernelCommand::GetApprovalConfig => self.cmd_get_approval_config().await,
+            KernelCommand::SetApprovalMode { mode } => self.cmd_set_approval_mode(mode).await,
+            KernelCommand::SetApprovalAgentOverride { agent_name, mode } => {
+                self.cmd_set_approval_agent_override(agent_name, mode).await
+            }
+            KernelCommand::ClearApprovalAgentOverride { agent_name } => {
+                self.cmd_clear_approval_agent_override(agent_name).await
+            }
+            KernelCommand::AddApprovalPolicy {
+                tool_name,
+                path_glob,
+                agent_name,
+            } => {
+                self.cmd_add_approval_policy(tool_name, path_glob, agent_name)
+                    .await
+            }
+            KernelCommand::ListApprovalPolicies => self.cmd_list_approval_policies().await,
+            KernelCommand::RevokeApprovalPolicy { id } => self.cmd_revoke_approval_policy(id).await,
         }
     }
 
@@ -2781,6 +2880,7 @@ impl Kernel {
             registry.compute_effective_permissions(&agent.id)
         };
 
+        let ws_sched = self.workspace_paths_for_agent(&agent.id);
         let exec_ctx = ToolExecutionContext {
             data_dir: self.data_dir.clone(),
             task_id: TaskID::new(),
@@ -2793,7 +2893,9 @@ impl Kernel {
             agent_registry: None,
             task_registry: None,
             escalation_query: None,
-            workspace_paths: self.workspace_paths.clone(),
+            workspace_paths: ws_sched.read,
+            workspace_paths_writable: ws_sched.writable,
+            workspace_paths_executable: ws_sched.executable,
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,

@@ -39,7 +39,7 @@ impl NodeContributor for ToolNodeContributor {
             .map(|rt| {
                 let tm = &rt.manifest;
                 let info = &tm.manifest;
-                let properties = json_schema_to_properties(tm.input_schema.as_ref());
+                let properties = json_schema_to_properties(tm.payload_schema.as_ref());
                 NodeManifest {
                     node: NodeManifestBody {
                         id: format!("tool.{}", info.name),

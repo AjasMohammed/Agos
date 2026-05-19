@@ -21,19 +21,19 @@ outputs = ["content.json"]
 input = "EnvInstallIntent"
 output = "EnvInstallResult"
 
-[input_schema]
+[payload_schema]
 required = ["package", "workspace"]
 type = "object"
 
-[input_schema.properties.package]
+[payload_schema.properties.package]
 description = "Package name to install (e.g., flask, express, serde)"
 type = "string"
 
-[input_schema.properties.version]
+[payload_schema.properties.version]
 description = "Version constraint (e.g., '3.0.0', '>=2.0'). Omit for latest."
 type = "string"
 
-[input_schema.properties.workspace]
+[payload_schema.properties.workspace]
 description = "Name of the workspace to install into (must exist)"
 type = "string"
 

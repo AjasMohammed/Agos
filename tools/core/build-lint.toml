@@ -18,10 +18,10 @@ outputs = ["content.json"]
 input = "BuildLintIntent"
 output = "BuildLintResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.working_dir]
+[payload_schema.properties.working_dir]
 description = "Project directory (auto-detects linter from Cargo.toml, package.json, etc.)"
 type = "string"
 

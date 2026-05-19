@@ -736,7 +736,9 @@ impl LLMCore for OllamaCore {
                 function: OllamaRequestToolFunction {
                     name: t.manifest.name.clone(),
                     description: t.manifest.description.clone(),
-                    parameters: tool_helpers::normalize_tool_input_schema(t.input_schema.as_ref()),
+                    parameters: tool_helpers::normalize_tool_input_schema(
+                        t.payload_schema.as_ref(),
+                    ),
                 },
             })
             .collect();
@@ -1026,7 +1028,9 @@ impl LLMCore for OllamaCore {
                 function: OllamaRequestToolFunction {
                     name: t.manifest.name.clone(),
                     description: t.manifest.description.clone(),
-                    parameters: tool_helpers::normalize_tool_input_schema(t.input_schema.as_ref()),
+                    parameters: tool_helpers::normalize_tool_input_schema(
+                        t.payload_schema.as_ref(),
+                    ),
                 },
             })
             .collect();

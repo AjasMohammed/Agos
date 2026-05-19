@@ -23,20 +23,20 @@ outputs = ["content.text"]
 input = "ShellExecIntent"
 output = "ShellExecResult"
 
-[input_schema]
+[payload_schema]
 required = ["command"]
 type = "object"
 
-[input_schema.properties.allow_network]
+[payload_schema.properties.allow_network]
 default = false
 description = "Allow network namespace sharing inside sandbox"
 type = "boolean"
 
-[input_schema.properties.command]
+[payload_schema.properties.command]
 description = "Shell command string to execute"
 type = "string"
 
-[input_schema.properties.timeout_secs]
+[payload_schema.properties.timeout_secs]
 default = 30
 description = "Execution timeout in seconds"
 minimum = 1

@@ -99,11 +99,17 @@ pub struct ToolManifest {
     pub capabilities_required: ToolCapabilities,
     pub capabilities_provided: ToolOutputs,
     pub intent_schema: ToolSchema,
-    /// Optional JSON Schema for validating the tool's input payload.
-    /// When present, `SemanticPayload.data` is validated against this schema
-    /// before the tool is executed.
-    #[serde(default)]
-    pub input_schema: Option<serde_json::Value>,
+    /// Optional JSON Schema (draft-07) for validating the tool's input payload.
+    /// During migration, manifests may still use `input_schema`; both names are
+    /// accepted and normalized into this field.
+    #[serde(default, alias = "input_schema")]
+    pub payload_schema: Option<serde_json::Value>,
+    /// Worked example payloads. Validated against `payload_schema` at registry
+    /// load — drift between schema and example is a loud boot failure, not a
+    /// silent corruption. Surfaced by `describe-tool` and by native-tool-call
+    /// adapters as provider-side examples.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<PayloadExample>,
     pub sandbox: ToolSandbox,
     /// Which execution backend should run this tool. Defaults to Inline.
     #[serde(default)]
@@ -133,6 +139,19 @@ pub struct ToolManifest {
 /// Recognised v1 manifest tag taxonomy. Manifests may declare additional tags
 /// for forward-compat; only these surface in pagination filters.
 pub const MANIFEST_TAG_TAXONOMY_V1: &[&str] = &["read", "write", "exec", "network", "fs", "meta"];
+
+/// A worked example payload for a tool. Author supplies a short label and a
+/// concrete JSON value the agent can copy. The kernel validates the payload
+/// against `ToolManifest.payload_schema` at registry load time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PayloadExample {
+    /// Short label describing what this example demonstrates
+    /// (e.g. "Read first 100 lines of a file").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The example payload. Must validate against `payload_schema`.
+    pub payload: serde_json::Value,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct UsageHints {

@@ -18,15 +18,15 @@ outputs = ["content.json"]
 input = "ProcWaitIntent"
 output = "ProcWaitResult"
 
-[input_schema]
+[payload_schema]
 required = ["process_id"]
 type = "object"
 
-[input_schema.properties.process_id]
+[payload_schema.properties.process_id]
 description = "ID of the process to wait for"
 type = "string"
 
-[input_schema.properties.timeout_secs]
+[payload_schema.properties.timeout_secs]
 description = "Maximum seconds to wait (default: 30)"
 type = "integer"
 default = 30

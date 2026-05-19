@@ -18,6 +18,14 @@ outputs = ["device_id", "desired_state", "reported_state", "reconciled"]
 input = "HardwareGetTwinIntent"
 output = "HardwareGetTwinResult"
 
+[payload_schema]
+type     = "object"
+required = ["device_id"]
+
+[payload_schema.properties.device_id]
+type        = "string"
+description = "Stable device identifier as registered with the kernel's IoT registry."
+
 [sandbox]
 network = false
 fs_write = false

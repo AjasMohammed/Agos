@@ -18,15 +18,15 @@ outputs = ["context.text"]
 input  = "ContextMemoryUpdateIntent"
 output = "ContextMemoryUpdateResult"
 
-[input_schema]
+[payload_schema]
 type     = "object"
 required = ["content"]
 
-[input_schema.properties.content]
+[payload_schema.properties.content]
 type        = "string"
 description = "Markdown content for your persistent context memory. This replaces the entire document. Be concise — you have a token budget."
 
-[input_schema.properties.reason]
+[payload_schema.properties.reason]
 type        = "string"
 description = "Brief explanation of why this update was made (stored in version history)."
 

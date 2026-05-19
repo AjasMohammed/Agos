@@ -44,6 +44,50 @@ pub async fn list(
         }
     };
 
+    // Counts across ALL statuses (separate query) — drives the status chip filters
+    // on the page header. Only fetched on the full-page render.
+    let task_counts = if query.partial.as_deref() != Some("list") {
+        let all_filter = TaskFilter {
+            status: None,
+            agent_name: None,
+            offset: None,
+            limit: Some(2000),
+        };
+        match state.service.list_tasks(all_filter).await {
+            Ok((all_tasks, _)) => {
+                let mut queued = 0u32;
+                let mut running = 0u32;
+                let mut waiting = 0u32;
+                let mut complete = 0u32;
+                let mut failed = 0u32;
+                let mut cancelled = 0u32;
+                for t in &all_tasks {
+                    match t.status.to_ascii_lowercase().as_str() {
+                        "queued" => queued += 1,
+                        "running" => running += 1,
+                        "waiting" | "suspended" => waiting += 1,
+                        "complete" | "completed" => complete += 1,
+                        "failed" => failed += 1,
+                        "cancelled" | "canceled" => cancelled += 1,
+                        _ => {}
+                    }
+                }
+                Some((
+                    queued,
+                    running,
+                    waiting,
+                    complete,
+                    failed,
+                    cancelled,
+                    all_tasks.len(),
+                ))
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
     let task_rows: Vec<_> = tasks_api
         .iter()
         .filter(|t| {
@@ -80,11 +124,28 @@ pub async fn list(
 
     let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);
 
+    let active_status = query.status.clone().unwrap_or_default();
+    let active_search = query.search.clone().unwrap_or_default();
+    let counts_ctx = task_counts.map(|(q, r, w, c, f, x, total)| {
+        context! {
+            queued => q,
+            running => r,
+            waiting => w,
+            complete => c,
+            failed => f,
+            cancelled => x,
+            total => total,
+        }
+    });
+
     let ctx = context! {
         page_title => "Tasks",
         breadcrumbs => vec![context! { label => "Tasks" }],
         tasks => task_rows,
         csrf_token,
+        active_status,
+        active_search,
+        task_counts => counts_ctx,
     };
     super::render(&state.templates, "tasks.html", ctx)
 }

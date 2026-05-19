@@ -56,7 +56,8 @@ fn make_blocked_manifest() -> ToolManifest {
             input: "None".to_string(),
             output: "None".to_string(),
         },
-        input_schema: None,
+        payload_schema: None,
+        examples: vec![],
         sandbox: ToolSandbox {
             network: false,
             fs_write: false,
@@ -97,7 +98,8 @@ fn make_community_manifest_with_sig(pubkey_hex: &str, sig_hex: &str) -> ToolMani
             input: "None".to_string(),
             output: "None".to_string(),
         },
-        input_schema: None,
+        payload_schema: None,
+        examples: vec![],
         sandbox: ToolSandbox {
             network: false,
             fs_write: false,

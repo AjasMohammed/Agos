@@ -19,27 +19,27 @@ outputs = ["a2a_task_result"]
 input  = "A2ADelegateIntent"
 output = "A2ADelegateResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["agent_url", "capability"]
 
-[input_schema.properties.agent_url]
+[payload_schema.properties.agent_url]
 type = "string"
 description = "Base URL of the external A2A agent (e.g. 'http://external-agent.example.com'). The tool fetches /.well-known/agent.json to discover capabilities."
 
-[input_schema.properties.capability]
+[payload_schema.properties.capability]
 type = "string"
 description = "Capability name to invoke on the external agent (must appear in its Agent Card)."
 
-[input_schema.properties.input]
+[payload_schema.properties.input]
 type = "object"
 description = "Input payload for the capability invocation."
 
-[input_schema.properties.token]
+[payload_schema.properties.token]
 type = "string"
 description = "Optional Bearer token for authenticating with the external agent."
 
-[input_schema.properties.wait_for_result]
+[payload_schema.properties.wait_for_result]
 type = "boolean"
 default = false
 description = "When true, poll until the external task reaches a terminal state and return the result. When false (default), return immediately with the task ID."

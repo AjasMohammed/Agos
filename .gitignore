@@ -56,3 +56,5 @@ graphify-out/*
 *.log
 
 .venv*/
+
+.playwright-mcp/*

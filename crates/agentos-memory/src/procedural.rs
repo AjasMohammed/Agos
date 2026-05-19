@@ -850,7 +850,7 @@ mod tests {
     #[tokio::test]
     async fn test_store_and_get_procedure() {
         let dir = TempDir::new().unwrap();
-        let embedder = Arc::new(Embedder::new().unwrap());
+        let embedder = Arc::new(Embedder::noop());
         let store = ProceduralStore::open_with_embedder(dir.path(), embedder).unwrap();
         let proc = make_test_procedure("deploy", "Deploy application safely");
 
@@ -863,7 +863,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_procedure() {
         let dir = TempDir::new().unwrap();
-        let embedder = Arc::new(Embedder::new().unwrap());
+        let embedder = Arc::new(Embedder::noop());
         let store = ProceduralStore::open_with_embedder(dir.path(), embedder).unwrap();
         let deploy = make_test_procedure("deploy", "Deploy application safely");
         let backup = make_test_procedure("backup", "Create full data backup");
@@ -880,7 +880,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_stats_and_delete() {
         let dir = TempDir::new().unwrap();
-        let embedder = Arc::new(Embedder::new().unwrap());
+        let embedder = Arc::new(Embedder::noop());
         let store = ProceduralStore::open_with_embedder(dir.path(), embedder).unwrap();
         let proc = make_test_procedure("deploy", "Deploy application safely");
         let id = store.store(&proc).await.unwrap();

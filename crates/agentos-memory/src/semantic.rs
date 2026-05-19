@@ -795,7 +795,11 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    // This test exercises true semantic similarity ranking, which requires a
+    // real embedder. Marked `#[ignore]` because ONNX graph optimization
+    // SIGFPEs on some Zen-class CPUs — see `embedder.rs::noop()`.
     #[tokio::test]
+    #[ignore = "real ONNX embedder; semantic ranking can't be exercised with the noop stub"]
     async fn test_semantic_search_finds_similar_content() {
         let dir = TempDir::new().unwrap();
         let embedder = Arc::new(Embedder::new().unwrap());

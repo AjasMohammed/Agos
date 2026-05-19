@@ -17,7 +17,7 @@ outputs = ["context.text"]
 input  = "ContextMemoryReadIntent"
 output = "ContextMemoryReadResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
 [sandbox]

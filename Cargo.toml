@@ -113,6 +113,7 @@ wasmtime-wasi = "44.0.1"
 
 # JSON Schema validation
 jsonschema = "0.28"
+schemars = { version = "0.8", features = ["derive"] }
 
 # Container runtime
 bollard = "0.18"
@@ -154,9 +155,10 @@ incremental = true
 opt-level = 1      # compile deps at opt-level 1 — big speedup for heavy crates like wasmtime/reqwest
 
 [profile.release]
-lto = "thin"
+lto = false
 codegen-units = 16
 strip = "debuginfo"
+incremental = true
 
 [profile.dist]
 inherits = "release"

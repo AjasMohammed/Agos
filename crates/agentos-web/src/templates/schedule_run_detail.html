@@ -21,10 +21,7 @@
 {% if result_json %}
 <article>
     <header><strong>Result</strong></header>
-    <details open>
-        <summary>Result JSON</summary>
-        <pre style="overflow-x:auto;max-height:400px"><code>{{ result_json }}</code></pre>
-    </details>
+    <div class="data-panel">{{ result_json|structured_data_html }}</div>
 </article>
 {% endif %}
 
@@ -39,8 +36,16 @@
         &mdash; {{ tc.duration_ms }}ms
         <details>
             <summary>Input / Output</summary>
-            <p><strong>Input:</strong> <code>{{ tc.input_preview }}</code></p>
-            <p><strong>Output:</strong> <code>{{ tc.output_preview }}</code></p>
+            <div class="tool-trace-grid">
+                <section>
+                    <h3>Input</h3>
+                    {{ tc.input_preview|structured_data_html }}
+                </section>
+                <section>
+                    <h3>Output</h3>
+                    {{ tc.output_preview|structured_data_html }}
+                </section>
+            </div>
         </details>
     </li>
     {% endfor %}

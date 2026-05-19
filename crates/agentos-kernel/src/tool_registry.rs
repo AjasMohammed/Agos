@@ -355,7 +355,7 @@ impl ToolRegistry {
                 block.push(format!("Permissions: {}", perms.join(", ")));
             }
 
-            let input_line = match compact_input_schema(tool.manifest.input_schema.as_ref()) {
+            let input_line = match compact_input_schema(tool.manifest.payload_schema.as_ref()) {
                 Some(schema_summary) => format!("Input: {}", schema_summary),
                 None => "Input: (see agent-manual tool-detail)".to_string(),
             };
@@ -444,7 +444,8 @@ mod tests {
                 input: "TestInput".to_string(),
                 output: "TestOutput".to_string(),
             },
-            input_schema: None,
+            payload_schema: None,
+            examples: vec![],
             sandbox: ToolSandbox {
                 network: false,
                 fs_write: false,
@@ -485,7 +486,8 @@ mod tests {
                 input: "TestInput".to_string(),
                 output: "TestOutput".to_string(),
             },
-            input_schema: None,
+            payload_schema: None,
+            examples: vec![],
             sandbox: ToolSandbox {
                 network: false,
                 fs_write: false,
@@ -648,7 +650,7 @@ mod tests {
         let mut manifest = make_core_manifest("file-reader");
         manifest.manifest.description = "Read files".into();
         manifest.capabilities_required.permissions = vec!["fs.user_data:r".to_string()];
-        manifest.input_schema = Some(serde_json::json!({
+        manifest.payload_schema = Some(serde_json::json!({
             "type": "object",
             "required": ["path"],
             "properties": {

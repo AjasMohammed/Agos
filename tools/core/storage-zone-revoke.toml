@@ -20,11 +20,11 @@ outputs = ["content.json"]
 input = "StorageZoneRevokeIntent"
 output = "StorageZoneRevokeResult"
 
-[input_schema]
+[payload_schema]
 required = ["zone_id"]
 type = "object"
 
-[input_schema.properties.zone_id]
+[payload_schema.properties.zone_id]
 description = "ID of the zone to revoke (from zone.create or zone.list)"
 type = "string"
 

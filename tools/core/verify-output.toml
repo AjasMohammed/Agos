@@ -17,19 +17,19 @@ outputs = ["task_id"]
 input  = "VerifyOutputIntent"
 output = "VerifyOutputResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["agent", "output"]
 
-[input_schema.properties.agent]
+[payload_schema.properties.agent]
 type = "string"
 description = "Name of the agent to use as a verifier/critic."
 
-[input_schema.properties.output]
+[payload_schema.properties.output]
 type = "string"
 description = "The output text to be verified."
 
-[input_schema.properties.criteria]
+[payload_schema.properties.criteria]
 type = "string"
 description = "Criteria to evaluate against. Defaults to 'correctness, safety, and completeness'."
 

@@ -18,6 +18,26 @@ outputs = ["subscribed"]
 input = "IotMqttSubscribeIntent"
 output = "IotMqttSubscribeResult"
 
+[payload_schema]
+type     = "object"
+required = ["topic"]
+
+[payload_schema.properties.topic]
+type        = "string"
+description = "MQTT topic filter, supports + and # wildcards (e.g. 'home/+/temperature')."
+
+[payload_schema.properties.qos]
+type        = "integer"
+enum        = [0, 1, 2]
+default     = 0
+description = "MQTT quality-of-service level."
+
+[payload_schema.properties.duration_seconds]
+type        = "integer"
+minimum     = 1
+default     = 30
+description = "How long to keep the subscription open before returning collected messages."
+
 [sandbox]
 network = false
 fs_write = false

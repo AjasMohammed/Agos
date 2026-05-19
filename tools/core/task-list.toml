@@ -17,16 +17,16 @@ outputs = ["content.structured"]
 input  = "TaskListQuery"
 output = "TaskListResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.filter]
+[payload_schema.properties.filter]
 type = "string"
 enum = ["mine", "active"]
 default = "mine"
 description = "mine for caller tasks, active for global running/queued tasks"
 
-[input_schema.properties.limit]
+[payload_schema.properties.limit]
 type = "integer"
 default = 20
 minimum = 1

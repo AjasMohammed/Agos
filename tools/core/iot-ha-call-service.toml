@@ -19,6 +19,27 @@ outputs = ["result"]
 input = "IotHaCallServiceIntent"
 output = "IotHaCallServiceResult"
 
+[payload_schema]
+type     = "object"
+required = ["domain", "service"]
+
+[payload_schema.properties.domain]
+type        = "string"
+description = "Home Assistant service domain (e.g. 'light', 'climate', 'switch')."
+
+[payload_schema.properties.service]
+type        = "string"
+description = "Service name within the domain (e.g. 'turn_on', 'set_temperature')."
+
+[payload_schema.properties.entity_id]
+type        = "string"
+description = "Target entity (e.g. 'light.kitchen'). Some services accept lists; pass a comma-separated string for those."
+
+[payload_schema.properties.service_data]
+type                 = "object"
+additionalProperties = true
+description          = "Service-specific arguments (e.g. {brightness: 200, color_name: 'red'})."
+
 [sandbox]
 network = false
 fs_write = false

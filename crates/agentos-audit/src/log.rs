@@ -315,6 +315,27 @@ pub enum AuditEventType {
     BuildExecuted,
     /// Emitted when a build command fails.
     BuildFailed,
+
+    // User-preference adaptation proposals
+    /// Emitted when the post-task user-adaptation hook inserts a new
+    /// preference proposal into the review queue.
+    ProposalCreated,
+    /// Emitted when an operator accepts a pending preference proposal
+    /// (followed by `ContextMemoryUpdated` for the actual write).
+    ProposalAccepted,
+    /// Emitted when an operator rejects a pending preference proposal.
+    ProposalRejected,
+    /// Emitted when a pending preference proposal is auto-expired by the
+    /// TimeoutChecker sweep after exceeding the TTL.
+    ProposalExpired,
+
+    // User filesystem grants
+    /// Emitted when an operator grants a host directory to one agent or
+    /// globally. Payload: `path`, `agent_id` (or `null` for global), `mode`
+    /// ("rwx" string), `source` ("cli"|"web"|"bus"|"config"), `granted_by`.
+    WorkspaceGranted,
+    /// Emitted when an operator revokes a previously-granted host directory.
+    WorkspaceRevoked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

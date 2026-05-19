@@ -19,22 +19,22 @@ outputs = ["convo_id", "url"]
 input  = "StartConversationIntent"
 output = "StartConversationResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["topic", "participants"]
 
-[input_schema.properties.topic]
+[payload_schema.properties.topic]
 type = "string"
 description = "The topic or prompt that drives the conversation between the agents."
 
-[input_schema.properties.participants]
+[payload_schema.properties.participants]
 type = "array"
 items = { type = "string" }
 minItems = 2
 maxItems = 8
 description = "List of agent names to include in the conversation (2–8 agents, must be unique)."
 
-[input_schema.properties.max_turns]
+[payload_schema.properties.max_turns]
 type = "integer"
 default = 6
 minimum = 2

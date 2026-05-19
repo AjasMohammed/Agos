@@ -222,6 +222,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -263,6 +265,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -307,6 +311,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -334,6 +340,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -1988,7 +1996,8 @@ mod tests {
                 description: "Read files".into(),
                 version: "1.1.0".into(),
                 permissions: vec!["fs.user_data:r".into()],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec![],
                 category: "core".into(),
@@ -2001,7 +2010,8 @@ mod tests {
                 description: "HTTP requests".into(),
                 version: "1.0.0".into(),
                 permissions: vec!["network.outbound:x".into()],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec![],
                 category: "core".into(),
@@ -2031,9 +2041,10 @@ mod tests {
             description: "Read files from data directory".into(),
             version: "1.1.0".into(),
             permissions: vec!["fs.user_data:r".into()],
-            input_schema: Some(
+            payload_schema: Some(
                 serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
             ),
+            examples: vec![],
             trust_tier: "core".into(),
             capability_tags: vec![],
             category: "core".into(),
@@ -2053,7 +2064,7 @@ mod tests {
         assert_eq!(result["section"], "tool-detail");
         assert_eq!(result["name"], "file-reader");
         assert_eq!(result["version"], "1.1.0");
-        assert!(result["input_schema"].is_object());
+        assert!(result["payload_schema"].is_object());
     }
 
     #[tokio::test]
@@ -2229,7 +2240,8 @@ mod tests {
                 description: "A test".into(),
                 version: "0.1.0".into(),
                 permissions: vec![],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec![],
                 category: "core".into(),

@@ -123,6 +123,35 @@ allowlist = [
     "docker.io",
 ]
 
+# env-install: install packages into per-agent workspaces (NOT the host).
+# Workspaces live at {data_dir}/workspaces/{agent_id}/{name}/ and are
+# isolated per-agent. Network is permitted only for the install duration.
+#
+# Policy values:
+#   "curated" — package must be on the allowlist below (default)
+#   "open"    — any package allowed (dev/lab use only)
+#   "locked"  — installation disabled
+[env]
+python_policy = "curated"
+nodejs_policy = "curated"
+rust_policy   = "curated"
+system_policy = "locked"          # host packages go through host-package-install
+default_quota_bytes = 2147483648  # 2 GiB (informational, not enforced)
+install_timeout_secs = 120
+
+python_allowlist = [
+    "flask", "requests", "pytest", "numpy", "pandas",
+    "pyyaml", "beautifulsoup4", "httpx", "fastapi",
+    "pydantic", "rich", "typer", "uvicorn", "sqlalchemy",
+]
+nodejs_allowlist = [
+    "express", "jest", "axios", "lodash", "zod",
+    "dotenv", "chalk", "commander",
+]
+rust_allowlist = [
+    "serde", "tokio", "anyhow", "clap", "tracing",
+]
+
 [bus]
 # Development default socket path.
 socket_path = "/tmp/agentos/agentos.sock"
@@ -337,6 +366,17 @@ allowed_images = [
     "alpine:3.19",
 ]
 
+[user_adaptation]
+# Deterministic post-task user preference proposal generator.
+# Disabled by default; when enabled, proposals are queued for operator review.
+enabled = false
+model = "compact"
+min_confidence = 0.5
+max_proposals_per_task = 3
+# Pending proposals older than this are auto-expired (status='expired',
+# history preserved) by the TimeoutChecker sweep.
+proposal_ttl_days = 30
+
 # IoT: MQTT broker connection (requires `mqtt` feature)
 # Uncomment to enable MQTT driver for IoT sensor/actuator communication.
 # [hal.mqtt]
@@ -349,3 +389,25 @@ allowed_images = [
 # [hal.homeassistant]
 # base_url = "http://homeassistant.local:8123"
 # token_vault_key = "homeassistant_token"
+
+# ---------------------------------------------------------------------------
+# Approval modes — when does the kernel auto-approve vs. escalate a tool
+# call for human review?
+#
+#   auto        — auto-approve everything except ControlPlane operations.
+#                  ControlPlane (kernel admin: key rotation, audit truncation,
+#                  agent shutdown) always prompts regardless of mode.
+#   ask_edit    — DEFAULT. Auto-approve readonly tools; prompt for writes,
+#                  exec, and control-plane. Mirrors Claude Code defaults.
+#   ask_always  — Prompt for everything except trivially-cheap
+#                  ReadonlyScoped tools.
+#   deny        — Hard-deny anything that would otherwise prompt. For
+#                  high-assurance / unattended agents that must never wait.
+#
+# Per-agent overrides go in `[approval.agent_overrides]`, keyed by agent
+# display name:
+#   [approval.agent_overrides]
+#   research-bot = "auto"
+#   writer-bot   = "ask_always"
+[approval]
+mode = "ask_edit"

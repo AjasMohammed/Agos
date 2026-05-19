@@ -18,7 +18,7 @@ outputs = ["content.structured"]
 input  = "AgentSelfQuery"
 output = "AgentSelfView"
 
-[input_schema]
+[payload_schema]
 type        = "object"
 description = "No input fields required. Pass an empty object ({}) to retrieve the full self-view."
 properties  = {}

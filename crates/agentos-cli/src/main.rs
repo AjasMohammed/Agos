@@ -41,10 +41,11 @@ use commands::{
     channel::ChannelCommands, cost::CostCommands, escalation::EscalationCommands,
     event::EventCommands, hal::HalCommands, identity::IdentityCommands, init::InitTemplate,
     log::LogCommands, mcp::McpCommands, notifications::NotificationCommands, perm::PermCommands,
-    pipeline::PipelineCommands, provider::ProviderCommands, resource::ResourceCommands,
-    role::RoleCommands, schedule::ScheduleCommands, scratchpad::ScratchpadCommands,
-    secret::SecretCommands, skill::SkillCommands, snapshot::SnapshotCommands, task::TaskCommands,
-    team::TeamCommands, tool::ToolCommands, web::WebCommands,
+    pipeline::PipelineCommands, prefs::PrefsCommands, provider::ProviderCommands,
+    resource::ResourceCommands, role::RoleCommands, schedule::ScheduleCommands,
+    scratchpad::ScratchpadCommands, secret::SecretCommands, skill::SkillCommands,
+    snapshot::SnapshotCommands, task::TaskCommands, team::TeamCommands, tool::ToolCommands,
+    web::WebCommands,
 };
 
 #[derive(Parser)]
@@ -96,6 +97,11 @@ pub enum Commands {
     Perm {
         #[command(subcommand)]
         command: PermCommands,
+    },
+    /// Review user preference adaptation proposals
+    Prefs {
+        #[command(subcommand)]
+        command: PrefsCommands,
     },
 
     /// Manage OS roles
@@ -244,6 +250,30 @@ pub enum Commands {
     Plugin {
         #[command(subcommand)]
         command: commands::plugin::PluginCommands,
+    },
+
+    /// Grant, revoke, or list user filesystem workspace grants.
+    ///
+    /// A grant lets one agent (or every agent) read, write, and/or execute
+    /// commands inside a specific host directory tree. Without a grant, file
+    /// tools that target an absolute path outside `data_dir` return
+    /// `PermissionDenied`.
+    Workspace {
+        #[command(subcommand)]
+        command: commands::workspace::WorkspaceCommands,
+    },
+
+    /// Manage tool-call approval mode and learned "allow always" policy.
+    ///
+    /// Modes control when the kernel auto-approves vs. escalates a tool call
+    /// for human review:
+    ///   auto       — approve everything except ControlPlane operations
+    ///   ask_edit   — approve readonly; prompt for writes/exec/control-plane
+    ///   ask_always — prompt for everything except trivially-cheap reads
+    ///   deny       — hard-deny anything that would otherwise prompt
+    Approval {
+        #[command(subcommand)]
+        command: commands::approval::ApprovalCommands,
     },
 
     /// Interactive setup wizard — configure providers, agents, and data paths.
@@ -771,6 +801,8 @@ async fn run_sandbox_exec(request_path: &str) -> anyhow::Result<()> {
         task_registry: None,
         escalation_query: None,
         workspace_paths: workspace_paths.unwrap_or_default(),
+        workspace_paths_writable: vec![],
+        workspace_paths_executable: vec![],
         capability_registry: None,
         capability_dispatcher: None,
         storage_zone_query: None,
@@ -825,6 +857,7 @@ async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
 
     let kernel = Arc::new(Kernel::boot(config_path, &passphrase).await?);
     kernel.wire_inbound_chat_bridge();
+    kernel.wire_process_crash_emission().await;
 
     // Start the webhook wake-up loop now that kernel is wrapped in Arc.
     kernel.start_webhook_wakeup().await;
@@ -1003,6 +1036,7 @@ mod tests {
                         autonomous: _,
                         no_checkpoint: _,
                         thinking: _,
+                        interactive: _,
                     },
             } => {
                 assert_eq!(agent, Some("analyst".to_string()));

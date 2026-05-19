@@ -3,7 +3,7 @@ tags = ["meta", "read"]
 [manifest]
 name        = "describe-tool"
 version     = "1.0.0"
-description = "Return full schema, permissions, and an example payload for one tool."
+description = "Return structured tool metadata including payload_schema and examples."
 author      = "agentos-core"
 trust_tier  = "core"
 risk_class  = "readonly_scoped"
@@ -19,11 +19,11 @@ outputs = ["content.structured"]
 input  = "ToolDescribeQuery"
 output = "ToolDescription"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["name"]
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 type = "string"
 description = "Exact tool name"
 

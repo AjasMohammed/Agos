@@ -7,6 +7,13 @@ use tokio::sync::mpsc;
 
 #[async_trait]
 pub trait LLMCore: Send + Sync {
+    /// Whether the adapter primarily uses provider-native tool-calling
+    /// protocol (tool_calls/tool_use/functionCall) instead of relying on
+    /// JSON-in-markdown tool instructions in the system prompt.
+    fn supports_native_tool_calling(&self) -> bool {
+        false
+    }
+
     /// Send a context window to the LLM and get a complete response.
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError>;
 
@@ -192,7 +199,8 @@ mod tests {
                 input: "Any".to_string(),
                 output: "Any".to_string(),
             },
-            input_schema: None,
+            payload_schema: None,
+            examples: vec![],
             sandbox: ToolSandbox {
                 network: false,
                 fs_write: false,

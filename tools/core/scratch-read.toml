@@ -17,11 +17,11 @@ outputs = ["content.text"]
 input  = "ScratchReadIntent"
 output = "ScratchReadResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["title"]
 
-[input_schema.properties.title]
+[payload_schema.properties.title]
 type = "string"
 description = "Page title to read"
 

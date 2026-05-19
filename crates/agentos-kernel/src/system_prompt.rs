@@ -55,6 +55,9 @@ pub struct SystemPromptContext {
     /// compact awareness block. Empty vec → block is skipped entirely.
     /// Populated from `UserChannelRegistry::list_active()` per task.
     pub connected_channels: Vec<ChannelHint>,
+    /// True when the bound adapter supports provider-native tool calling.
+    /// When enabled, omit JSON-in-markdown tool instructions from the prompt.
+    pub native_tool_calling: bool,
 }
 
 /// One connected channel, rendered into the system prompt awareness block.
@@ -139,33 +142,39 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
 
     // ── Output format (only when final-tag enforcement is on) ────
     if ctx.enforce_final_tag {
-        prompt.push_str(
+        let tool_call_output_guidance = if ctx.native_tool_calling {
+            "Tool calls should be emitted via the provider's native tool-calling protocol and run before the `<final>` block."
+        } else {
+            "Tool calls go in their own ```json blocks (see ## Tools) and run before the `<final>` block."
+        };
+        prompt.push_str(&format!(
             "\n\n## Output Format\n\
-             Wrap your final user-facing answer in `<final>...</final>` tags. \
-             Anything outside `<final>` blocks is hidden from the user \u{2014} including \
-             reasoning, status updates, and tool-call scaffolding. Use \
-             `<think>...</think>` for internal reasoning that should not be shown. \
-             Tool calls go in their own ```json blocks (see ## Tools) and run \
-             before the `<final>` block.\n\
-             When referencing a file or location inside `<final>`, use `path:line` \
-             (e.g. `crates/agentos-kernel/src/run_loop.rs:142`) so the UI can render \
-             a clickable link. Avoid pasting whole-file contents \u{2014} cite the location.\n\
-             \n\
-             Example (single turn):\n\
-             <think>I should check the weather first before answering.</think>\n\
-             <final>The weather in Tokyo is 18\u{00b0}C and clear.</final>",
-        );
+                 Wrap your final user-facing answer in `<final>...</final>` tags. \
+                 Anything outside `<final>` blocks is hidden from the user \u{2014} including \
+                 reasoning, status updates, and tool-call scaffolding. Use \
+                 `<think>...</think>` for internal reasoning that should not be shown. \
+                 {tool_call_output_guidance}\n\
+                 When referencing a file or location inside `<final>`, use `path:line` \
+                 (e.g. `crates/agentos-kernel/src/run_loop.rs:142`) so the UI can render \
+                 a clickable link. Avoid pasting whole-file contents \u{2014} cite the location.\n\
+                 \n\
+                 Example (single turn):\n\
+                 <think>I should check the weather first before answering.</think>\n\
+                 <final>The weather in Tokyo is 18\u{00b0}C and clear.</final>"
+        ));
     }
 
     // ── Tool calling ─────────────────────────────────────────────
-    prompt.push_str(
-        "\n\n## Tools\n\
-         Call tools with JSON blocks:\n\
-         ```json\n\
-         {\"tool\": \"name\", \"intent_type\": \"read|write|execute|query|observe|delegate|message|broadcast|escalate|subscribe|unsubscribe\", \"payload\": {...}}\n\
-         ```\n\
-         Multiple tool calls per response are supported. When done, reply in plain text with no tool blocks.",
-    );
+    if !ctx.native_tool_calling {
+        prompt.push_str(
+            "\n\n## Tools\n\
+             Call tools with JSON blocks:\n\
+             ```json\n\
+             {\"tool\": \"name\", \"intent_type\": \"read|write|execute|query|observe|delegate|message|broadcast|escalate|subscribe|unsubscribe\", \"payload\": {...}}\n\
+             ```\n\
+             Multiple tool calls per response are supported. When done, reply in plain text with no tool blocks.",
+        );
+    }
 
     // ── Execution model ──────────────────────────────────────────
     prompt.push_str(
@@ -173,13 +182,33 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
          - You run in iterations: respond \u{2192} tools execute \u{2192} results injected \u{2192} respond again.\n\
          - Plan before acting. Your task has an iteration limit — use iterations efficiently. \
            Call `agent-self` to check remaining iterations and budget.\n\
-         - If a tool fails, read the error and adjust before retrying.\n\
+         - Read every tool error, classify it (see Task Feasibility), and adjust before retrying — \
+           never repeat an identical payload, never abandon on first failure.\n\
          - Tool outputs > 256 KB are truncated ([TRUNCATED]). Request smaller data or paginate.\n\
          - If a tool returns 'awaiting_approval', your task is paused for human review.\n\
          - Priority when rules conflict: safety > task completion > correctness > efficiency.\n\
          - Respond directly if the answer is factual and no external state is needed. \
            Use tools for current state, files, side effects, or when uncertain about system state. \
            Prefer fewer tool calls — batch or combine operations where possible.",
+    );
+
+    // ── Task Feasibility & Persistence ───────────────────────────
+    // Codifies "explore the ecosystem before declaring a task impossible".
+    // Generalises the Live Information rule (must attempt a tool before
+    // refusing) into a task-wide contract. Pairs with Tool Result Contract:
+    // that section prevents looping, this one prevents premature surrender.
+    prompt.push_str(
+        "\n\n## Task Feasibility & Persistence\n\
+         Prove infeasibility — don't assume it. The ecosystem (tools, memory, scheduling, \
+         sub-agents, channels) is composable; most \"impossible\" tasks are solved by combination.\n\
+         - Discover before refusing: a tool missing from your visible list is not proof — \
+           `search-tools` \u{2192} `describe-tool`. `agent-manual section=index` lists every subsystem; \
+           `agent-list` shows peers to delegate to.\n\
+         - Classify each error: bad args \u{2192} fix via `describe-tool`; permission \u{2192} `escalate` or pick a tool with the right RiskClass; \
+           external/transient \u{2192} fall back along provider chains (web-search has 4) or retry; only genuinely unsupported \u{2192} stop.\n\
+         - Compose: chain memory + capabilities + `spawn-agent` + `schedule-once` when no single tool fits.\n\
+         - Stop only when ALL hold: `search-tools` found nothing, \u{2265}1 alternative tried, missing capability named. Report what would unblock it — never refuse blankly.\n\
+         - Persistence \u{2260} looping. Same tool + same args twice = switch approach.",
     );
 
     // ── Tool result contract (anti-verify preamble) ──────────────
@@ -190,28 +219,11 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
         "\n\n## Tool Result Contract\n\
          No error = success. Never re-read to verify a write. Never send the same payload twice. \
          If kernel returns `kernel_directive: STOP`, do not retry that tool; finalize from existing context. \
-         Two consecutive identical rejections end the task.",
+         Two consecutive identical rejections end the task. \
+         A STOP on one tool is NOT a stop on the whole task — switch to a different tool, \
+         composition, or sub-agent unless the task is genuinely unachievable per \
+         the Task Feasibility & Persistence rules.",
     );
-
-    // ── User adaptation ──────────────────────────────────────────
-    // Skipped for sub-agents: they emit to a parent agent, not a user, so
-    // observed signals are not user preferences and should not be persisted
-    // to user-pref memory tiers. Parent agent owns user adaptation.
-    if ctx.sub_agent.is_none() {
-        prompt.push_str(
-            "\n\n## User Adaptation\n\
-             Observe and persist user behavior, preferences, style, goals, and recurring needs.\n\
-             - Notice: tone (formal/casual), detail level, pacing, format (bullets vs prose), \
-               domain expertise, recurring goals, ignored vs accepted suggestions, name/locale/timezone.\n\
-             - Persist stable prefs via `context-memory-update` (durable prefs) or `memory-write` (single facts). \
-               Read first with `context-memory-read` / `memory-search` when prior context may matter — \
-               do not assume; recall.\n\
-             - Treat patterns as hypotheses. If a new turn contradicts a stored pref, \
-               update or delete the memory (`memory-delete` then rewrite) — never silently ignore.\n\
-             - Don't store fleeting moods, one-off task details, or sensitive secrets. \
-               Confirm before persisting anything irreversible or identity-bearing.",
-        );
-    }
 
     // ── Grounding & anti-hallucination ───────────────────────────
     prompt.push_str(
@@ -252,14 +264,14 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
     );
 
     // ── Live information & refusal policy ────────────────────────
+    // Concrete instantiation of the Task Feasibility rule for the common
+    // case of \"current/live\" data queries — the pattern small models most
+    // often refuse on without trying.
     prompt.push_str(
         "\n\n## Live Information\n\
-         For current/today/live data (news, prices, scores, election results, weather, public info) \
-         you MUST attempt a tool call before refusing. Pipeline:\n\
-         1. `web-search(query=...)` if visible in your tool list.\n\
-         2. Otherwise `search-tools(query=\"web search\")` \u{2192} `describe-tool(name=...)` \u{2192} call.\n\
-         Do NOT reply \"I have no internet access\" or \"I cannot fetch live data\" without trying. \
-         Refusing without a tool attempt is forbidden when search/fetch tools exist.",
+         For current/live data (news, prices, weather, public info): try `web-search` if visible, \
+         else `search-tools(query=\"web search\")` \u{2192} `describe-tool` \u{2192} call. \
+         Never reply \"I have no internet access\" without an attempt.",
     );
 
     // ── Memory (compact — full prose in `agent-manual section=memory`) ──
@@ -354,7 +366,8 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
     prompt.push_str(
         "\n\n## Escalation & Errors\n\
          - Escalate to human via intent_type 'escalate' when you need human judgment. Escalations expire in 5 minutes.\n\
-         - If stuck after investigation, escalate rather than looping.\n\
+         - Escalate only after investigation: ran `search-tools`, tried \u{2265}1 alternative, can name the blocker. \
+           Failure reports must be specific (tool, error class, what was tried, what would unblock) — no vague \"I can't do that\".\n\
          - Use `agent-self` to check your remaining budget. If exhausted, your task may be suspended.",
     );
 
@@ -376,6 +389,7 @@ mod tests {
             enforce_final_tag: false,
             timezone: String::new(),
             connected_channels: vec![],
+            native_tool_calling: false,
         });
         assert!(prompt.contains("You are analyst, an AI agent in AgentOS"));
         assert!(!prompt.contains("Sub-Agent Context"));
@@ -392,6 +406,7 @@ mod tests {
             enforce_final_tag: false,
             timezone: String::new(),
             connected_channels: vec![],
+            native_tool_calling: false,
         });
         assert!(prompt.contains("Roles: security, auditor."));
         assert!(prompt.contains("Watches for security anomalies."));
@@ -408,6 +423,7 @@ mod tests {
             enforce_final_tag: false,
             timezone: String::new(),
             connected_channels: vec![],
+            native_tool_calling: false,
         });
         assert!(prompt.contains("## Agent Custom Instructions"));
         assert!(prompt.contains("Always answer with a brief checklist."));
@@ -424,6 +440,7 @@ mod tests {
             enforce_final_tag: false,
             timezone: String::new(),
             connected_channels: vec![],
+            native_tool_calling: false,
         });
         // Must not leak model details
         assert!(!prompt.contains("llama"));
@@ -442,6 +459,7 @@ mod tests {
             enforce_final_tag: false,
             timezone: String::new(),
             connected_channels: vec![],
+            native_tool_calling: false,
             sub_agent: Some(SubAgentContext {
                 parent_task_id: "abc-123".into(),
                 spawn_depth: 2,
@@ -463,6 +481,7 @@ mod tests {
             enforce_final_tag: false,
             timezone: String::new(),
             connected_channels: vec![],
+            native_tool_calling: false,
             sub_agent: Some(SubAgentContext {
                 parent_task_id: "xyz".into(),
                 spawn_depth: MAX_SPAWN_DEPTH,
@@ -477,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sub_agent_skips_user_adaptation() {
+    fn test_user_adaptation_section_removed() {
         let prompt = build_system_prompt(&SystemPromptContext {
             agent_name: "child".into(),
             agent_description: String::new(),
@@ -486,15 +505,12 @@ mod tests {
             enforce_final_tag: false,
             timezone: String::new(),
             connected_channels: vec![],
+            native_tool_calling: false,
             sub_agent: Some(SubAgentContext {
                 parent_task_id: "parent-1".into(),
                 spawn_depth: 1,
             }),
         });
-        // Sub-agents emit to a parent, not a user — user-pref persistence is the
-        // parent's responsibility. Including it here pollutes user-pref memory.
-        // (`context-memory-update` is still mentioned in the Memory section as
-        // a tool reference; we assert on the section header + directive instead.)
         assert!(!prompt.contains("## User Adaptation"));
         assert!(!prompt.contains("Persist stable prefs"));
         assert!(!prompt.contains("Observe and persist user behavior"));
@@ -513,6 +529,7 @@ mod tests {
             enforce_final_tag: true,
             timezone: String::new(),
             connected_channels: vec![],
+            native_tool_calling: false,
         });
         assert!(prompt.contains("path:line"));
         assert!(prompt.contains("clickable link"));
@@ -548,6 +565,7 @@ mod tests {
             enforce_final_tag: false,
             timezone: String::new(),
             connected_channels: vec![],
+            native_tool_calling: false,
         })
     }
 
@@ -557,7 +575,7 @@ mod tests {
         for section in &[
             "## Tools",
             "## Execution",
-            "## User Adaptation",
+            "## Task Feasibility & Persistence",
             "## Grounding & Anti-Hallucination",
             "## Tool Result Contract",
             "## Self-Discovery",
@@ -570,6 +588,23 @@ mod tests {
         ] {
             assert!(prompt.contains(section), "Missing section: {section}");
         }
+    }
+
+    #[test]
+    fn test_tools_section_omitted_for_native_tool_calling() {
+        let prompt = build_system_prompt(&SystemPromptContext {
+            agent_name: "native".into(),
+            agent_description: String::new(),
+            agent_roles: vec![],
+            custom_instructions: None,
+            sub_agent: None,
+            enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: vec![],
+            native_tool_calling: true,
+        });
+        assert!(!prompt.contains("## Tools"));
+        assert!(!prompt.contains("Call tools with JSON blocks"));
     }
 
     #[test]
@@ -589,15 +624,6 @@ mod tests {
         // Coordination — spawn-cost heuristic
         assert!(prompt.contains("Spawn"), "spawn rule header");
         assert!(prompt.contains("consumes budget"), "spawn cost");
-        // User Adaptation — persistence directive
-        assert!(
-            prompt.contains("context-memory-update"),
-            "user-pref persistence tool"
-        );
-        assert!(
-            prompt.contains("Persist stable prefs"),
-            "persistence directive"
-        );
         // Grounding — anti-hallucination guardrails
         assert!(
             prompt.contains("Never invent a tool name"),
@@ -610,6 +636,48 @@ mod tests {
         assert!(
             prompt.contains("mark uncertainty"),
             "uncertainty-over-guessing rule"
+        );
+        // Task Feasibility & Persistence — discover-before-refuse + classify-errors rules
+        assert!(
+            prompt.contains("Prove infeasibility"),
+            "feasibility opening rule"
+        );
+        assert!(
+            prompt.contains("Discover before refusing"),
+            "discovery-before-refusal rule"
+        );
+        assert!(
+            prompt.contains("Persistence \u{2260} looping"),
+            "persistence-not-looping rule"
+        );
+    }
+
+    #[test]
+    fn test_feasibility_section_sits_between_execution_and_tool_result_contract() {
+        // Feasibility framing must precede the Tool Result Contract so the
+        // model reads "explore before stopping" before it reads the STOP
+        // semantics — otherwise STOP gets misread as "give up on the task".
+        // It must also precede Grounding & Anti-Hallucination — Grounding's
+        // "say so explicitly if unavailable" line could otherwise win over
+        // Feasibility's discover-first rule when read first.
+        let prompt = default_prompt();
+        let exec = prompt.find("## Execution").expect("Execution missing");
+        let feas = prompt
+            .find("## Task Feasibility & Persistence")
+            .expect("Task Feasibility section missing");
+        let trc = prompt
+            .find("## Tool Result Contract")
+            .expect("Tool Result Contract missing");
+        let grounding = prompt
+            .find("## Grounding & Anti-Hallucination")
+            .expect("Grounding section missing");
+        assert!(
+            exec < feas && feas < trc,
+            "Feasibility must sit between Execution and Tool Result Contract (exec={exec}, feas={feas}, trc={trc})"
+        );
+        assert!(
+            feas < grounding,
+            "Feasibility must precede Grounding so discover-first beats say-so-explicitly (feas={feas}, grounding={grounding})"
         );
     }
 
@@ -624,6 +692,7 @@ mod tests {
             enforce_final_tag: false,
             timezone: String::new(),
             connected_channels: vec![],
+            native_tool_calling: false,
         });
         assert!(!prompt.contains("## Output Format"));
         assert!(!prompt.contains("<final>"));
@@ -643,12 +712,42 @@ mod tests {
             enforce_final_tag: true,
             timezone: String::new(),
             connected_channels: vec![],
+            native_tool_calling: false,
         });
         assert!(prompt.contains("## Output Format"));
         assert!(prompt.contains("<final>"));
         assert!(prompt.contains("</final>"));
         assert!(prompt.contains("<think>"));
         assert!(prompt.contains("hidden from the user"));
+    }
+
+    #[test]
+    fn test_output_format_tool_guidance_matches_mode() {
+        let fallback_prompt = build_system_prompt(&SystemPromptContext {
+            agent_name: "fallback".into(),
+            agent_description: String::new(),
+            agent_roles: vec![],
+            custom_instructions: None,
+            sub_agent: None,
+            enforce_final_tag: true,
+            timezone: String::new(),
+            connected_channels: vec![],
+            native_tool_calling: false,
+        });
+        assert!(fallback_prompt.contains("go in their own ```json blocks"));
+
+        let native_prompt = build_system_prompt(&SystemPromptContext {
+            agent_name: "native".into(),
+            agent_description: String::new(),
+            agent_roles: vec![],
+            custom_instructions: None,
+            sub_agent: None,
+            enforce_final_tag: true,
+            timezone: String::new(),
+            connected_channels: vec![],
+            native_tool_calling: true,
+        });
+        assert!(native_prompt.contains("provider's native tool-calling protocol"));
     }
 
     #[test]
@@ -662,6 +761,7 @@ mod tests {
             enforce_final_tag: false,
             timezone: String::new(),
             connected_channels: vec![],
+            native_tool_calling: false,
         });
         assert!(!prompt.contains("## Channels"));
         assert!(!prompt.contains("channel-send"));
@@ -687,6 +787,7 @@ mod tests {
                     kind: "slack".into(),
                 },
             ],
+            native_tool_calling: false,
         });
         assert!(prompt.contains("## Channels"));
         assert!(prompt.contains("telegram-main (telegram)"));
@@ -712,17 +813,19 @@ mod tests {
             enforce_final_tag: false,
             timezone: String::new(),
             connected_channels: many,
+            native_tool_calling: false,
         });
         assert!(prompt.contains("ch-0"));
         assert!(prompt.contains("ch-4"));
         assert!(!prompt.contains("ch-5"));
         assert!(prompt.contains("3 more"));
         // Stays well under budget even with 8 channels (capped at 5 + overflow line).
-        // 8 KB ceiling: trims (memory + host-inspection compaction)
-        // typically land prompts well under 5.5 KB. Headroom covers
-        // future additions while still catching unbounded growth.
+        // 9 KB ceiling: the Task Feasibility & Persistence section adds ~1 KB of
+        // intentional content (discover-before-refuse + error classification).
+        // Headroom still catches unbounded growth — base prompt should land
+        // well under 8 KB without channels.
         assert!(
-            prompt.len() < 8000,
+            prompt.len() < 9000,
             "Prompt too large: {} chars",
             prompt.len()
         );
@@ -738,6 +841,7 @@ mod tests {
             enforce_final_tag: false,
             timezone: String::new(),
             connected_channels: vec![],
+            native_tool_calling: false,
             sub_agent: Some(SubAgentContext {
                 parent_task_id: "parent-id".into(),
                 spawn_depth: 1,

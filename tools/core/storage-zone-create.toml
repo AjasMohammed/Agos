@@ -20,15 +20,15 @@ outputs = ["content.json"]
 input = "StorageZoneCreateIntent"
 output = "StorageZoneCreateResult"
 
-[input_schema]
+[payload_schema]
 required = ["path"]
 type = "object"
 
-[input_schema.properties.path]
+[payload_schema.properties.path]
 description = "Absolute path to the directory to grant access to"
 type = "string"
 
-[input_schema.properties.access]
+[payload_schema.properties.access]
 description = "Access level: 'ro' (read-only) or 'rw' (read-write, default)"
 type = "string"
 default = "rw"

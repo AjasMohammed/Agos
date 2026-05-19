@@ -1,4 +1,5 @@
 use agentos_sdk::prelude::*;
+use serde::{Deserialize, Serialize};
 
 #[tool(
     name = "test-tool",
@@ -15,6 +16,44 @@ async fn test_tool(
         .and_then(|v| v.as_str())
         .unwrap_or("default");
     Ok(serde_json::json!({"echo": input}))
+}
+
+/// Strongly-typed input used to verify `#[tool(input = T)]` auto-derives a
+/// `payload_schema()` constructor via schemars.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct EchoInput {
+    /// Message to echo back to the caller.
+    pub message: String,
+    /// Optional repeat count (default 1).
+    #[serde(default)]
+    pub repeat: Option<u32>,
+}
+
+#[tool(
+    name = "echo-tool",
+    version = "1.0.0",
+    description = "A typed test tool for schemars verification",
+    permissions = "fs.read:r",
+    input = EchoInput,
+)]
+async fn echo_tool(
+    payload: serde_json::Value,
+    _context: ToolExecutionContext,
+) -> Result<serde_json::Value, AgentOSError> {
+    Ok(payload)
+}
+
+#[test]
+fn typed_tool_emits_payload_schema() {
+    let schema = EchoTool::payload_schema();
+    assert!(schema.is_object(), "schema must be a JSON object");
+    let props = schema
+        .pointer("/properties")
+        .expect("properties present")
+        .as_object()
+        .expect("properties is an object");
+    assert!(props.contains_key("message"));
+    assert!(props.contains_key("repeat"));
 }
 
 #[test]
@@ -67,6 +106,8 @@ async fn test_tool_execute() {
         task_registry: None,
         escalation_query: None,
         workspace_paths: vec![],
+        workspace_paths_writable: vec![],
+        workspace_paths_executable: vec![],
         capability_registry: None,
         capability_dispatcher: None,
         storage_zone_query: None,

@@ -412,7 +412,8 @@ impl Kernel {
                     input: "McpToolInput".to_string(),
                     output: "McpToolOutput".to_string(),
                 },
-                input_schema: Some(tool_def.input_schema.clone()),
+                payload_schema: Some(tool_def.input_schema.clone()),
+                examples: vec![],
                 sandbox: ToolSandbox {
                     network: true,
                     fs_write: false,

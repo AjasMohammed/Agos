@@ -85,11 +85,11 @@ impl AgentTool for FileEditor {
             parsed_edits.push((old_text, new_text));
         }
 
-        // SECURITY: resolve path, checking workspace paths before falling back to data_dir.
+        // SECURITY: file-editor writes — resolve against the *writable* workspace list.
         let resolved = crate::traits::resolve_tool_path(
             path_str,
             &context.data_dir,
-            &context.workspace_paths,
+            &context.workspace_paths_writable,
         )?;
 
         let canonical = resolved
@@ -109,7 +109,7 @@ impl AgentTool for FileEditor {
                 })?;
 
         let in_workspace = context
-            .workspace_paths
+            .workspace_paths_writable
             .iter()
             .any(|wp| canonical.starts_with(wp));
         // KMC Phase 3: check dynamic storage zones

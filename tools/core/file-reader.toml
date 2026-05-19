@@ -17,27 +17,27 @@ outputs = ["content.text"]
 input  = "FileReadIntent"
 output = "FileContent"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["path"]
 
-[input_schema.properties.path]
+[payload_schema.properties.path]
 type = "string"
 description = "Relative path to file or directory"
 
-[input_schema.properties.mode]
+[payload_schema.properties.mode]
 type = "string"
 enum = ["read", "list"]
 default = "read"
 description = "read for file content, list for directory listing"
 
-[input_schema.properties.offset]
+[payload_schema.properties.offset]
 type = "integer"
 default = 0
 minimum = 0
 description = "Line offset to start reading from"
 
-[input_schema.properties.limit]
+[payload_schema.properties.limit]
 type = "integer"
 default = 500
 minimum = 0

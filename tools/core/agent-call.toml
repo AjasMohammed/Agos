@@ -17,19 +17,19 @@ outputs = ["content.text"]
 input  = "AgentCallIntent"
 output = "AgentCallResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["target_agent", "prompt"]
 
-[input_schema.properties.target_agent]
+[payload_schema.properties.target_agent]
 type = "string"
 description = "Name of the agent to call"
 
-[input_schema.properties.prompt]
+[payload_schema.properties.prompt]
 type = "string"
 description = "Task prompt for the target agent"
 
-[input_schema.properties.timeout_secs]
+[payload_schema.properties.timeout_secs]
 type = "integer"
 default = 300
 minimum = 1

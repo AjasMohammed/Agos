@@ -18,24 +18,24 @@ outputs = ["content.json"]
 input = "NetHttpIntent"
 output = "NetHttpResult"
 
-[input_schema]
+[payload_schema]
 required = ["url"]
 type = "object"
 
-[input_schema.properties.url]
+[payload_schema.properties.url]
 description = "Full URL to request"
 type = "string"
 
-[input_schema.properties.method]
+[payload_schema.properties.method]
 description = "HTTP method (default: GET)"
 type = "string"
 default = "GET"
 
-[input_schema.properties.headers]
+[payload_schema.properties.headers]
 description = "Request headers as key-value pairs"
 type = "object"
 
-[input_schema.properties.body]
+[payload_schema.properties.body]
 description = "Request body (for POST/PUT)"
 type = "string"
 

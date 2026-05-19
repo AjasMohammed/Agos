@@ -70,9 +70,61 @@ pub struct KernelConfig {
     /// REST API server configuration.
     #[serde(default)]
     pub api: ApiSettings,
+    /// User-selectable approval mode for tool calls. Controls when the
+    /// kernel auto-approves vs. escalates a tool call for human review.
+    #[serde(default)]
+    pub approval: ApprovalConfig,
     /// Chat-specific kernel configuration (output filtering, enforcement modes).
     #[serde(default)]
     pub chat: ChatConfig,
+    /// User preference adaptation post-task proposer.
+    #[serde(default)]
+    pub user_adaptation: UserAdaptationConfig,
+    /// Managed environment (`env-install`) policies and allowlists.
+    /// Controls which packages agents may install into per-agent workspaces.
+    #[serde(default)]
+    pub env: EnvSettings,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UserAdaptationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_user_adaptation_model")]
+    pub model: String,
+    #[serde(default = "default_user_adaptation_min_confidence")]
+    pub min_confidence: f32,
+    #[serde(default = "default_user_adaptation_max_proposals_per_task")]
+    pub max_proposals_per_task: usize,
+    /// Days that a pending proposal lives before the TimeoutChecker sweep
+    /// transitions it to `expired` (history is preserved — no DELETE).
+    #[serde(default = "default_user_adaptation_ttl_days")]
+    pub proposal_ttl_days: i64,
+}
+
+impl Default for UserAdaptationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: default_user_adaptation_model(),
+            min_confidence: default_user_adaptation_min_confidence(),
+            max_proposals_per_task: default_user_adaptation_max_proposals_per_task(),
+            proposal_ttl_days: default_user_adaptation_ttl_days(),
+        }
+    }
+}
+
+fn default_user_adaptation_model() -> String {
+    "compact".to_string()
+}
+fn default_user_adaptation_min_confidence() -> f32 {
+    0.5
+}
+fn default_user_adaptation_max_proposals_per_task() -> usize {
+    3
+}
+fn default_user_adaptation_ttl_days() -> i64 {
+    30
 }
 
 /// Chat-specific kernel configuration.
@@ -683,6 +735,72 @@ fn default_host_package_managers() -> Vec<String> {
     ]
 }
 
+/// Managed environments (`env-install`) configuration.
+///
+/// Controls which packages agents may install into per-agent workspaces at
+/// `{data_dir}/workspaces/{agent_id}/{name}/`. Workspaces are isolated per
+/// agent and never touch the host system package set.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EnvSettings {
+    /// Python package policy: `"curated"` (allowlist), `"open"` (any), or `"locked"` (none).
+    #[serde(default = "default_env_policy")]
+    pub python_policy: String,
+    /// Node.js package policy: `"curated"`, `"open"`, or `"locked"`.
+    #[serde(default = "default_env_policy")]
+    pub nodejs_policy: String,
+    /// Rust (cargo install) policy: `"curated"`, `"open"`, or `"locked"`.
+    #[serde(default = "default_env_policy")]
+    pub rust_policy: String,
+    /// System package policy. Locked by default; host packages route through
+    /// `host-package-install` instead.
+    #[serde(default = "default_locked_policy")]
+    pub system_policy: String,
+    /// Per-agent workspace disk quota in bytes (informational; not enforced yet).
+    #[serde(default = "default_env_quota")]
+    pub default_quota_bytes: u64,
+    /// Maximum wall time for a single install command.
+    #[serde(default = "default_env_install_timeout")]
+    pub install_timeout_secs: u64,
+    /// Curated Python allowlist (only consulted when `python_policy = "curated"`).
+    #[serde(default)]
+    pub python_allowlist: Vec<String>,
+    /// Curated Node.js allowlist.
+    #[serde(default)]
+    pub nodejs_allowlist: Vec<String>,
+    /// Curated Rust allowlist.
+    #[serde(default)]
+    pub rust_allowlist: Vec<String>,
+}
+
+fn default_env_policy() -> String {
+    "curated".into()
+}
+fn default_locked_policy() -> String {
+    "locked".into()
+}
+fn default_env_quota() -> u64 {
+    2_147_483_648 // 2 GiB
+}
+fn default_env_install_timeout() -> u64 {
+    120
+}
+
+impl Default for EnvSettings {
+    fn default() -> Self {
+        Self {
+            python_policy: default_env_policy(),
+            nodejs_policy: default_env_policy(),
+            rust_policy: default_env_policy(),
+            system_policy: default_locked_policy(),
+            default_quota_bytes: default_env_quota(),
+            install_timeout_secs: default_env_install_timeout(),
+            python_allowlist: Vec::new(),
+            nodejs_allowlist: Vec::new(),
+            rust_allowlist: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BusSettings {
     pub socket_path: String,
@@ -765,6 +883,18 @@ fn default_ollama_context_window() -> u32 {
 pub struct MemorySettings {
     #[serde(default = "default_model_cache_dir")]
     pub model_cache_dir: String,
+    /// Skip loading the ONNX embedding model at boot.
+    ///
+    /// When `true`, the kernel constructs a no-op embedder that returns
+    /// zero vectors instead of initializing fastembed/onnxruntime. Memory
+    /// stores still operate (FTS5 lexical search keeps working), but
+    /// vector-based retrieval becomes a no-op. Intended for environments
+    /// where onnxruntime crashes during graph optimization (e.g. certain
+    /// Zen 3 / glibc combinations trigger an integer-divide-by-zero in the
+    /// transpose-optimizer hashmap) or for tests that boot the kernel
+    /// without needing semantic retrieval.
+    #[serde(default)]
+    pub disable_embedder: bool,
     #[serde(default)]
     pub extraction: crate::memory_extraction::ExtractionConfig,
     #[serde(default)]
@@ -817,6 +947,7 @@ impl Default for MemorySettings {
     fn default() -> Self {
         Self {
             model_cache_dir: default_model_cache_dir(),
+            disable_embedder: false,
             extraction: crate::memory_extraction::ExtractionConfig::default(),
             consolidation: crate::consolidation::ConsolidationConfig::default(),
             context: ContextMemoryConfig::default(),
@@ -1351,6 +1482,24 @@ impl Default for ApiSettings {
     }
 }
 
+/// `[approval]` config block. Controls when the kernel auto-approves vs.
+/// escalates a tool call for human review.
+///
+/// `mode` is the global default. `agent_overrides` lets the operator dial
+/// up or down for individual agents — e.g. a research-bot in `auto` next to
+/// a writer-bot in `ask_always` inside the same kernel.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ApprovalConfig {
+    /// Global default mode. Defaults to `ask_edit` (Claude-Code-style:
+    /// auto-approve reads, prompt for writes/exec/control-plane).
+    #[serde(default)]
+    pub mode: agentos_types::ApprovalMode,
+    /// Per-agent overrides keyed by display name. Lookup is name-based so
+    /// operators can express the override in TOML without knowing UUIDs.
+    #[serde(default)]
+    pub agent_overrides: std::collections::BTreeMap<String, agentos_types::ApprovalMode>,
+}
+
 fn default_api_host() -> String {
     "127.0.0.1".to_string()
 }
@@ -1398,38 +1547,70 @@ fn validate_mcp_config(mcp: &McpConfig) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Validate that workspace paths are absolute and not forbidden system directories.
-fn validate_workspace_paths(workspace: &WorkspaceConfig) -> Result<(), anyhow::Error> {
-    // Exact paths that are too broad to be safe workspace roots.
-    const FORBIDDEN: &[&str] = &[
-        "/", "/etc", "/var", "/root", "/home", "/proc", "/sys", "/dev", "/boot", "/usr",
-    ];
+/// Roots that are never allowed as a workspace path, not even as a deep subpath.
+/// Mounting any of these would expose security-critical OS state.
+pub(crate) const WORKSPACE_FORBIDDEN_ROOTS: &[&str] = &[
+    "/etc", "/proc", "/sys", "/dev", "/boot", "/usr", "/bin", "/sbin", "/lib", "/lib64",
+];
 
+/// Roots that are too broad as exact paths, but whose subpaths ARE allowed.
+/// For example `/home` is rejected but `/home/alice/project` is fine.
+pub(crate) const WORKSPACE_BARE_FORBIDDEN: &[&str] = &[
+    "/", "/home", "/var", "/root", "/tmp", "/mnt", "/media", "/opt",
+];
+
+/// Validate a single workspace path. Public so the runtime grant store can reuse it.
+pub(crate) fn validate_workspace_path(path_str: &str) -> Result<(), anyhow::Error> {
+    let p = std::path::Path::new(path_str);
+    if !p.is_absolute() {
+        anyhow::bail!(
+            "workspace path '{}' is not absolute; must start with '/'",
+            path_str
+        );
+    }
+    // Reject `..` components defensively; lexical only — caller may also canonicalize.
+    if p.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        anyhow::bail!(
+            "workspace path '{}' contains '..' component; resolve it first",
+            path_str
+        );
+    }
+    for root in WORKSPACE_FORBIDDEN_ROOTS {
+        let root_p = std::path::Path::new(root);
+        if p == root_p || p.starts_with(root_p) {
+            anyhow::bail!(
+                "workspace path '{}' is under forbidden system root '{}'",
+                path_str,
+                root
+            );
+        }
+    }
+    for root in WORKSPACE_BARE_FORBIDDEN {
+        if p == std::path::Path::new(root) {
+            anyhow::bail!(
+                "workspace path '{}' is too broad; grant a specific subdirectory instead",
+                path_str
+            );
+        }
+    }
+    // Must have at least one path component beyond the filesystem root.
+    let components: Vec<_> = p.components().collect();
+    if components.len() < 2 {
+        anyhow::bail!(
+            "workspace path '{}' is too broad — must include at least one subdirectory",
+            path_str
+        );
+    }
+    Ok(())
+}
+
+/// Validate that all workspace paths in config are absolute and not forbidden.
+fn validate_workspace_paths(workspace: &WorkspaceConfig) -> Result<(), anyhow::Error> {
     for path_str in &workspace.allowed_paths {
-        let p = std::path::Path::new(path_str);
-        if !p.is_absolute() {
-            anyhow::bail!(
-                "tools.workspace.allowed_paths: '{}' is not an absolute path; \
-                 workspace paths must start with '/'",
-                path_str
-            );
-        }
-        if FORBIDDEN.contains(&path_str.as_str()) {
-            anyhow::bail!(
-                "tools.workspace.allowed_paths: '{}' is a system directory and \
-                 cannot be used as a workspace root",
-                path_str
-            );
-        }
-        // Must have at least one path component beyond the filesystem root.
-        let components: Vec<_> = p.components().collect();
-        if components.len() < 2 {
-            anyhow::bail!(
-                "tools.workspace.allowed_paths: '{}' is too broad — \
-                 must include at least one subdirectory (e.g. /home/user/project)",
-                path_str
-            );
-        }
+        validate_workspace_path(path_str)
+            .map_err(|e| anyhow::anyhow!("tools.workspace.allowed_paths: {}", e))?;
     }
     Ok(())
 }
@@ -1818,6 +1999,57 @@ fn is_tmp_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_workspace_path_accepts_user_subdirs() {
+        assert!(validate_workspace_path("/home/alice/Desktop").is_ok());
+        assert!(validate_workspace_path("/home/alice/projects/foo").is_ok());
+        assert!(validate_workspace_path("/var/log/agentos").is_ok());
+        assert!(validate_workspace_path("/tmp/work").is_ok());
+        assert!(validate_workspace_path("/opt/agentos-data").is_ok());
+        assert!(validate_workspace_path("/mnt/external/data").is_ok());
+    }
+
+    #[test]
+    fn validate_workspace_path_rejects_bare_broad_roots() {
+        assert!(validate_workspace_path("/").is_err());
+        assert!(validate_workspace_path("/home").is_err());
+        assert!(validate_workspace_path("/var").is_err());
+        assert!(validate_workspace_path("/root").is_err());
+        assert!(validate_workspace_path("/tmp").is_err());
+        assert!(validate_workspace_path("/opt").is_err());
+    }
+
+    #[test]
+    fn validate_workspace_path_rejects_forbidden_roots_and_subpaths() {
+        for bad in &[
+            "/etc",
+            "/etc/agentos",
+            "/proc",
+            "/proc/1",
+            "/sys/kernel",
+            "/dev/sda",
+            "/boot/grub",
+            "/usr/bin",
+            "/bin/sh",
+            "/sbin/init",
+            "/lib/x86_64-linux-gnu",
+            "/lib64/ld-linux-x86-64.so.2",
+        ] {
+            assert!(
+                validate_workspace_path(bad).is_err(),
+                "expected '{}' to be rejected",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn validate_workspace_path_rejects_relative_and_traversal() {
+        assert!(validate_workspace_path("relative/path").is_err());
+        assert!(validate_workspace_path("../escape").is_err());
+        assert!(validate_workspace_path("/home/alice/../bob").is_err());
+    }
 
     #[test]
     fn task_limits_default_when_omitted_from_toml() {

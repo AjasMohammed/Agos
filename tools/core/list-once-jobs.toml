@@ -19,7 +19,7 @@ outputs = ["jobs", "count"]
 input  = "ListOnceJobsIntent"
 output = "ListOnceJobsResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
 [sandbox]

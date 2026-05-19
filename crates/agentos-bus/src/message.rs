@@ -654,6 +654,18 @@ pub enum KernelCommand {
         agent_id: String,
         content: String,
     },
+    // User preference proposal review
+    UserPrefsListPending {
+        #[serde(default = "default_user_prefs_limit")]
+        limit: u32,
+    },
+    UserPrefsAccept {
+        proposal_id: String,
+    },
+    UserPrefsReject {
+        proposal_id: String,
+    },
+    UserPrefsStats,
 
     // Skills management
     /// Install a skill from a directory containing SKILL.toml + prompt.
@@ -768,6 +780,60 @@ pub enum KernelCommand {
     ContainerList {
         agent_name: Option<String>,
     },
+
+    /// Grant a host directory to one agent (by name) or globally (None).
+    /// `mode` is a short string like "r", "rw", or "rwx" (case-insensitive).
+    GrantWorkspace {
+        path: std::path::PathBuf,
+        agent_name: Option<String>,
+        mode: String,
+    },
+    /// Revoke an active workspace grant. `agent_name` must match the original
+    /// scope (None for a global grant).
+    RevokeWorkspace {
+        path: std::path::PathBuf,
+        agent_name: Option<String>,
+    },
+    /// List active workspace grants. If `agent_name` is set, return grants
+    /// that apply to that agent (agent-scoped + global). If None, return all.
+    ListWorkspaceGrants {
+        agent_name: Option<String>,
+    },
+
+    /// Get the current approval mode (global + per-agent overrides snapshot).
+    GetApprovalConfig,
+    /// Set the global approval mode at runtime.
+    /// `mode` is a short string: "auto" | "ask_edit" | "ask_always" | "deny".
+    SetApprovalMode {
+        mode: String,
+    },
+    /// Set a per-agent approval mode override.
+    SetApprovalAgentOverride {
+        agent_name: String,
+        mode: String,
+    },
+    /// Clear a per-agent approval mode override.
+    ClearApprovalAgentOverride {
+        agent_name: String,
+    },
+    /// Add a learned "allow always" policy entry.
+    /// `path_glob` is optional (None = match any payload).
+    /// `agent_name` is optional (None = applies to every agent).
+    AddApprovalPolicy {
+        tool_name: String,
+        path_glob: Option<String>,
+        agent_name: Option<String>,
+    },
+    /// List active learned approval policy entries.
+    ListApprovalPolicies,
+    /// Revoke a learned approval policy entry by `id`.
+    RevokeApprovalPolicy {
+        id: i64,
+    },
+}
+
+fn default_user_prefs_limit() -> u32 {
+    50
 }
 
 impl KernelCommand {
@@ -924,6 +990,33 @@ pub enum KernelResponse {
     WebhookEndpointList {
         endpoints: Vec<agentos_types::WebhookEndpointMeta>,
     },
+
+    // User filesystem grants
+    WorkspaceGrantCreated(agentos_types::WorkspaceGrant),
+    WorkspaceGrantRevoked {
+        count: u64,
+    },
+    WorkspaceGrantList(Vec<agentos_types::WorkspaceGrant>),
+
+    // Approval mode + learned policy
+    /// Snapshot of the current approval config (global mode + per-agent overrides).
+    ApprovalConfigSnapshot {
+        mode: String,
+        agent_overrides: std::collections::BTreeMap<String, String>,
+    },
+    /// A learned approval policy entry was added.
+    ApprovalPolicyAdded {
+        id: i64,
+        tool_name: String,
+        path_glob: Option<String>,
+        agent_name: Option<String>,
+    },
+    /// A learned approval policy entry was revoked.
+    ApprovalPolicyRevoked {
+        ok: bool,
+    },
+    /// List of active learned approval policy entries.
+    ApprovalPolicyList(Vec<serde_json::Value>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -17,11 +17,11 @@ outputs = ["results"]
 input  = "AwaitAgentsIntent"
 output = "AwaitAgentsResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["task_ids"]
 
-[input_schema.properties.task_ids]
+[payload_schema.properties.task_ids]
 type = "array"
 items = { type = "string" }
 description = "Task IDs returned by spawn-agent calls to check."

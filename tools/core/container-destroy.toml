@@ -19,6 +19,14 @@ outputs = ["destroyed"]
 input = "ContainerDestroyIntent"
 output = "ContainerDestroyResult"
 
+[payload_schema]
+type     = "object"
+required = ["container_id"]
+
+[payload_schema.properties.container_id]
+type        = "string"
+description = "Container ID returned by container-create."
+
 [sandbox]
 network = false
 fs_write = false

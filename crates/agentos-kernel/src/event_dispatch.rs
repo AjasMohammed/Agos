@@ -135,7 +135,7 @@ impl Kernel {
     /// This builds an `EventMessage`, signs it with the kernel HMAC key,
     /// logs it to the audit trail, and pushes it into the event channel
     /// for asynchronous processing by the `EventDispatcher` task.
-    pub(crate) async fn emit_event(
+    pub async fn emit_event(
         &self,
         event_type: EventType,
         source: EventSource,

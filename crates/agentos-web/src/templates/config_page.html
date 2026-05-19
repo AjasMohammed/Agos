@@ -16,7 +16,7 @@
 
     <article>
         <header><strong>{{ selected or "Section" }}</strong></header>
-        <pre><code>{{ section_value|pretty_json }}</code></pre>
+        <div class="data-panel">{{ section_value|structured_data_html }}</div>
     </article>
 </div>
 {% endblock %}

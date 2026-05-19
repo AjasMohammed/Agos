@@ -18,15 +18,15 @@ outputs = ["content.json"]
 input = "ProcOutputIntent"
 output = "ProcOutputResult"
 
-[input_schema]
+[payload_schema]
 required = ["process_id"]
 type = "object"
 
-[input_schema.properties.process_id]
+[payload_schema.properties.process_id]
 description = "ID of the process to read output from"
 type = "string"
 
-[input_schema.properties.lines]
+[payload_schema.properties.lines]
 description = "Number of recent lines to return (default: 50)"
 type = "integer"
 default = 50

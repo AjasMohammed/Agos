@@ -18,14 +18,14 @@ outputs = ["content.text", "content.binary"]
 input  = "UserFileReadIntent"
 output = "FileContent"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.file_id]
+[payload_schema.properties.file_id]
 type        = "string"
 description = "UUID of the uploaded file (from the file registry)"
 
-[input_schema.properties.file_name]
+[payload_schema.properties.file_name]
 type        = "string"
 description = "Original filename or display name of the uploaded file"
 

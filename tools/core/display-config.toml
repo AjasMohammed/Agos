@@ -21,63 +21,63 @@ outputs = ["hardware.display", "content.structured"]
 input  = "DisplayConfigIntent"
 output = "DisplayConfigResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 description = "Display configuration request"
 
-[input_schema.properties.action]
+[payload_schema.properties.action]
 type = "string"
 enum = ["list", "test", "set_mode", "set_position", "set_scale", "enable", "disable", "confirm", "revert"]
 default = "list"
 description = "Display action to execute."
 
-[input_schema.properties.output]
+[payload_schema.properties.output]
 type = "string"
 description = "Display output id (for example HDMI-A-1)."
 
-[input_schema.properties.width]
+[payload_schema.properties.width]
 type = "integer"
 minimum = 1
 maximum = 16384
 description = "Target width for set_mode."
 
-[input_schema.properties.height]
+[payload_schema.properties.height]
 type = "integer"
 minimum = 1
 maximum = 16384
 description = "Target height for set_mode."
 
-[input_schema.properties.refresh_hz]
+[payload_schema.properties.refresh_hz]
 type = "number"
 minimum = 1
 maximum = 1000
 description = "Optional target refresh rate for set_mode."
 
-[input_schema.properties.x]
+[payload_schema.properties.x]
 type = "integer"
 minimum = -32768
 maximum = 32768
 description = "X coordinate for set_position."
 
-[input_schema.properties.y]
+[payload_schema.properties.y]
 type = "integer"
 minimum = -32768
 maximum = 32768
 description = "Y coordinate for set_position."
 
-[input_schema.properties.scale]
+[payload_schema.properties.scale]
 type = "number"
 minimum = 0.25
 maximum = 4
 description = "Scale factor for set_scale."
 
-[input_schema.properties.auto_revert_timeout_secs]
+[payload_schema.properties.auto_revert_timeout_secs]
 type = "integer"
 minimum = 5
 maximum = 300
 description = "Auto-revert confirmation timeout in seconds."
 
-[input_schema.properties.config_id]
+[payload_schema.properties.config_id]
 type = "string"
 description = "Pending display configuration id for confirm/revert actions."
 
@@ -89,26 +89,14 @@ max_memory_mb = 256
 max_cpu_ms    = 20000
 syscalls      = []
 
-[examples]
-"List outputs" = """
-{
-  "action": "list"
-}
-"""
+[[examples]]
+description = "List outputs"
+payload = { action = "list" }
 
-"Set mode" = """
-{
-  "action": "set_mode",
-  "output": "HDMI-A-1",
-  "width": 1920,
-  "height": 1080,
-  "refresh_hz": 60
-}
-"""
+[[examples]]
+description = "Set mode"
+payload = { action = "set_mode", output = "HDMI-A-1", width = 1920, height = 1080, refresh_hz = 60 }
 
-"Disable output" = """
-{
-  "action": "disable",
-  "output": "DP-1"
-}
-"""
+[[examples]]
+description = "Disable output"
+payload = { action = "disable", output = "DP-1" }

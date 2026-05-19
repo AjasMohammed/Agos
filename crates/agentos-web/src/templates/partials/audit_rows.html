@@ -11,7 +11,7 @@
     <td class="details-cell">
         <details>
             <summary><span class="details-preview">Show details</span></summary>
-            <pre class="details-full">{{ entry.details|pretty_json }}</pre>
+            <div class="details-full">{{ entry.details|structured_data_html }}</div>
             {% if entry.rollback_ref %}
             <div class="muted">Rollback ref: {{ entry.rollback_ref }}</div>
             {% endif %}

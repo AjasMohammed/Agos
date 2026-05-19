@@ -259,7 +259,8 @@ mod tests {
                 input: "TestInput".into(),
                 output: "TestOutput".into(),
             },
-            input_schema: None,
+            payload_schema: None,
+            examples: vec![],
             sandbox: ToolSandbox {
                 network: false,
                 fs_write: false,

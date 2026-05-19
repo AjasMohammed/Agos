@@ -255,7 +255,9 @@ impl AnthropicCore {
             anthropic_tools.push(json!({
                 "name": tool_name,
                 "description": manifest.manifest.description,
-                "input_schema": tool_helpers::normalize_tool_input_schema(manifest.input_schema.as_ref()),
+                // Anthropic Messages API requires `input_schema` (NOT `payload_schema`).
+                // Using the wrong key causes 400 errors or silent schemaless tool definitions.
+                "input_schema": tool_helpers::normalize_tool_input_schema(manifest.payload_schema.as_ref()),
             }));
         }
 
@@ -350,6 +352,10 @@ fn attach_cache_control_to_last_block(message: &mut Value) {
 
 #[async_trait]
 impl LLMCore for AnthropicCore {
+    fn supports_native_tool_calling(&self) -> bool {
+        true
+    }
+
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
         self.infer_with_tools(context, &[]).await
     }
@@ -1134,9 +1140,10 @@ mod tests {
                 input: "Input".to_string(),
                 output: "Output".to_string(),
             },
-            input_schema: Some(
+            payload_schema: Some(
                 json!({"type": "object", "properties": {"path": {"type": "string"}}}),
             ),
+            examples: vec![],
             sandbox: ToolSandbox {
                 network: false,
                 fs_write: false,
@@ -1158,6 +1165,21 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "file-reader");
         assert_eq!(intent_map.get("file-reader"), Some(&"read".to_string()));
+
+        // Golden-body assertion: Anthropic Messages API requires `input_schema`
+        // (NOT `payload_schema`). Using the wrong key silently produces schemaless
+        // tools or 400 errors. This is the regression test for that bug.
+        assert!(
+            tools[0].get("input_schema").is_some(),
+            "Anthropic tool def must use `input_schema` key; got: {}",
+            tools[0]
+        );
+        assert!(
+            tools[0].get("payload_schema").is_none(),
+            "Anthropic tool def must NOT carry `payload_schema` — that's the AgentOS-internal field name"
+        );
+        assert_eq!(tools[0]["input_schema"]["type"], "object");
+        assert!(tools[0]["input_schema"]["properties"]["path"].is_object());
     }
 
     #[test]

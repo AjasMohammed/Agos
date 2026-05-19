@@ -17,10 +17,10 @@ outputs = ["status"]
 input  = "EscalationQueryIntent"
 output = "EscalationStatusResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.id]
+[payload_schema.properties.id]
 type = "integer"
 description = "Optional escalation ID to query a specific escalation. If omitted, lists all pending escalations for this agent."
 

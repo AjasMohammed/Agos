@@ -26,3 +26,15 @@ mod multimodal_chat;
 
 #[path = "e2e/chat_manifest_selection.rs"]
 mod chat_manifest_selection;
+
+#[path = "e2e/native_tool_call_round_trip.rs"]
+mod native_tool_call_round_trip;
+
+#[path = "e2e/workspace_grant_e2e.rs"]
+mod workspace_grant_e2e;
+
+#[path = "e2e/approval_modes_e2e.rs"]
+mod approval_modes_e2e;
+
+#[path = "e2e/event_trigger_e2e.rs"]
+mod event_trigger_e2e;

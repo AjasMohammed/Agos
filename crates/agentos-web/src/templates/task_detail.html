@@ -63,10 +63,7 @@
             <span class="muted context-preview">{{ msg.preview }}</span>
             <span class="muted">{{ msg.timestamp|relative_time }}</span>
         </summary>
-        <pre class="context-content"><code class="language-json">{{ msg.payload }}</code></pre>
-        <div class="context-footer">
-            <a href="/api/tasks/{{ task_id }}/context/{{ loop.index0 }}/raw" target="_blank" class="muted">View raw payload →</a>
-        </div>
+        <div class="context-content">{{ msg.payload|structured_data_html }}</div>
     </details>
     {% endfor %}
 </div>

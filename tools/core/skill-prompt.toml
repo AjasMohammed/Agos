@@ -30,11 +30,11 @@ outputs = ["name", "version", "description", "system_prompt", "tools.required", 
 input  = "SkillPromptIntent"
 output = "SkillPromptResult"
 
-[input_schema]
+[payload_schema]
 type     = "object"
 required = ["name"]
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 type        = "string"
 description = "Installed skill name. Match is case-insensitive. Call agent-manual {section: skills} first if you don't know what's installed."
 

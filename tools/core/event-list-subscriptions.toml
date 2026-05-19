@@ -17,7 +17,7 @@ outputs = ["subscriptions"]
 input  = "EventListSubscriptionsIntent"
 output = "EventListSubscriptionsResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
 [sandbox]

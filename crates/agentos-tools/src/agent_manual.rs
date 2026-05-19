@@ -285,6 +285,12 @@ pub struct SkillSummary {
     /// Wrapped in `Arc<str>` so cloning the snapshot vec is a pointer-bump per
     /// entry rather than a multi-KB byte copy of every prompt — `agent-manual
     /// {section: skills}` clones the snapshot on every call.
+    ///
+    /// `#[serde(skip)]` (not `skip_serializing`) is intentional: `Arc<str>`
+    /// has no `Default` impl, so `SkillSummary` deserialization is unsupported
+    /// by design. Nothing in the workspace deserializes this type; if a
+    /// future contributor tries, they'll get a compile error pointing here,
+    /// which is the desired failure mode.
     #[serde(skip)]
     pub system_prompt: Arc<str>,
 }
@@ -514,7 +520,13 @@ pub struct ToolSummary {
     /// Permission strings from the manifest, e.g. ["fs.user_data:r"]
     pub permissions: Vec<String>,
     /// Optional JSON Schema for the tool's input payload.
-    pub input_schema: Option<serde_json::Value>,
+    pub payload_schema: Option<serde_json::Value>,
+    /// Author-curated example payloads. Validated against `payload_schema` at
+    /// registry load — drift is a loud boot failure. Surfaced verbatim by
+    /// `describe-tool` so the agent sees real, schema-conformant calls rather
+    /// than only synthesized placeholders.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<agentos_types::tool::PayloadExample>,
     /// Trust tier: "core", "verified", "community"
     pub trust_tier: String,
     /// Semantic capability tags for discoverability.
@@ -1033,7 +1045,8 @@ impl AgentManualTool {
                     description: t.manifest.manifest.description.clone(),
                     version: t.manifest.manifest.version.clone(),
                     permissions,
-                    input_schema: t.manifest.input_schema.clone(),
+                    payload_schema: t.manifest.payload_schema.clone(),
+                    examples: t.manifest.examples.clone(),
                     trust_tier: format!("{:?}", t.manifest.manifest.trust_tier).to_lowercase(),
                     capability_tags,
                     category,
@@ -1191,7 +1204,7 @@ impl AgentManualTool {
             .find(|t| t.name == name)
             .ok_or_else(|| AgentOSError::ToolNotFound(name.to_string()))?;
 
-        let input_schema_docs = Self::summarize_input_schema(tool.input_schema.as_ref());
+        let input_schema_docs = Self::summarize_input_schema(tool.payload_schema.as_ref());
 
         let mut result = serde_json::json!({
             "section": "tool-detail",
@@ -1208,7 +1221,10 @@ impl AgentManualTool {
             "usage_hints": tool.usage_hints,
         });
         if verbose {
-            result["input_schema"] = tool.input_schema.clone().unwrap_or(serde_json::Value::Null);
+            result["payload_schema"] = tool
+                .payload_schema
+                .clone()
+                .unwrap_or(serde_json::Value::Null);
         }
         Ok(result)
     }
@@ -2444,7 +2460,11 @@ impl AgentManualTool {
             summaries,
             "capabilities",
             "capabilities",
-            "Kernel-Mediated Capability (KMC) tools: managed environments (env-*), storage zones (storage-zone-*), processes (proc-*), networking (net-*), builds (build-*). Every action is policy-checked and audited. Privileged host actions: see `host-package-install` (risk_class=control_plane) — installs OS packages via apt/dnf/pacman/etc.; requires explicit operator approval per call AND the package must be on the operator-controlled allowlist. See `agent-manual section=escalation` for the approval flow.",
+            "Kernel-Mediated Capability (KMC) tools: managed environments (env-*), storage zones (storage-zone-*), processes (proc-*), networking (net-*), builds (build-*). Every action is policy-checked and audited. \
+             \
+             Managed-environment workflow: (1) env-create {name, ecosystem: python|nodejs|rust} creates an isolated workspace at {data_dir}/workspaces/{agent_id}/{name}/ — does NOT touch the host system. (2) env-install {workspace, package} installs into the workspace (pip into venv, npm into node_modules, cargo --root). Packages are validated against the operator allowlist in [env].python_allowlist / nodejs_allowlist / rust_allowlist. (3) To USE the installed package you MUST pass workspace=<name> to build-run or proc-spawn — otherwise the spawn inherits the host PATH and the import fails. build-run {workspace, command: 'python -c \"import flask\"'} activates VIRTUAL_ENV + prepends {ws}/venv/bin:{ws}/node_modules/.bin:{ws}/bin to PATH for the child. proc-spawn {workspace, binary: 'uvicorn', args: [...]} resolves the binary inside the workspace (venv/bin → node_modules/.bin → bin) so long-running processes (servers, daemons) work. Workspaces survive kernel restart via SQLite-backed state. \
+             \
+             Privileged host actions: see `host-package-install` (risk_class=control_plane) — installs OS packages via apt/dnf/pacman/etc.; requires explicit operator approval per call AND the package must be on the operator-controlled allowlist. Prefer env-install over host-package-install whenever possible. See `agent-manual section=escalation` for the approval flow.",
             "No KMC tools currently available to this agent.",
         )
     }
@@ -3097,6 +3117,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -3226,7 +3248,8 @@ mod tests {
                 description: "Read files".into(),
                 version: "1.1.0".into(),
                 permissions: vec!["fs.user_data:r".into()],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec!["file-io".into(), "reading".into()],
                 category: "core".into(),
@@ -3239,7 +3262,8 @@ mod tests {
                 description: "HTTP requests".into(),
                 version: "1.0.0".into(),
                 permissions: vec!["network.outbound:x".into()],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec!["network".into(), "api".into(), "web".into()],
                 category: "core".into(),
@@ -3340,7 +3364,7 @@ mod tests {
             description: "Read files".into(),
             version: "1.1.0".into(),
             permissions: vec!["fs.user_data:r".into()],
-            input_schema: Some(serde_json::json!({
+            payload_schema: Some(serde_json::json!({
                 "type": "object",
                 "required": ["path"],
                 "properties": {
@@ -3348,6 +3372,7 @@ mod tests {
                     "offset": { "type": "integer", "default": 0 }
                 }
             })),
+            examples: vec![],
             trust_tier: "core".into(),
             capability_tags: vec![],
             category: "core".into(),
@@ -3364,7 +3389,7 @@ mod tests {
             .unwrap()
             .iter()
             .any(|f| f["name"] == "path" && f["required"] == true));
-        assert!(result["input_schema"].is_object());
+        assert!(result["payload_schema"].is_object());
     }
 
     #[test]
@@ -3383,7 +3408,8 @@ mod tests {
                 description: "Write to memory".into(),
                 version: "1".into(),
                 permissions: vec!["memory.semantic:w".into()],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec![],
                 category: "memory".into(),
@@ -3396,7 +3422,8 @@ mod tests {
                 description: "Archival search".into(),
                 version: "1".into(),
                 permissions: vec!["memory.semantic:r".into()],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec![],
                 category: "memory".into(),
@@ -3593,7 +3620,8 @@ mod tests {
             description: format!("{name} (MCP)"),
             version: "0.1.0".into(),
             permissions: vec![],
-            input_schema: None,
+            payload_schema: None,
+            examples: vec![],
             trust_tier: "core".into(),
             capability_tags: vec![],
             category: "mcp".into(),
@@ -3729,7 +3757,8 @@ mod tests {
             description: format!("{name} description"),
             version: "1".into(),
             permissions: vec![],
-            input_schema: None,
+            payload_schema: None,
+            examples: vec![],
             trust_tier: "core".into(),
             capability_tags: vec![],
             category: category.into(),

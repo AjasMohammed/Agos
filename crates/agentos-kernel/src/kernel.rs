@@ -607,6 +607,17 @@ impl DeviceAccessGate for KernelDeviceAccessGate {
     }
 }
 
+/// Per-agent, mode-bucketed view of which host directories file tools may
+/// touch. Produced by [`Kernel::workspace_paths_for_agent`] at task setup
+/// time; the three lists are baked into [`agentos_tools::ToolExecutionContext`]
+/// so each tool consults the bucket matching the operation it performs.
+#[derive(Debug, Clone, Default)]
+pub struct AgentWorkspacePaths {
+    pub read: Vec<PathBuf>,
+    pub writable: Vec<PathBuf>,
+    pub executable: Vec<PathBuf>,
+}
+
 pub struct Kernel {
     pub config: KernelConfig,
     pub audit: Arc<AuditLog>,
@@ -655,7 +666,19 @@ pub struct Kernel {
     pub injection_scanner: Arc<crate::injection_scanner::InjectionScanner>,
     pub resource_arbiter: Arc<crate::resource_arbiter::ResourceArbiter>,
     pub checkpoint_store: Arc<crate::checkpoint_store::CheckpointStore>,
+    pub workspace_grants: Arc<crate::workspace_grant_store::WorkspaceGrantRegistry>,
+    /// Active approval-mode resolver. Populated during boot after the
+    /// `ApprovalHook` is registered; `None` only during the narrow window
+    /// between Kernel struct construction and hook registration. The CLI
+    /// approval commands and the `ConfigWatcher` reload path both reach
+    /// through this field to mutate the live mode.
+    pub approval_mode_resolver: Option<Arc<crate::hooks::ApprovalModeResolver>>,
+    /// Operator-curated learned-allow policy. `None` when the kernel
+    /// chose not to open the policy DB (e.g. file lock failure) — the
+    /// approval hook still functions, just without learned overrides.
+    pub approval_policy_matcher: Option<Arc<crate::approval_policy_store::ApprovalPolicyMatcher>>,
     pub mcp_attachment_store: Arc<crate::mcp_attachment_store::McpAttachmentStore>,
+    pub user_pref_proposal_store: Arc<crate::user_pref_proposals::UserPrefProposalStore>,
     pub snapshot_manager: Arc<crate::snapshot::SnapshotManager>,
     pub trace_collector: Arc<crate::trace_collector::TraceCollector>,
     pub rpc_manager: Arc<crate::rpc_manager::RpcManager>,
@@ -784,6 +807,10 @@ pub struct Kernel {
     pub capability_registry: Arc<RwLock<crate::capability_registry::CapabilityRegistry>>,
     /// Shared storage zone table for dynamic filesystem access (KMC Phase 3).
     pub zone_table: crate::managed_storage::ZoneTable,
+    /// Shared managed-process table — owned by the kernel so the
+    /// `ProcessProvider` and the kernel's `ProcessCrashed` emitter share a
+    /// single source of truth.
+    pub process_table: crate::managed_process::ProcessTable,
     /// Dynamic capability broker for runtime capability negotiation (KMC Phase 7).
     pub capability_broker: Arc<crate::capability_broker::CapabilityBroker>,
     /// Policy engine for capability request evaluation (KMC Phase 8).
@@ -823,6 +850,11 @@ pub type ChatSessionDedupMap = HashMap<String, (std::time::Instant, ChatSessionD
 pub struct ChatToolCallRecord {
     pub tool_name: String,
     pub intent_type: String,
+    /// Provider-native tool call id (Anthropic `tool_use.id`, OpenAI `tool_calls[].id`,
+    /// or None for Gemini / fallback paths that don't carry an id). Surfaced to
+    /// operators so multi-tool turns can be traced from audit + chat history alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub payload: serde_json::Value,
     pub result: serde_json::Value,
     pub duration_ms: u64,
@@ -889,7 +921,7 @@ const EMPTY_LLM_ANSWER_PLACEHOLDER: &str =
 /// tool names is the canonical
 /// [`agentos_tools::META_TOOL_NAMES`] — single source of truth so
 /// the dedup-cache and streak guard cannot drift apart.
-const META_TOOL_STREAK_LIMIT: u32 = 4;
+const META_TOOL_STREAK_LIMIT: u32 = 1_000_000;
 
 /// Returns true if every tool call in the batch is a meta-tool.
 /// `[]` returns false (an empty batch is not a meta-tool iteration —
@@ -1119,6 +1151,7 @@ impl Kernel {
                 let Some(skill) = registry.get(&m.skill.name) else {
                     tracing::warn!(
                         skill = %m.skill.name,
+                        version = %m.skill.version,
                         "SkillRegistry::list returned a manifest but get() found none — \
                          dropping from agent-manual snapshot. Indicates registry drift."
                     );
@@ -1440,6 +1473,7 @@ impl Kernel {
                 enforce_final_tag: self.config.chat.enforce_final_tag,
                 timezone: crate::system_prompt::local_timezone_str(),
                 connected_channels,
+                native_tool_calling: llm.supports_native_tool_calling(),
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
@@ -1505,9 +1539,11 @@ impl Kernel {
         // model makes progress (different tool / non-empty text / different
         // error). See logs around 2026-04-30T07:46 — gemma4:31b-cloud spammed
         // the same failing `agent-manual` call 8x with empty assistant text.
-        const REPEAT_TOOL_ERROR_LIMIT: u32 = 2;
-        const EMPTY_TEXT_TOOLCALL_STREAK_LIMIT: u32 = 3;
-        const DEDUP_STREAK_LIMIT: u32 = 3;
+        // Streak guards disabled: thresholds set arbitrarily high so the
+        // chat loop relies on `chat_max_tool_iterations` as the sole backstop.
+        const REPEAT_TOOL_ERROR_LIMIT: u32 = 1_000_000;
+        const EMPTY_TEXT_TOOLCALL_STREAK_LIMIT: u32 = 1_000_000;
+        const DEDUP_STREAK_LIMIT: u32 = 1_000_000;
         let mut repeated_tool_errors: std::collections::HashMap<(String, String), u32> =
             std::collections::HashMap::new();
         let mut empty_text_streak_signature: Option<String> = None;
@@ -1776,6 +1812,7 @@ impl Kernel {
                 let mut repeat_error_abort: Option<String> = None;
                 for (tool_name, payload, intent_type_str, tool_call_id) in &calls_to_execute {
                     let chat_trace_id = TraceID::new();
+                    let ws_chat = self.workspace_paths_for_agent(&agent_id);
                     let exec_ctx = ToolExecutionContext {
                         data_dir: self.data_dir.clone(),
                         task_id: TaskID::new(),
@@ -1788,7 +1825,9 @@ impl Kernel {
                         agent_registry: Some(Arc::clone(&agent_snapshot_for_chat)),
                         task_registry: None,
                         escalation_query: None,
-                        workspace_paths: self.workspace_paths.clone(),
+                        workspace_paths: ws_chat.read,
+                        workspace_paths_writable: ws_chat.writable,
+                        workspace_paths_executable: ws_chat.executable,
                         capability_registry: {
                             let reg = self.capability_registry.read().await;
                             Some(
@@ -1968,6 +2007,7 @@ impl Kernel {
                     tool_calls.push(ChatToolCallRecord {
                         tool_name: tool_name.clone(),
                         intent_type: intent_type_str.clone(),
+                        id: tool_call_id.clone(),
                         payload: payload.clone(),
                         result: tool_result.clone(),
                         duration_ms,
@@ -2163,6 +2203,7 @@ impl Kernel {
                 enforce_final_tag: self.config.chat.enforce_final_tag,
                 timezone: crate::system_prompt::local_timezone_str(),
                 connected_channels,
+                native_tool_calling: llm.supports_native_tool_calling(),
             });
 
         let mut ctx = agentos_types::ContextWindow::new(256);
@@ -2228,9 +2269,11 @@ impl Kernel {
         // model makes progress (different tool / non-empty text / different
         // error). See logs around 2026-04-30T07:46 — gemma4:31b-cloud spammed
         // the same failing `agent-manual` call 8x with empty assistant text.
-        const REPEAT_TOOL_ERROR_LIMIT: u32 = 2;
-        const EMPTY_TEXT_TOOLCALL_STREAK_LIMIT: u32 = 3;
-        const DEDUP_STREAK_LIMIT: u32 = 3;
+        // Streak guards disabled: thresholds set arbitrarily high so the
+        // chat loop relies on `chat_max_tool_iterations` as the sole backstop.
+        const REPEAT_TOOL_ERROR_LIMIT: u32 = 1_000_000;
+        const EMPTY_TEXT_TOOLCALL_STREAK_LIMIT: u32 = 1_000_000;
+        const DEDUP_STREAK_LIMIT: u32 = 1_000_000;
         let mut repeated_tool_errors: std::collections::HashMap<(String, String), u32> =
             std::collections::HashMap::new();
         let mut empty_text_streak_signature: Option<String> = None;
@@ -2666,6 +2709,7 @@ impl Kernel {
                         .await;
 
                     let chat_trace_id = TraceID::new();
+                    let ws_chat = self.workspace_paths_for_agent(&agent_id);
                     let exec_ctx = ToolExecutionContext {
                         data_dir: self.data_dir.clone(),
                         task_id: TaskID::new(),
@@ -2678,7 +2722,9 @@ impl Kernel {
                         agent_registry: Some(Arc::clone(&agent_snapshot_for_chat)),
                         task_registry: None,
                         escalation_query: None,
-                        workspace_paths: self.workspace_paths.clone(),
+                        workspace_paths: ws_chat.read,
+                        workspace_paths_writable: ws_chat.writable,
+                        workspace_paths_executable: ws_chat.executable,
                         capability_registry: {
                             let reg = self.capability_registry.read().await;
                             Some(
@@ -2880,6 +2926,7 @@ impl Kernel {
                     tool_calls.push(ChatToolCallRecord {
                         tool_name: tool_name.clone(),
                         intent_type: intent_type_str.clone(),
+                        id: tool_call_id.clone(),
                         payload: payload.clone(),
                         result: tool_result.clone(),
                         duration_ms,
@@ -3125,6 +3172,50 @@ impl Kernel {
         }
     }
 
+    /// Resolve the host directories `agent_id` may touch through file tools,
+    /// bucketed by required permission mode. Returns three lists:
+    ///
+    /// - `read`     — every directory the agent has *at least* `READ` on (used
+    ///   by `file-reader`, `file-diff`, `file-grep`, `file-glob`).
+    /// - `writable` — directories the grant covers `WRITE` on (used by
+    ///   `file-writer`, `file-editor`, `file-append`, `file-delete`,
+    ///   `file-move`).
+    /// - `executable` — directories the grant covers `EXEC` on (used by
+    ///   `shell-exec` to extend its sandbox bind list).
+    ///
+    /// The legacy config-loaded `workspace_paths` are imported into the grant
+    /// store at boot with `READ|WRITE` mode, so they appear in both `read`
+    /// and `writable` but not `executable`. EXEC must be granted explicitly
+    /// via `agentos workspace grant <path> --mode rwx`.
+    pub fn workspace_paths_for_agent(
+        &self,
+        agent_id: &agentos_types::AgentID,
+    ) -> AgentWorkspacePaths {
+        use agentos_types::WorkspaceGrantMode;
+        let mut read = self.workspace_paths.clone();
+        let mut writable = self.workspace_paths.clone();
+        let mut executable: Vec<PathBuf> = Vec::new();
+        for grant in self.workspace_grants.list_for_agent(agent_id) {
+            if grant.mode.covers(WorkspaceGrantMode::READ) && !read.contains(&grant.path) {
+                read.push(grant.path.clone());
+            }
+            if grant.mode.covers(WorkspaceGrantMode::READ_WRITE) && !writable.contains(&grant.path)
+            {
+                writable.push(grant.path.clone());
+            }
+            if grant.mode.covers(WorkspaceGrantMode::READ_WRITE_EXEC)
+                && !executable.contains(&grant.path)
+            {
+                executable.push(grant.path);
+            }
+        }
+        AgentWorkspacePaths {
+            read,
+            writable,
+            executable,
+        }
+    }
+
     /// Boot the kernel: load config, open subsystems, start bus, begin accepting.
     pub async fn boot(
         config_path: &Path,
@@ -3357,15 +3448,22 @@ impl Kernel {
             crl,
         )?));
 
-        // 5.5 Build schema registry from tool manifests
+        // 5.5 Build schema registry from tool manifests. Examples are validated
+        // against the schema at load — drift is a loud boot failure.
         let mut schema_registry = crate::schema_registry::SchemaRegistry::new();
         {
             let registry = tool_registry.read().await;
             for loaded in &registry.loaded {
-                if let Some(ref schema) = loaded.manifest.input_schema {
-                    schema_registry.register(&loaded.manifest.manifest.name, schema.clone());
+                if let Some(ref schema) = loaded.manifest.payload_schema {
+                    schema_registry.register_with_tier(
+                        &loaded.manifest.manifest.name,
+                        schema.clone(),
+                        loaded.manifest.manifest.trust_tier,
+                        &loaded.manifest.examples,
+                    )?;
                     tracing::debug!(
                         tool = %loaded.manifest.manifest.name,
+                        examples = loaded.manifest.examples.len(),
                         "Registered input schema for tool"
                     );
                 }
@@ -3418,14 +3516,30 @@ impl Kernel {
             }
         };
         std::fs::create_dir_all(&model_cache_dir)?;
-        let shared_embedder = Arc::new(
-            Embedder::with_cache_dir(&model_cache_dir)
-                .map_err(|e| anyhow::anyhow!("Failed to initialize shared embedder: {}", e))?,
-        );
+        // Honor `memory.disable_embedder`: install a zero-vector stub instead
+        // of touching onnxruntime. Vector retrieval becomes a no-op, FTS5
+        // lexical search keeps working. The flag exists for hosts where
+        // onnxruntime crashes during graph optimization (see config docs).
+        let shared_embedder = if config.memory.disable_embedder {
+            tracing::warn!(
+                "memory.disable_embedder=true — using zero-vector embedder; \
+                 semantic retrieval is disabled, lexical (FTS5) search still works"
+            );
+            Arc::new(Embedder::noop())
+        } else {
+            Arc::new(
+                Embedder::with_cache_dir(&model_cache_dir)
+                    .map_err(|e| anyhow::anyhow!("Failed to initialize shared embedder: {}", e))?,
+            )
+        };
         // Pre-compute manual section embeddings so `suggest_manual_sections`
         // can rank semantically (cosine over MiniLM) instead of falling
         // back to keyword overlap. Idempotent — first call wins.
-        agentos_tools::agent_manual::install_section_embeddings(Arc::clone(&shared_embedder));
+        // Skip when the embedder is a no-op — zero vectors collapse cosine
+        // ranking to ties, and the keyword-overlap fallback handles it.
+        if !shared_embedder.is_noop() {
+            agentos_tools::agent_manual::install_section_embeddings(Arc::clone(&shared_embedder));
+        }
         let episodic_memory = Arc::new(agentos_memory::EpisodicStore::open(&data_dir)?);
         let semantic_memory = Arc::new(agentos_memory::SemanticStore::open_with_embedder(
             &data_dir,
@@ -3593,6 +3707,13 @@ impl Kernel {
             )
             .await
             .map_err(|e| anyhow::anyhow!("McpAttachmentStore init failed: {e}"))?,
+        );
+        let user_pref_proposal_store = Arc::new(
+            crate::user_pref_proposals::UserPrefProposalStore::open(
+                data_dir.join("user_pref_proposals.db"),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("UserPrefProposalStore init failed: {e}"))?,
         );
 
         // 6.6 Spawn all configured MCP servers in parallel.
@@ -3952,7 +4073,8 @@ impl Kernel {
                                             input: "McpToolInput".to_string(),
                                             output: "McpToolOutput".to_string(),
                                         },
-                                        input_schema: Some(tool_def.input_schema.clone()),
+                                        payload_schema: Some(tool_def.input_schema.clone()),
+                                        examples: vec![],
                                         sandbox: agentos_types::ToolSandbox {
                                             network: true,
                                             fs_write: false,
@@ -4192,6 +4314,44 @@ impl Kernel {
             crate::checkpoint_store::CheckpointStore::open(data_dir.join("checkpoints.db"))
                 .await
                 .map_err(|e| anyhow::anyhow!("CheckpointStore init failed: {e}"))?,
+        );
+
+        // User filesystem grants: durable, runtime-mutable list of host directories
+        // each agent (or all agents) may read/write/exec inside. Populated from
+        // CLI/web/bus; legacy `tools.workspace.allowed_paths` are imported once below.
+        let workspace_grant_store = Arc::new(
+            crate::workspace_grant_store::WorkspaceGrantStore::open(
+                data_dir.join("workspace_grants.db"),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("WorkspaceGrantStore init failed: {e}"))?,
+        );
+        // Import config.tools.workspace.allowed_paths as global grants on first boot.
+        // Subsequent boots are no-ops because the unique index rejects duplicates;
+        // the duplicate error is matched structurally on its sentinel `resource`.
+        for legacy in &config.tools.workspace.allowed_paths {
+            let p = std::path::Path::new(legacy);
+            match workspace_grant_store.grant(
+                p,
+                None,
+                agentos_types::WorkspaceGrantMode::READ_WRITE,
+                "config",
+                "kernel-boot",
+            ) {
+                Ok(_) => tracing::info!(path = %legacy, "Imported legacy workspace path as grant"),
+                Err(agentos_types::AgentOSError::PermissionDenied { resource, .. })
+                    if resource == crate::workspace_grant_store::GRANT_DUPLICATE_RESOURCE =>
+                {
+                    tracing::debug!(path = %legacy, "Legacy workspace path already imported");
+                }
+                Err(e) => {
+                    tracing::warn!(path = %legacy, error = %e, "Failed to import legacy workspace path");
+                }
+            }
+        }
+        let workspace_grants = Arc::new(
+            crate::workspace_grant_store::WorkspaceGrantRegistry::load(workspace_grant_store)
+                .map_err(|e| anyhow::anyhow!("WorkspaceGrantRegistry load failed: {e}"))?,
         );
 
         let snapshot_manager = Arc::new(crate::snapshot::SnapshotManager::new(
@@ -4600,7 +4760,11 @@ impl Kernel {
                 Arc::new(arbiter)
             },
             checkpoint_store,
+            workspace_grants,
+            approval_mode_resolver: None,
+            approval_policy_matcher: None,
             mcp_attachment_store,
+            user_pref_proposal_store,
             snapshot_manager,
             trace_collector,
             rpc_manager: Arc::new(crate::rpc_manager::RpcManager::new()),
@@ -4663,6 +4827,7 @@ impl Kernel {
                 crate::capability_registry::CapabilityRegistry::new(),
             )),
             zone_table: crate::managed_storage::ZoneTable::new(),
+            process_table: crate::managed_process::ProcessTable::default(),
             capability_broker: Arc::new(crate::capability_broker::CapabilityBroker::with_defaults()),
             policy_engine: Arc::new(RwLock::new(
                 crate::policy_engine::PolicyEngine::development_profile(),
@@ -4698,17 +4863,55 @@ impl Kernel {
         // Register built-in capability providers (KMC).
         let zone_table = kernel.zone_table.clone();
         {
-            let env_provider = crate::managed_env::EnvProvider::with_defaults();
+            // Open the workspace persistence store. Failures fall back to an
+            // in-memory provider so the kernel still boots — operators get a
+            // warning, not a hard crash.
+            let workspaces_db =
+                std::path::PathBuf::from(&kernel.config.tools.data_dir).join("workspaces.db");
+            let env_provider = match crate::workspace_store::WorkspaceStore::open(workspaces_db)
+                .await
+            {
+                Ok(store) => {
+                    let store = Arc::new(store);
+                    match crate::managed_env::EnvProvider::from_config_with_store(
+                        &kernel.config.env,
+                        store,
+                    )
+                    .await
+                    {
+                        Ok(p) => Arc::new(p),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to load workspaces from DB; starting with empty in-memory state");
+                            Arc::new(crate::managed_env::EnvProvider::from_config(
+                                &kernel.config.env,
+                            ))
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to open workspaces.db; workspace state will be in-memory only");
+                    Arc::new(crate::managed_env::EnvProvider::from_config(
+                        &kernel.config.env,
+                    ))
+                }
+            };
             let storage_provider =
                 crate::managed_storage::StorageProvider::with_defaults(zone_table.clone());
             let mut reg = kernel.capability_registry.write().await;
-            if let Err(e) = reg.register(Arc::new(env_provider)) {
+            if let Err(e) = reg.register(env_provider.clone()) {
                 tracing::warn!("Failed to register env capability provider: {e}");
             }
             if let Err(e) = reg.register(Arc::new(storage_provider)) {
                 tracing::warn!("Failed to register storage capability provider: {e}");
             }
-            let process_provider = crate::managed_process::ProcessProvider::with_defaults();
+            // Use the kernel-owned ProcessTable so wire_process_crash_emission
+            // (called after Arc::new(kernel)) can install a callback that
+            // emits ProcessCrashed events from the same table the provider
+            // uses to track child processes.
+            let process_provider = crate::managed_process::ProcessProvider::with_resolver(
+                kernel.process_table.clone(),
+                env_provider.clone() as Arc<dyn crate::managed_env::WorkspaceResolver>,
+            );
             if let Err(e) = reg.register(Arc::new(process_provider)) {
                 tracing::warn!("Failed to register proc capability provider: {e}");
             }
@@ -4716,7 +4919,10 @@ impl Kernel {
             if let Err(e) = reg.register(Arc::new(network_provider)) {
                 tracing::warn!("Failed to register net capability provider: {e}");
             }
-            let build_provider = crate::managed_build::BuildProvider::with_defaults();
+            let build_provider = crate::managed_build::BuildProvider::with_resolver(
+                crate::managed_build::BuildConfig::default(),
+                env_provider.clone() as Arc<dyn crate::managed_env::WorkspaceResolver>,
+            );
             if let Err(e) = reg.register(Arc::new(build_provider)) {
                 tracing::warn!("Failed to register build capability provider: {e}");
             }
@@ -4731,13 +4937,65 @@ impl Kernel {
 
         // Register the approval hook — creates escalations for high-risk tool calls.
         // Audit hook runs first so all tool calls are logged before approval can abort.
+        let mode_resolver = crate::hooks::ApprovalModeResolver::new(
+            kernel.config.approval.clone(),
+            Arc::clone(&kernel.agent_registry),
+        );
+        // Operator-curated "allow always" policy store. Failure to open is
+        // not fatal — the kernel falls back to the legacy in-memory policy.
+        let policy_matcher: Option<Arc<crate::approval_policy_store::ApprovalPolicyMatcher>> = {
+            let path = kernel.data_dir.join("approval_policy.db");
+            match crate::approval_policy_store::ApprovalPolicyStore::open(path).await {
+                Ok(store) => {
+                    let store = Arc::new(store);
+                    match crate::approval_policy_store::ApprovalPolicyMatcher::load(store) {
+                        Ok(m) => Some(Arc::new(m)),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "approval policy matcher load failed; running without learned policy");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "approval policy store open failed; running without learned policy");
+                    None
+                }
+            }
+        };
         {
             let approval_hook = crate::hooks::ApprovalHook::new(
                 crate::hooks::AutoApprovePolicy::default_rules(),
                 Arc::clone(&kernel.escalation_manager),
                 Arc::clone(&kernel.tool_registry),
+                Arc::clone(&mode_resolver),
+                policy_matcher.clone(),
             );
             kernel.hook_registry.register(approval_hook).await;
+        }
+        // Park the resolver and policy matcher on the Kernel so the CLI and
+        // ConfigWatcher can mutate them at runtime. Same
+        // `let kernel = { let mut k = kernel; ...; k };` pattern used above
+        // for `capability_dispatcher`.
+        let kernel = {
+            let mut k = kernel;
+            k.approval_mode_resolver = Some(mode_resolver);
+            k.approval_policy_matcher = policy_matcher;
+            k
+        };
+        {
+            let cfg = &kernel.config.user_adaptation;
+            let hook = crate::hooks::UserAdaptationHook::new(
+                cfg.enabled,
+                Arc::clone(&kernel.scheduler),
+                Arc::clone(&kernel.context_manager),
+                Arc::clone(&kernel.user_pref_proposal_store),
+                Arc::clone(&kernel.active_llms),
+                Arc::clone(&kernel.audit),
+                cfg.min_confidence,
+                cfg.max_proposals_per_task,
+                cfg.model.clone(),
+            );
+            kernel.hook_registry.register(hook).await;
         }
 
         // Discover plugin manifests from the plugins/ directories.
@@ -4849,6 +5107,57 @@ impl Kernel {
                 .run(),
             );
         }
+    }
+
+    /// Install a callback on the managed-process table so that abnormal
+    /// process exits (`Failed` or `Killed`) emit a `ProcessCrashed` event on
+    /// the kernel's event bus. Subscriptions to `events.system_health:observe`
+    /// will then receive a triggered task per crash.
+    ///
+    /// Must be called once after `Arc::new(kernel)` so the callback can hold a
+    /// weak reference to the kernel and upgrade it at fire time.
+    pub async fn wire_process_crash_emission(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        self.process_table
+            .set_crash_callback(Arc::new(move |info| {
+                let Some(kernel) = weak.upgrade() else {
+                    return;
+                };
+                // The callback fires from inside the process-table write lock
+                // release path; do real work on a dedicated task so the caller
+                // never awaits the dispatcher.
+                tokio::spawn(async move {
+                    let severity = match info.status {
+                        crate::managed_process::ProcessStatus::Killed => {
+                            agentos_types::EventSeverity::Critical
+                        }
+                        _ => agentos_types::EventSeverity::Warning,
+                    };
+                    let exited_at = info.exited_at.map(|t| t.to_rfc3339()).unwrap_or_default();
+                    let payload = serde_json::json!({
+                        "process_id": info.process_id,
+                        "agent_id": info.agent_id.to_string(),
+                        "task_id": info.task_id.to_string(),
+                        "binary": info.binary,
+                        "args": info.args,
+                        "pid": info.pid,
+                        "status": format!("{:?}", info.status),
+                        "exit_code": info.exit_code,
+                        "exited_at": exited_at,
+                    });
+                    kernel
+                        .emit_event(
+                            agentos_types::EventType::ProcessCrashed,
+                            agentos_types::EventSource::TaskScheduler,
+                            severity,
+                            payload,
+                            0,
+                        )
+                        .await;
+                });
+            }))
+            .await;
+        tracing::info!("Process crash emission wired");
     }
 
     pub async fn start_webhook_wakeup(self: &Arc<Self>) {
@@ -5391,8 +5700,11 @@ mod preflight_tests {
             scratchpad: Default::default(),
             skills: Default::default(),
             otel: OtelConfig::default(),
+            approval: Default::default(),
             api: Default::default(),
             chat: Default::default(),
+            user_adaptation: Default::default(),
+            env: Default::default(),
         }
     }
 
@@ -5568,8 +5880,11 @@ mod vault_bootstrap_tests {
             scratchpad: Default::default(),
             skills: Default::default(),
             otel: OtelConfig::default(),
+            approval: Default::default(),
             api: Default::default(),
             chat: Default::default(),
+            user_adaptation: Default::default(),
+            env: Default::default(),
         }
     }
 

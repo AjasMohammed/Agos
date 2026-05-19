@@ -62,6 +62,17 @@ pub enum AgentOSError {
     #[error("Schema validation failed: {0}")]
     SchemaValidation(String),
 
+    #[error("Tool '{name}' has an invalid JSON Schema: {reason}")]
+    ToolSchemaInvalid { name: String, reason: String },
+
+    #[error("Tool '{tool_name}' payload validation failed: {pointer} - {reason}")]
+    ToolPayloadValidationFailed {
+        tool_name: String,
+        /// RFC 6901 JSON Pointer to the offending field (e.g. "/path", "/").
+        pointer: String,
+        reason: String,
+    },
+
     // LLM errors
     #[error("LLM adapter error: {provider}: {reason}")]
     LLMError { provider: String, reason: String },
@@ -165,6 +176,8 @@ impl AgentOSError {
             Self::ToolBlocked { .. } => "ToolBlocked",
             Self::ToolSignatureInvalid { .. } => "ToolSignatureInvalid",
             Self::SchemaValidation(_) => "SchemaValidation",
+            Self::ToolSchemaInvalid { .. } => "ToolSchemaInvalid",
+            Self::ToolPayloadValidationFailed { .. } => "ToolPayloadValidationFailed",
             Self::LLMError { .. } => "LLMError",
             Self::NoLLMConnected => "NoLLMConnected",
             Self::SecretNotFound(_) => "SecretNotFound",

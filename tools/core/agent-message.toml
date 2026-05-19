@@ -17,15 +17,15 @@ outputs = ["status"]
 input  = "AgentMessageIntent"
 output = "AgentMessageResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["to", "content"]
 
-[input_schema.properties.to]
+[payload_schema.properties.to]
 type = "string"
 description = "Target agent name"
 
-[input_schema.properties.content]
+[payload_schema.properties.content]
 type = "string"
 description = "Message text to send"
 

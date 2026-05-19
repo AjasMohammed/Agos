@@ -17,36 +17,36 @@ outputs = ["content.text"]
 input  = "FileDiffIntent"
 output = "FileDiffResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 anyOf = [
   { required = ["file_a", "file_b"] },
   { required = ["text_a", "text_b"] }
 ]
 
-[input_schema.properties.mode]
+[payload_schema.properties.mode]
 type = "string"
 enum = ["files", "strings"]
 default = "files"
 description = "Compare files or raw strings"
 
-[input_schema.properties.file_a]
+[payload_schema.properties.file_a]
 type = "string"
 description = "First file path when mode=files"
 
-[input_schema.properties.file_b]
+[payload_schema.properties.file_b]
 type = "string"
 description = "Second file path when mode=files"
 
-[input_schema.properties.text_a]
+[payload_schema.properties.text_a]
 type = "string"
 description = "First text blob when mode=strings"
 
-[input_schema.properties.text_b]
+[payload_schema.properties.text_b]
 type = "string"
 description = "Second text blob when mode=strings"
 
-[input_schema.properties.context_lines]
+[payload_schema.properties.context_lines]
 type = "integer"
 default = 3
 minimum = 0

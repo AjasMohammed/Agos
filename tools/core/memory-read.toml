@@ -17,20 +17,20 @@ outputs = ["content.text"]
 input  = "MemoryReadIntent"
 output = "MemoryReadResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.scope]
+[payload_schema.properties.scope]
 type = "string"
 enum = ["semantic", "episodic"]
 default = "semantic"
 description = "Memory tier to read from"
 
-[input_schema.properties.key]
+[payload_schema.properties.key]
 type = "string"
 description = "Semantic memory key (required when scope=semantic)"
 
-[input_schema.properties.id]
+[payload_schema.properties.id]
 type = "integer"
 description = "Episodic entry ID (required when scope=episodic)"
 

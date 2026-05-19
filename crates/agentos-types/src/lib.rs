@@ -77,6 +77,10 @@ pub use tool::{
     ExecutorType, FallbackRule, RegisteredTool, RiskClass, ToolExecutor, ToolManifest, ToolSandbox,
     ToolStatus, TrustTier, UsageHints,
 };
+pub mod approval;
+pub use approval::{ApprovalDecision, ApprovalMode};
+pub mod workspace_grant;
+pub use workspace_grant::{WorkspaceGrant, WorkspaceGrantMode};
 pub mod task_trace;
 pub use task_trace::{
     IterationTrace, PermissionCheckTrace, TaskTrace, TaskTraceSummary, ToolCallTrace,

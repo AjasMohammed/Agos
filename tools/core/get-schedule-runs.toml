@@ -17,21 +17,21 @@ outputs = ["runs"]
 input  = "GetScheduleRunsIntent"
 output = "GetScheduleRunsResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["schedule_id"]
 
-[input_schema.properties.schedule_id]
+[payload_schema.properties.schedule_id]
 type        = "string"
 description = "ID of the schedule, once-job, or timer to fetch runs for."
 
-[input_schema.properties.limit]
+[payload_schema.properties.limit]
 type        = "integer"
 minimum     = 1
 maximum     = 100
 description = "Maximum number of runs to return. Default 20, max 100."
 
-[input_schema.properties.state]
+[payload_schema.properties.state]
 type        = "string"
 description = "Filter by run state: 'Queued' | 'Running' | 'Complete' | 'Failed' | 'Missed'."
 

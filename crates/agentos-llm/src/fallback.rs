@@ -33,6 +33,28 @@ impl FallbackAdapter {
             });
         }
         let capabilities = providers[0].capabilities().clone();
+        // Warn at construction if chained providers disagree on tool-calling support.
+        // `supports_native_tool_calling()` (below) is the source of truth for whether
+        // the kernel uses the native path — this assertion catches callers who read
+        // the cached `capabilities()` snapshot directly and would see stale provider[0]
+        // values that don't match the chain's actual native-call behavior.
+        if providers.len() > 1 {
+            let p0_native = providers[0].supports_native_tool_calling();
+            for (idx, p) in providers.iter().enumerate().skip(1) {
+                if p.supports_native_tool_calling() != p0_native {
+                    warn!(
+                        primary = providers[0].provider_name(),
+                        fallback = p.provider_name(),
+                        index = idx,
+                        primary_native = p0_native,
+                        fallback_native = p.supports_native_tool_calling(),
+                        "FallbackAdapter providers disagree on supports_native_tool_calling; \
+                         capabilities() snapshot reflects provider[0] only — callers should \
+                         use supports_native_tool_calling() for routing decisions"
+                    );
+                }
+            }
+        }
         Ok(Self {
             providers,
             capabilities,
@@ -56,6 +78,15 @@ impl FallbackAdapter {
 
 #[async_trait]
 impl LLMCore for FallbackAdapter {
+    fn supports_native_tool_calling(&self) -> bool {
+        // Enable native prompt/tool guidance only when every fallback candidate
+        // supports it, so failover never lands on a provider that expects
+        // JSON-in-markdown instructions but no longer receives them.
+        self.providers
+            .iter()
+            .all(|p| p.supports_native_tool_calling())
+    }
+
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
         self.infer_with_tools(context, &[]).await
     }
@@ -265,6 +296,59 @@ mod tests {
         }
     }
 
+    struct NativeMock {
+        capabilities: ModelCapabilities,
+    }
+
+    impl NativeMock {
+        fn new() -> Self {
+            Self {
+                capabilities: ModelCapabilities {
+                    context_window_tokens: 8192,
+                    supports_images: false,
+                    supports_tool_calling: true,
+                    supports_json_mode: false,
+                    max_output_tokens: 0,
+                    supports_streaming: false,
+                    supports_parallel_tools: false,
+                    supports_prompt_caching: false,
+                    supports_thinking: false,
+                    supports_structured_output: false,
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LLMCore for NativeMock {
+        fn supports_native_tool_calling(&self) -> bool {
+            true
+        }
+
+        async fn infer(&self, _context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
+            Err(AgentOSError::LLMError {
+                provider: "native-mock".to_string(),
+                reason: "not used".to_string(),
+            })
+        }
+
+        fn capabilities(&self) -> &ModelCapabilities {
+            &self.capabilities
+        }
+
+        async fn health_check(&self) -> HealthStatus {
+            HealthStatus::Healthy
+        }
+
+        fn provider_name(&self) -> &str {
+            "native-mock"
+        }
+
+        fn model_name(&self) -> &str {
+            "native"
+        }
+    }
+
     #[tokio::test]
     async fn test_fallback_first_provider_succeeds() {
         let primary = Arc::new(MockLLMCore::new(vec!["primary response".to_string()]));
@@ -331,6 +415,23 @@ mod tests {
         ])
         .unwrap();
         assert!(!fallback.health_check().await.is_healthy());
+    }
+
+    #[test]
+    fn test_fallback_supports_native_only_when_all_providers_do() {
+        let all_native = FallbackAdapter::new(vec![
+            Arc::new(NativeMock::new()) as Arc<dyn LLMCore>,
+            Arc::new(NativeMock::new()) as Arc<dyn LLMCore>,
+        ])
+        .unwrap();
+        assert!(all_native.supports_native_tool_calling());
+
+        let mixed = FallbackAdapter::new(vec![
+            Arc::new(NativeMock::new()) as Arc<dyn LLMCore>,
+            Arc::new(MockLLMCore::new(vec!["ok".to_string()])) as Arc<dyn LLMCore>,
+        ])
+        .unwrap();
+        assert!(!mixed.supports_native_tool_calling());
     }
 
     #[tokio::test]

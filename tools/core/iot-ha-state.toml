@@ -18,6 +18,13 @@ outputs = ["entities", "state"]
 input = "IotHaStateIntent"
 output = "IotHaStateResult"
 
+[payload_schema]
+type = "object"
+
+[payload_schema.properties.entity_id]
+type        = "string"
+description = "Specific Home Assistant entity (e.g. 'light.kitchen'). Omit to list all entities."
+
 [sandbox]
 network = false
 fs_write = false

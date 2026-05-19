@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod approval;
 pub mod audit;
 pub mod background;
 pub mod channel;
@@ -27,4 +28,6 @@ pub mod system;
 pub mod task;
 pub mod team;
 pub mod tool;
+pub mod user_prefs;
 pub mod webhook;
+pub mod workspace;

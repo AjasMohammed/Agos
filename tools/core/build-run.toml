@@ -3,7 +3,7 @@ tags = ["exec"]
 [manifest]
 name = "build-run"
 version = "1.0.0"
-description = "Execute a build command with structured output parsing"
+description = "Execute a build/test/script command with structured output parsing. Pass `workspace` to activate a managed environment's venv / node_modules / cargo bin paths and run the command inside it."
 author = "agentos-core"
 trust_tier = "core"
 risk_class = "exec_capable"
@@ -18,16 +18,20 @@ outputs = ["content.json"]
 input = "BuildRunIntent"
 output = "BuildRunResult"
 
-[input_schema]
+[payload_schema]
 required = ["command"]
 type = "object"
 
-[input_schema.properties.command]
-description = "Build command to execute (e.g., 'cargo test', 'npm run build')"
+[payload_schema.properties.command]
+description = "Command to execute (e.g., 'cargo test', 'npm run build', 'python -c \"import flask\"'). Without `workspace`, restricted to the configured build allowlist; with `workspace`, restricted to the workspace-build allowlist (python/pip/pytest/node/npm/npx/cargo/etc.)."
 type = "string"
 
-[input_schema.properties.working_dir]
-description = "Working directory for the build (default: agent data_dir)"
+[payload_schema.properties.working_dir]
+description = "Working directory for the command (default: workspace root when `workspace` is set, otherwise agent data_dir). Must be inside the agent's accessible scope."
+type = "string"
+
+[payload_schema.properties.workspace]
+description = "Optional managed workspace name (created via env-create). When set, the command runs with VIRTUAL_ENV and {ws}/venv/bin:{ws}/node_modules/.bin:{ws}/bin prepended to PATH so it can import packages installed via env-install."
 type = "string"
 
 [sandbox]

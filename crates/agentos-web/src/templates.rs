@@ -391,6 +391,18 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
         render_tool_data_html(&value)
     });
 
+    // Generic structured-data renderer for pages that previously displayed
+    // raw JSON. It reuses the tool-data parser so JSON strings, nested JSON
+    // strings, and plain text all get a readable UI treatment.
+    env.add_filter("structured_data_html", |value: minijinja::Value| {
+        let parsed = parsed_tool_value(&value);
+        let html = format!(
+            "<div class=\"structured-data\">{}</div>",
+            render_tool_json_html(&parsed, 0)
+        );
+        minijinja::Value::from_safe_string(html)
+    });
+
     env.add_template("base.html", include_str!("templates/base.html"))?;
     env.add_template("dashboard.html", include_str!("templates/dashboard.html"))?;
     env.add_template("agents.html", include_str!("templates/agents.html"))?;
@@ -460,6 +472,7 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
         include_str!("templates/escalations.html"),
     )?;
     env.add_template("mcp_page.html", include_str!("templates/mcp_page.html"))?;
+    env.add_template("prefs.html", include_str!("templates/prefs.html"))?;
     env.add_template(
         "webhooks_page.html",
         include_str!("templates/webhooks_page.html"),

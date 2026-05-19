@@ -3,6 +3,7 @@ use agentos_bus::client::BusClient;
 
 pub mod a2a;
 pub mod agent;
+pub mod approval;
 pub mod audit;
 pub mod bg;
 pub mod channel;
@@ -22,6 +23,7 @@ pub mod onboard;
 pub mod perm;
 pub mod pipeline;
 pub mod plugin;
+pub mod prefs;
 pub mod provider;
 pub mod resource;
 pub mod role;
@@ -35,6 +37,7 @@ pub mod task;
 pub mod team;
 pub mod tool;
 pub mod web;
+pub mod workspace;
 
 pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow::Result<()> {
     match command {
@@ -43,6 +46,7 @@ pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow
         Commands::Tool { command } => tool::handle(client, command).await,
         Commands::Secret { command } => secret::handle(client, command).await,
         Commands::Perm { command } => perm::handle(client, command).await,
+        Commands::Prefs { command } => prefs::handle(client, command).await,
         Commands::Status => status::handle(client).await,
         Commands::Audit { command } => audit::handle(client, command).await,
         Commands::Role { command } => role::handle(client, command).await,
@@ -64,6 +68,8 @@ pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow
         Commands::Provider { command } => provider::handle(client, command).await,
         Commands::Team { command } => team::handle(client, command).await,
         Commands::Plugin { command } => plugin::handle(client, command).await,
+        Commands::Workspace { command } => workspace::handle(client, command).await,
+        Commands::Approval { command } => approval::handle(client, command).await,
         _ => unreachable!(),
     }
 }

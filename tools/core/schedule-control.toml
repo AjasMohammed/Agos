@@ -19,16 +19,16 @@ outputs = ["updated", "action", "name", "kind"]
 input  = "ScheduleControlIntent"
 output = "ScheduleControlResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["action", "name"]
 
-[input_schema.properties.action]
+[payload_schema.properties.action]
 type = "string"
 enum = ["pause", "resume", "delete"]
 description = "Lifecycle action to apply."
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 type = "string"
 description = "Schedule name (or compatible ID string)."
 

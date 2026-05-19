@@ -20,7 +20,7 @@ outputs = ["content.json"]
 input = "StorageZoneListIntent"
 output = "StorageZoneListResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
 [sandbox]

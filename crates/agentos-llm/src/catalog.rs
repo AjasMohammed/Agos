@@ -29,6 +29,11 @@ pub struct CatalogEntry {
     pub supports_images: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_tool_calling: Option<bool>,
+    /// Whether this provider should use native tool-calling prompt mode
+    /// (`tool_calls` protocol) instead of JSON-in-markdown fallback guidance.
+    /// Defaults to `None` (treated as false/safe fallback by `CustomCore`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_native_tool_calling: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_streaming: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -258,6 +263,9 @@ impl ProviderCatalog {
             }
             if let Some(v) = entry.supports_tool_calling {
                 lines.push_str(&format!("supports_tool_calling = {}\n", v));
+            }
+            if let Some(v) = entry.supports_native_tool_calling {
+                lines.push_str(&format!("supports_native_tool_calling = {}\n", v));
             }
             if let Some(v) = entry.supports_streaming {
                 lines.push_str(&format!("supports_streaming = {}\n", v));

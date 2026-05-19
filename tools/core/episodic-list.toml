@@ -17,10 +17,10 @@ outputs = ["content.text"]
 input  = "EpisodicListIntent"
 output = "EpisodicListResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.limit]
+[payload_schema.properties.limit]
 type = "integer"
 default = 20
 minimum = 1

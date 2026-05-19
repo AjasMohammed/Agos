@@ -111,8 +111,11 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         scratchpad: Default::default(),
         skills: Default::default(),
         otel: agentos_kernel::config::OtelConfig::default(),
+        approval: Default::default(),
         api: Default::default(),
         chat: Default::default(),
+        user_adaptation: Default::default(),
+        env: Default::default(),
     }
 }
 

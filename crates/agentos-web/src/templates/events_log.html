@@ -3,12 +3,75 @@
 <div class="page-header">
     <div>
         <h1>Events</h1>
-        <p class="page-meta">Event subscriptions and category permissions</p>
+        <p class="page-meta">Subscribe agents to kernel events, browse the audit stream, and fire test events.</p>
     </div>
 </div>
 
+<article id="subscribe">
+    <header><strong>Subscribe an agent</strong>
+        <small class="muted"> — operator action; subscribes the agent even if it lacks the matching <code>events.&lt;category&gt;:observe</code> permission.</small>
+    </header>
+    <form method="post" action="/events/subscribe">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <div class="form-grid-4">
+            <label>Agent
+                <select name="agent_name" required>
+                    <option value="">— pick agent —</option>
+                    {% for a in agents %}
+                    <option value="{{ a.name }}">{{ a.name }} ({{ a.allowed_category_count }} of {{ categories|length }} categories observable)</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>Event filter
+                <input name="event_filter" placeholder="all | category:SystemHealth | DiskSpaceLow" required>
+            </label>
+            <label>Throttle (optional)
+                <input name="throttle" placeholder="once_per:30s or max:5/60s">
+            </label>
+            <label>Priority (optional)
+                <select name="priority">
+                    <option value="">normal (default)</option>
+                    <option value="critical">critical</option>
+                    <option value="high">high</option>
+                    <option value="normal">normal</option>
+                    <option value="low">low</option>
+                </select>
+            </label>
+        </div>
+        <label>Payload filter (optional)
+            <input name="payload_filter" placeholder="e.g. severity == 'critical' AND disk_percent &gt; 90">
+        </label>
+        <button type="submit">Subscribe</button>
+    </form>
+</article>
+
+<article id="emit">
+    <header><strong>Emit a test event</strong>
+        <small class="muted"> — fires a synthetic event through the dispatcher so you can verify subscriptions react.</small>
+    </header>
+    <form method="post" action="/events/emit">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <div class="form-grid-4">
+            <label>Event type
+                <input name="event_type" placeholder="DiskSpaceLow" required>
+            </label>
+            <label>Severity
+                <select name="severity">
+                    <option value="info">info</option>
+                    <option value="warning" selected>warning</option>
+                    <option value="critical">critical</option>
+                </select>
+            </label>
+            <label style="grid-column: span 2">Payload JSON (optional)
+                <input name="payload" placeholder='{"disk_percent": 92.0}'>
+            </label>
+        </div>
+        <button type="submit">Emit event</button>
+    </form>
+</article>
+
 <article>
-    <header><strong>Search Event Log</strong></header>
+    <header><strong>Recent emitted events</strong></header>
     <form method="get" action="/events">
         <div class="form-grid-4">
             <label>Text
@@ -26,10 +89,6 @@
         </div>
         <button type="submit">Search</button>
     </form>
-</article>
-
-<article>
-    <header><strong>Recent Emitted Events</strong></header>
     {% if event_rows|length == 0 %}
     <p class="muted">No matching events in the audit stream.</p>
     {% else %}
@@ -44,7 +103,38 @@
             <td><code>{{ e.task_id or "-" }}</code></td>
             <td>{{ e.event_source or "-" }}</td>
             <td><code>{{ e.trace_id }}</code></td>
-            <td><pre><code>{{ e.details|pretty_json }}</code></pre></td>
+            <td class="details-cell">{{ e.details|structured_data_html }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</article>
+
+<article id="subscriptions">
+    <header><strong>Active subscriptions</strong></header>
+    {% if subscriptions|length == 0 %}
+    <p class="muted">No active subscriptions.</p>
+    {% else %}
+    <table>
+        <thead><tr><th>ID</th><th>Agent</th><th>Event filter</th><th>Payload filter</th><th>Enabled</th><th>Priority</th><th>Throttle</th><th>Created</th><th></th></tr></thead>
+        <tbody>
+        {% for s in subscriptions %}
+        <tr>
+            <td><code>{{ s.id[:8] }}…</code></td>
+            <td>{{ s.agent_name }} <small class="muted">({{ s.agent_id[:8] }}…)</small></td>
+            <td><code>{{ s.event_type_filter }}</code></td>
+            <td><code>{{ s.filter or "-" }}</code></td>
+            <td>{{ s.enabled }}</td>
+            <td>{{ s.priority }}</td>
+            <td><code>{{ s.throttle_policy }}</code></td>
+            <td>{{ s.created_at }}</td>
+            <td>
+                <form method="post" action="/events/subscriptions/{{ s.id }}/delete" style="display:inline">
+                    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                    <button type="submit" class="secondary outline">Unsubscribe</button>
+                </form>
+            </td>
         </tr>
         {% endfor %}
         </tbody>
@@ -54,7 +144,9 @@
 
 <div class="grid">
     <article>
-        <header><strong>Categories</strong></header>
+        <header><strong>Categories</strong>
+            <small class="muted"> — every event belongs to one of these; subscribing to a category receives every event in it.</small>
+        </header>
         <table>
             <thead><tr><th>Category</th><th>Permission</th></tr></thead>
             <tbody>
@@ -69,22 +161,28 @@
     </article>
 
     <article>
-        <header><strong>Subscriptions</strong></header>
-        {% if subscriptions|length == 0 %}
-        <p class="muted">No active subscriptions.</p>
+        <header><strong>Per-agent observe permissions</strong>
+            <small class="muted"> — green ✓ means the agent can self-subscribe via <code>event-subscribe</code>; operator subscriptions above bypass this gate.</small>
+        </header>
+        {% if agents|length == 0 %}
+        <p class="muted">No agents registered.</p>
         {% else %}
         <table>
-            <thead><tr><th>ID</th><th>Agent</th><th>Event Filter</th><th>Payload Filter</th><th>Enabled</th><th>Priority</th><th>Created</th></tr></thead>
+            <thead>
+                <tr>
+                    <th>Agent</th>
+                    {% for c in categories %}
+                    <th title="{{ c.permission }}:observe">{{ c.name[:6] }}</th>
+                    {% endfor %}
+                </tr>
+            </thead>
             <tbody>
-            {% for s in subscriptions %}
+            {% for a in agents %}
             <tr>
-                <td><code>{{ s.id }}</code></td>
-                <td><code>{{ s.agent_id }}</code></td>
-                <td><code>{{ s.event_type_filter }}</code></td>
-                <td><code>{{ s.filter }}</code></td>
-                <td>{{ s.enabled }}</td>
-                <td>{{ s.priority }}</td>
-                <td>{{ s.created_at }}</td>
+                <td>{{ a.name }} <small class="muted">{{ a.status }}</small></td>
+                {% for c in a.category_status %}
+                <td style="text-align:center">{% if c.allowed %}<span style="color:var(--pico-color-green-500, green)">✓</span>{% else %}<span class="muted">·</span>{% endif %}</td>
+                {% endfor %}
             </tr>
             {% endfor %}
             </tbody>

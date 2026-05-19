@@ -89,6 +89,11 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         llm: LlmSettings::default(),
         memory: MemorySettings {
             model_cache_dir: shared_model_cache_dir(),
+            // E2E harness skips ONNX init — onnxruntime's graph optimizer
+            // crashes (SIGFPE / FPE_INTDIV) on some Zen-class CPUs during
+            // boot. Lexical FTS5 search still works for the assertions that
+            // need memory; semantic retrieval is the only thing degraded.
+            disable_embedder: true,
             extraction: Default::default(),
             consolidation: Default::default(),
             context: Default::default(),
@@ -104,8 +109,11 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         scratchpad: Default::default(),
         skills: Default::default(),
         otel: OtelConfig::default(),
+        approval: Default::default(),
         api: Default::default(),
         chat: Default::default(),
+        user_adaptation: Default::default(),
+        env: Default::default(),
     }
 }
 

@@ -17,7 +17,7 @@ outputs = ["content.text"]
 input  = "MemoryStatsIntent"
 output = "MemoryStatsResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 description = "No input required"
 

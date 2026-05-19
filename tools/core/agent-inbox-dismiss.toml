@@ -18,11 +18,11 @@ outputs = ["dismissed", "id"]
 input  = "AgentInboxDismissIntent"
 output = "AgentInboxDismissResult"
 
-[input_schema]
+[payload_schema]
 type     = "object"
 required = ["id"]
 
-[input_schema.properties.id]
+[payload_schema.properties.id]
 type        = "string"
 description = "Inbox entry ID to dismiss"
 

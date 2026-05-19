@@ -559,9 +559,31 @@ impl Kernel {
             timestamp: chrono::Utc::now(),
         };
 
-        // Validate payload against registered JSON Schema (if any)
-        self.schema_registry
-            .validate(&tool_call.tool_name, &tool_call.payload)?;
+        // Validate payload against registered JSON Schema (if any).
+        //
+        // Trust-tier behavior (see `SchemaRegistry::validate_for_dispatch`):
+        // - Core/Verified manifests: fail-closed. A validation failure aborts
+        //   dispatch with an `AgentOSError::ToolPayloadValidationFailed` whose
+        //   message carries an RFC 6901 JSON Pointer to the offending field.
+        // - Community/Blocked manifests: fail-open. The validator returns a
+        //   soft diagnostic that is logged so operators can spot drift, but
+        //   the tool's own Rust deserializer remains the authoritative gate
+        //   for unaudited authors.
+        match self
+            .schema_registry
+            .validate_for_dispatch(&tool_call.tool_name, &tool_call.payload)
+        {
+            Ok(Some(soft)) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    tool = %tool_call.tool_name,
+                    diag = %soft,
+                    "Community-tier tool payload failed schema (soft, fail-open)"
+                );
+            }
+            Ok(None) => {}
+            Err(e) => return Err(e.to_string()),
+        }
 
         let required_perms = self
             .tool_runner
@@ -1038,7 +1060,7 @@ impl Kernel {
                         "kernel_directive": "STOP",
                         "tool": tool_call.tool_name,
                         "reason": reason,
-                        "instruction": "Do NOT call this tool again with similar arguments. Synthesize a final answer using information already gathered. If the task cannot be completed, summarise what you have and end."
+                        "instruction": "Do NOT call this tool again with similar arguments. This STOP applies to THIS TOOL only — the task is not over. Try a different tool, a different payload shape, or compose with sub-agents/memory/capabilities (see Task Feasibility & Persistence). Only if discovery via `search-tools` finds no alternative AND you can name the missing capability, summarise what you have and end."
                     });
                     if let Err(e) = self
                         .context_manager
@@ -1441,7 +1463,10 @@ impl Kernel {
             #[cfg(feature = "otel")]
             let otel = self.otel.clone();
             let data_dir = self.data_dir.clone();
-            let workspace_paths = self.workspace_paths.clone();
+            let ws_for_call = self.workspace_paths_for_agent(&task.agent_id);
+            let workspace_paths = ws_for_call.read;
+            let workspace_paths_writable = ws_for_call.writable;
+            let workspace_paths_executable = ws_for_call.executable;
             let task_id = task.id;
             let agent_id = task.agent_id;
             let trace_id = call.trace_id;
@@ -1520,6 +1545,8 @@ impl Kernel {
                         task_registry: Some(task_registry),
                         escalation_query: Some(escalation_query),
                         workspace_paths,
+                        workspace_paths_writable,
+                        workspace_paths_executable,
                         capability_registry: Some(cap_registry),
                         capability_dispatcher: Some(cap_dispatcher),
                         storage_zone_query: Some(zone_query),
@@ -3971,7 +3998,7 @@ impl Kernel {
                                 "kernel_directive": "STOP",
                                 "tool": tool_call.tool_name,
                                 "reason": reason,
-                                "instruction": "Do NOT call this tool again with similar arguments. Synthesize a final answer using information already gathered. If the task cannot be completed, summarise what you have and end."
+                                "instruction": "Do NOT call this tool again with similar arguments. This STOP applies to THIS TOOL only — the task is not over. Try a different tool, a different payload shape, or compose with sub-agents/memory/capabilities (see Task Feasibility & Persistence). Only if discovery via `search-tools` finds no alternative AND you can name the missing capability, summarise what you have and end."
                             });
                             if let Err(e) = self
                                 .context_manager
@@ -4416,6 +4443,7 @@ impl Kernel {
                         EscalationSnapshot::new(summaries)
                     };
 
+                    let ws_sync = self.workspace_paths_for_agent(&task.agent_id);
                     let exec_context = ToolExecutionContext {
                         data_dir: self.data_dir.clone(),
                         task_id: task.id,
@@ -4434,7 +4462,9 @@ impl Kernel {
                         escalation_query: Some(
                             Arc::new(escalation_snapshot) as Arc<dyn EscalationQuery>
                         ),
-                        workspace_paths: self.workspace_paths.clone(),
+                        workspace_paths: ws_sync.read,
+                        workspace_paths_writable: ws_sync.writable,
+                        workspace_paths_executable: ws_sync.executable,
                         capability_registry: {
                             let reg = self.capability_registry.read().await;
                             Some(
@@ -5254,9 +5284,6 @@ impl Kernel {
             );
         }
 
-        self.context_manager.remove_context(&task.id).await;
-        self.intent_validator.remove_task(&task.id).await;
-
         // Fire TaskEnd hook (informational — result already computed).
         self.hook_registry
             .fire(&agentos_types::HookEvent::TaskEnd {
@@ -5265,6 +5292,8 @@ impl Kernel {
                 success: true,
             })
             .await;
+        self.context_manager.remove_context(&task.id).await;
+        self.intent_validator.remove_task(&task.id).await;
 
         Ok(TaskResult {
             answer: final_answer,
@@ -5272,7 +5301,11 @@ impl Kernel {
             iterations: completed_iterations,
             // FOLLOWUP: thread per-record `ToolCallRecord` through the
             // executor so scheduled run history shows tool-by-tool detail.
-            // Currently only the count is recorded.
+            // Currently only the count is recorded. When wiring, populate
+            // `ToolCallRecord.tool_call_id` from each `InferenceToolCall.id`
+            // — native Anthropic/OpenAI calls carry the provider tool_use_id,
+            // and checkpoint replay needs it to reconstruct the assistant
+            // turn's tool_calls array on resume.
             tool_calls: Vec::new(),
         })
     }

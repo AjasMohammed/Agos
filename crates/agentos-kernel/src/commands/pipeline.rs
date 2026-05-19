@@ -146,6 +146,7 @@ impl Kernel {
         });
 
         if detach {
+            let ws_pipeline = self.workspace_paths_for_agent(&agent_id);
             let executor = OwnedPipelineExecutor {
                 agent_registry: self.agent_registry.clone(),
                 active_llms: self.active_llms.clone(),
@@ -154,7 +155,9 @@ impl Kernel {
                 vault: self.vault.clone(),
                 hal: self.hal.clone(),
                 data_dir: self.data_dir.clone(),
-                workspace_paths: self.workspace_paths.clone(),
+                workspace_paths: ws_pipeline.read,
+                workspace_paths_writable: ws_pipeline.writable,
+                workspace_paths_executable: ws_pipeline.executable,
                 context_manager: self.context_manager.clone(),
                 cost_tracker: self.cost_tracker.clone(),
                 agent_id,
@@ -392,6 +395,7 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
         let trace_id = TraceID::new();
         let task_id = TaskID::new();
 
+        let ws_pipe_step = self.kernel.workspace_paths_for_agent(&self.agent_id);
         let context = ToolExecutionContext {
             data_dir: self.kernel.data_dir.clone(),
             task_id,
@@ -406,7 +410,9 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
             agent_registry: None,
             task_registry: None,
             escalation_query: None,
-            workspace_paths: self.kernel.workspace_paths.clone(),
+            workspace_paths: ws_pipe_step.read,
+            workspace_paths_writable: ws_pipe_step.writable,
+            workspace_paths_executable: ws_pipe_step.executable,
             // Pipeline execution is synchronous — cannot await RwLock.
             // Capability providers are accessed via the task executor path instead.
             capability_registry: None,
@@ -514,6 +520,12 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
 
 /// Owned pipeline executor that can be moved into a spawned task for detach mode.
 /// Holds Arc references to kernel subsystems instead of borrowing from Kernel.
+///
+/// `workspace_paths` / `workspace_paths_writable` / `workspace_paths_executable`
+/// are captured at spawn time and represent the agent's workspace grants as of
+/// that moment. Grants added or revoked after the detached pipeline starts are
+/// NOT visible — operators wanting live-grant semantics should run the
+/// pipeline in synchronous (non-detached) mode.
 pub(crate) struct OwnedPipelineExecutor {
     pub(crate) agent_registry: Arc<RwLock<AgentRegistry>>,
     pub(crate) active_llms: Arc<RwLock<HashMap<AgentID, Arc<dyn LLMCore>>>>,
@@ -523,6 +535,8 @@ pub(crate) struct OwnedPipelineExecutor {
     pub(crate) hal: Arc<HardwareAbstractionLayer>,
     pub(crate) data_dir: PathBuf,
     pub(crate) workspace_paths: Vec<PathBuf>,
+    pub(crate) workspace_paths_writable: Vec<PathBuf>,
+    pub(crate) workspace_paths_executable: Vec<PathBuf>,
     pub(crate) context_manager: Arc<ContextManager>,
     pub(crate) cost_tracker: Arc<crate::cost_tracker::CostTracker>,
     pub(crate) agent_id: AgentID,
@@ -780,6 +794,8 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
             task_registry: None,
             escalation_query: None,
             workspace_paths: self.workspace_paths.clone(),
+            workspace_paths_writable: self.workspace_paths_writable.clone(),
+            workspace_paths_executable: self.workspace_paths_executable.clone(),
             // Pipeline execution is synchronous — cannot await RwLock.
             // Capability providers are accessed via the task executor path instead.
             capability_registry: None,

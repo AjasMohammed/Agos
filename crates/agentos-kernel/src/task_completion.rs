@@ -949,10 +949,23 @@ impl Kernel {
             }
         }
 
-        let observed_iterations = match self.checkpoint_store.get_latest(task_id).await {
-            Ok(Some(record)) => Some(record.step_num),
-            // Fallback already normalized to 1-based above.
-            _ => last_iteration,
+        // Both signals are 1-based and best-effort. They can disagree when a
+        // checkpoint write succeeds but the episodic write for the same
+        // iteration fails (or vice versa). Take the max so the user-visible
+        // metric never under-reports progress relative to "Last tool: foo
+        // (iteration N)".
+        let observed_iterations = match (
+            self.checkpoint_store
+                .get_latest(task_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.step_num),
+            last_iteration,
+        ) {
+            (Some(cp), Some(li)) => Some(cp.max(li)),
+            (Some(cp), None) => Some(cp),
+            (None, li) => li,
         };
 
         (
@@ -1132,9 +1145,15 @@ impl Kernel {
         // across all adapters. Telegram's HTML converter strips leading `>`
         // (it isn't recognised as a blockquote) and Slack/Discord render
         // fenced blocks consistently.
+        //
+        // A prompt containing a literal triple-backtick would close the fence
+        // early and cause the rest of the notification to leak as raw markdown
+        // (and on Telegram, the HTML render then fails with "unclosed entity").
+        // Defuse by inserting a zero-width space between the backticks.
+        let safe_prompt = prompt_preview.replace("```", "`\u{200B}``");
         out.push_str("### Original request\n\n");
         out.push_str("```\n");
-        out.push_str(&prompt_preview);
+        out.push_str(&safe_prompt);
         out.push_str("\n```\n");
 
         out
@@ -1357,9 +1376,16 @@ mod tests {
             Some(&failure),
             now,
         );
-        let z_count = body.matches('Z').count();
-        assert_eq!(z_count, 200, "prompt should be truncated to 200 chars");
-        // 200 Zs + ellipsis appears inside the fenced block
+        // Assert structurally — count-based assertions would silently break
+        // the day someone adds a Z to any static body label.
+        assert!(
+            body.contains(&"Z".repeat(200)),
+            "body should contain a run of 200 Zs"
+        );
+        assert!(
+            !body.contains(&"Z".repeat(201)),
+            "body must not contain 201 Zs (cap violated)"
+        );
         let expected_block = format!("```\n{}…\n```", "Z".repeat(200));
         assert!(
             body.contains(&expected_block),
@@ -1411,6 +1437,34 @@ mod tests {
         assert!(body.contains("**Summary:** the answer"));
         assert!(!body.contains("### Why"));
         assert!(!body.contains("### Where"));
+    }
+
+    #[test]
+    fn failure_body_neutralizes_triple_backtick_in_prompt() {
+        // A prompt that itself contains ``` must not close the fenced block early.
+        let task = dummy_task("explain this code: ```rust\nfn x() {}\n```");
+        let failure = FailureDetails::default();
+        let body = Kernel::format_completion_body(
+            TaskOutcome::Failed,
+            &task,
+            "agent",
+            "summary",
+            500,
+            None,
+            None,
+            None,
+            Some(&failure),
+            chrono::Utc::now(),
+        );
+        // The opening + closing fences of the rendered block, plus zero
+        // additional triple-backtick runs from the prompt body.
+        let fence_runs = body.matches("```").count();
+        assert_eq!(
+            fence_runs, 2,
+            "exactly one fenced block: opening + closing; embedded ``` must be neutralized"
+        );
+        // Zero-width space inserted between original backticks.
+        assert!(body.contains("`\u{200B}``"));
     }
 
     #[test]

@@ -18,11 +18,11 @@ outputs = ["content.structured"]
 input  = "ToolInfoQuery"
 output = "ToolInfo"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["tool_name"]
 
-[input_schema.properties.tool_name]
+[payload_schema.properties.tool_name]
 type = "string"
 description = "Tool name from the agent-manual index, for example 'memory-write'."
 

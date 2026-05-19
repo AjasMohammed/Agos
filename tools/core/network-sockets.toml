@@ -23,39 +23,39 @@ outputs = ["content.structured"]
 input  = "NetworkSocketsIntent"
 output = "NetworkSocketsResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.protocol]
+[payload_schema.properties.protocol]
 type = "string"
 enum = ["tcp", "udp", "all"]
 default = "all"
 description = "Protocol to list"
 
-[input_schema.properties.state]
+[payload_schema.properties.state]
 type = "string"
 enum = ["listen", "established", "all"]
 default = "all"
 description = "Socket state filter (UDP ignores state)"
 
-[input_schema.properties.ipv]
+[payload_schema.properties.ipv]
 type = "string"
 enum = ["v4", "v6", "both"]
 default = "both"
 description = "IP version filter"
 
-[input_schema.properties.port]
+[payload_schema.properties.port]
 type = "integer"
 minimum = 1
 maximum = 65535
 description = "Filter by exact local port number"
 
-[input_schema.properties.include_pid]
+[payload_schema.properties.include_pid]
 type = "boolean"
 default = true
 description = "Attempt to resolve owning process PID and name (slower)"
 
-[input_schema.properties.limit]
+[payload_schema.properties.limit]
 type = "integer"
 minimum = 1
 maximum = 1000

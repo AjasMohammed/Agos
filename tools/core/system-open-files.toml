@@ -23,19 +23,19 @@ outputs = ["content.structured"]
 input  = "SystemOpenFilesIntent"
 output = "SystemOpenFilesResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.pid]
+[payload_schema.properties.pid]
 type = "integer"
 minimum = 1
 description = "Filter by process PID (significantly faster)"
 
-[input_schema.properties.path_contains]
+[payload_schema.properties.path_contains]
 type = "string"
 description = "Filter by file path substring"
 
-[input_schema.properties.limit]
+[payload_schema.properties.limit]
 type = "integer"
 minimum = 1
 maximum = 1000

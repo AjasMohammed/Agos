@@ -17,10 +17,10 @@ outputs = ["content.structured"]
 input  = "AgentListQuery"
 output = "AgentListResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.status]
+[payload_schema.properties.status]
 type = "string"
 description = "Optional agent status filter (case-insensitive), e.g. idle or busy"
 

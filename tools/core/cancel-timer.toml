@@ -19,11 +19,11 @@ outputs = ["status"]
 input  = "CancelTimerIntent"
 output = "CancelTimerResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["name"]
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 type        = "string"
 description = "Name of the timer to cancel"
 

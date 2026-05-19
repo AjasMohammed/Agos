@@ -18,33 +18,33 @@ outputs = ["status"]
 input  = "MemoryWriteIntent"
 output = "WriteResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["content"]
 
-[input_schema.properties.content]
+[payload_schema.properties.content]
 type = "string"
 description = "Memory content to store"
 
-[input_schema.properties.scope]
+[payload_schema.properties.scope]
 type = "string"
 enum = ["semantic", "episodic"]
 default = "semantic"
 description = "Target memory tier"
 
-[input_schema.properties.key]
+[payload_schema.properties.key]
 type = "string"
 description = "Semantic key (auto-generated when omitted)"
 
-[input_schema.properties.summary]
+[payload_schema.properties.summary]
 type = "string"
 description = "Optional episodic summary"
 
-[input_schema.properties.tags]
+[payload_schema.properties.tags]
 type = ["string", "array"]
 description = "Semantic tags as comma-separated string or array"
 
-[input_schema.properties.tags.items]
+[payload_schema.properties.tags.items]
 type = "string"
 
 

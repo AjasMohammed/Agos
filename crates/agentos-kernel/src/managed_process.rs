@@ -7,12 +7,13 @@
 //! completion or agent disconnect.
 
 use crate::capability_provider::{CapabilityContext, CapabilityProvider, CapabilityResult};
+use crate::managed_env::{activated_env, WorkspaceInfo, WorkspaceResolver};
 use agentos_types::{AgentID, AgentOSError, PermissionOp, TaskID};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -206,6 +207,15 @@ fn validate_binary(
 // Process table
 // ---------------------------------------------------------------------------
 
+/// Callback invoked when a managed process exits abnormally
+/// (status [`ProcessStatus::Failed`] or [`ProcessStatus::Killed`]).
+///
+/// Receives a snapshot of the process info at exit time. The kernel uses this
+/// to emit a `ProcessCrashed` event without `managed_process` having to depend
+/// on `EventBus`. Callbacks must be non-blocking — long work should be
+/// `tokio::spawn`ed inside the callback.
+pub type ProcessCrashCallback = Arc<dyn Fn(ManagedProcessInfo) + Send + Sync>;
+
 /// Shared process table for all agents.
 #[derive(Clone)]
 pub struct ProcessTable {
@@ -217,6 +227,10 @@ struct ProcessTableInner {
     /// process_id -> RunningProcess
     processes: HashMap<String, RunningProcess>,
     next_id: u64,
+    /// Set via [`ProcessTable::set_crash_callback`]. Fired from
+    /// [`ProcessTable::mark_exited`] when a process exits with
+    /// `Failed` or `Killed` status.
+    crash_callback: Option<ProcessCrashCallback>,
 }
 
 impl ProcessTable {
@@ -225,9 +239,17 @@ impl ProcessTable {
             inner: Arc::new(RwLock::new(ProcessTableInner {
                 processes: HashMap::new(),
                 next_id: 1,
+                crash_callback: None,
             })),
             config,
         }
+    }
+
+    /// Install a callback fired whenever a managed process exits with
+    /// abnormal status. Replaces any previously installed callback.
+    pub async fn set_crash_callback(&self, cb: ProcessCrashCallback) {
+        let mut inner = self.inner.write().await;
+        inner.crash_callback = Some(cb);
     }
 
     async fn get_info(&self, process_id: &str, agent_id: &AgentID) -> Option<ManagedProcessInfo> {
@@ -268,11 +290,30 @@ impl ProcessTable {
     }
 
     async fn mark_exited(&self, process_id: &str, exit_code: i32, status: ProcessStatus) {
-        let mut inner = self.inner.write().await;
-        if let Some(proc) = inner.processes.get_mut(process_id) {
-            proc.info.status = status;
-            proc.info.exit_code = Some(exit_code);
-            proc.info.exited_at = Some(chrono::Utc::now());
+        // Update under the write lock; collect the crash-callback inputs while
+        // we still hold it so we can fire after releasing — keeping callback
+        // execution out of the critical section.
+        let crash_fire = {
+            let mut inner = self.inner.write().await;
+            let info_snapshot = inner.processes.get_mut(process_id).map(|proc| {
+                proc.info.status = status;
+                proc.info.exit_code = Some(exit_code);
+                proc.info.exited_at = Some(chrono::Utc::now());
+                proc.info.clone()
+            });
+            match (
+                info_snapshot,
+                matches!(status, ProcessStatus::Failed | ProcessStatus::Killed),
+            ) {
+                (Some(info), true) => inner
+                    .crash_callback
+                    .as_ref()
+                    .map(|cb| (Arc::clone(cb), info)),
+                _ => None,
+            }
+        };
+        if let Some((cb, info)) = crash_fire {
+            cb(info);
         }
     }
 
@@ -339,22 +380,113 @@ impl Default for ProcessTable {
 /// Managed processes capability provider.
 pub struct ProcessProvider {
     table: ProcessTable,
+    /// Optional resolver for `workspace` parameters on `proc-spawn`. When set,
+    /// the spawn flow looks up the workspace, resolves binaries inside it
+    /// (venv/bin → node_modules/.bin → bin → system PATH), and activates
+    /// the workspace env vars before exec.
+    workspace_resolver: Option<Arc<dyn WorkspaceResolver>>,
 }
 
 impl ProcessProvider {
     pub fn new(table: ProcessTable) -> Self {
-        Self { table }
+        Self {
+            table,
+            workspace_resolver: None,
+        }
     }
 
     pub fn with_defaults() -> Self {
         Self::new(ProcessTable::default())
     }
 
+    /// Attach a workspace resolver. Wired at kernel boot to the shared
+    /// `EnvProvider`.
+    pub fn with_resolver(
+        table: ProcessTable,
+        workspace_resolver: Arc<dyn WorkspaceResolver>,
+    ) -> Self {
+        Self {
+            table,
+            workspace_resolver: Some(workspace_resolver),
+        }
+    }
+
+    /// Set a workspace resolver post-construction. Used at kernel boot where
+    /// the ProcessTable is constructed before the EnvProvider.
+    pub fn set_workspace_resolver(&mut self, resolver: Arc<dyn WorkspaceResolver>) {
+        self.workspace_resolver = Some(resolver);
+    }
+
     /// Get a reference to the process table for sharing.
     pub fn table(&self) -> &ProcessTable {
         &self.table
     }
+}
 
+/// Resolve a binary name against the workspace's local bin dirs.
+///
+/// Order matches `activated_env`'s `PATH`: venv/bin → node_modules/.bin →
+/// bin. Returns `None` if no match is an executable regular file confined
+/// to the workspace tree.
+///
+/// SECURITY: the lookup is bounded to the workspace in two layers:
+/// 1. `binary` must not contain path separators or `..` segments. This blocks
+///    inputs like `"../../../bin/sh"` that would otherwise traverse out via
+///    `PathBuf::join`.
+/// 2. The resolved path is canonicalized and its canonical form must start
+///    with the canonical workspace root. This blocks symlinks that a
+///    package install (pip/npm post-install scripts) might drop to point
+///    out of the workspace at e.g. `/bin/rm`.
+fn resolve_workspace_binary(ws: &WorkspaceInfo, binary: &str) -> Option<PathBuf> {
+    // Layer 1: reject any binary name that could traverse via the join.
+    if binary.is_empty()
+        || binary.contains('/')
+        || binary.contains('\\')
+        || binary.contains('\0')
+        || binary.split(|c| c == '/' || c == '\\').any(|seg| seg == "..")
+    {
+        return None;
+    }
+
+    let canonical_root = std::fs::canonicalize(&ws.root).ok()?;
+
+    for sub in ["venv/bin", "node_modules/.bin", "bin"] {
+        let p = ws.root.join(sub).join(binary);
+        if !p.is_file() || !is_executable(&p) {
+            continue;
+        }
+        // Layer 2: canonicalize-and-prefix-check defeats symlink escapes.
+        let Ok(canonical) = std::fs::canonicalize(&p) else {
+            continue;
+        };
+        if !canonical.starts_with(&canonical_root) {
+            tracing::warn!(
+                workspace = %ws.root.display(),
+                binary = binary,
+                resolved = %canonical.display(),
+                "rejected workspace binary that resolved outside the workspace tree (symlink escape attempt?)"
+            );
+            continue;
+        }
+        return Some(canonical);
+    }
+    None
+}
+
+#[cfg(unix)]
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(p: &Path) -> bool {
+    p.exists()
+}
+
+impl ProcessProvider {
     async fn action_spawn(
         &self,
         params: &Value,
@@ -373,9 +505,28 @@ impl ProcessProvider {
             })
             .unwrap_or_default();
 
+        // Optional workspace name. When set, the binary is resolved against
+        // {ws}/venv/bin → {ws}/node_modules/.bin → {ws}/bin, the workspace
+        // env (VIRTUAL_ENV + PATH prepends) is activated for the child, and
+        // working_dir defaults to the workspace root.
+        let workspace_name = params["workspace"].as_str();
+        let workspace_info = match (workspace_name, self.workspace_resolver.as_ref()) {
+            (Some(name), Some(resolver)) => resolver.resolve(context.agent_id, name).await,
+            _ => None,
+        };
+        if workspace_name.is_some() && workspace_info.is_none() {
+            return Err(AgentOSError::KernelError {
+                reason: format!(
+                    "workspace '{}' not found for this agent; create it with env-create first",
+                    workspace_name.unwrap_or("")
+                ),
+            });
+        }
+
         let working_dir = params["working_dir"]
             .as_str()
             .map(PathBuf::from)
+            .or_else(|| workspace_info.as_ref().map(|w| w.root.clone()))
             .unwrap_or_else(|| context.data_dir.clone());
 
         // SECURITY: validate working_dir is within agent's scope.
@@ -394,35 +545,68 @@ impl ProcessProvider {
             });
         }
 
-        // SECURITY: reject path-based binaries — require bare names resolved via PATH.
-        if binary.contains('/') || binary.contains('\\') {
-            return Err(AgentOSError::PermissionDenied {
-                resource: "proc.spawn".into(),
-                operation:
-                    "binary must be a bare name (no paths); system PATH is used for resolution"
-                        .into(),
-            });
-        }
+        // Resolve the binary. With a workspace, prefer the workspace's local
+        // bin dirs and bypass the global binary allowlist (the workspace is
+        // the sandbox). Without a workspace, keep the original "no path-based
+        // binaries + allowlist" rules.
+        let (resolved_binary, in_workspace) = if let Some(ws) = workspace_info.as_ref() {
+            match resolve_workspace_binary(ws, binary) {
+                Some(path) => (path.to_string_lossy().into_owned(), true),
+                None => {
+                    // Fall back to PATH lookup, but still forbid path-based binaries.
+                    if binary.contains('/') || binary.contains('\\') {
+                        return Err(AgentOSError::PermissionDenied {
+                            resource: "proc.spawn".into(),
+                            operation: format!(
+                                "binary '{}' not found in workspace '{}' and absolute paths are not allowed",
+                                binary,
+                                ws.root.display()
+                            ),
+                        });
+                    }
+                    (binary.to_string(), false)
+                }
+            }
+        } else {
+            if binary.contains('/') || binary.contains('\\') {
+                return Err(AgentOSError::PermissionDenied {
+                    resource: "proc.spawn".into(),
+                    operation:
+                        "binary must be a bare name (no paths); system PATH is used for resolution"
+                            .into(),
+                });
+            }
+            (binary.to_string(), false)
+        };
 
-        // SECURITY: validate binary against allowlist/denylist.
-        validate_binary(
-            binary,
-            &self.table.config.allowed_binaries,
-            &self.table.config.denied_binaries,
-        )?;
+        // SECURITY: skip the global allowlist only when the binary was
+        // resolved inside the workspace tree (fail-closed everywhere else).
+        if !in_workspace {
+            validate_binary(
+                binary,
+                &self.table.config.allowed_binaries,
+                &self.table.config.denied_binaries,
+            )?;
+        }
 
         let limits = self.table.config.default_limits.clone();
 
         // Spawn the process first (we need the PID for the table entry).
-        let mut cmd = tokio::process::Command::new(binary);
+        let mut cmd = tokio::process::Command::new(&resolved_binary);
         cmd.args(&args)
             .current_dir(&working_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        if let Some(ws) = workspace_info.as_ref() {
+            cmd.env_clear();
+            for (k, v) in activated_env(ws) {
+                cmd.env(k, v);
+            }
+        }
 
         let mut child = cmd.spawn().map_err(|e| AgentOSError::ToolExecutionFailed {
             tool_name: "proc-spawn".into(),
-            reason: format!("failed to spawn '{binary}': {e}"),
+            reason: format!("failed to spawn '{resolved_binary}': {e}"),
         })?;
 
         let pid = child.id();
@@ -456,7 +640,7 @@ impl ProcessProvider {
                 process_id: proc_id.clone(),
                 agent_id: context.agent_id,
                 task_id: context.task_id,
-                binary: binary.to_string(),
+                binary: resolved_binary.clone(),
                 args: args.clone(),
                 working_dir: working_dir.clone(),
                 pid,
@@ -557,17 +741,21 @@ impl ProcessProvider {
         Ok(CapabilityResult {
             output: json!({
                 "process_id": process_id,
-                "binary": binary,
+                "binary": resolved_binary,
                 "args": args,
                 "pid": pid,
                 "status": "running",
+                "workspace": workspace_name,
+                "resolved_via": if in_workspace { "workspace" } else { "path" },
             }),
             audit_metadata: json!({
                 "event": "ManagedProcessSpawned",
                 "process_id": process_id,
-                "binary": binary,
+                "binary": resolved_binary,
                 "pid": pid,
                 "agent_id": context.agent_id.to_string(),
+                "workspace": workspace_name,
+                "resolved_via": if in_workspace { "workspace" } else { "path" },
             }),
         })
     }
@@ -861,6 +1049,107 @@ mod tests {
 
         assert!(validate_binary("python", &allowed, &denied).is_ok());
         assert!(validate_binary("node", &allowed, &denied).is_ok());
+    }
+
+    #[test]
+    fn resolve_workspace_binary_prefers_venv() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let venv_bin = tmp.path().join("venv").join("bin");
+        std::fs::create_dir_all(&venv_bin).unwrap();
+        let bin_path = venv_bin.join("pytest");
+        std::fs::write(&bin_path, "#!/bin/sh\necho hi").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let ws = crate::managed_env::WorkspaceInfo {
+            root: tmp.path().to_path_buf(),
+            ecosystem: crate::managed_env::Ecosystem::Python,
+        };
+        let resolved = resolve_workspace_binary(&ws, "pytest").unwrap();
+        assert!(resolved.ends_with("venv/bin/pytest"));
+    }
+
+    #[test]
+    fn resolve_workspace_binary_returns_none_for_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = crate::managed_env::WorkspaceInfo {
+            root: tmp.path().to_path_buf(),
+            ecosystem: crate::managed_env::Ecosystem::NodeJs,
+        };
+        assert!(resolve_workspace_binary(&ws, "nope").is_none());
+    }
+
+    #[test]
+    fn resolve_workspace_binary_rejects_path_traversal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("venv").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let ws = crate::managed_env::WorkspaceInfo {
+            root: tmp.path().to_path_buf(),
+            ecosystem: crate::managed_env::Ecosystem::Python,
+        };
+        // All of these must return None — they could otherwise reach /bin/sh
+        // or similar via the OS resolving `..` segments.
+        assert!(resolve_workspace_binary(&ws, "../../../bin/sh").is_none());
+        assert!(resolve_workspace_binary(&ws, "../sh").is_none());
+        assert!(resolve_workspace_binary(&ws, "foo/bar").is_none());
+        assert!(resolve_workspace_binary(&ws, "\\foo").is_none());
+        assert!(resolve_workspace_binary(&ws, "").is_none());
+        assert!(resolve_workspace_binary(&ws, "foo\0bar").is_none());
+        // Plain `..` as the whole input is rejected; a name *containing* the
+        // characters `..` (like `pip3.10`) must still be accepted as a name.
+        assert!(resolve_workspace_binary(&ws, "..").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_workspace_binary_rejects_symlink_escape() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let venv_bin = tmp.path().join("venv").join("bin");
+        std::fs::create_dir_all(&venv_bin).unwrap();
+
+        // Drop a target outside the workspace so canonicalize succeeds.
+        let outside = tempfile::TempDir::new().unwrap();
+        let escape_target = outside.path().join("malicious");
+        std::fs::write(&escape_target, "#!/bin/sh\necho pwned").unwrap();
+        std::fs::set_permissions(&escape_target, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Symlink {ws}/venv/bin/innocuous -> /tmp/outside/malicious
+        let link = venv_bin.join("innocuous");
+        std::os::unix::fs::symlink(&escape_target, &link).unwrap();
+
+        let ws = crate::managed_env::WorkspaceInfo {
+            root: tmp.path().to_path_buf(),
+            ecosystem: crate::managed_env::Ecosystem::Python,
+        };
+        // The symlink itself is_file() and executable, but its canonical
+        // target lives outside the workspace — must be rejected.
+        assert!(resolve_workspace_binary(&ws, "innocuous").is_none());
+    }
+
+    #[test]
+    fn resolve_workspace_binary_skips_non_executable() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let file = bin.join("plain");
+        std::fs::write(&file, "not exec").unwrap();
+        // Permissions deliberately not set executable on unix.
+        let ws = crate::managed_env::WorkspaceInfo {
+            root: tmp.path().to_path_buf(),
+            ecosystem: crate::managed_env::Ecosystem::Generic,
+        };
+        #[cfg(unix)]
+        {
+            assert!(resolve_workspace_binary(&ws, "plain").is_none());
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (&ws, &file);
+        }
     }
 
     #[test]

@@ -114,12 +114,29 @@ impl AgentTool for ShellExec {
                 .arg("/home")
                 .arg("--tmpfs")
                 .arg("/tmp")
-                // Bind the data dir as the only writable place (after /home tmpfs
-                // so it isn't shadowed when data_dir lives under /home/<user>).
+                // Bind the data dir as the always-writable place (after the
+                // /home tmpfs so it isn't shadowed when data_dir lives under
+                // /home/<user>).
                 .arg("--bind")
                 .arg(&data_dir_str)
-                .arg(&data_dir_str)
-                .arg("--dev")
+                .arg(&data_dir_str);
+
+            // Bind every `workspace_paths_executable` entry as writable. These
+            // are user-granted directories with `--mode rwx` — the sandbox
+            // child sees them at their real on-disk path so commands like
+            // `ls`, `cargo build`, `python` act on real files. Bindings come
+            // AFTER the tmpfs steps so they survive being shadowed. Skip any
+            // path under data_dir (already bound) to avoid bwrap "already
+            // bound" errors.
+            let data_dir_canon = std::path::Path::new(&data_dir_str);
+            for exec_path in &context.workspace_paths_executable {
+                if exec_path.starts_with(data_dir_canon) {
+                    continue;
+                }
+                proc.arg("--bind").arg(exec_path).arg(exec_path);
+            }
+
+            proc.arg("--dev")
                 .arg("/dev")
                 .arg("--proc")
                 .arg("/proc")
@@ -254,6 +271,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,

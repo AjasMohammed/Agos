@@ -17,11 +17,11 @@ outputs = ["content.structured"]
 input  = "TaskStatusQuery"
 output = "TaskStatusResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["task_id"]
 
-[input_schema.properties.task_id]
+[payload_schema.properties.task_id]
 type = "string"
 format = "uuid"
 description = "Task UUID"
