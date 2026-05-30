@@ -603,7 +603,7 @@ impl Kernel {
     }
 
     /// Resume a task from its latest checkpoint.
-    pub(crate) async fn cmd_resume_task(&self, task_id: TaskID) -> KernelResponse {
+    pub async fn cmd_resume_task(&self, task_id: TaskID) -> KernelResponse {
         // 1. Load the latest checkpoint.
         let record = match self.checkpoint_store.get_latest(&task_id).await {
             Ok(Some(r)) => r,

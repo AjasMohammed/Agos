@@ -344,6 +344,29 @@ pub async fn send_with_retry(
                     "other"
                 };
                 full_reason += &format!(" [kind={}]", kind);
+
+                // Read/idle timeouts (connection established, server stopped
+                // responding) take the full per-attempt timeout to surface —
+                // ~60s for the streaming clients — and rarely recover on retry.
+                // Retrying them `max_retries` times turned a single ~60s failure
+                // into a ~4min wait for interactive chat (observed in kernel logs
+                // against a flapping NVIDIA gateway). Fail fast on these. The
+                // failure is already recorded against the breaker above; connect
+                // -level timeouts (`is_connect`) are cheap (~10s) and stay
+                // retryable below.
+                if e.is_timeout() && !e.is_connect() {
+                    warn!(
+                        provider,
+                        kind,
+                        error = %e,
+                        "Read/idle timeout — not retrying (fail fast)"
+                    );
+                    return Err(AgentOSError::LLMError {
+                        provider: provider.to_string(),
+                        reason: full_reason,
+                    });
+                }
+
                 last_error = Some(full_reason);
 
                 if attempt < policy.max_retries {
@@ -523,6 +546,65 @@ mod tests {
     fn test_is_retryable_status_includes_408_504() {
         assert!(is_retryable_status(408));
         assert!(is_retryable_status(504));
+    }
+
+    /// A read/idle timeout (connection accepted, server never responds) must
+    /// NOT be retried — retrying a 60s-per-attempt timeout turned a single
+    /// failure into a ~4min wait for interactive chat. We assert by counting
+    /// accepted connections: fail-fast means exactly one, a retry loop would
+    /// produce `max_retries + 1`.
+    #[tokio::test]
+    async fn read_timeout_is_not_retried() {
+        use std::sync::atomic::AtomicU32;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_cl = Arc::clone(&accepts);
+        tokio::spawn(async move {
+            // Accept connections and hold them open without ever responding,
+            // forcing the client's request to hit its read/overall timeout.
+            let mut held = Vec::new();
+            loop {
+                if let Ok((stream, _)) = listener.accept().await {
+                    accepts_cl.fetch_add(1, Ordering::SeqCst);
+                    held.push(stream);
+                }
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(300))
+            .build()
+            .unwrap();
+        let url = format!("http://{addr}/");
+        let policy = RetryPolicy {
+            max_retries: 3,
+            base_delay: Duration::from_millis(10),
+            max_delay: Duration::from_millis(50),
+            backoff_factor: 2.0,
+        };
+        let breaker = CircuitBreaker::default();
+
+        let start = Instant::now();
+        let res = send_with_retry("test", &policy, &breaker, None, || client.get(&url)).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            res.is_err(),
+            "hanging server should produce a timeout error"
+        );
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            1,
+            "read/idle timeout must not be retried (expected exactly one connection)"
+        );
+        // And it should fail fast — far under 4 × the per-attempt timeout.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "timeout fail-fast took too long: {elapsed:?}"
+        );
     }
 
     /// Regression test for the per-provider concurrency cap. Two

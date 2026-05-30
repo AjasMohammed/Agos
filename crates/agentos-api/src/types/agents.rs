@@ -2,8 +2,9 @@ use agentos_types::{AgentID, CostSnapshot, ThinkingLevel};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ApiAgentSummary {
+    #[schema(value_type = String)]
     pub id: AgentID,
     pub name: String,
     pub provider: String,
@@ -16,15 +17,16 @@ pub struct ApiAgentSummary {
     pub supports_images: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ApiAgentDetail {
     pub summary: ApiAgentSummary,
     pub permissions: Vec<String>,
     pub recent_tasks: Vec<super::tasks::ApiTaskSummary>,
+    #[schema(value_type = Option<Object>)]
     pub cost_snapshot: Option<CostSnapshot>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ConnectAgentRequest {
     pub name: String,
     pub provider: String,
@@ -36,21 +38,23 @@ pub struct ConnectAgentRequest {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
+    #[schema(value_type = String)]
     pub thinking_level: Option<ThinkingLevel>,
     #[serde(default)]
     pub system_prompt: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct UpdateAgentSettingsRequest {
     pub agent_name: String,
     pub description: String,
+    #[schema(value_type = String)]
     pub thinking_level: ThinkingLevel,
     #[serde(default)]
     pub system_prompt: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PermissionRequest {
     pub agent_name: String,
     pub permission: String,

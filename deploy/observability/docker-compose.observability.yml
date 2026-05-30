@@ -1,0 +1,51 @@
+# Observability overlay for AgentOS — Prometheus + Grafana.
+#
+# Compose with the root stack (which already defines `agentos` and `jaeger`):
+#
+#   docker compose -f docker-compose.yml \
+#                  -f deploy/observability/docker-compose.observability.yml up -d
+#
+# Then:
+#   - Prometheus UI : http://localhost:9090   (scrapes agentos:9091/metrics)
+#   - Grafana       : http://localhost:3000   (admin / admin on first login)
+#   - Jaeger UI     : http://localhost:16686  (from the root compose; set AGENTOS_OTEL_ENABLED=true)
+#
+# This file only ADDS services; it reuses the network + `agentos`/`jaeger`
+# services from the root docker-compose.yml. Do not redefine those here.
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: agentos-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - agentos
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: agentos-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      # Auto-provision the AgentOS dashboard + a Prometheus datasource.
+      - ./deploy/observability/grafana-dashboard-agentos.json:/var/lib/grafana/dashboards/agentos.json:ro
+      - ./deploy/observability/grafana-provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+  grafana-data:

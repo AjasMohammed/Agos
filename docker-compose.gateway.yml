@@ -1,0 +1,40 @@
+# Gateway ("run as a bot") overlay for AgentOS.
+#
+# Runs the messaging gateway daemon instead of (or alongside, with a distinct
+# data dir) the web server. Compose with the root stack:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gateway.yml up -d agentos-gateway
+#
+# Channels are declared in the mounted config's [gateway] block; tokens come
+# from the vault (referenced by credential_key), seeded via `agentos secret set`
+# — never inline here. No web/health ports are published by default.
+
+services:
+  agentos-gateway:
+    build: .
+    image: agentos:latest
+    container_name: agentos-gateway
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+      - /run
+      - /var/log/agentos:uid=65532,gid=65532,mode=0755
+    environment:
+      - AGENTOS_DATA_DIR=/var/lib/agentos/data
+      # Provide the vault passphrase via a Docker/K8s secret in production:
+      #   AGENTOS_VAULT_PASSPHRASE_FILE=/run/secrets/vault_pass
+      - AGENTOS_VAULT_PASSPHRASE=${AGENTOS_VAULT_PASSPHRASE:-}
+    volumes:
+      # Separate volume from the web `agentos` service so the two daemons do not
+      # share a bus socket / state DB. Pre-seed the vault here with channel tokens.
+      - agentos-gateway-data:/var/lib/agentos/data
+      - ./config/docker.toml:/etc/agentos/config.toml:ro
+
+volumes:
+  agentos-gateway-data:

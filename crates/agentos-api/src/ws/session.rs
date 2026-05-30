@@ -9,19 +9,27 @@ use crate::service::KernelService;
 use super::broadcaster::WsBroadcaster;
 use super::protocol::{ClientFrame, ServerFrame};
 
+/// Maximum channels a single connection may subscribe to (fail-closed against
+/// fan-out abuse / memory growth).
+const MAX_SUBSCRIPTIONS: usize = 64;
+
 /// Per-connection state for a WebSocket client.
 pub struct WsSession {
     subscriptions: HashMap<String, String>, // sub_id → channel
     next_sub_id: u64,
     outbound_tx: mpsc::Sender<ServerFrame>,
+    /// Scopes of the API key that authenticated this connection (e.g. `"audit:r"`,
+    /// `"*:rw"`). Empty = full access (bootstrap key). Used to gate `subscribe`.
+    permissions: Vec<String>,
 }
 
 impl WsSession {
-    pub fn new(outbound_tx: mpsc::Sender<ServerFrame>) -> Self {
+    pub fn new(outbound_tx: mpsc::Sender<ServerFrame>, permissions: Vec<String>) -> Self {
         Self {
             subscriptions: HashMap::new(),
             next_sub_id: 0,
             outbound_tx,
+            permissions,
         }
     }
 
@@ -39,6 +47,31 @@ impl WsSession {
     ) {
         match frame {
             ClientFrame::Subscribe { channel, .. } => {
+                // Cap per-connection subscriptions.
+                if self.subscriptions.len() >= MAX_SUBSCRIPTIONS {
+                    let _ = self
+                        .send(ServerFrame::Error {
+                            code: "SUBSCRIPTION_LIMIT".into(),
+                            message: format!("Subscription limit ({MAX_SUBSCRIPTIONS}) reached"),
+                        })
+                        .await;
+                    return;
+                }
+                // Scope check: subscribing to a channel requires the matching read
+                // scope (e.g. `audit` needs `audit:r`). Empty key permissions =
+                // full access (bootstrap). Mirrors REST `require_permission`.
+                let required = channel_required_scope(&channel);
+                if !permissions_grant(&self.permissions, &required) {
+                    let _ = self
+                        .send(ServerFrame::Error {
+                            code: "FORBIDDEN".into(),
+                            message: format!(
+                                "Missing permission '{required}' for channel '{channel}'"
+                            ),
+                        })
+                        .await;
+                    return;
+                }
                 let sub_id = self.alloc_sub_id();
                 self.subscriptions.insert(sub_id.clone(), channel.clone());
                 broadcaster
@@ -191,4 +224,34 @@ impl WsSession {
         self.next_sub_id += 1;
         id
     }
+}
+
+/// The read scope required to subscribe to `channel`. The base (before any
+/// `:id` suffix) maps to a `<resource>:r` scope; `agent-chat` maps to `chat`.
+fn channel_required_scope(channel: &str) -> String {
+    let base = channel.split(':').next().unwrap_or(channel);
+    let resource = match base {
+        "agent-chat" => "chat",
+        other => other,
+    };
+    format!("{resource}:r")
+}
+
+/// Whether `permissions` grant `required` (`resource:op`). Empty permissions =
+/// full access (bootstrap key). Mirrors `handlers::require_permission`.
+fn permissions_grant(permissions: &[String], required: &str) -> bool {
+    if permissions.is_empty() {
+        return true;
+    }
+    let req_res = required.split(':').next().unwrap_or(required);
+    let req_op = required
+        .split(':')
+        .nth(1)
+        .and_then(|o| o.chars().next())
+        .unwrap_or('r');
+    permissions.iter().any(|p| {
+        let res = p.split(':').next().unwrap_or(p);
+        let op = p.split(':').nth(1).unwrap_or("r");
+        (res == req_res || res == "*") && op.contains(req_op)
+    })
 }

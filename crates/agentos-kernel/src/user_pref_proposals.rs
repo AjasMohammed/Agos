@@ -323,7 +323,7 @@ impl UserPrefProposalStore {
         .context("spawn_blocking transition proposal")?
     }
 
-    async fn list_by_status(
+    pub async fn list_by_status(
         &self,
         status: ProposalStatus,
         limit: u32,

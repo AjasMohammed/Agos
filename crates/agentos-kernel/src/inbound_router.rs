@@ -58,6 +58,16 @@ pub struct InboundRouter {
     /// commands. Without this, anyone who can DM the bot could resolve
     /// pending escalations.
     pairing_manager: Arc<PairingManager>,
+    /// Vault, for resolving a channel's bot-token credential when downloading
+    /// inbound media (Telegram getFile needs the token).
+    vault: Arc<agentos_vault::SecretsVault>,
+    /// Persists downloaded inbound media; shared slot with the kernel so a
+    /// post-boot `set_attachment_sink` is honored.
+    attachment_sink: Arc<std::sync::RwLock<Arc<dyn crate::attachment_sink::AttachmentSink>>>,
+    /// HTTP client for media downloads (getFile + file fetch) and transcription.
+    http_client: reqwest::Client,
+    /// Speech-to-text settings for inbound voice/audio (disabled by default).
+    transcription: crate::config::TranscriptionSettings,
     rx: mpsc::Receiver<InboundMessage>,
     /// Per-channel rate limiter: (message count, window start instant).
     rate_limiter: HashMap<ChannelInstanceID, (u32, Instant)>,
@@ -75,6 +85,9 @@ impl InboundRouter {
         audit: Arc<AuditLog>,
         escalation_manager: Arc<EscalationManager>,
         pairing_manager: Arc<PairingManager>,
+        vault: Arc<agentos_vault::SecretsVault>,
+        attachment_sink: Arc<std::sync::RwLock<Arc<dyn crate::attachment_sink::AttachmentSink>>>,
+        transcription: crate::config::TranscriptionSettings,
         rx: mpsc::Receiver<InboundMessage>,
     ) -> Self {
         Self {
@@ -85,6 +98,13 @@ impl InboundRouter {
             audit,
             escalation_manager,
             pairing_manager,
+            vault,
+            attachment_sink,
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .unwrap_or_default(),
+            transcription,
             rx,
             rate_limiter: HashMap::new(),
             last_prune: Instant::now(),
@@ -100,7 +120,153 @@ impl InboundRouter {
         }
     }
 
-    async fn route(&mut self, msg: InboundMessage) -> Result<(), AgentOSError> {
+    /// Best-effort: if an inbound Telegram message carries media, download it
+    /// (using the channel's vaulted bot token), persist it via the attachment
+    /// sink, and append a stored-file reference to `msg.text`. Any failure
+    /// (no token, download error, no sink configured) is logged and skipped —
+    /// the descriptive media note added at parse time still reaches the agent.
+    async fn enrich_inbound_media(&self, msg: &mut InboundMessage) {
+        use crate::adapters::telegram::{
+            download_telegram_file, ext_for_mime, telegram_media_ref, TelegramMessage,
+            TELEGRAM_MAX_DOWNLOAD_BYTES,
+        };
+
+        if msg.channel != DeliveryChannel::custom(DeliveryChannel::TELEGRAM) {
+            return;
+        }
+        // `raw` holds the serialized TelegramMessage for message updates; for
+        // callback queries it won't deserialize, so this returns early.
+        let tg: TelegramMessage = match serde_json::from_value(msg.raw.clone()) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let media = match telegram_media_ref(&tg) {
+            Some(m) => m,
+            None => return,
+        };
+
+        let credential_key = match self
+            .channel_registry
+            .get_by_id(&msg.channel_instance_id)
+            .await
+        {
+            Ok(Some(ch)) => ch.credential_key,
+            _ => return,
+        };
+        if credential_key.is_empty() {
+            return;
+        }
+        let token = match self.vault.get(&credential_key).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "inbound media: bot token unavailable; skipping download");
+                return;
+            }
+        };
+
+        let (bytes, mime) = match download_telegram_file(
+            &self.http_client,
+            token.as_str(),
+            &media.file_id,
+            TELEGRAM_MAX_DOWNLOAD_BYTES,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "inbound media download failed");
+                return;
+            }
+        };
+
+        let name = media
+            .filename
+            .clone()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| {
+                format!(
+                    "telegram-{}.{}",
+                    media.kind_label.replace(' ', "-"),
+                    ext_for_mime(&mime)
+                )
+            });
+
+        // Transcribe voice/audio when enabled, so the agent reads the words.
+        // (Hermes-style "transcribe, don't drop".) Best-effort: on failure the
+        // media note + stored file still reach the agent.
+        let is_audio = matches!(media.kind_label.as_str(), "voice message" | "audio");
+        if is_audio && self.transcription.enabled {
+            // Self-bounded inner timeout so the transcription call is capped
+            // regardless of the caller's wrapper (the outer enrich timeout).
+            let fut = crate::transcription::transcribe_audio(
+                &self.http_client,
+                &self.transcription,
+                bytes.clone(),
+                &name,
+            );
+            match tokio::time::timeout(std::time::Duration::from_secs(15), fut).await {
+                Ok(Ok(transcript)) => {
+                    msg.text
+                        .push_str(&format!("\n[Voice transcript]: {transcript}"));
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "inbound voice transcription failed");
+                }
+                Err(_) => {
+                    tracing::warn!("inbound voice transcription timed out");
+                }
+            }
+        }
+
+        let sink = self
+            .attachment_sink
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let byte_len = bytes.len();
+        match sink.store(&name, &mime, bytes).await {
+            Ok(file_id) => {
+                // Audit: external bytes were downloaded and persisted to disk.
+                let _ = self.audit.append(AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: AuditEventType::InboundMessageReceived,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "kind": "inbound_media_stored",
+                        "channel_id": msg.channel_instance_id.to_string(),
+                        "file_id": file_id.clone(),
+                        "name": name,
+                        "mime": mime,
+                        "bytes": byte_len,
+                        "media_kind": media.kind_label,
+                    }),
+                    severity: AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                if mime.starts_with("image/") {
+                    // Carried into the chat context as a ContentPart::Image so
+                    // vision-capable agents see it (adapter resolves the FileRef;
+                    // non-vision agents get an automatic text stub).
+                    msg.media_file_ids.push((file_id, mime.clone()));
+                } else {
+                    // Non-image files have no vision path yet — note the stored id
+                    // so the agent can reference it.
+                    msg.text.push_str(&format!(
+                        "\n[Attachment stored — file id: {file_id}, name: {name}, type: {mime}]"
+                    ));
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "attachment sink declined; media not persisted");
+            }
+        }
+    }
+
+    async fn route(&mut self, mut msg: InboundMessage) -> Result<(), AgentOSError> {
         // Prune stale rate-limiter entries at most once per minute regardless of map size.
         if self.last_prune.elapsed().as_secs() >= 60 {
             self.rate_limiter
@@ -154,6 +320,26 @@ impl InboundRouter {
                         .await;
                 }
             }
+        }
+
+        // Download + persist any inbound media (best-effort) and annotate the
+        // message text with a stored file reference. Runs before routing so the
+        // enriched text reaches questions, chat, and the inbox alike. Bounded by
+        // a timeout so a slow/large fetch cannot stall the shared inbound loop
+        // (which also carries /stop, /approve, and question replies); on timeout
+        // the parse-time media note still reaches the agent. (Fully off-loop
+        // enrichment is a planned follow-up — see telegram-media-pipeline.)
+        if tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            self.enrich_inbound_media(&mut msg),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                channel_id = %msg.channel_instance_id,
+                "inbound media enrichment timed out; forwarding text-only note"
+            );
         }
 
         if let Some(notif_id) = msg.reply_to_notification_id {
@@ -253,9 +439,27 @@ impl InboundRouter {
                 if !ch.credential_key.is_empty() {
                     let text = msg.text.trim();
                     if !text.is_empty() {
+                        // Carry any stored inbound images into the chat as vision
+                        // parts so a vision-capable agent can see them.
+                        let user_parts = if msg.media_file_ids.is_empty() {
+                            None
+                        } else {
+                            let mut parts = vec![agentos_types::ContentPart::Text {
+                                text: text.to_string(),
+                            }];
+                            for (file_id, mime) in &msg.media_file_ids {
+                                parts.push(agentos_types::ContentPart::Image {
+                                    mime: mime.clone(),
+                                    source: agentos_types::ImageSource::FileRef {
+                                        file_id: file_id.clone(),
+                                    },
+                                });
+                            }
+                            Some(parts)
+                        };
                         match self
                             .chat_bridge
-                            .channel_chat(msg.channel_instance_id, agent, text)
+                            .channel_chat(msg.channel_instance_id, agent, text, user_parts)
                             .await
                         {
                             Ok(answer) => {
@@ -478,7 +682,7 @@ impl InboundRouter {
                 }
                 match self
                     .chat_bridge
-                    .channel_chat(msg.channel_instance_id, agent, prompt)
+                    .channel_chat(msg.channel_instance_id, agent, prompt, None)
                     .await
                 {
                     Ok(answer) => {
@@ -777,6 +981,7 @@ impl InboundRouter {
             read: false,
             thread_id: Some(format!("channel:{}", original.channel_instance_id)),
             reply_to_external_id: None,
+            attachment: None,
         };
         // Route back to the originating channel only — not all registered adapters.
         let instance_id = original.channel_instance_id.to_string();
@@ -845,6 +1050,7 @@ impl InboundRouter {
             read: false,
             thread_id: Some(format!("channel:{}", original.channel_instance_id)),
             reply_to_external_id: None,
+            attachment: None,
         };
         // Route back to the originating channel only — not all registered adapters.
         let instance_id = original.channel_instance_id.to_string();

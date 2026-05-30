@@ -180,6 +180,17 @@ max_tokens = 8192
 # Context window size passed to Ollama as num_ctx. Many modern models support 32K+.
 # Set to match your model's actual context size (e.g. 131072 for llama3.1:8b-instruct-q8_0).
 ollama_context_window = 32768
+# Optional provider fallback chain applied to every agent's primary adapter.
+# When the primary provider errors (including mid-stream), the kernel fails over
+# to these in order. Empty by default. Useful when the primary is a flaky free
+# tier (e.g. NVIDIA) — fail over to a reliable local or paid model.
+# NOTE: mixing native-tool-calling providers (e.g. Anthropic) with non-native
+# ones (e.g. a local Ollama model) disables native tool calling for the whole
+# chain — every provider then receives JSON-in-markdown tool guidance instead.
+# [[llm.fallback_models]]
+# provider = "ollama"          # ollama | openai | anthropic | gemini | <catalog name> | custom:<name>
+# model = "llama3.1:8b"
+# # base_url = "http://localhost:11434"   # optional; defaults resolve from catalog/config
 
 [memory]
 model_cache_dir = "models"
@@ -238,6 +249,17 @@ log_level = "info"
 # Output format: "text" (human-readable, default) or "json" (structured, for log aggregators like
 # Loki, Datadog, or Elasticsearch). In production, set to "json".
 log_format = "text"
+
+# Boot pre-flight checks — run before any subsystem starts so a misconfigured
+# host fails fast with one precise diagnostic instead of crashing deep in init.
+# (Dev defaults below; production profiles raise min_free_disk_mb.)
+[preflight]
+# Minimum free disk (MB) on the data-dir partition required to boot.
+# Set to 0 to disable the disk check.
+min_free_disk_mb = 512
+# Probe that the audit/vault/state DB dirs, the log dir, and the bus-socket dir
+# are writable before subsystem init.
+check_db_writable = true
 
 [otel]
 enabled = false
@@ -330,6 +352,21 @@ url = "https://registry.agentos.dev"
 enabled = false
 host = "127.0.0.1"
 port = 8080
+# Serve the interactive API-docs UI at GET /api/v1/docs. The OpenAPI contract
+# at GET /api/v1/openapi.json stays public regardless. Disable on public deployments.
+docs_enabled = true
+# Operator credential for POST /api/v1/auth/login. When unset/empty, login is
+# disabled (503). Set this to let a browser SPA exchange it for a scoped, expiring
+# key. Prefer an env-substituted value over committing a secret here.
+# operator_token = "change-me"
+# Cross-origin allowlist for the REST API (full origins: scheme + host + port).
+# Empty = same-origin only. Add your SPA dev origin, e.g. "http://localhost:5173".
+cors_allowed_origins = []
+# Enable POST /api/v1/auth/refresh (rotate a valid key for a fresh one).
+refresh_enabled = false
+# Allow PUT /api/v1/config/{key} to write the config file at runtime. Off by
+# default; enable only on trusted control-plane deployments.
+config_writable = false
 
 [mcp]
 # List of MCP servers to connect at kernel boot.
@@ -411,3 +448,35 @@ proposal_ttl_days = 30
 #   writer-bot   = "ask_always"
 [approval]
 mode = "ask_edit"
+
+# Scheduler run-history retention. The TimeoutChecker prunes completed/failed
+# scheduled-run records older than this many days on its periodic sweep so the
+# run store does not grow without bound. Set to 0 to disable pruning.
+[scheduler]
+run_retention_days = 30
+
+# Inbound voice/audio transcription (speech-to-text) for channel media.
+# When enabled, voice notes received on a channel (e.g. Telegram) are sent to an
+# OpenAI-compatible /audio/transcriptions endpoint and the transcript is injected
+# into the message the agent reads. Disabled by default. The API key is read from
+# the named environment variable — never stored in config.
+[transcription]
+enabled = false
+endpoint = "https://api.openai.com/v1/audio/transcriptions"
+model = "whisper-1"
+api_key_env = "OPENAI_API_KEY"
+
+# Gateway ("run as a bot") — `agentos gateway run` boots the kernel and connects
+# every channel listed here. Disabled by default. Tokens are referenced by a
+# VAULT key (credential_key), never inline — seed with `agentos secret set <key> <token>`.
+[gateway]
+enabled = false
+
+# One [[gateway.channels]] table per bot. Example (uncomment + set credential_key):
+# [[gateway.channels]]
+# kind = "telegram"                  # telegram | ntfy | email | discord | slack | whatsapp | webhook
+# display_name = "Ops Bot"
+# credential_key = "telegram_bot_token"   # vault key holding the token
+# active_agent = "assistant"         # default agent for inbound chat
+# # external_id omitted for Telegram → auto-discovered from the first /start
+

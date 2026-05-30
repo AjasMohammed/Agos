@@ -41,13 +41,14 @@ pub async fn ws_upgrade(
     Query(params): Query<WsParams>,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Validate API key from query param.
-    let _record = key_store
+    // Validate API key from query param. Its scopes gate channel subscriptions.
+    let record = key_store
         .validate(&params.token)
         .await
         .ok_or(ApiError::Unauthorized)?;
+    let permissions = record.permissions.clone();
 
-    Ok(ws.on_upgrade(move |socket| handle_connection(socket, svc, broadcaster)))
+    Ok(ws.on_upgrade(move |socket| handle_connection(socket, svc, broadcaster, permissions)))
 }
 
 /// Main connection handler — spawns read/write loops and heartbeat.
@@ -55,11 +56,12 @@ async fn handle_connection(
     socket: WebSocket,
     svc: Arc<dyn KernelService>,
     broadcaster: WsBroadcaster,
+    permissions: Vec<String>,
 ) {
     let (ws_sink, mut ws_stream) = socket.split();
     let (outbound_tx, outbound_rx) = mpsc::channel::<ServerFrame>(256);
 
-    let mut session = WsSession::new(outbound_tx.clone());
+    let mut session = WsSession::new(outbound_tx.clone(), permissions);
 
     // Spawn write loop: outbound channel → WebSocket sink.
     let write_handle = tokio::spawn(write_loop(ws_sink, outbound_rx));

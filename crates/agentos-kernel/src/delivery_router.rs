@@ -170,6 +170,7 @@ impl Kernel {
                     read: false,
                     thread_id: Some(run.run_id.to_string()),
                     reply_to_external_id: None,
+                    attachment: None,
                 };
                 self.notification_router.deliver(msg).await.map_err(|e| {
                     AgentOSError::KernelError {

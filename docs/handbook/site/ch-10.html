@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory System · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-10.html"><span class="ch-num">10</span> Memory System</a><div class="nav-subs"><a class="nav-sub" href="#memory-architecture-overview" data-target="memory-architecture-overview">Memory Architecture Overview</a><a class="nav-sub" href="#tier-1-working-memory-context-window" data-target="tier-1-working-memory-context-window">Tier 1 — Working Memory (Context Window)</a><a class="nav-sub" href="#tier-2-episodic-memory" data-target="tier-2-episodic-memory">Tier 2 — Episodic Memory</a><a class="nav-sub" href="#tier-3-semantic-memory" data-target="tier-3-semantic-memory">Tier 3 — Semantic Memory</a><a class="nav-sub" href="#tier-4-procedural-memory" data-target="tier-4-procedural-memory">Tier 4 — Procedural Memory</a><a class="nav-sub" href="#memory-blocks" data-target="memory-blocks">Memory Blocks</a><a class="nav-sub" href="#memory-extraction" data-target="memory-extraction">Memory Extraction</a><a class="nav-sub" href="#memory-consolidation" data-target="memory-consolidation">Memory Consolidation</a><a class="nav-sub" href="#retrieval-gate" data-target="retrieval-gate">Retrieval Gate</a><a class="nav-sub" href="#context-compilation" data-target="context-compilation">Context Compilation</a><a class="nav-sub" href="#additional-memory-tools" data-target="additional-memory-tools">Additional Memory Tools</a><a class="nav-sub" href="#full-configuration-reference" data-target="full-configuration-reference">Full Configuration Reference</a><a class="nav-sub" href="#related" data-target="related">Related</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 10 · Memory System</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 10</div><h1 class="ch-title">Memory System</h1><p class="ch-summary">4 memory tiers, automatic extraction, consolidation, context budget management</p></div>
+    <article class="prose"><h1 id="memory-system" class="anchored"><a class="hanchor" href="#memory-system" aria-label="link">#</a>Memory System</h1>
+<blockquote><p>How AgentOS agents remember facts, recall history, and learn procedures across tasks.</p></blockquote>
+<hr>
+<h2 id="memory-architecture-overview" class="anchored"><a class="hanchor" href="#memory-architecture-overview" aria-label="link">#</a>Memory Architecture Overview</h2>
+<p>AgentOS uses a <strong>four-tier memory architecture</strong> plus a set of supporting systems that manage how information flows in and out of each tier.</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>┌─────────────────────────────────────────────────────────────────┐
+│                     TASK EXECUTION                              │
+│                                                                 │
+│  ┌────────────────────────────────────────────────────────┐     │
+│  │  Tier 1: Working Memory (Context Window)               │     │
+│  │  In-memory · Per-task · Token-budget managed           │     │
+│  └──────────────┬──────────────────────┬──────────────────┘     │
+│                 │ auto-inject at start │ auto-write on complete │
+│                 ▼                      ▼                        │
+│  ┌──────────────────────┐  ┌──────────────────────────────┐     │
+│  │ Tier 2: Episodic     │  │ Memory Blocks                │     │
+│  │ Per-task event log   │  │ Named agent working state    │     │
+│  │ SQLite · FTS5        │  │ SQLite · label-keyed         │     │
+│  └──────────┬───────────┘  └──────────────────────────────┘     │
+│             │ consolidation (background)                        │
+│             ▼                                                   │
+│  ┌──────────────────────┐  ┌──────────────────────────────┐     │
+│  │ Tier 3: Semantic     │  │ Tier 4: Procedural           │     │
+│  │ Cross-task knowledge │  │ Learned step-by-step skills  │     │
+│  │ FTS5 + vector (RRF)  │  │ FTS5 + vector (RRF)          │     │
+│  └──────────────────────┘  └──────────────────────────────┘     │
+└─────────────────────────────────────────────────────────────────┘
+         ▲                          │
+         │  Retrieval Gate          │ Memory Extraction
+         │  (classifies + queries)  │ (auto-facts from results)
+         └──────────────────────────┘
+</pre></div>
+</div>
+<h3 id="when-each-tier-is-used" class="anchored"><a class="hanchor" href="#when-each-tier-is-used" aria-label="link">#</a>When each tier is used</h3>
+<div class="table-wrap"><table><thead><tr><th>Phase</th><th>Action</th></tr></thead><tbody><tr><td>Task starts</td><td>Retrieval Gate classifies the task prompt; relevant episodic, semantic, and procedural entries are fetched and injected into the context window</td></tr><tr><td>During execution</td><td>Tool results feed the Memory Extraction engine, which auto-writes new facts into Semantic memory</td></tr><tr><td>Task completes</td><td>Episode events are persisted to Episodic memory</td></tr><tr><td>Background</td><td>Consolidation engine scans Episodic memory for repeated patterns and distills them into Procedural memory</td></tr></tbody></table></div>
+<hr>
+<h2 id="tier-1-working-memory-context-window" class="anchored"><a class="hanchor" href="#tier-1-working-memory-context-window" aria-label="link">#</a>Tier 1 — Working Memory (Context Window)</h2>
+<p>Working memory is the active in-memory buffer that the LLM reads on every inference. It is <strong>per-task</strong>, <strong>token-budget-managed</strong>, and discarded when the task ends.</p>
+<h3 id="how-the-context-window-is-built" class="anchored"><a class="hanchor" href="#how-the-context-window-is-built" aria-label="link">#</a>How the context window is built</h3>
+<p>The <strong>ContextCompiler</strong> assembles the window from structured inputs in a fixed priority order:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>System Prompt → Tool Descriptions → Knowledge Blocks → Conversation History → Task Prompt
+</pre></div>
+</div>
+<p>This ordering follows the <strong>primacy/recency principle</strong>: the most important framing (system prompt) appears first; the most immediately relevant context (task prompt) appears last.</p>
+<h3 id="entry-categories" class="anchored"><a class="hanchor" href="#entry-categories" aria-label="link">#</a>Entry categories</h3>
+<div class="table-wrap"><table><thead><tr><th>Category</th><th>Contents</th><th>Evictable?</th></tr></thead><tbody><tr><td><code>System</code></td><td>System prompt, agent persona, safety instructions</td><td>No — pinned at importance 1.0</td></tr><tr><td><code>Tools</code></td><td>Tool descriptions injected by the compiler</td><td>Yes</td></tr><tr><td><code>Knowledge</code></td><td>Retrieved memory blocks from Retrieval Gate</td><td>Yes</td></tr><tr><td><code>History</code></td><td>Conversation turns, tool results</td><td>Yes (oldest first)</td></tr><tr><td><code>Task</code></td><td>Current task prompt</td><td>Yes</td></tr></tbody></table></div>
+<h3 id="token-budget-enforcement" class="anchored"><a class="hanchor" href="#token-budget-enforcement" aria-label="link">#</a>Token budget enforcement</h3>
+<p>When the context window fills up, the kernel automatically compresses it:</p>
+<div class="table-wrap"><table><thead><tr><th>Threshold</th><th>Action</th></tr></thead><tbody><tr><td>80% full</td><td>Evict the oldest 25% of evictable entries</td></tr><tr><td>95% full</td><td>Evict the oldest 33% of evictable entries + set a checkpoint flag</td></tr></tbody></table></div>
+<p>The system prompt is <strong>never evicted</strong> (pinned entry). History entries are selected newest-first; pinned entries (if any) are always preserved.</p>
+<h3 id="context-budget-configuration" class="anchored"><a class="hanchor" href="#context-budget-configuration" aria-label="link">#</a>Context budget configuration</h3>
+<p>The <code>[context_budget]</code> section in <code>config/default.toml</code> controls how total tokens are divided among entry categories:</p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>total_tokens</code></td><td><code>128000</code></td><td>Total token budget for the context window</td></tr><tr><td><code>reserve_pct</code></td><td><code>0.25</code></td><td>Fraction reserved for LLM output (not consumed by inputs)</td></tr><tr><td><code>system_pct</code></td><td><code>0.15</code></td><td>Fraction of <em>usable</em> tokens allocated to system prompt + tools</td></tr><tr><td><code>tools_pct</code></td><td><code>0.18</code></td><td>Fraction allocated to tool descriptions</td></tr><tr><td><code>knowledge_pct</code></td><td><code>0.30</code></td><td>Fraction allocated to retrieved memory blocks</td></tr><tr><td><code>history_pct</code></td><td><code>0.25</code></td><td>Fraction allocated to conversation history</td></tr><tr><td><code>task_pct</code></td><td><code>0.12</code></td><td>Fraction allocated to the current task prompt</td></tr></tbody></table></div>
+<div class="callout callout-tip"><div class="callout-title">Tip</div><p><code>reserve_pct</code> is subtracted first. The remaining percentages are applied to the usable token count, not the total. Percentages need not sum to 1.0 — the compiler fits each category independently and may leave slack.</p></div>
+<hr>
+<h2 id="tier-2-episodic-memory" class="anchored"><a class="hanchor" href="#tier-2-episodic-memory" aria-label="link">#</a>Tier 2 — Episodic Memory</h2>
+<p>Episodic memory is an <strong>append-only SQLite event log</strong> that records what happened during each task. It persists across restarts and can be recalled in future tasks.</p>
+<h3 id="episode-types" class="anchored"><a class="hanchor" href="#episode-types" aria-label="link">#</a>Episode types</h3>
+<p>Each event written to episodic memory has one of the following types:</p>
+<div class="table-wrap"><table><thead><tr><th>Type</th><th>When emitted</th></tr></thead><tbody><tr><td><code>Intent</code></td><td>An intent message is received by the kernel</td></tr><tr><td><code>ToolCall</code></td><td>An agent calls a tool</td></tr><tr><td><code>ToolResult</code></td><td>A tool returns a result</td></tr><tr><td><code>LLMResponse</code></td><td>The LLM produces an inference output</td></tr><tr><td><code>AgentMessage</code></td><td>One agent sends a message to another</td></tr><tr><td><code>UserPrompt</code></td><td>A user-supplied prompt is received</td></tr><tr><td><code>SystemEvent</code></td><td>A system-level event (task completion, errors, milestone outcomes)</td></tr></tbody></table></div>
+<h3 id="what-gets-stored-per-episode" class="anchored"><a class="hanchor" href="#what-gets-stored-per-episode" aria-label="link">#</a>What gets stored per episode</h3>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>task_id     — which task this event belongs to
+agent_id    — which agent produced the event
+entry_type  — one of the types above
+content     — full event content
+summary     — short searchable summary (for FTS5)
+metadata    — JSON blob for structured extras (e.g., outcome=&quot;success&quot;)
+timestamp   — UTC timestamp
+trace_id    — optional distributed trace correlation ID
+</pre></div>
+</div>
+<h3 id="recall-and-access" class="anchored"><a class="hanchor" href="#recall-and-access" aria-label="link">#</a>Recall and access</h3>
+<p>Agents recall episodic memory using the <code>memory-search</code> tool with <code>scope: &quot;episodic&quot;</code>. Retrieval is permission-gated:</p>
+<ul><li><strong>Own task episodes</strong> — allowed by default</li><li><strong>Other tasks (same agent)</strong> — requires <code>memory.episodic:r</code></li><li><strong>Global (all agents, all tasks)</strong> — requires the global episodic read permission</li></ul>
+<p>The store supports full-text search (FTS5) across summaries and content, filtered by <code>task_id</code>, <code>agent_id</code>, or time range.</p>
+<h3 id="auto-injection-at-task-start" class="anchored"><a class="hanchor" href="#auto-injection-at-task-start" aria-label="link">#</a>Auto-injection at task start</h3>
+<p>When a new task starts, the Retrieval Gate evaluates the task prompt. If it matches episodic signal words (e.g., "last time", "previously", "remember"), the most relevant past episodes are fetched and injected into the context window as <code>Knowledge</code> entries.</p>
+<hr>
+<h2 id="tier-3-semantic-memory" class="anchored"><a class="hanchor" href="#tier-3-semantic-memory" aria-label="link">#</a>Tier 3 — Semantic Memory</h2>
+<p>Semantic memory is a <strong>global, cross-task, cross-agent knowledge store</strong> backed by SQLite with FTS5 full-text search and fastembed vector embeddings.</p>
+<h3 id="how-search-works" class="anchored"><a class="hanchor" href="#how-search-works" aria-label="link">#</a>How search works</h3>
+<p>Semantic search uses <strong>Reciprocal Rank Fusion (RRF)</strong> to merge two independent rankings:</p>
+<ol><li><strong>FTS5 phase</strong> — keyword/text relevance using SQLite's built-in full-text search</li><li><strong>Vector phase</strong> — semantic similarity via cosine distance on 384-dimensional <code>AllMiniLML6V2</code> embeddings</li></ol>
+<p>The RRF score combines both ranks, making results that appear high in <em>both</em> lists float to the top. This handles both exact keyword matches and paraphrased queries.</p>
+<h3 id="text-chunking" class="anchored"><a class="hanchor" href="#text-chunking" aria-label="link">#</a>Text chunking</h3>
+<p>Large content is automatically split into overlapping chunks before embedding:</p>
+<ul><li><strong>Chunk size:</strong> up to 2000 characters</li><li><strong>Overlap:</strong> 200 characters between consecutive chunks</li><li>Chunks are whitespace-aware and UTF-8 safe</li></ul>
+<h3 id="permissions" class="anchored"><a class="hanchor" href="#permissions" aria-label="link">#</a>Permissions</h3>
+<div class="table-wrap"><table><thead><tr><th>Operation</th><th>Required permission</th></tr></thead><tbody><tr><td>Read / search</td><td><code>memory.semantic:r</code></td></tr><tr><td>Write / update</td><td><code>memory.semantic:w</code></td></tr></tbody></table></div>
+<h3 id="tools" class="anchored"><a class="hanchor" href="#tools" aria-label="link">#</a>Tools</h3>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>What it does</th></tr></thead><tbody><tr><td><code>memory-search</code></td><td>Hybrid FTS5+vector search; <code>scope: &quot;semantic&quot;</code> (default)</td></tr><tr><td><code>memory-write</code></td><td>Write a fact to semantic memory with optional key and tags</td></tr><tr><td><code>archival-insert</code></td><td>Insert a note into long-term archival (alias for semantic write)</td></tr><tr><td><code>archival-search</code></td><td>Search archival semantic memory; returns key, content, and score</td></tr></tbody></table></div>
+<hr>
+<h2 id="tier-4-procedural-memory" class="anchored"><a class="hanchor" href="#tier-4-procedural-memory" aria-label="link">#</a>Tier 4 — Procedural Memory</h2>
+<p>Procedural memory stores <strong>named, step-by-step skill patterns</strong> that agents have learned from repeated successful task executions.</p>
+<h3 id="what-a-procedure-looks-like" class="anchored"><a class="hanchor" href="#what-a-procedure-looks-like" aria-label="link">#</a>What a procedure looks like</h3>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>name          — human-readable procedure name
+description   — what this procedure accomplishes
+pre_conditions — conditions that must be true before running
+post_conditions — expected state after completion
+steps         — ordered list of ProcedureSteps
+  └─ order          — step sequence number
+  └─ action         — natural language description of the action
+  └─ tool           — optional: which tool to invoke
+  └─ expected_outcome — optional: what a successful result looks like
+success_count — how many times this procedure succeeded
+failure_count — how many times it failed
+source_episodes — list of episode IDs that informed this procedure
+tags          — searchable labels
+</pre></div>
+</div>
+<h3 id="how-procedures-are-created" class="anchored"><a class="hanchor" href="#how-procedures-are-created" aria-label="link">#</a>How procedures are created</h3>
+<p>Procedures are not written manually — they are <strong>distilled automatically</strong> by the Consolidation engine (see <a class="wikilink" href="ch-10.html#memory-consolidation">Memory Consolidation</a>) from clusters of successful episodic events.</p>
+<p>Agents can also retrieve procedures on-demand. When a task prompt contains procedural signal words ("how to", "steps", "guide"), the Retrieval Gate queries the procedural store and injects matching procedures into the context window.</p>
+<h3 id="search" class="anchored"><a class="hanchor" href="#search" aria-label="link">#</a>Search</h3>
+<p>Procedural search uses the same hybrid FTS5+vector RRF approach as Semantic memory.</p>
+<hr>
+<h2 id="memory-blocks" class="anchored"><a class="hanchor" href="#memory-blocks" aria-label="link">#</a>Memory Blocks</h2>
+<p>Memory blocks are <strong>short-form, labeled persistent state</strong> for individual agents. Think of them as an agent's working notebook — small named slots it can read and update between tasks.</p>
+<h3 id="characteristics" class="anchored"><a class="hanchor" href="#characteristics" aria-label="link">#</a>Characteristics</h3>
+<div class="table-wrap"><table><thead><tr><th>Property</th><th>Value</th></tr></thead><tbody><tr><td>Scope</td><td>Per-agent</td></tr><tr><td>Label constraint</td><td>Unique per agent; 1–128 characters</td></tr><tr><td>Content limit</td><td>2048 characters</td></tr><tr><td>Storage</td><td>SQLite (<code>memory_blocks.db</code>)</td></tr><tr><td>Persistence</td><td>Survives task boundaries and restarts</td></tr></tbody></table></div>
+<h3 id="use-cases" class="anchored"><a class="hanchor" href="#use-cases" aria-label="link">#</a>Use cases</h3>
+<ul><li>Storing user preferences discovered during past tasks</li><li>Tracking working assumptions between task runs</li><li>Maintaining task-specific counters or state flags</li></ul>
+<h3 id="tools-2" class="anchored"><a class="hanchor" href="#tools-2" aria-label="link">#</a>Tools</h3>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>What it does</th></tr></thead><tbody><tr><td><code>memory-block-read</code></td><td><code>memory.blocks:r</code></td><td>Read a block by label</td></tr><tr><td><code>memory-block-write</code></td><td><code>memory.blocks:w</code></td><td>Write or update a block (upsert)</td></tr><tr><td><code>memory-block-list</code></td><td><code>memory.blocks:r</code></td><td>List all blocks for this agent</td></tr><tr><td><code>memory-block-delete</code></td><td><code>memory.blocks:w</code></td><td>Delete a block by label</td></tr></tbody></table></div>
+<h3 id="example" class="anchored"><a class="hanchor" href="#example" aria-label="link">#</a>Example</h3>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1">// memory-block-write</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;user-preferred-language&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;TypeScript&quot;</span>
+<span class="p">}</span>
+
+<span class="c1">// memory-block-read</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;user-preferred-language&quot;</span>
+<span class="p">}</span>
+<span class="c1">// → { &quot;label&quot;: &quot;user-preferred-language&quot;, &quot;content&quot;: &quot;TypeScript&quot; }</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="memory-extraction" class="anchored"><a class="hanchor" href="#memory-extraction" aria-label="link">#</a>Memory Extraction</h2>
+<p>The Memory Extraction engine <strong>automatically extracts facts from tool results</strong> and writes them to Semantic memory without the agent needing to do anything.</p>
+<h3 id="how-it-works" class="anchored"><a class="hanchor" href="#how-it-works" aria-label="link">#</a>How it works</h3>
+<p>After each tool returns a result, the extraction engine:</p>
+<ol><li>Checks whether the result meets the minimum length threshold (default: 50 characters)</li><li>Applies a <strong>tool-specific extractor</strong> to identify candidate facts:<ul><li><code>http-client</code> results → URL, status, extracted data fields</li><li><code>shell-exec</code> results → command output fragments</li><li><code>file-reader</code> results → file key-value facts</li><li><code>data-parser</code> results → structured data elements</li></ul></li></ol><ol><li>For each candidate fact, performs a <strong>semantic similarity check</strong> against existing memory entries</li><li>Decides what to do based on the similarity score:</li></ol>
+<div class="table-wrap"><table><thead><tr><th>Score</th><th>Action</th></tr></thead><tbody><tr><td>&gt; 0.95</td><td>Skip — this is a duplicate</td></tr><tr><td>0.85 – 0.95</td><td>Update the existing entry — this is related information</td></tr><tr><td>&lt; 0.85</td><td>Add a new entry — this is novel</td></tr></tbody></table></div>
+<h3 id="configuration" class="anchored"><a class="hanchor" href="#configuration" aria-label="link">#</a>Configuration</h3>
+<div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[memory.extraction]</span>
+<span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<span class="n">conflict_threshold</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0.85</span><span class="w">   </span><span class="c1"># similarity threshold between &quot;update&quot; and &quot;add new&quot;</span>
+<span class="n">max_facts_per_result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="w">    </span><span class="c1"># maximum facts extracted from a single tool result</span>
+<span class="n">min_result_length</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">50</span><span class="w">      </span><span class="c1"># minimum result length (chars) to attempt extraction</span>
+</pre></div>
+</div>
+<h3 id="extraction-report" class="anchored"><a class="hanchor" href="#extraction-report" aria-label="link">#</a>Extraction report</h3>
+<p>Each extraction run returns counts of:</p>
+<ul><li><code>added</code> — new facts written</li><li><code>updated</code> — existing facts revised</li><li><code>skipped</code> — duplicates discarded</li></ul>
+<hr>
+<h2 id="memory-consolidation" class="anchored"><a class="hanchor" href="#memory-consolidation" aria-label="link">#</a>Memory Consolidation</h2>
+<p>The Consolidation engine runs <strong>periodically in the background</strong>, scanning Episodic memory for repeated patterns and distilling them into Procedural memory.</p>
+<h3 id="how-consolidation-works" class="anchored"><a class="hanchor" href="#how-consolidation-works" aria-label="link">#</a>How consolidation works</h3>
+<ol><li>Query Episodic memory for <code>SystemEvent</code> entries with <code>outcome = &quot;success&quot;</code></li><li>Cluster episodes by the <strong>first 4 tokens</strong> of their summary (case-insensitive)</li><li>For each cluster with at least <code>min_pattern_occurrences</code> episodes:<ul><li>Extract the tools called across those episodes</li><li>Generate a <code>Procedure</code> with steps derived from the tool sequence</li><li>Check whether a similar procedure already exists (RRF score &gt; 0.90 → skip)</li><li>Write the new procedure to Procedural memory</li></ul></li></ol>
+<h3 id="configuration-2" class="anchored"><a class="hanchor" href="#configuration-2" aria-label="link">#</a>Configuration</h3>
+<div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[memory.consolidation]</span>
+<span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<span class="n">min_pattern_occurrences</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="w">    </span><span class="c1"># minimum episodes in a cluster to form a procedure</span>
+<span class="n">task_completions_trigger</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="c1"># run consolidation after every N task completions</span>
+<span class="n">time_trigger_hours</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">24</span><span class="w">        </span><span class="c1"># also run after N hours regardless of task count</span>
+<span class="n">max_episodes_per_cycle</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">500</span><span class="w">   </span><span class="c1"># maximum episodes to scan per consolidation run</span>
+</pre></div>
+</div>
+<h3 id="consolidation-report" class="anchored"><a class="hanchor" href="#consolidation-report" aria-label="link">#</a>Consolidation report</h3>
+<p>Each consolidation cycle reports:</p>
+<ul><li><code>patterns_found</code> — clusters meeting the occurrence threshold</li><li><code>created</code> — new procedures written</li><li><code>skipped_existing</code> — patterns that matched existing procedures</li><li><code>failed</code> — episodes that could not be processed</li></ul>
+<hr>
+<h2 id="retrieval-gate" class="anchored"><a class="hanchor" href="#retrieval-gate" aria-label="link">#</a>Retrieval Gate</h2>
+<p>The Retrieval Gate determines <strong>which memory indices to search</strong> for a given query, avoiding unnecessary lookups.</p>
+<h3 id="query-classification" class="anchored"><a class="hanchor" href="#query-classification" aria-label="link">#</a>Query classification</h3>
+<p>The gate inspects signal words in the query text:</p>
+<div class="table-wrap"><table><thead><tr><th>Signal words</th><th>Index queried</th></tr></thead><tbody><tr><td>"remember", "last time", "previously", "earlier", "before"</td><td>Episodic</td></tr><tr><td>"how to", "steps", "procedure", "guide", "tutorial"</td><td>Procedural</td></tr><tr><td>"find tool", "what tool", "tool for"</td><td>Tools</td></tr><tr><td>"what is", "explain", "define", "tell me about"</td><td>Semantic</td></tr><tr><td>Short/trivial queries ("ok", "thanks", &lt; threshold)</td><td>None — skipped</td></tr></tbody></table></div>
+<p>A single query can match multiple indices; searches run in parallel via the <strong>RetrievalExecutor</strong>.</p>
+<h3 id="result-formatting" class="anchored"><a class="hanchor" href="#result-formatting" aria-label="link">#</a>Result formatting</h3>
+<p>Retrieved entries are wrapped in typed XML blocks before injection into the context window:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>[RETRIEVED_SEMANTIC]
+key: deployment-checklist
+...content...
+[/RETRIEVED_SEMANTIC]
+
+[RETRIEVED_EPISODIC]
+...event summary...
+[/RETRIEVED_EPISODIC]
+</pre></div>
+</div>
+<p>Duplicate results (detected by content hash) are removed before injection.</p>
+<hr>
+<h2 id="context-compilation" class="anchored"><a class="hanchor" href="#context-compilation" aria-label="link">#</a>Context Compilation</h2>
+<p>Before each LLM inference, the <strong>ContextCompiler</strong> assembles the final context window from structured inputs.</p>
+<h3 id="inputs" class="anchored"><a class="hanchor" href="#inputs" aria-label="link">#</a>Inputs</h3>
+<div class="table-wrap"><table><thead><tr><th>Input field</th><th>Source</th></tr></thead><tbody><tr><td><code>system_prompt</code></td><td>Agent definition or kernel default</td></tr><tr><td><code>tool_descriptions</code></td><td>Registered tools for this agent</td></tr><tr><td><code>agent_directory</code></td><td>Other agents visible to this agent</td></tr><tr><td><code>knowledge_blocks</code></td><td>Retrieved memory from Retrieval Gate</td></tr><tr><td><code>history</code></td><td>Conversation turns and tool results</td></tr><tr><td><code>task_prompt</code></td><td>Current task description</td></tr></tbody></table></div>
+<h3 id="ordering" class="anchored"><a class="hanchor" href="#ordering" aria-label="link">#</a>Ordering</h3>
+<p>The compiler writes entries in a fixed order that maximizes LLM comprehension:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>1. System prompt       ← framing and identity (primacy)
+2. Tool descriptions   ← available capabilities
+3. Knowledge blocks    ← retrieved memories and facts
+4. Conversation history ← recent context
+5. Task prompt         ← immediate intent (recency)
+</pre></div>
+</div>
+<h3 id="budget-enforcement" class="anchored"><a class="hanchor" href="#budget-enforcement" aria-label="link">#</a>Budget enforcement</h3>
+<p>Each category has its own token allocation (see <a class="wikilink" href="ch-10.html#context-budget-configuration">Context budget configuration</a>). If a category's content exceeds its budget:</p>
+<ul><li><strong>History</strong>: newest entries are kept, oldest are dropped</li><li><strong>Knowledge blocks</strong>: entries are truncated to fit</li><li><strong>Other categories</strong>: truncated to the per-category limit</li></ul>
+<p>Pinned entries (importance = 1.0) bypass eviction and are always included.</p>
+<hr>
+<h2 id="additional-memory-tools" class="anchored"><a class="hanchor" href="#additional-memory-tools" aria-label="link">#</a>Additional Memory Tools</h2>
+<p>Beyond the tier-specific tools documented above, the memory system provides the following tools:</p>
+<h3 id="procedural-memory-tools" class="anchored"><a class="hanchor" href="#procedural-memory-tools" aria-label="link">#</a>Procedural Memory Tools</h3>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>procedure-search</code></td><td><code>memory.procedural:r</code></td><td>Search procedures by query</td></tr><tr><td><code>procedure-create</code></td><td><code>memory.procedural:w</code></td><td>Create a new procedure</td></tr><tr><td><code>procedure-list</code></td><td><code>memory.procedural:r</code></td><td>List all procedures</td></tr><tr><td><code>procedure-delete</code></td><td><code>memory.procedural:w</code></td><td>Delete a procedure</td></tr></tbody></table></div>
+<h3 id="episodic-memory-tools" class="anchored"><a class="hanchor" href="#episodic-memory-tools" aria-label="link">#</a>Episodic Memory Tools</h3>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>episodic-list</code></td><td><code>memory.episodic:r</code></td><td>List recent episodes</td></tr></tbody></table></div>
+<h3 id="general-memory-tools" class="anchored"><a class="hanchor" href="#general-memory-tools" aria-label="link">#</a>General Memory Tools</h3>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>memory-read</code></td><td><code>memory:r</code></td><td>Read a specific memory entry</td></tr><tr><td><code>memory-delete</code></td><td><code>memory:w</code></td><td>Delete a memory entry</td></tr><tr><td><code>memory-stats</code></td><td><code>memory:r</code></td><td>Show memory system statistics</td></tr></tbody></table></div>
+<h3 id="context-memory-tools" class="anchored"><a class="hanchor" href="#context-memory-tools" aria-label="link">#</a>Context Memory Tools</h3>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>context-memory-read</code></td><td><code>agent.context:r</code></td><td>Read agent's context memory document</td></tr><tr><td><code>context-memory-update</code></td><td><code>agent.context:w</code></td><td>Update agent's context memory document</td></tr></tbody></table></div>
+<hr>
+<h2 id="full-configuration-reference" class="anchored"><a class="hanchor" href="#full-configuration-reference" aria-label="link">#</a>Full Configuration Reference</h2>
+<h3 id="memory" class="anchored"><a class="hanchor" href="#memory" aria-label="link">#</a><code>[memory]</code></h3>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>model_cache_dir</code></td><td><code>&quot;models&quot;</code></td><td>Directory for fastembed model cache (~23 MB, downloaded once)</td></tr></tbody></table></div>
+<h3 id="memoryextraction" class="anchored"><a class="hanchor" href="#memoryextraction" aria-label="link">#</a><code>[memory.extraction]</code></h3>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>enabled</code></td><td><code>true</code></td><td>Enable automatic fact extraction from tool results</td></tr><tr><td><code>conflict_threshold</code></td><td><code>0.85</code></td><td>Similarity score boundary between "update existing" and "add new"</td></tr><tr><td><code>max_facts_per_result</code></td><td><code>5</code></td><td>Maximum facts extracted from a single tool result</td></tr><tr><td><code>min_result_length</code></td><td><code>50</code></td><td>Minimum result length (characters) before extraction is attempted</td></tr></tbody></table></div>
+<h3 id="memoryconsolidation" class="anchored"><a class="hanchor" href="#memoryconsolidation" aria-label="link">#</a><code>[memory.consolidation]</code></h3>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>enabled</code></td><td><code>true</code></td><td>Enable background consolidation of episodic patterns into procedures</td></tr><tr><td><code>min_pattern_occurrences</code></td><td><code>3</code></td><td>Minimum episode cluster size to create a procedure</td></tr><tr><td><code>task_completions_trigger</code></td><td><code>100</code></td><td>Run consolidation after every N task completions</td></tr><tr><td><code>time_trigger_hours</code></td><td><code>24</code></td><td>Run consolidation every N hours regardless of task count</td></tr><tr><td><code>max_episodes_per_cycle</code></td><td><code>500</code></td><td>Maximum episodes scanned per consolidation cycle</td></tr></tbody></table></div>
+<h3 id="context-budget" class="anchored"><a class="hanchor" href="#context-budget" aria-label="link">#</a><code>[context_budget]</code></h3>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>total_tokens</code></td><td><code>128000</code></td><td>Total token capacity of the context window</td></tr><tr><td><code>reserve_pct</code></td><td><code>0.25</code></td><td>Fraction reserved for LLM output tokens</td></tr><tr><td><code>system_pct</code></td><td><code>0.15</code></td><td>Fraction of usable tokens for the system prompt</td></tr><tr><td><code>tools_pct</code></td><td><code>0.18</code></td><td>Fraction for tool descriptions</td></tr><tr><td><code>knowledge_pct</code></td><td><code>0.30</code></td><td>Fraction for retrieved memory blocks</td></tr><tr><td><code>history_pct</code></td><td><code>0.25</code></td><td>Fraction for conversation history</td></tr><tr><td><code>task_pct</code></td><td><code>0.12</code></td><td>Fraction for the current task prompt</td></tr></tbody></table></div>
+<div class="callout callout-note"><div class="callout-title">Note</div><p>Percentages apply to <em>usable</em> tokens (<code>total_tokens × (1 - reserve_pct)</code>), not the raw total. They are enforced independently per category — the compiler does not require them to sum to 1.0.</p></div>
+<hr>
+<h2 id="related" class="anchored"><a class="hanchor" href="#related" aria-label="link">#</a>Related</h2>
+<ul><li><span class="wikilink-dead">Memory Context Architecture Plan</span> — design decisions and rationale for the memory system</li><li><span class="wikilink-dead">Memory Context Data Flow</span> — data flow diagrams</li><li><a class="wikilink" href="ch-08.html">Security Model</a> — capability token requirements for memory permissions</li><li><a class="wikilink" href="ch-07.html">Tool System</a> — how tools invoke memory operations</li></ul></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-09.html"><span class="pn-dir">← Previous</span><span class="pn-title">Secrets and Vault</span></a><a class="pn pn-next" href="ch-11.html"><span class="pn-dir">Next →</span><span class="pn-title">Pipeline and Workflows</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#memory-architecture-overview" data-target="memory-architecture-overview">Memory Architecture Overview</a></li><li class="toc-h3"><a href="#when-each-tier-is-used" data-target="when-each-tier-is-used">When each tier is used</a></li><li class="toc-h2"><a href="#tier-1-working-memory-context-window" data-target="tier-1-working-memory-context-window">Tier 1 — Working Memory (Context Window)</a></li><li class="toc-h3"><a href="#how-the-context-window-is-built" data-target="how-the-context-window-is-built">How the context window is built</a></li><li class="toc-h3"><a href="#entry-categories" data-target="entry-categories">Entry categories</a></li><li class="toc-h3"><a href="#token-budget-enforcement" data-target="token-budget-enforcement">Token budget enforcement</a></li><li class="toc-h3"><a href="#context-budget-configuration" data-target="context-budget-configuration">Context budget configuration</a></li><li class="toc-h2"><a href="#tier-2-episodic-memory" data-target="tier-2-episodic-memory">Tier 2 — Episodic Memory</a></li><li class="toc-h3"><a href="#episode-types" data-target="episode-types">Episode types</a></li><li class="toc-h3"><a href="#what-gets-stored-per-episode" data-target="what-gets-stored-per-episode">What gets stored per episode</a></li><li class="toc-h3"><a href="#recall-and-access" data-target="recall-and-access">Recall and access</a></li><li class="toc-h3"><a href="#auto-injection-at-task-start" data-target="auto-injection-at-task-start">Auto-injection at task start</a></li><li class="toc-h2"><a href="#tier-3-semantic-memory" data-target="tier-3-semantic-memory">Tier 3 — Semantic Memory</a></li><li class="toc-h3"><a href="#how-search-works" data-target="how-search-works">How search works</a></li><li class="toc-h3"><a href="#text-chunking" data-target="text-chunking">Text chunking</a></li><li class="toc-h3"><a href="#permissions" data-target="permissions">Permissions</a></li><li class="toc-h3"><a href="#tools" data-target="tools">Tools</a></li><li class="toc-h2"><a href="#tier-4-procedural-memory" data-target="tier-4-procedural-memory">Tier 4 — Procedural Memory</a></li><li class="toc-h3"><a href="#what-a-procedure-looks-like" data-target="what-a-procedure-looks-like">What a procedure looks like</a></li><li class="toc-h3"><a href="#how-procedures-are-created" data-target="how-procedures-are-created">How procedures are created</a></li><li class="toc-h3"><a href="#search" data-target="search">Search</a></li><li class="toc-h2"><a href="#memory-blocks" data-target="memory-blocks">Memory Blocks</a></li><li class="toc-h3"><a href="#characteristics" data-target="characteristics">Characteristics</a></li><li class="toc-h3"><a href="#use-cases" data-target="use-cases">Use cases</a></li><li class="toc-h3"><a href="#tools-2" data-target="tools-2">Tools</a></li><li class="toc-h3"><a href="#example" data-target="example">Example</a></li><li class="toc-h2"><a href="#memory-extraction" data-target="memory-extraction">Memory Extraction</a></li><li class="toc-h3"><a href="#how-it-works" data-target="how-it-works">How it works</a></li><li class="toc-h3"><a href="#configuration" data-target="configuration">Configuration</a></li><li class="toc-h3"><a href="#extraction-report" data-target="extraction-report">Extraction report</a></li><li class="toc-h2"><a href="#memory-consolidation" data-target="memory-consolidation">Memory Consolidation</a></li><li class="toc-h3"><a href="#how-consolidation-works" data-target="how-consolidation-works">How consolidation works</a></li><li class="toc-h3"><a href="#configuration-2" data-target="configuration-2">Configuration</a></li><li class="toc-h3"><a href="#consolidation-report" data-target="consolidation-report">Consolidation report</a></li><li class="toc-h2"><a href="#retrieval-gate" data-target="retrieval-gate">Retrieval Gate</a></li><li class="toc-h3"><a href="#query-classification" data-target="query-classification">Query classification</a></li><li class="toc-h3"><a href="#result-formatting" data-target="result-formatting">Result formatting</a></li><li class="toc-h2"><a href="#context-compilation" data-target="context-compilation">Context Compilation</a></li><li class="toc-h3"><a href="#inputs" data-target="inputs">Inputs</a></li><li class="toc-h3"><a href="#ordering" data-target="ordering">Ordering</a></li><li class="toc-h3"><a href="#budget-enforcement" data-target="budget-enforcement">Budget enforcement</a></li><li class="toc-h2"><a href="#additional-memory-tools" data-target="additional-memory-tools">Additional Memory Tools</a></li><li class="toc-h3"><a href="#procedural-memory-tools" data-target="procedural-memory-tools">Procedural Memory Tools</a></li><li class="toc-h3"><a href="#episodic-memory-tools" data-target="episodic-memory-tools">Episodic Memory Tools</a></li><li class="toc-h3"><a href="#general-memory-tools" data-target="general-memory-tools">General Memory Tools</a></li><li class="toc-h3"><a href="#context-memory-tools" data-target="context-memory-tools">Context Memory Tools</a></li><li class="toc-h2"><a href="#full-configuration-reference" data-target="full-configuration-reference">Full Configuration Reference</a></li><li class="toc-h3"><a href="#memory" data-target="memory"><code>[memory]</code></a></li><li class="toc-h3"><a href="#memoryextraction" data-target="memoryextraction"><code>[memory.extraction]</code></a></li><li class="toc-h3"><a href="#memoryconsolidation" data-target="memoryconsolidation"><code>[memory.consolidation]</code></a></li><li class="toc-h3"><a href="#context-budget" data-target="context-budget"><code>[context_budget]</code></a></li><li class="toc-h2"><a href="#related" data-target="related">Related</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

@@ -8,7 +8,7 @@ AgentOS supports two profiles out of the box:
 Use a custom profile with:
 
 ```bash
-agentctl --config /path/to/config.toml start
+agentos --config /path/to/config.toml start
 ```
 
 ---
@@ -64,6 +64,29 @@ data_dir = "/tmp/agentos/data"
 # Additional directories agents can access beyond data_dir.
 # Must be absolute paths. System roots (/, /etc, /var, /root) are rejected.
 allowed_paths = []
+
+[env]
+# Managed environments — `env-install` installs into per-agent workspaces
+# under {data_dir}/workspaces/{agent_id}/{name}/ (Python venv, Node
+# node_modules, or `cargo install --root`). Host system packages are NEVER
+# affected. Workspace state persists across kernel restarts via SQLite.
+#
+# Policy values per ecosystem:
+#   "curated" (default) — package name must be on the allowlist below
+#   "open"             — any package allowed (dev / lab only)
+#   "locked"           — installs disabled
+python_policy = "curated"
+nodejs_policy = "curated"
+rust_policy   = "curated"
+system_policy = "locked"          # host packages go through host-package-install
+default_quota_bytes = 2147483648  # 2 GiB (informational, not enforced yet)
+install_timeout_secs = 120
+
+# Curated allowlists. Only consulted when the corresponding policy is "curated".
+# Entries are matched verbatim against the package name (no fuzzy match).
+python_allowlist = ["flask", "requests", "pytest", "numpy", "pandas"]
+nodejs_allowlist = ["express", "jest", "axios", "lodash"]
+rust_allowlist   = ["serde", "tokio", "anyhow", "clap"]
 
 [bus]
 socket_path = "/tmp/agentos/agentos.sock"
@@ -230,14 +253,33 @@ Provider behavior:
 
 ## Environment Variables
 
-Environment variables are supported only for non-secret endpoint overrides:
+Override precedence everywhere is **environment variable > config file value > built-in default**.
 
-- `AGENTOS_OLLAMA_HOST`
-- `AGENTOS_LLM_URL`
-- `AGENTOS_OPENAI_BASE_URL`
-- `RUST_LOG`
+### Required / common variables per deploy mode
 
-Secrets (API keys, tokens, credentials) must stay in the encrypted vault.
+| Env var | systemd | Docker | Gateway-first | Pi | Purpose |
+|---------|---------|--------|---------------|-----|---------|
+| `AGENTOS_CONFIG` | `/etc/agentos/config.toml` | mounted (`:ro`) | required | `~/.agentos/config.toml` | Config file path |
+| `AGENTOS_VAULT_PASSPHRASE` | from `/etc/agentos/env` (0600) | env / secret | secret | prompt/secret | Derives the AES-256-GCM vault key (see below) |
+| `AGENTOS_VAULT_PASSPHRASE_FILE` | optional | **preferred** (secret mount) | secret mount | optional | Path to a file holding the passphrase |
+| `AGENTOS_AUTO_INIT_VAULT` | `false` (prod) | `true` (ephemeral) / `false` | `false` | `false` | Auto-create the vault on first boot |
+| `AGENTOS_OLLAMA_HOST` | optional | service DNS | optional | network LLM host | Overrides `[ollama].host` |
+| `AGENTOS_LLM_URL` | optional | optional | optional | optional | Custom OpenAI-compat base URL (`[llm].custom_base_url`) |
+| `AGENTOS_OPENAI_BASE_URL` | optional | optional | optional | optional | Overrides `[llm].openai_base_url` |
+| `AGENTOS_LLM_MAX_TOKENS` / `AGENTOS_OLLAMA_CONTEXT_WINDOW` | optional | optional | optional | optional | Per-key LLM overrides |
+| `RUST_LOG` | `info` | `info` | `info` | `info` | Log filter (e.g. `agentos=debug`) |
+
+Non-secret endpoint overrides (`AGENTOS_OLLAMA_HOST`, `AGENTOS_LLM_URL`, `AGENTOS_OPENAI_BASE_URL`, `RUST_LOG`) may live in plain env. **API keys, tokens, and credentials must stay in the encrypted vault.**
+
+### Vault passphrase sourcing
+
+The boot passphrase is resolved in this priority order (`resolve_boot_vault_passphrase`):
+
+1. **`AGENTOS_VAULT_PASSPHRASE`** — env var. On systemd, supply it via `EnvironmentFile=-/etc/agentos/env` (owner `agentos`, mode `0600`).
+2. **`AGENTOS_VAULT_PASSPHRASE_FILE`** — path to a file whose contents are the passphrase (trailing whitespace trimmed). Use this with Docker/Kubernetes secret mounts (e.g. `/run/secrets/vault_pass`) so the secret never enters the process environment.
+3. **Interactive prompt** — dev / first-run only.
+
+> Never combine `AGENTOS_AUTO_INIT_VAULT=true` with a baked default passphrase (e.g. `release.sh`'s `devpass`) in production — that would silently create a weakly-keyed vault.
 
 ---
 
@@ -258,13 +300,13 @@ Secrets (API keys, tokens, credentials) must stay in the encrypted vault.
 5. Start with production profile:
 
 ```bash
-agentctl --config config/production.toml start
+agentos --config config/production.toml start
 ```
 
 6. Verify:
 
 ```bash
-agentctl --config config/production.toml status
+agentos --config config/production.toml status
 grep -n "localhost" config/production.toml
 ```
 
@@ -282,3 +324,19 @@ Enable debug logs:
 ```bash
 RUST_LOG=agentos=debug cargo run --bin agentos-cli -- start --config config/production.toml
 ```
+
+---
+
+## API contract (OpenAPI)
+
+The REST API contract is generated from `utoipa` annotations on the handlers and committed at `crates/agentos-api/openapi.json` (OpenAPI 3.1).
+
+Regenerate it after changing any handler or response type:
+
+```bash
+cargo run -p agentos-api --bin gen-openapi -- crates/agentos-api/openapi.json
+```
+
+CI fails if the committed spec drifts from the freshly generated one, and additionally runs `spectral lint` against the `.spectral.yaml` ruleset to catch structural/quality issues (failing on error-severity findings).
+
+At runtime the spec is served at `GET /api/v1/openapi.json` (always public) with a Scalar UI at `GET /api/v1/docs`, gated by the `[api] docs_enabled` config flag (default `true`).

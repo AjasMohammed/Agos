@@ -626,6 +626,29 @@ impl Kernel {
                                         });
                                     }
 
+                                    // Prune scheduled-run history older than the configured
+                                    // retention window so the run store does not grow without
+                                    // bound (0 days disables pruning).
+                                    {
+                                        let retention_days = kernel.config.scheduler.run_retention_days;
+                                        if retention_days > 0 {
+                                            if let Some(run_store) = kernel.schedule_manager.store().cloned() {
+                                                tokio::spawn(async move {
+                                                    let max_age = chrono::Duration::days(i64::from(retention_days));
+                                                    match run_store.prune_runs_older_than(max_age).await {
+                                                        Ok(0) => {}
+                                                        Ok(n) => {
+                                                            tracing::info!(pruned = n, retention_days, "Pruned {} expired scheduled runs", n);
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::warn!(error = %e, "Scheduled-run pruning failed");
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }
+
                                     // Sweep expired OAuth pending flows (10min TTL)
                                     if let Err(e) = kernel.vault.oauth_store().sweep_expired_flows().await {
                                         tracing::warn!(error = %e, "OAuth pending flow sweep failed");
@@ -889,8 +912,31 @@ impl Kernel {
                                             instance_id = %inbound.channel_instance_id,
                                             "Inbound channel message received"
                                         );
-                                        // TODO: Route to bound agent based on
-                                        // channel_instance_id -> agent mapping.
+                                        let channel_instance_id = match inbound.channel_instance_id.parse() {
+                                            Ok(id) => id,
+                                            Err(_) => {
+                                                tracing::warn!(
+                                                    channel_type = %inbound.channel_type,
+                                                    instance_id = %inbound.channel_instance_id,
+                                                    "Dropping inbound channel-manager message with invalid channel instance id"
+                                                );
+                                                continue;
+                                            }
+                                        };
+                                        let routed = crate::notification_router::InboundMessage {
+                                            channel: agentos_types::DeliveryChannel::custom(inbound.channel_type.clone()),
+                                            channel_instance_id,
+                                            external_sender_id: inbound.sender.platform_id,
+                                            text: inbound.content.as_text(),
+                                            reply_to_notification_id: None,
+                                            received_at: inbound.timestamp,
+                                            raw: inbound.raw,
+                                            media_file_ids: Vec::new(),
+                                        };
+                                        if kernel.inbound_tx.send(routed).await.is_err() {
+                                            tracing::warn!("Inbound router channel closed; dropping channel-manager message");
+                                            break;
+                                        }
                                     }
                                     None => {
                                         tracing::warn!("Channel inbound channel closed");
@@ -1523,6 +1569,7 @@ impl Kernel {
     }
 
     /// Route a KernelCommand to the appropriate handler.
+    #[tracing::instrument(skip_all)]
     async fn handle_command(&self, cmd: agentos_bus::KernelCommand) -> agentos_bus::KernelResponse {
         use agentos_bus::KernelCommand;
 
@@ -2393,6 +2440,7 @@ impl Kernel {
                             read: false,
                             thread_id: None,
                             reply_to_external_id: None,
+                            attachment: None,
                         };
                         let now = chrono::Utc::now();
                         if let Err(e) = self.notification_router.deliver(msg).await {
@@ -2570,6 +2618,7 @@ impl Kernel {
                             read: false,
                             thread_id: None,
                             reply_to_external_id: None,
+                            attachment: None,
                         };
                         let now = chrono::Utc::now();
                         if let Err(e) = self.notification_router.deliver(msg).await {
@@ -2698,6 +2747,7 @@ impl Kernel {
                 read: false,
                 thread_id: None,
                 reply_to_external_id: None,
+                attachment: None,
             }
         };
 

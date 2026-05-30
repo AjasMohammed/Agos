@@ -2145,7 +2145,10 @@ impl Kernel {
     }
 
     /// Execute a single task synchronously: assemble context, call LLM, process tool calls, repeat.
-    #[tracing::instrument(skip_all, fields(task_id = %task.id, agent_id = %task.agent_id))]
+    #[tracing::instrument(
+        skip_all,
+        fields(task_id = %task.id, agent_id = %task.agent_id, trace_id = %task_trace_id)
+    )]
     pub(crate) async fn execute_task_sync(
         &self,
         task: &AgentTask,

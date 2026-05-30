@@ -13,7 +13,7 @@ priority: high
 
 # WebSocket Guide
 
-> Real-time bidirectional communication with AgentOS — subscribe to kernel events, stream chat responses, and send task actions over a single persistent connection.
+> Real-time bidirectional communication with AgentOS — subscribe to kernel events, exchange chat messages, and send task actions over a single persistent connection.
 
 ---
 
@@ -22,7 +22,7 @@ priority: high
 The WebSocket endpoint upgrades a standard HTTP connection into a persistent JSON message stream. It is the preferred interface for:
 
 - **Real-time event feeds** — watch task completions, agent state changes, audit events
-- **Streaming chat** — receive LLM response tokens as they generate
+- **Chat** — send a message to an agent and receive the full reply in one frame (non-streaming; for token-level streaming use the REST `POST /api/v1/chat/completions` SSE endpoint)
 - **Interactive notifications** — respond to `ask-user` questions from agents without polling
 - **Task control** — cancel running tasks mid-execution
 
@@ -121,9 +121,11 @@ Server confirms with a `subscribed` frame:
 {
   "type": "subscribed",
   "channel": "tasks",
-  "subscription_id": "sub_abc123"
+  "subscription_id": "sub_0"
 }
 ```
+
+Subscription IDs are assigned per-connection as sequential integers: `sub_0`, `sub_1`, `sub_2`, ....
 
 ---
 
@@ -132,7 +134,7 @@ Server confirms with a `subscribed` frame:
 ```json
 {
   "type": "unsubscribe",
-  "subscription_id": "sub_abc123"
+  "subscription_id": "sub_0"
 }
 ```
 
@@ -141,7 +143,7 @@ Server confirms with `unsubscribed`:
 ```json
 {
   "type": "unsubscribed",
-  "subscription_id": "sub_abc123"
+  "subscription_id": "sub_0"
 }
 ```
 
@@ -149,7 +151,7 @@ Server confirms with `unsubscribed`:
 
 #### `chat.send` — Send a chat message
 
-Sends a message to an agent and begins a streaming response.
+Sends a message to an agent. The full reply arrives in a single `chat.done` frame — this is **not** streamed token-by-token.
 
 ```json
 {
@@ -209,6 +211,9 @@ Server confirms with `chat.cancelled`:
 }
 ```
 
+> [!note] No dedicated ack frame
+> `task.cancel` and `notification.respond` do not return a dedicated acknowledgement frame. Success is confirmed via an `event` frame: `task.cancel` emits `{ "channel": "tasks", "event": "task.cancelled" }` and `notification.respond` emits `{ "channel": "notifications", "event": "notification.responded" }`.
+
 ---
 
 ### Server → Client Frames
@@ -233,31 +238,23 @@ Delivered for all active subscriptions when a matching event occurs.
 
 ---
 
-#### `chat.chunk` — Streaming response token
-
-```json
-{
-  "type": "chat.chunk",
-  "session_id": "sess_xyz",
-  "delta": "The quarterly report shows..."
-}
-```
-
-Chunks arrive in order. Concatenate `delta` values to build the full response.
-
----
-
 #### `chat.done` — Response complete
+
+The full reply to a `chat.send` arrives in this single frame. There is no token-level streaming over WebSocket.
 
 ```json
 {
   "type": "chat.done",
   "session_id": "sess_xyz",
+  "message": "The quarterly report shows...",
   "tool_calls": []
 }
 ```
 
 The `tool_calls` array contains any tool calls the agent made during inference (may be empty).
+
+> [!note] WebSocket chat is non-streaming
+> WebSocket `chat.send` is currently non-streaming — the full response arrives in one `chat.done` frame. For token-level streaming use the REST `POST /api/v1/chat/completions` SSE endpoint with `stream: true`.
 
 ---
 
@@ -275,10 +272,11 @@ Common error codes:
 
 | Code | Description |
 |------|-------------|
-| `INVALID_FRAME` | Malformed JSON or unknown `type` |
-| `CHANNEL_NOT_FOUND` | Subscribed channel name not recognized |
-| `AGENT_NOT_FOUND` | Target agent for `chat.send` not connected |
-| `TASK_NOT_FOUND` | Task ID for `task.cancel` not found |
+| `INVALID_FRAME` | Malformed JSON frame (e.g. failed to parse, missing/unknown `type`) |
+| `UNKNOWN_SUBSCRIPTION` | `unsubscribe` referenced a subscription id that does not exist |
+| `BAD_REQUEST` | Invalid task or notification id (e.g. on `task.cancel` / `notification.respond`) |
+
+In addition, service errors are propagated with the service's own error code (from `e.error_code()`).
 
 ---
 
@@ -288,7 +286,7 @@ Common error codes:
 |---------|--------------|-------------|
 | `tasks` | `TaskStarted`, `TaskCompleted`, `TaskFailed`, `TaskCancelled` | Task lifecycle changes for all agents |
 | `agents` | `AgentConnected`, `AgentDisconnected`, `AgentStatusChanged` | Agent registry changes |
-| `audit` | All 83+ event types | Full audit log stream (high volume — use filters) |
+| `audit` | All 146 event types | Full audit log stream (high volume — use filters) |
 | `costs` | `BudgetAlert`, `HardLimitExceeded`, `CostAttribution` | Budget threshold events |
 | `notifications` | `NotificationCreated`, `EscalationCreated` | Operator inbox events |
 
@@ -329,11 +327,12 @@ ws.onmessage = (e) => {
 
 ---
 
-## Complete Example: Streaming Chat
+## Complete Example: Chat
+
+WebSocket chat is non-streaming — send a `chat.send` frame and wait for the single `chat.done` frame carrying the full reply. (For token-level streaming, use the REST `POST /api/v1/chat/completions` SSE endpoint with `stream: true`.)
 
 ```javascript
 const ws = new WebSocket('ws://localhost:8080/api/v1/ws?token=agos_...');
-let response = '';
 
 ws.onopen = () => {
   ws.send(JSON.stringify({
@@ -347,11 +346,11 @@ ws.onopen = () => {
 ws.onmessage = (e) => {
   const frame = JSON.parse(e.data);
 
-  if (frame.type === 'chat.chunk' && frame.session_id === 'session-1') {
-    process.stdout.write(frame.delta);
-    response += frame.delta;
-  } else if (frame.type === 'chat.done' && frame.session_id === 'session-1') {
-    console.log('\n--- done ---');
+  if (frame.type === 'chat.done' && frame.session_id === 'session-1') {
+    console.log(frame.message);
+    if (frame.tool_calls && frame.tool_calls.length) {
+      console.log('tool calls:', frame.tool_calls);
+    }
     ws.close();
   } else if (frame.type === 'error') {
     console.error(frame.code, frame.message);

@@ -303,6 +303,21 @@ impl EnvProvider {
     /// allowlists are omitted so the curated check fails fast with a clear
     /// "not on the curated allowlist" error.
     pub fn from_config(settings: &crate::config::EnvSettings) -> Self {
+        for (eco, raw) in [
+            ("python_policy", &settings.python_policy),
+            ("nodejs_policy", &settings.nodejs_policy),
+            ("rust_policy", &settings.rust_policy),
+            ("system_policy", &settings.system_policy),
+        ] {
+            if !matches!(raw.as_str(), "curated" | "open" | "locked") {
+                tracing::warn!(
+                    field = eco,
+                    value = %raw,
+                    "unrecognized env policy value; falling back to 'curated' (deny by default). \
+                     Valid values: \"curated\", \"open\", \"locked\""
+                );
+            }
+        }
         let cfg = EnvConfig {
             default_quota_bytes: settings.default_quota_bytes,
             python_policy: settings.python_policy.clone(),
@@ -345,11 +360,16 @@ impl EnvProvider {
     pub async fn from_config_with_store(
         settings: &crate::config::EnvSettings,
         store: Arc<crate::workspace_store::WorkspaceStore>,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, AgentOSError> {
         let mut provider = Self::from_config(settings);
         provider.store = Some(store.clone());
 
-        let rows = store.load_all().await?;
+        let rows = store
+            .load_all()
+            .await
+            .map_err(|e| AgentOSError::KernelError {
+                reason: format!("failed to load workspaces from store: {e}"),
+            })?;
         let mut map = HashMap::new();
         for ws in rows {
             map.insert((ws.agent_id, ws.name.clone()), ws);
@@ -357,6 +377,66 @@ impl EnvProvider {
         // No tokio lock held yet; replace the empty map wholesale.
         *provider.workspaces.write().await = map;
         Ok(provider)
+    }
+
+    /// Compare on-disk `{data_dir}/workspaces/<agent>/<name>/` directories
+    /// against the in-memory map and emit warnings for either direction of
+    /// drift. Warn-only — never destructive — so operators can investigate
+    /// before any auto-clean is contemplated.
+    pub async fn warn_on_disk_drift(&self, data_dir: &Path) {
+        let root = data_dir.join("workspaces");
+        if !root.is_dir() {
+            return;
+        }
+        let ws_map = self.workspaces.read().await;
+        let known: std::collections::HashSet<(String, String)> = ws_map
+            .keys()
+            .map(|(a, n)| (a.to_string(), n.clone()))
+            .collect();
+        // Forward direction: directories present on disk but not in DB.
+        let mut on_disk: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        match std::fs::read_dir(&root) {
+            Ok(agent_dirs) => {
+                for agent_entry in agent_dirs.flatten() {
+                    let agent_str = match agent_entry.file_name().into_string() {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    let agent_path = agent_entry.path();
+                    if !agent_path.is_dir() {
+                        continue;
+                    }
+                    if let Ok(ws_dirs) = std::fs::read_dir(&agent_path) {
+                        for ws_entry in ws_dirs.flatten() {
+                            if let Ok(ws_name) = ws_entry.file_name().into_string() {
+                                if ws_entry.path().is_dir() {
+                                    on_disk.insert((agent_str.clone(), ws_name));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %root.display(), "failed to scan workspaces dir for drift");
+                return;
+            }
+        }
+        for orphan in on_disk.difference(&known) {
+            tracing::warn!(
+                agent_id = %orphan.0,
+                workspace = %orphan.1,
+                "workspace directory exists on disk but has no row in workspaces.db (orphan — investigate before cleaning)"
+            );
+        }
+        for missing in known.difference(&on_disk) {
+            tracing::warn!(
+                agent_id = %missing.0,
+                workspace = %missing.1,
+                "workspaces.db row exists but workspace directory is missing on disk (manual delete?)"
+            );
+        }
     }
 
     /// Resolve workspace root path for an agent.
@@ -431,28 +511,35 @@ impl EnvProvider {
         let root_path = Self::workspace_path(&context.data_dir, &context.agent_id, name);
         let key = (context.agent_id, name.to_string());
 
-        // Hold write lock for the entire create operation to prevent TOCTOU races.
-        // Directory creation is fast (microseconds) so contention is minimal.
-        let mut ws = self.workspaces.write().await;
-        if ws.contains_key(&key) {
-            return Err(AgentOSError::KernelError {
-                reason: format!("workspace '{name}' already exists for this agent"),
-            });
+        // First, take the write lock just long enough to reserve the slot
+        // (rejecting duplicates) and release it before the slow filesystem
+        // and DB work. We use a tombstone-like placeholder (`Pending`) — no,
+        // simpler: hold the lock only for the duplicate check, drop, and
+        // re-check on insert at the end. The (agent_id, name) key prevents
+        // cross-agent collisions; in-agent races just produce the same
+        // collision error on whichever call lands the insert second.
+        {
+            let ws = self.workspaces.read().await;
+            if ws.contains_key(&key) {
+                return Err(AgentOSError::KernelError {
+                    reason: format!("workspace '{name}' already exists for this agent"),
+                });
+            }
         }
 
-        // Create workspace directory structure
+        // Slow path runs without the workspaces lock so concurrent reads /
+        // installs on other workspaces aren't blocked.
         let root_clone = root_path.clone();
         let eco = ecosystem;
+        let stub_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stub_flag_for_blocking = stub_flag.clone();
         tokio::task::spawn_blocking(move || -> Result<(), AgentOSError> {
             std::fs::create_dir_all(&root_clone).map_err(|e| AgentOSError::KernelError {
                 reason: format!("failed to create workspace directory: {e}"),
             })?;
 
-            // Ecosystem-specific setup
             match eco {
                 Ecosystem::Python => {
-                    // Create venv using python3. If python3 is not available,
-                    // fall back to creating the directory structure.
                     let venv_dir = root_clone.join("venv");
                     let output = std::process::Command::new("python3")
                         .args(["-m", "venv", &venv_dir.to_string_lossy()])
@@ -462,7 +549,7 @@ impl EnvProvider {
                         Ok(out) if out.status.success() => {}
                         Ok(out) => {
                             tracing::warn!(
-                                "python3 -m venv failed ({}), creating stub structure",
+                                "python3 -m venv failed ({}), creating stub structure; env-install will fail until python3 is available",
                                 String::from_utf8_lossy(&out.stderr)
                                     .chars()
                                     .take(200)
@@ -470,11 +557,17 @@ impl EnvProvider {
                             );
                             std::fs::create_dir_all(venv_dir.join("bin")).ok();
                             std::fs::create_dir_all(venv_dir.join("lib")).ok();
+                            stub_flag_for_blocking
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                         Err(e) => {
-                            tracing::warn!("python3 not found ({e}), creating stub venv structure");
+                            tracing::warn!(
+                                "python3 not found ({e}), creating stub venv structure; env-install will fail until python3 is available"
+                            );
                             std::fs::create_dir_all(venv_dir.join("bin")).ok();
                             std::fs::create_dir_all(venv_dir.join("lib")).ok();
+                            stub_flag_for_blocking
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                 }
@@ -492,9 +585,7 @@ impl EnvProvider {
                         }
                     })?;
                 }
-                Ecosystem::System | Ecosystem::Generic => {
-                    // Just the root directory, already created above
-                }
+                Ecosystem::System | Ecosystem::Generic => {}
             }
 
             Ok(())
@@ -503,6 +594,7 @@ impl EnvProvider {
         .map_err(|e| AgentOSError::KernelError {
             reason: format!("workspace creation task panicked: {e}"),
         })??;
+        let python_venv_stub = stub_flag.load(std::sync::atomic::Ordering::Relaxed);
 
         let workspace = ManagedWorkspace {
             name: name.to_string(),
@@ -513,24 +605,46 @@ impl EnvProvider {
             packages_installed: vec![],
         };
 
+        // Persist before the in-memory insert so the store is the source of
+        // truth on crash mid-create. If the persist fails we still surface
+        // the workspace in-memory so the agent can keep working.
         if let Some(store) = &self.store {
             if let Err(e) = store.upsert(&workspace).await {
                 tracing::warn!(error = %e, workspace = %name, "failed to persist workspace; in-memory state still consistent");
             }
         }
-        ws.insert(key, workspace);
 
+        // Final insert under write lock — re-check for the race where two
+        // concurrent creates of the same (agent_id, name) both made it past
+        // the read-lock duplicate check.
+        {
+            let mut ws = self.workspaces.write().await;
+            if ws.contains_key(&key) {
+                return Err(AgentOSError::KernelError {
+                    reason: format!("workspace '{name}' was concurrently created by another call"),
+                });
+            }
+            ws.insert(key, workspace);
+        }
+
+        let mut output = json!({
+            "workspace": name,
+            "ecosystem": ecosystem_str,
+            "path": root_path.to_string_lossy(),
+        });
+        if python_venv_stub {
+            output["warnings"] = json!([
+                "python3 unavailable: venv is a stub; env-install will fail until python3 is installed (try host-package-install for python3-venv)"
+            ]);
+        }
         Ok(CapabilityResult {
-            output: json!({
-                "workspace": name,
-                "ecosystem": ecosystem_str,
-                "path": root_path.to_string_lossy(),
-            }),
+            output,
             audit_metadata: json!({
                 "event": "EnvironmentCreated",
                 "workspace": name,
                 "ecosystem": ecosystem_str,
                 "path": root_path.to_string_lossy().to_string(),
+                "python_venv_stub": python_venv_stub,
             }),
         })
     }
@@ -686,8 +800,22 @@ impl EnvProvider {
                 None
             }
         };
+        // Persist OUTSIDE the lock. The destroy path holds the same write
+        // lock so a destroy that lands between the snapshot clone and this
+        // upsert would race; we re-verify membership under a read lock right
+        // before persisting to avoid resurrecting a destroyed workspace.
         if let (Some(store), Some(snap)) = (self.store.as_ref(), snapshot_for_store) {
-            if let Err(e) = store.upsert(&snap).await {
+            let still_present = {
+                let ws = self.workspaces.read().await;
+                ws.contains_key(&(context.agent_id, workspace_name.to_string()))
+            };
+            if !still_present {
+                tracing::warn!(
+                    workspace = %workspace_name,
+                    package = %package,
+                    "workspace destroyed during package install; skipping store upsert to avoid ghost row"
+                );
+            } else if let Err(e) = store.upsert(&snap).await {
                 tracing::warn!(error = %e, workspace = %workspace_name, package = %package, "failed to persist package install; in-memory state still consistent");
             }
         }

@@ -33,7 +33,7 @@ description = "Maximum number of runs to return. Default 20, max 100."
 
 [payload_schema.properties.state]
 type        = "string"
-description = "Filter by run state: 'Queued' | 'Running' | 'Complete' | 'Failed' | 'Missed'."
+description = "Filter by run state (case-insensitive): 'running' | 'complete' | 'failed' | 'missed'."
 
 [sandbox]
 network       = false

@@ -66,6 +66,12 @@ pub enum Commands {
     /// Boot the AgentOS kernel
     Start,
 
+    /// Run AgentOS as a long-lived messaging gateway ("run as a bot")
+    Gateway {
+        #[command(subcommand)]
+        command: commands::gateway::GatewayCommands,
+    },
+
     /// Gracefully shut down the running kernel
     Stop,
 
@@ -379,8 +385,14 @@ async fn tokio_main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Start => {
-            cmd_start(&cli.config).await?;
+            cmd_start(&cli.config, false).await?;
         }
+
+        Commands::Gateway { command } => match command {
+            commands::gateway::GatewayCommands::Run => {
+                cmd_start(&cli.config, true).await?;
+            }
+        },
 
         Commands::Web { command } => {
             let config_path = Path::new(&cli.config);
@@ -834,7 +846,7 @@ fn build_sandbox_hal() -> Arc<HardwareAbstractionLayer> {
     Arc::new(hal)
 }
 
-async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
+async fn cmd_start(config_str: &str, gateway: bool) -> anyhow::Result<()> {
     let config_path = Path::new(config_str);
     if !config_path.exists() {
         anyhow::bail!("Config file not found: {}", config_str);
@@ -862,6 +874,13 @@ async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
     // Start the webhook wake-up loop now that kernel is wrapped in Arc.
     kernel.start_webhook_wakeup().await;
 
+    // Gateway mode ("run as a bot"): connect every channel declared in the
+    // [gateway] config block before entering the supervisor loop.
+    if gateway {
+        println!("🤖 Gateway mode: connecting configured channels...");
+        kernel.connect_configured_channels().await?;
+    }
+
     println!("✅ Kernel started");
     println!("   Bus: {}", kernel.config.bus.socket_path);
     println!(
@@ -873,6 +892,9 @@ async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
     if kernel.config.api.enabled {
         let api_host = kernel.config.api.host.clone();
         let api_port = kernel.config.api.port;
+        let api_docs_enabled = kernel.config.api.docs_enabled;
+        let api_cors_origins = kernel.config.api.cors_allowed_origins.clone();
+        let api_refresh_enabled = kernel.config.api.refresh_enabled;
         let api_addr: std::net::SocketAddr = format!("{api_host}:{api_port}")
             .parse()
             .map_err(|e| anyhow::anyhow!("Invalid API bind address: {e}"))?;
@@ -909,9 +931,27 @@ async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
 
         let service: Arc<dyn agentos_api::KernelService> = kernel.clone();
         let broadcaster = agentos_api::ws::broadcaster::WsBroadcaster::new();
+        // Wire kernel task-status updates into the WS broadcaster. Without this
+        // relay, the `tasks` / `tasks:{id}` WebSocket channels broadcast nothing
+        // (the relay task is spawned internally and runs for the process lifetime).
+        broadcaster
+            .clone()
+            .start_status_relay(kernel.status_update_sender.subscribe());
+        // Fan out coarse kernel events (agents/audit/schedules/system/...) to WS.
+        broadcaster
+            .clone()
+            .start_realtime_relay(kernel.realtime_event_sender.subscribe());
         tokio::spawn(async move {
-            if let Err(e) =
-                agentos_api::run_api_server(service, key_store, broadcaster, api_addr).await
+            if let Err(e) = agentos_api::run_api_server(
+                service,
+                key_store,
+                broadcaster,
+                api_addr,
+                api_docs_enabled,
+                api_cors_origins,
+                api_refresh_enabled,
+            )
+            .await
             {
                 tracing::error!("API server exited with error: {e}");
             }

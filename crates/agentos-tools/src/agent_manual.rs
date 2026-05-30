@@ -1390,7 +1390,7 @@ impl AgentManualTool {
                         {"name": "task-status", "description": "Inspect status of a specific task by ID", "tool": "task-status", "kernel_only": false},
                         {"name": "RunTask", "description": "Start a new task on a specific or auto-routed agent", "kernel_only": true},
                         {"name": "CancelTask", "description": "Cancel a running task by ID", "kernel_only": true},
-                        {"name": "GetTaskLogs", "description": "Get execution logs for a specific task", "kernel_only": true}
+                        {"name": "get-task-logs", "description": "Get the result + audit trail of a scheduled run you own, keyed by run_id (from get-schedule-runs)", "tool": "get-task-logs", "kernel_only": false}
                     ]
                 },
                 {
@@ -1565,7 +1565,9 @@ impl AgentManualTool {
                 {
                     "domain": "Skills",
                     "commands": [
-                        {"name": "SkillInstall", "description": "Install a skill package from a directory or archive", "kernel_only": true},
+                        {"name": "skill-prompt", "description": "Fetch an installed skill's full system prompt + tool allowlist + budget", "tool": "skill-prompt", "kernel_only": false},
+                        {"name": "skill-create", "description": "Author a new skill at runtime (writes SKILL.toml + prompt.md under user-skills dir, installs it; trust tier forced to community; gated by control_plane approval)", "tool": "skill-create", "kernel_only": false},
+                        {"name": "SkillInstall", "description": "Install a skill package from a directory (CLI: agentos skill install <path>)", "kernel_only": true},
                         {"name": "SkillList", "description": "List installed skills", "kernel_only": true},
                         {"name": "SkillRun", "description": "Execute an installed skill against an input prompt", "kernel_only": true},
                         {"name": "SkillStatus", "description": "Inspect the status of a running skill", "kernel_only": true},
@@ -2101,6 +2103,10 @@ impl AgentManualTool {
                 "behavior": "AgentOS converts the body to Telegram HTML before sending: HTML-escapes <, >, & first, then renders **bold**, *italic*/_italic_, ~~strike~~, `code`, ```fenced code```, [label](url). On HTML parse errors the adapter retries the same segment as plain text — agents do NOT need to escape anything."
             },
             "supported_markdown": [
+                {"syntax": "# Heading … ###### Heading", "renders": "<b>Heading</b> (Telegram has no header tag, so ATX headers become bold lines)"},
+                {"syntax": "- item / * item / + item", "renders": "• item (bullet lists; nesting indent preserved)"},
+                {"syntax": "> quoted", "renders": "<blockquote>quoted</blockquote>"},
+                {"syntax": "--- or *** or ___", "renders": "────────── (horizontal rule)"},
                 {"syntax": "**text**", "renders": "<b>text</b> (bold)"},
                 {"syntax": "*text* or _text_", "renders": "<i>text</i> (italic)"},
                 {"syntax": "~~text~~", "renders": "<s>text</s> (strikethrough)"},
@@ -2109,6 +2115,19 @@ impl AgentManualTool {
                 {"syntax": "```rust\ncode\n```", "renders": "<pre><code class=\"language-rust\">…</code></pre> (highlighted block)"},
                 {"syntax": "[label](https://url)", "renders": "<a href=\"…\">label</a> (only http/https/tg/mailto schemes are linked; others are left as text)"}
             ],
+            "media": {
+                "summary": "channel-send can attach one media item by URL. Telegram fetches the URL itself and renders it natively.",
+                "fields": [
+                    {"field": "image_url", "desc": "Public https URL of an image → sent via sendPhoto (inline image)."},
+                    {"field": "document_url", "desc": "Public https URL of a file → sent via sendDocument (downloadable attachment)."},
+                    {"field": "caption", "desc": "Optional short caption (≤1024 chars, markdown-rendered) shown on the media."}
+                ],
+                "rules": [
+                    "image_url and document_url are mutually exclusive — pass at most one.",
+                    "When an attachment is present, 'text' is optional. If both are given, the media is sent first, then 'text' follows as a normal (fully-rendered, un-truncated) message.",
+                    "The URL must be publicly reachable by Telegram's servers; local file paths and file IDs are not yet supported."
+                ]
+            },
             "limits": {
                 "max_message_chars": 4096,
                 "long_message_handling": "Bodies longer than ~3000 source chars are split across multiple sendMessage calls. Question payloads with options are NEVER split — they stay on one message so the inline keyboard remains valid.",

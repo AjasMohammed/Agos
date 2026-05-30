@@ -224,9 +224,18 @@ impl OpenAICore {
             );
             intent_by_tool.insert(tool_name.to_string(), intent_type);
 
-            let parameters =
+            let mut parameters =
                 tool_helpers::normalize_tool_input_schema(manifest.payload_schema.as_ref());
             let strict = tool_helpers::is_openai_strict_compatible_schema(&parameters);
+            // OpenAI strict mode *requires* `additionalProperties: false` on
+            // every object. Only close the schema when we actually emit
+            // `strict: true` — non-strict OpenAI (and every other
+            // OpenAI-compatible host, via the shared normalizer) gets an open
+            // schema, since closed empty objects trip some guided-decoding
+            // backends. See the note in `normalize_tool_input_schema`.
+            if strict {
+                tool_helpers::add_object_additional_properties_false(&mut parameters);
+            }
 
             openai_tools.push(json!({
                 "type": "function",
@@ -667,32 +676,35 @@ impl LLMCore for OpenAICore {
             body["tool_choice"] = json!("auto");
         }
 
-        let res = self
-            .client
-            .post(&url)
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.api_key.expose_secret()),
-            )
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AgentOSError::LLMError {
-                provider: "openai".to_string(),
-                reason: format!("Reqwest failed: {}", e),
-            })?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let text = res.text().await.unwrap_or_default();
-            let err_msg = format!("OpenAI API error {}: {}", status, text);
-            let _ = tx.send(InferenceEvent::Error(err_msg.clone())).await;
-            return Err(AgentOSError::LLMError {
-                provider: "openai".to_string(),
-                reason: err_msg,
-            });
-        }
+        // Retry the initial POST + status check (before any SSE event is
+        // forwarded) so a transient upstream 5xx / network blip doesn't fail
+        // the whole chat turn — matching the resilience of the non-streaming
+        // path. `send_with_retry` returns the live `Response` with its body
+        // stream intact on 2xx.
+        let res = crate::retry::send_with_retry(
+            "openai",
+            &self.retry_policy,
+            &self.circuit_breaker,
+            Some(&self.concurrency),
+            || {
+                self.client
+                    .post(&url)
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", self.api_key.expose_secret()),
+                    )
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+            },
+        )
+        .await;
+        let res = match res {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(InferenceEvent::Error(e.to_string())).await;
+                return Err(e);
+            }
+        };
 
         // State for accumulating the streamed response.
         let mut full_text = String::new();

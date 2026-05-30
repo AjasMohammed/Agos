@@ -550,5 +550,6 @@ fn row_to_user_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<UserM
         read: read != 0,
         thread_id,
         reply_to_external_id,
+        attachment: None,
     }))
 }

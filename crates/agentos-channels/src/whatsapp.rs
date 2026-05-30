@@ -60,7 +60,7 @@ impl ChannelAdapter for WhatsAppAdapter {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
-        let text = msg.content.as_text();
+        let text: String = msg.content.as_text().chars().take(4096).collect();
         let url = format!(
             "https://graph.facebook.com/v18.0/{}/messages",
             self.phone_number_id

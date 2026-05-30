@@ -87,6 +87,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             extraction: Default::default(),
             consolidation: Default::default(),
             context: Default::default(),
+            disable_embedder: true,
         },
         context_budget: Default::default(),
         health_monitor: HealthMonitorConfig::default(),
@@ -104,5 +105,8 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         chat: Default::default(),
         user_adaptation: Default::default(),
         env: Default::default(),
+        gateway: Default::default(),
+        scheduler: Default::default(),
+        transcription: Default::default(),
     }
 }

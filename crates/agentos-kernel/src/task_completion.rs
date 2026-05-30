@@ -1244,6 +1244,7 @@ impl Kernel {
             read: false,
             thread_id: Some(task.id.to_string()),
             reply_to_external_id: None,
+            attachment: None,
         };
 
         if let Err(e) = self.notification_router.deliver(msg).await {

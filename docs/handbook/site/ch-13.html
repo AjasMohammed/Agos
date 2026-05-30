@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cost Tracking · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a><div class="nav-subs"><a class="nav-sub" href="#cost-tracking-overview" data-target="cost-tracking-overview">Cost Tracking Overview</a><a class="nav-sub" href="#viewing-cost-reports" data-target="viewing-cost-reports">Viewing Cost Reports</a><a class="nav-sub" href="#budget-enforcement" data-target="budget-enforcement">Budget Enforcement</a><a class="nav-sub" href="#model-pricing" data-target="model-pricing">Model Pricing</a><a class="nav-sub" href="#retrieval-efficiency-metrics" data-target="retrieval-efficiency-metrics">Retrieval Efficiency Metrics</a><a class="nav-sub" href="#related" data-target="related">Related</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 13 · Cost Tracking</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 13</div><h1 class="ch-title">Cost Tracking</h1><p class="ch-summary">Per-agent token costs, budget enforcement, model pricing table, cost CLI</p></div>
+    <article class="prose"><h1 id="cost-tracking" class="anchored"><a class="hanchor" href="#cost-tracking" aria-label="link">#</a>Cost Tracking</h1>
+<blockquote><p>The kernel tracks LLM token consumption and USD cost per agent in real time, enforces configurable budget limits, and reports usage via CLI. When a budget threshold is crossed, the kernel can warn, pause, downgrade to a cheaper model, or kill the agent's task.</p></blockquote>
+<hr>
+<h2 id="cost-tracking-overview" class="anchored"><a class="hanchor" href="#cost-tracking-overview" aria-label="link">#</a>Cost Tracking Overview</h2>
+<p>The <code>CostTracker</code> (<code>crates/agentos-kernel/src/cost_tracker.rs</code>) maintains per-agent cost state in memory. For each registered agent it tracks:</p>
+<ul><li><strong>Tokens used</strong> — cumulative input + output tokens consumed in the current 24-hour budget period.</li><li><strong>Cost in USD</strong> — computed from the model's pricing table and accumulated as micro-USD (millionths of a dollar) to avoid floating-point precision loss.</li><li><strong>Tool calls</strong> — number of tool invocations in the current period.</li></ul>
+<p>Counters reset automatically every 24 hours using a lock-free <code>AtomicI64</code> period timestamp. A single <code>compare_exchange</code> ensures exactly one concurrent inference call performs the reset even under high parallelism.</p>
+<p>Every completed inference call is also logged to the audit trail as a <code>CostAttribution</code> entry with structured JSON containing agent ID, model, token counts, and cost.</p>
+<h3 id="crash-safe-persistence" class="anchored"><a class="hanchor" href="#crash-safe-persistence" aria-label="link">#</a>Crash-Safe Persistence</h3>
+<p>The <code>CostTracker</code> supports optional persistence via the <code>KernelStateStore</code>. When enabled:</p>
+<ul><li>Cost counters are periodically flushed to a <code>PersistedCostSnapshot</code> record in the state store</li><li>Each snapshot includes a monotonic <code>persist_version</code> for out-of-order-safe DB upserts — a stale write never overwrites a newer snapshot</li><li>On kernel restart, persisted snapshots are restored so agents resume with their pre-crash budget counters intact</li><li>Agents that have disconnected retain their last-known cost state in the persisted snapshots map</li></ul>
+<p>This eliminates the previous behavior where a kernel crash would reset all budget counters to zero, allowing agents to exceed their daily limits after a restart.</p>
+<hr>
+<h2 id="viewing-cost-reports" class="anchored"><a class="hanchor" href="#viewing-cost-reports" aria-label="link">#</a>Viewing Cost Reports</h2>
+<h3 id="all-agents" class="anchored"><a class="hanchor" href="#all-agents" aria-label="link">#</a>All Agents</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>cost<span class="w"> </span>show
+</pre></div>
+</div>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Agent                Tokens     Cost (USD)   Tool Calls    Tok %    Cost %   Call %
+----------------------------------------------------------------------------------------
+researcher             4200     0.000063           12      42.0%    12.6%    12.0%
+analyst                2800     0.000042            8      28.0%     8.4%     8.0%
+----------------------------------------------------------------------------------------
+TOTAL                  7000     0.000105           20
+</pre></div>
+</div>
+<p>Columns:</p>
+<div class="table-wrap"><table><thead><tr><th>Column</th><th>Description</th></tr></thead><tbody><tr><td><code>Agent</code></td><td>Agent display name.</td></tr><tr><td><code>Tokens</code></td><td>Total tokens (input + output) in the current budget period.</td></tr><tr><td><code>Cost (USD)</code></td><td>Accumulated cost in US dollars for the current period.</td></tr><tr><td><code>Tool Calls</code></td><td>Number of tool invocations in the current period.</td></tr><tr><td><code>Tok %</code></td><td>Tokens used as a percentage of <code>max_tokens_per_day</code>.</td></tr><tr><td><code>Cost %</code></td><td>Cost as a percentage of <code>max_cost_usd_per_day</code>.</td></tr><tr><td><code>Call %</code></td><td>Tool calls as a percentage of <code>max_tool_calls_per_day</code>.</td></tr></tbody></table></div>
+<p>Percentages show <code>0.0%</code> when the corresponding limit is set to zero (unlimited).</p>
+<h3 id="specific-agent" class="anchored"><a class="hanchor" href="#specific-agent" aria-label="link">#</a>Specific Agent</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>cost<span class="w"> </span>show<span class="w"> </span>--agent<span class="w"> </span>&lt;agent-name&gt;
+</pre></div>
+</div>
+<p>Same output, filtered to a single agent row.</p>
+<hr>
+<h2 id="budget-enforcement" class="anchored"><a class="hanchor" href="#budget-enforcement" aria-label="link">#</a>Budget Enforcement</h2>
+<p>Each agent is registered with an <code>AgentBudget</code> that defines limits and enforcement behavior.</p>
+<h3 id="budget-fields" class="anchored"><a class="hanchor" href="#budget-fields" aria-label="link">#</a>Budget Fields</h3>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>max_tokens_per_day</code></td><td>integer</td><td>Token limit per 24-hour period. <code>0</code> = unlimited.</td></tr><tr><td><code>max_cost_usd_per_day</code></td><td>float</td><td>USD cost limit per 24-hour period. <code>0.0</code> = unlimited.</td></tr><tr><td><code>max_tool_calls_per_day</code></td><td>integer</td><td>Tool call limit per 24-hour period. <code>0</code> = unlimited.</td></tr><tr><td><code>warn_at_pct</code></td><td>integer</td><td>Percentage at which a <code>BudgetWarning</code> alert is fired (e.g. <code>80</code> = warn at 80%).</td></tr><tr><td><code>pause_at_pct</code></td><td>integer</td><td>Percentage at which the task is paused or a model downgrade is attempted (e.g. <code>95</code>).</td></tr><tr><td><code>on_hard_limit</code></td><td>enum</td><td>Action taken when 100% of a limit is reached: <code>Suspend</code>, <code>NotifyOnly</code>, or <code>Kill</code>.</td></tr><tr><td><code>downgrade_model</code></td><td>struct (optional)</td><td>If set, pause-threshold events trigger a model downgrade instead of pausing.</td></tr><tr><td><code>allowed_models</code></td><td>list (optional)</td><td>If non-empty, only listed model names are permitted. Any other model is blocked before inference.</td></tr><tr><td><code>max_wall_time_seconds</code></td><td>integer</td><td>Wall-clock time limit per task. <code>0</code> = unlimited.</td></tr></tbody></table></div>
+<h3 id="budget-check-results" class="anchored"><a class="hanchor" href="#budget-check-results" aria-label="link">#</a>Budget Check Results</h3>
+<p>After every inference call and tool invocation, the tracker returns a <code>BudgetCheckResult</code>:</p>
+<div class="table-wrap"><table><thead><tr><th>Result</th><th>When</th><th>Kernel Action</th></tr></thead><tbody><tr><td><code>Ok</code></td><td>Usage is within all limits.</td><td>Proceed normally.</td></tr><tr><td><code>Warning</code></td><td>Usage crossed <code>warn_at_pct</code> on any resource.</td><td>Fire <code>BudgetWarning</code> event; continue execution.</td></tr><tr><td><code>PauseRequired</code></td><td>Usage crossed <code>pause_at_pct</code> and no downgrade model is configured.</td><td>Take checkpoint snapshot; suspend task.</td></tr><tr><td><code>ModelDowngradeRecommended</code></td><td>Usage crossed <code>pause_at_pct</code> and a <code>downgrade_model</code> is configured.</td><td>Switch subsequent LLM calls to the cheaper model; continue task.</td></tr><tr><td><code>HardLimitExceeded</code></td><td>Usage hit 100% of any limit.</td><td>Apply <code>on_hard_limit</code> action (<code>Suspend</code>, <code>NotifyOnly</code>, or <code>Kill</code>).</td></tr><tr><td><code>ModelNotAllowed</code></td><td>Agent attempted to use a model not in <code>allowed_models</code>.</td><td>Block the inference call before it is sent.</td></tr><tr><td><code>WallTimeExceeded</code></td><td>Task elapsed time exceeded <code>max_wall_time_seconds</code>.</td><td>Kill the task.</td></tr></tbody></table></div>
+<h3 id="enforcement-flow" class="anchored"><a class="hanchor" href="#enforcement-flow" aria-label="link">#</a>Enforcement Flow</h3>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Inference call received
+  → validate_model() — check allowed_models allowlist
+  → check_budget() — pre-flight read-only check against current counters
+  → [send request to LLM provider]
+  → record_inference() — accumulate tokens + cost, re-check limits
+     → Warning       → emit BudgetWarning event, continue
+     → ModelDowngradeRecommended → route next calls to cheaper model
+     → PauseRequired → take snapshot, suspend task
+     → HardLimitExceeded → apply on_hard_limit action
+</pre></div>
+</div>
+<p>Tool calls follow the same pattern via <code>record_tool_call()</code>, checking only the <code>max_tool_calls_per_day</code> limit.</p>
+<h3 id="budget-alerts" class="anchored"><a class="hanchor" href="#budget-alerts" aria-label="link">#</a>Budget Alerts</h3>
+<p>Budget alerts are broadcast over an internal channel (subscribable by the kernel's alert handler). The <code>BudgetAlert</code> message carries the agent ID, agent name, and the <code>BudgetCheckResult</code>. The kernel translates alerts into <code>BudgetWarning</code> and <code>BudgetExceeded</code> audit events.</p>
+<hr>
+<h2 id="model-pricing" class="anchored"><a class="hanchor" href="#model-pricing" aria-label="link">#</a>Model Pricing</h2>
+<p>Cost is calculated per inference call using a built-in pricing table (<code>crates/agentos-llm/src/types.rs</code>).</p>
+<h3 id="cost-formula" class="anchored"><a class="hanchor" href="#cost-formula" aria-label="link">#</a>Cost Formula</h3>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>cost = (prompt_tokens / 1000 * input_per_1k) + (completion_tokens / 1000 * output_per_1k)
+</pre></div>
+</div>
+<h3 id="default-pricing-table" class="anchored"><a class="hanchor" href="#default-pricing-table" aria-label="link">#</a>Default Pricing Table</h3>
+<p>Prices are in USD per 1,000 tokens (as of March 2026):</p>
+<div class="table-wrap"><table><thead><tr><th>Provider</th><th>Model</th><th>Input / 1K</th><th>Output / 1K</th></tr></thead><tbody><tr><td><code>anthropic</code></td><td><code>claude-sonnet-4-6</code></td><td>$0.003</td><td>$0.015</td></tr><tr><td><code>anthropic</code></td><td><code>claude-opus-4-6</code></td><td>$0.015</td><td>$0.075</td></tr><tr><td><code>anthropic</code></td><td><code>claude-haiku-4-5</code></td><td>$0.0008</td><td>$0.004</td></tr><tr><td><code>openai</code></td><td><code>gpt-4o</code></td><td>$0.0025</td><td>$0.010</td></tr><tr><td><code>openai</code></td><td><code>gpt-4o-mini</code></td><td>$0.00015</td><td>$0.0006</td></tr><tr><td><code>gemini</code></td><td><code>gemini-2.0-flash</code></td><td>$0.0001</td><td>$0.0004</td></tr><tr><td><code>gemini</code></td><td><code>gemini-2.5-pro</code></td><td>$0.00125</td><td>$0.010</td></tr><tr><td><code>ollama</code></td><td><code>*</code> (all models)</td><td>$0.00</td><td>$0.00</td></tr></tbody></table></div>
+<p>The pricing table is loaded at kernel startup. Unknown providers and models default to zero cost (the kernel does not block them; it just records no cost).</p>
+<p>Ollama's wildcard <code>*</code> entry means all locally-hosted models are tracked at zero cost — accurate for self-hosted inference.</p>
+<h3 id="model-downgrade-example" class="anchored"><a class="hanchor" href="#model-downgrade-example" aria-label="link">#</a>Model Downgrade Example</h3>
+<p>An agent configured with:</p>
+<div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[agents.researcher.budget]</span>
+<span class="n">max_tokens_per_day</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100_000</span>
+<span class="n">pause_at_pct</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">90</span>
+<span class="n">downgrade_model</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">model</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;claude-haiku-4-5&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">provider</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;anthropic&quot;</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<p>Will automatically switch from <code>claude-sonnet-4-6</code> to <code>claude-haiku-4-5</code> at 90,000 tokens consumed, instead of suspending. The task continues with the cheaper model for the remainder of the period.</p>
+<hr>
+<h2 id="retrieval-efficiency-metrics" class="anchored"><a class="hanchor" href="#retrieval-efficiency-metrics" aria-label="link">#</a>Retrieval Efficiency Metrics</h2>
+<p>The kernel's memory context assembly system tracks whether it refreshed (re-fetched) or reused (cached) memory retrievals. This informs token efficiency — unnecessary refreshes waste input tokens.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>cost<span class="w"> </span>retrieval
+</pre></div>
+</div>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Retrieval Refresh Efficiency
+  Refresh decisions: 142
+  Reuse decisions:   891
+  Total decisions:   1033
+  Refresh ratio:     13.75%
+  Reuse ratio:       86.25%
+</pre></div>
+</div>
+<p>A high reuse ratio indicates the memory retrieval cache is working well. A high refresh ratio suggests the context assembly is over-fetching — potentially indicating stale cache thresholds or high memory churn.</p>
+<hr>
+<h2 id="related" class="anchored"><a class="hanchor" href="#related" aria-label="link">#</a>Related</h2>
+<ul><li><a class="wikilink" href="ch-12.html">Event System</a> — <code>BudgetWarning</code> and <code>BudgetExceeded</code> events can be subscribed to</li><li><a class="wikilink" href="ch-11.html">Pipeline and Workflows</a> — pipelines can set <code>max_cost_usd</code> caps</li><li><a class="wikilink" href="ch-09.html">Secrets and Vault</a> — API keys for LLM providers are stored in the vault</li></ul></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-12.html"><span class="pn-dir">← Previous</span><span class="pn-title">Event System</span></a><a class="pn pn-next" href="ch-14.html"><span class="pn-dir">Next →</span><span class="pn-title">Audit Log</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#cost-tracking-overview" data-target="cost-tracking-overview">Cost Tracking Overview</a></li><li class="toc-h3"><a href="#crash-safe-persistence" data-target="crash-safe-persistence">Crash-Safe Persistence</a></li><li class="toc-h2"><a href="#viewing-cost-reports" data-target="viewing-cost-reports">Viewing Cost Reports</a></li><li class="toc-h3"><a href="#all-agents" data-target="all-agents">All Agents</a></li><li class="toc-h3"><a href="#specific-agent" data-target="specific-agent">Specific Agent</a></li><li class="toc-h2"><a href="#budget-enforcement" data-target="budget-enforcement">Budget Enforcement</a></li><li class="toc-h3"><a href="#budget-fields" data-target="budget-fields">Budget Fields</a></li><li class="toc-h3"><a href="#budget-check-results" data-target="budget-check-results">Budget Check Results</a></li><li class="toc-h3"><a href="#enforcement-flow" data-target="enforcement-flow">Enforcement Flow</a></li><li class="toc-h3"><a href="#budget-alerts" data-target="budget-alerts">Budget Alerts</a></li><li class="toc-h2"><a href="#model-pricing" data-target="model-pricing">Model Pricing</a></li><li class="toc-h3"><a href="#cost-formula" data-target="cost-formula">Cost Formula</a></li><li class="toc-h3"><a href="#default-pricing-table" data-target="default-pricing-table">Default Pricing Table</a></li><li class="toc-h3"><a href="#model-downgrade-example" data-target="model-downgrade-example">Model Downgrade Example</a></li><li class="toc-h2"><a href="#retrieval-efficiency-metrics" data-target="retrieval-efficiency-metrics">Retrieval Efficiency Metrics</a></li><li class="toc-h2"><a href="#related" data-target="related">Related</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

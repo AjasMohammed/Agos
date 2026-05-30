@@ -158,26 +158,59 @@ impl LLMCore for FallbackAdapter {
         tools: &[ToolManifest],
         tx: mpsc::Sender<InferenceEvent>,
     ) -> Result<(), AgentOSError> {
+        // Single-provider chains (the common case) have nothing to fail over
+        // to, so forward the caller's channel straight through. This preserves
+        // real-time token streaming and avoids the buffering done for the
+        // multi-provider case below.
+        if self.providers.len() == 1 {
+            return self.providers[0]
+                .infer_stream_with_tools(context, tools, tx)
+                .await;
+        }
+
         let mut last_error = None;
         for (i, provider) in self.providers.iter().enumerate() {
-            // Use an intermediate channel so partial events from a failing
-            // provider are discarded before trying the next one. Without this,
-            // a provider that emits tokens before erroring mid-stream would
+            // Drive each provider on a spawned task writing to an intermediate
+            // channel that we drain concurrently into a buffer. Draining as we
+            // go means the bounded channel never blocks the producer — the old
+            // code awaited the provider to completion *before* reading the
+            // channel, which deadlocked any response longer than the channel
+            // capacity. Buffering also lets us discard a failing provider's
+            // partial events before trying the next one, so they never
             // contaminate the caller's channel.
-            let (inner_tx, mut inner_rx) = mpsc::channel(256);
-            match provider
-                .infer_stream_with_tools(context, tools, inner_tx)
-                .await
-            {
+            let (inner_tx, mut inner_rx) = mpsc::channel::<InferenceEvent>(256);
+            let provider_cl = Arc::clone(provider);
+            let ctx_cl = context.clone();
+            let tools_cl = tools.to_vec();
+            let handle = tokio::spawn(async move {
+                provider_cl
+                    .infer_stream_with_tools(&ctx_cl, &tools_cl, inner_tx)
+                    .await
+            });
+
+            let mut buffered = Vec::new();
+            while let Some(event) = inner_rx.recv().await {
+                buffered.push(event);
+            }
+
+            let result = match handle.await {
+                Ok(r) => r,
+                Err(join_err) => Err(AgentOSError::LLMError {
+                    provider: provider.provider_name().to_string(),
+                    reason: format!("Streaming task panicked: {join_err}"),
+                }),
+            };
+
+            match result {
                 Ok(()) => {
                     // Forward all buffered events from the successful provider.
-                    while let Some(event) = inner_rx.recv().await {
+                    for event in buffered {
                         let _ = tx.send(event).await;
                     }
                     return Ok(());
                 }
                 Err(e) => {
-                    // inner_rx dropped here, discarding any partial events.
+                    // `buffered` dropped here, discarding any partial events.
                     warn!(
                         provider = provider.provider_name(),
                         index = i,
@@ -473,5 +506,147 @@ mod tests {
         assert!(!events.is_empty());
         assert!(matches!(events.last(), Some(InferenceEvent::Done(_))));
         assert_eq!(secondary.call_count(), 1);
+    }
+
+    /// Streams `count` `Token` events, then returns `Ok` (or `Err` if `fail`).
+    struct StreamMock {
+        count: usize,
+        fail: bool,
+        capabilities: ModelCapabilities,
+    }
+
+    impl StreamMock {
+        fn new(count: usize, fail: bool) -> Self {
+            Self {
+                count,
+                fail,
+                capabilities: ModelCapabilities {
+                    context_window_tokens: 8192,
+                    supports_images: false,
+                    supports_tool_calling: false,
+                    supports_json_mode: false,
+                    max_output_tokens: 0,
+                    supports_streaming: true,
+                    supports_parallel_tools: false,
+                    supports_prompt_caching: false,
+                    supports_thinking: false,
+                    supports_structured_output: false,
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LLMCore for StreamMock {
+        async fn infer(&self, _context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
+            Err(AgentOSError::LLMError {
+                provider: "stream-mock".to_string(),
+                reason: "not used".to_string(),
+            })
+        }
+
+        async fn infer_with_tools(
+            &self,
+            _context: &ContextWindow,
+            _tools: &[ToolManifest],
+        ) -> Result<InferenceResult, AgentOSError> {
+            self.infer(_context).await
+        }
+
+        async fn infer_stream_with_tools(
+            &self,
+            _context: &ContextWindow,
+            _tools: &[ToolManifest],
+            tx: mpsc::Sender<InferenceEvent>,
+        ) -> Result<(), AgentOSError> {
+            for i in 0..self.count {
+                let _ = tx.send(InferenceEvent::Token(format!("t{i}"))).await;
+            }
+            if self.fail {
+                return Err(AgentOSError::LLMError {
+                    provider: "stream-mock".to_string(),
+                    reason: "Intentional mid-stream failure".to_string(),
+                });
+            }
+            Ok(())
+        }
+
+        fn capabilities(&self) -> &ModelCapabilities {
+            &self.capabilities
+        }
+
+        async fn health_check(&self) -> HealthStatus {
+            HealthStatus::Healthy
+        }
+
+        fn provider_name(&self) -> &str {
+            "stream-mock"
+        }
+
+        fn model_name(&self) -> &str {
+            "stream"
+        }
+    }
+
+    /// Drain the fallback stream concurrently with the producer (as the kernel
+    /// does), counting `Token` events. Times out so a regression that
+    /// reintroduces the buffer deadlock fails fast instead of hanging the suite.
+    async fn collect_tokens(fallback: FallbackAdapter, tx_cap: usize) -> usize {
+        let ctx = ContextWindow::new(10);
+        let (tx, mut rx) = mpsc::channel::<InferenceEvent>(tx_cap);
+        let handle =
+            tokio::spawn(async move { fallback.infer_stream_with_tools(&ctx, &[], tx).await });
+        let drain = async {
+            let mut tokens = 0;
+            while let Some(ev) = rx.recv().await {
+                if matches!(ev, InferenceEvent::Token(_)) {
+                    tokens += 1;
+                }
+            }
+            tokens
+        };
+        let tokens = tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+            .await
+            .expect("fallback streaming deadlocked");
+        handle.await.unwrap().unwrap();
+        tokens
+    }
+
+    #[tokio::test]
+    async fn test_fallback_single_provider_streams_through() {
+        // Single provider takes the passthrough path: 300 events flow through a
+        // 16-slot channel with concurrent draining, proving real-time streaming
+        // under backpressure (no buffering).
+        let fallback = FallbackAdapter::new(vec![
+            Arc::new(StreamMock::new(300, false)) as Arc<dyn LLMCore>
+        ])
+        .unwrap();
+        assert_eq!(collect_tokens(fallback, 16).await, 300);
+    }
+
+    #[tokio::test]
+    async fn test_fallback_multi_provider_long_stream_no_deadlock() {
+        // 300 events exceed the internal 256-slot buffer channel: the old
+        // buffer-then-drain code deadlocked here. First provider fails to
+        // exercise the failover path into the buffered second provider.
+        let fallback = FallbackAdapter::new(vec![
+            Arc::new(ErrorMock::new()) as Arc<dyn LLMCore>,
+            Arc::new(StreamMock::new(300, false)) as Arc<dyn LLMCore>,
+        ])
+        .unwrap();
+        assert_eq!(collect_tokens(fallback, 16).await, 300);
+    }
+
+    #[tokio::test]
+    async fn test_fallback_discards_partial_events_from_failing_provider() {
+        // First provider emits 2 tokens then errors mid-stream; those partial
+        // events must be discarded so only the second provider's 3 tokens reach
+        // the caller.
+        let fallback = FallbackAdapter::new(vec![
+            Arc::new(StreamMock::new(2, true)) as Arc<dyn LLMCore>,
+            Arc::new(StreamMock::new(3, false)) as Arc<dyn LLMCore>,
+        ])
+        .unwrap();
+        assert_eq!(collect_tokens(fallback, 64).await, 3);
     }
 }

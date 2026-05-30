@@ -17,6 +17,11 @@ socket_path = "/var/lib/agentos/data/agentos.sock"
 log_path = "/var/lib/agentos/data/audit.db"
 
 [secrets]
+# Vault stays under /var/lib/agentos/data because that is the only path backed
+# by a persistent Docker volume (see docker-compose.yml). systemd/production use
+# /var/lib/agentos/vault/secrets.db instead — the drift is intentional.
+# Passphrase: set AGENTOS_VAULT_PASSPHRASE or AGENTOS_VAULT_PASSPHRASE_FILE
+# (mount a Docker/K8s secret). See docs/guide/07-configuration.md.
 vault_path = "/var/lib/agentos/data/vault.db"
 
 [tools]
@@ -64,6 +69,14 @@ task_pct = 0.12
 
 [logging]
 log_dir = "/var/log/agentos"
+# JSON logs to stdout so `docker logs` / log drivers stay machine-parseable.
+log_format = "json"
+log_level = "info"
+
+# Boot pre-flight — fail fast before subsystem init (see kernel preflight_checks).
+[preflight]
+min_free_disk_mb = 512
+check_db_writable = true
 
 [memory.context]
 db_path = "/var/lib/agentos/data/context_memory.db"

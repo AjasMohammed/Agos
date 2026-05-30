@@ -84,6 +84,83 @@ pub struct KernelConfig {
     /// Controls which packages agents may install into per-agent workspaces.
     #[serde(default)]
     pub env: EnvSettings,
+    /// Gateway ("run as a bot") config — channels connected automatically at
+    /// `agentos gateway run` boot. See `GatewaySettings`.
+    #[serde(default)]
+    pub gateway: GatewaySettings,
+    /// Scheduler run-history retention.
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
+    /// Inbound voice/audio transcription (speech-to-text) for channel media.
+    #[serde(default)]
+    pub transcription: TranscriptionSettings,
+}
+
+/// Speech-to-text settings for inbound channel voice/audio messages.
+///
+/// When enabled, voice notes received on a channel (e.g. Telegram) are sent to
+/// an OpenAI-compatible `/audio/transcriptions` endpoint and the transcript is
+/// injected into the message text the agent reads. Disabled by default; the API
+/// key is read from the named environment variable (never stored in config).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TranscriptionSettings {
+    /// Master switch. When false, voice/audio is stored but not transcribed.
+    #[serde(default)]
+    pub enabled: bool,
+    /// OpenAI-compatible transcription endpoint (multipart `file` + `model`).
+    #[serde(default = "default_transcription_endpoint")]
+    pub endpoint: String,
+    /// Model name sent in the request (e.g. `whisper-1`, `whisper-large-v3`).
+    #[serde(default = "default_transcription_model")]
+    pub model: String,
+    /// Environment variable holding the API key (Bearer auth). Never the key itself.
+    #[serde(default = "default_transcription_key_env")]
+    pub api_key_env: String,
+}
+
+impl Default for TranscriptionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: default_transcription_endpoint(),
+            model: default_transcription_model(),
+            api_key_env: default_transcription_key_env(),
+        }
+    }
+}
+
+fn default_transcription_endpoint() -> String {
+    "https://api.openai.com/v1/audio/transcriptions".to_string()
+}
+
+fn default_transcription_model() -> String {
+    "whisper-1".to_string()
+}
+
+fn default_transcription_key_env() -> String {
+    "OPENAI_API_KEY".to_string()
+}
+
+/// Configuration for the scheduler's persisted run history.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SchedulerConfig {
+    /// Days of per-fire run history to keep in `schedules.db`. The
+    /// TimeoutChecker prunes completed/failed runs older than this on its
+    /// periodic sweep. `0` disables pruning (unbounded growth — not advised).
+    #[serde(default = "default_run_retention_days")]
+    pub run_retention_days: u32,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            run_retention_days: default_run_retention_days(),
+        }
+    }
+}
+
+fn default_run_retention_days() -> u32 {
+    30
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -801,6 +878,52 @@ impl Default for EnvSettings {
     }
 }
 
+/// Gateway ("run as a bot") configuration. When `enabled`, `agentos gateway
+/// run` connects each channel in `channels` at boot through the same path as
+/// `agentos channel connect`. Tokens are referenced by a vault `credential_key`
+/// — never inline.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct GatewaySettings {
+    /// Master switch. When false, `gateway run` boots the kernel (restoring any
+    /// previously `channel connect`-ed channels) but connects nothing new.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Channels to connect declaratively at gateway boot.
+    #[serde(default)]
+    pub channels: Vec<GatewayChannelConfig>,
+}
+
+/// One channel to connect at gateway boot. Fields map 1:1 to the
+/// `ConnectChannel` command consumed by `build_channel_adapter`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GatewayChannelConfig {
+    /// Channel kind (must be a known `ChannelKind`; an unknown kind fails the
+    /// gateway boot): telegram | ntfy | email | discord | slack | whatsapp | webhook
+    pub kind: String,
+    /// Channel-specific external id (e.g. Telegram chat_id). Omit for Telegram
+    /// to auto-discover from the first `/start`.
+    #[serde(default)]
+    pub external_id: Option<String>,
+    #[serde(default)]
+    pub display_name: String,
+    /// VAULT key holding the token — never an inline token. Seed it first with
+    /// `agentos secret set <key> <token>`.
+    #[serde(default)]
+    pub credential_key: String,
+    #[serde(default)]
+    pub reply_topic: Option<String>,
+    #[serde(default)]
+    pub server_url: Option<String>,
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    /// Default agent for inbound chat on this channel.
+    #[serde(default)]
+    pub active_agent: Option<String>,
+    /// Set false to declare-but-skip this channel.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BusSettings {
     pub socket_path: String,
@@ -856,6 +979,28 @@ pub struct LlmSettings {
     /// Defaults to 32768. Increase for models with larger context support (e.g. 131072).
     #[serde(default = "default_ollama_context_window")]
     pub ollama_context_window: u32,
+    /// Ordered fallback chain applied to every agent's primary adapter. When the
+    /// primary provider errors (including mid-stream), the kernel fails over to
+    /// these in order via `FallbackAdapter`. Empty by default — no behavior
+    /// change unless configured. Entries that fail to build (e.g. missing key)
+    /// are skipped at construction time with a warning rather than failing the
+    /// agent.
+    #[serde(default)]
+    pub fallback_models: Vec<FallbackModelConfig>,
+}
+
+/// One entry in `llm.fallback_models`. Mirrors the `--provider`/`--model`
+/// arguments used when connecting an agent.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FallbackModelConfig {
+    /// Provider name: `ollama` | `openai` | `anthropic` | `gemini`, a catalog
+    /// name like `nvidia`, or `custom:<name>`.
+    pub provider: String,
+    /// Model identifier for that provider.
+    pub model: String,
+    /// Optional base URL override (defaults resolve from the catalog/config).
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 impl Default for LlmSettings {
@@ -867,6 +1012,7 @@ impl Default for LlmSettings {
             gemini_base_url: None,
             max_tokens: default_llm_max_tokens(),
             ollama_context_window: default_ollama_context_window(),
+            fallback_models: Vec::new(),
         }
     }
 }
@@ -1470,6 +1616,28 @@ pub struct ApiSettings {
     /// TCP port for the API server.
     #[serde(default = "default_api_port")]
     pub port: u16,
+    /// Whether to serve the interactive Scalar API-docs UI at `GET /api/v1/docs`.
+    /// The `GET /api/v1/openapi.json` contract endpoint stays public regardless.
+    /// Disable on internet-exposed deployments.
+    #[serde(default = "default_true")]
+    pub docs_enabled: bool,
+    /// Operator credential for `POST /api/v1/auth/login`. When unset (or empty),
+    /// the login endpoint is disabled and returns `503`. Set this to let a
+    /// browser SPA exchange the operator credential for a scoped, expiring key.
+    #[serde(default)]
+    pub operator_token: Option<String>,
+    /// Cross-origin allowlist for the REST API. Each entry is a full origin
+    /// (scheme + host + optional port), e.g. `http://localhost:5173`. When empty,
+    /// CORS falls back to the API's own bind origin (same-origin only).
+    #[serde(default)]
+    pub cors_allowed_origins: Vec<String>,
+    /// Whether `POST /api/v1/auth/refresh` (key rotation) is enabled.
+    #[serde(default = "default_false")]
+    pub refresh_enabled: bool,
+    /// Whether `PUT /api/v1/config/{key}` may write to the config file at runtime.
+    /// Off by default — enable only on trusted control-plane deployments.
+    #[serde(default = "default_false")]
+    pub config_writable: bool,
 }
 
 impl Default for ApiSettings {
@@ -1478,6 +1646,11 @@ impl Default for ApiSettings {
             enabled: false,
             host: default_api_host(),
             port: default_api_port(),
+            docs_enabled: true,
+            operator_token: None,
+            cors_allowed_origins: Vec::new(),
+            refresh_enabled: false,
+            config_writable: false,
         }
     }
 }
@@ -1843,6 +2016,15 @@ where
         &mut config.otel.sample_rate,
     );
 
+    // Logging overrides — containers/systemd commonly set these via env.
+    // Invalid values are rejected by validate_logging_settings after overrides apply.
+    apply_string_override(
+        &lookup,
+        "AGENTOS_LOG_FORMAT",
+        &mut config.logging.log_format,
+    );
+    apply_string_override(&lookup, "AGENTOS_LOG_LEVEL", &mut config.logging.log_level);
+
     apply_parsed_override(
         &lookup,
         "AGENTOS_LLM_MAX_TOKENS",
@@ -2052,6 +2234,56 @@ mod tests {
     }
 
     #[test]
+    fn production_toml_otel_logging_valid() {
+        // Guards the shipped production profile: structured JSON logs on, OTel
+        // opt-in (disabled), and the preflight block present. Catches a
+        // fat-fingered [logging]/[otel]/[preflight] regression that would still
+        // parse as valid TOML but ship the wrong production defaults.
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/production.toml");
+        // Parse the shipped file directly (NOT load_config) so the assertions test
+        // the file's defaults rather than the resolved process environment — env
+        // overrides like AGENTOS_OTEL_ENABLED must not be able to flip this test.
+        let content = std::fs::read_to_string(&path).expect("config/production.toml must exist");
+        let cfg: KernelConfig =
+            toml::from_str(&content).expect("config/production.toml must parse");
+        assert_eq!(cfg.logging.log_format, "json");
+        assert!(!cfg.otel.enabled, "otel must default to disabled (opt-in)");
+        assert_eq!(cfg.preflight.min_free_disk_mb, 512);
+        assert!(cfg.preflight.check_db_writable);
+    }
+
+    #[test]
+    fn gateway_settings_toml_roundtrip() {
+        // The [gateway] contract: enabled flag + per-channel tables; per-channel
+        // `enabled` defaults to true; absence of [gateway] is valid (disabled).
+        let gw: GatewaySettings = toml::from_str(
+            r#"
+enabled = true
+[[channels]]
+kind = "telegram"
+display_name = "Ops Bot"
+credential_key = "tg_token"
+active_agent = "assistant"
+"#,
+        )
+        .expect("gateway block must parse");
+        assert!(gw.enabled);
+        assert_eq!(gw.channels.len(), 1);
+        assert_eq!(gw.channels[0].kind, "telegram");
+        assert_eq!(gw.channels[0].credential_key, "tg_token");
+        assert!(
+            gw.channels[0].enabled,
+            "per-channel enabled defaults to true"
+        );
+
+        // Absent gateway block → default (disabled, no channels).
+        let def = GatewaySettings::default();
+        assert!(!def.enabled);
+        assert!(def.channels.is_empty());
+    }
+
+    #[test]
     fn task_limits_default_when_omitted_from_toml() {
         let config: KernelConfig = toml::from_str(
             r#"
@@ -2214,6 +2446,31 @@ default_model = "llama3.2"
         let config: KernelConfig = toml::from_str(&toml_str).expect("config should parse");
         assert_eq!(config.llm.max_tokens, 16384);
         assert_eq!(config.llm.ollama_context_window, 131072);
+    }
+
+    #[test]
+    fn llm_settings_fallback_models_default_empty() {
+        let config: KernelConfig = toml::from_str(MINIMAL_TOML).expect("config should parse");
+        assert!(config.llm.fallback_models.is_empty());
+    }
+
+    #[test]
+    fn llm_settings_parses_fallback_models() {
+        let toml_str = format!(
+            "{}\n[[llm.fallback_models]]\nprovider = \"ollama\"\nmodel = \"llama3.1:8b\"\n\
+             \n[[llm.fallback_models]]\nprovider = \"anthropic\"\nmodel = \"claude-haiku-4-5\"\nbase_url = \"https://x/v1\"\n",
+            MINIMAL_TOML
+        );
+        let config: KernelConfig = toml::from_str(&toml_str).expect("config should parse");
+        assert_eq!(config.llm.fallback_models.len(), 2);
+        assert_eq!(config.llm.fallback_models[0].provider, "ollama");
+        assert_eq!(config.llm.fallback_models[0].model, "llama3.1:8b");
+        assert_eq!(config.llm.fallback_models[0].base_url, None);
+        assert_eq!(config.llm.fallback_models[1].provider, "anthropic");
+        assert_eq!(
+            config.llm.fallback_models[1].base_url.as_deref(),
+            Some("https://x/v1")
+        );
     }
 
     #[test]

@@ -741,30 +741,33 @@ impl LLMCore for AnthropicCore {
             serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
         );
 
-        let res = self
-            .client
-            .post(&url)
-            .header("x-api-key", self.api_key.expose_secret())
-            .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AgentOSError::LLMError {
-                provider: "anthropic".to_string(),
-                reason: format!("Reqwest failed: {}", e),
-            })?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let text = res.text().await.unwrap_or_default();
-            let err_msg = format!("Anthropic API error {}: {}", status, text);
-            let _ = tx.send(InferenceEvent::Error(err_msg.clone())).await;
-            return Err(AgentOSError::LLMError {
-                provider: "anthropic".to_string(),
-                reason: err_msg,
-            });
-        }
+        // Retry the initial POST + status check (before any SSE event is
+        // forwarded) so a transient upstream 5xx / network blip doesn't fail
+        // the whole chat turn — matching the resilience of the non-streaming
+        // path. `send_with_retry` returns the live `Response` with its body
+        // stream intact on 2xx.
+        let res = crate::retry::send_with_retry(
+            "anthropic",
+            &self.retry_policy,
+            &self.circuit_breaker,
+            Some(&self.concurrency),
+            || {
+                self.client
+                    .post(&url)
+                    .header("x-api-key", self.api_key.expose_secret())
+                    .header("anthropic-version", "2023-06-01")
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+            },
+        )
+        .await;
+        let res = match res {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(InferenceEvent::Error(e.to_string())).await;
+                return Err(e);
+            }
+        };
 
         // Streaming state.
         let mut full_text = String::new();

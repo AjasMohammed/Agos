@@ -2,7 +2,7 @@ use super::agents::ApiAgentSummary;
 use super::audit::AuditEntrySummary;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SystemStatus {
     pub uptime_secs: u64,
     pub agent_count: usize,
@@ -11,7 +11,7 @@ pub struct SystemStatus {
     pub version: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DashboardSummary {
     pub agent_count: usize,
     pub online_agents: Vec<ApiAgentSummary>,
@@ -22,7 +22,7 @@ pub struct DashboardSummary {
     pub background_task_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TaskCounts {
     pub running: usize,
     pub completed: usize,

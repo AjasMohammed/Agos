@@ -43,20 +43,25 @@ impl ChannelAdapter for SlackAdapter {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
-        let text = msg.content.as_text();
+        let text: String = msg.content.as_text().chars().take(40_000).collect();
+        let thread_ts = msg.thread_id.clone();
         let client = &self.client;
         let token = self.bot_token.as_str();
         let channel = &self.channel_id;
         let policy = crate::retry::RetryPolicy::default();
 
         crate::retry::with_retry(&policy, "slack", || async {
+            let mut body = serde_json::json!({
+                "channel": channel,
+                "text": &text
+            });
+            if let Some(ts) = thread_ts.as_deref().filter(|s| !s.trim().is_empty()) {
+                body["thread_ts"] = serde_json::Value::String(ts.to_string());
+            }
             let resp = client
                 .post("https://slack.com/api/chat.postMessage")
                 .bearer_auth(token)
-                .json(&serde_json::json!({
-                    "channel": channel,
-                    "text": &text
-                }))
+                .json(&body)
                 .send()
                 .await
                 .map_err(|e| AgentOSError::ToolExecutionFailed {

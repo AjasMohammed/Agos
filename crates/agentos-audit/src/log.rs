@@ -34,6 +34,16 @@ pub enum AuditEventType {
     TokenIssued,
     TokenExpired,
 
+    // REST API / control-plane auth (React control panel)
+    /// An operator authenticated successfully at `POST /api/v1/auth/login`.
+    ApiLoginSucceeded,
+    /// A login attempt failed (bad credential). Rate-limited; never logs the credential.
+    ApiLoginFailed,
+    /// An API key was minted (via login or `POST /api/v1/keys`). Records the key id, never the secret.
+    ApiKeyIssued,
+    /// An API key was revoked (via `DELETE /api/v1/keys/{id}`).
+    ApiKeyRevoked,
+
     // Tool events
     ToolInstalled,
     ToolRemoved,

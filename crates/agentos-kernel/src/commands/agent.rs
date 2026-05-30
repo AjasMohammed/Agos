@@ -2,7 +2,8 @@ use crate::event_bus::default_subscriptions_for_role;
 use crate::kernel::Kernel;
 use agentos_bus::KernelResponse;
 use agentos_llm::{
-    AnthropicCore, CustomCore, GeminiCore, HealthStatus, LLMCore, OllamaCore, OpenAICore,
+    AnthropicCore, CustomCore, FallbackAdapter, GeminiCore, HealthStatus, LLMCore, OllamaCore,
+    OpenAICore,
 };
 use agentos_types::*;
 use secrecy::SecretString;
@@ -20,16 +21,107 @@ fn is_valid_agent_name(name: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
+/// Parse a provider string from config (`llm.fallback_models[].provider`) into
+/// an `LLMProvider`, mirroring the CLI's `--provider` parsing: known names map
+/// to their variants; `custom:<name>` and any other bare name map to
+/// `Custom(<name>)` (resolved against the provider catalog at build time). An
+/// empty name (`custom:`) is normalized to `Custom("custom")` rather than an
+/// empty string, since this parser is operator-typed config.
+fn parse_provider_name(s: &str) -> LLMProvider {
+    match s.to_lowercase().as_str() {
+        "ollama" => LLMProvider::Ollama,
+        "openai" => LLMProvider::OpenAI,
+        "anthropic" => LLMProvider::Anthropic,
+        "gemini" => LLMProvider::Gemini,
+        p if p.starts_with("custom:") => {
+            let name = p.strip_prefix("custom:").unwrap_or("").trim();
+            let name = if name.is_empty() { "custom" } else { name };
+            LLMProvider::Custom(name.to_string())
+        }
+        "custom" => LLMProvider::Custom("custom".to_string()),
+        other => LLMProvider::Custom(other.to_string()),
+    }
+}
+
 impl Kernel {
-    /// Build an `LLMCore` adapter for the given provider/model/base_url combination.
+    /// Build the `LLMCore` for an agent: the primary adapter for
+    /// `provider`/`model`/`base_url`, optionally wrapped in a [`FallbackAdapter`]
+    /// when `llm.fallback_models` is configured (failover covers both the
+    /// blocking and streaming inference paths). Shared by `cmd_connect_agent`,
+    /// `cmd_ping_llm`, and auto-reactivation so all paths build identical
+    /// adapters. The returned base URL is always the *primary's* resolved URL
+    /// (persisted on `AgentProfile.base_url`).
+    pub(crate) async fn build_llm_adapter(
+        &self,
+        agent_name: &str,
+        provider: &LLMProvider,
+        model: &str,
+        base_url: Option<String>,
+    ) -> Result<(Arc<dyn LLMCore>, Option<String>), String> {
+        let (primary, resolved_url) = self
+            .build_single_llm_adapter(agent_name, provider, model, base_url)
+            .await?;
+
+        if self.config.llm.fallback_models.is_empty() {
+            return Ok((primary, resolved_url));
+        }
+
+        let mut chain: Vec<Arc<dyn LLMCore>> = vec![primary];
+        for fb in &self.config.llm.fallback_models {
+            let fb_provider = parse_provider_name(&fb.provider);
+            // Skip a fallback that resolves to the same primary endpoint —
+            // failing over to the endpoint that just failed is pointless. Only
+            // dedup when the fallback has no explicit `base_url`; an explicit
+            // URL marks a deliberately distinct target (e.g. a mirror/region)
+            // and is always kept.
+            if &fb_provider == provider && fb.model == model && fb.base_url.is_none() {
+                continue;
+            }
+            match self
+                .build_single_llm_adapter(agent_name, &fb_provider, &fb.model, fb.base_url.clone())
+                .await
+            {
+                Ok((adapter, _)) => chain.push(adapter),
+                Err(e) => tracing::warn!(
+                    agent_name = %agent_name,
+                    provider = %fb.provider,
+                    model = %fb.model,
+                    error = %e,
+                    "Skipping fallback model that failed to build"
+                ),
+            }
+        }
+
+        if chain.len() == 1 {
+            // Every fallback was skipped or failed to build — return the bare
+            // primary rather than a single-element FallbackAdapter.
+            return Ok((chain.pop().expect("chain has one element"), resolved_url));
+        }
+
+        match FallbackAdapter::new(chain) {
+            Ok(fa) => {
+                tracing::info!(
+                    agent_name = %agent_name,
+                    fallbacks = self.config.llm.fallback_models.len(),
+                    "Built agent LLM with provider fallback chain"
+                );
+                Ok((Arc::new(fa), resolved_url))
+            }
+            // `FallbackAdapter::new` only errors on an empty vec, already
+            // excluded above; surface a clear error rather than panic.
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Build a single `LLMCore` adapter for the given provider/model/base_url
+    /// combination (no fallback wrapping).
     ///
     /// Resolves vault-stored API keys (preferring `<agent>_<provider>_api_key` then
     /// the global `<provider>_api_key`), honors env-var fallbacks, and applies
     /// config defaults. Returns the adapter plus the effective base URL that
     /// should be stored on `AgentProfile.base_url` (so `agent set-url` can mutate
-    /// it later). Shared by `cmd_connect_agent` and `cmd_ping_llm` so both
-    /// paths construct identical adapters.
-    pub(crate) async fn build_llm_adapter(
+    /// it later).
+    pub(crate) async fn build_single_llm_adapter(
         &self,
         agent_name: &str,
         provider: &LLMProvider,
@@ -1771,4 +1863,42 @@ fn default_permissions_for_agent(name: &str) -> PermissionSet {
     perms.grant("scratchpad".to_string(), true, true, false, None);
 
     perms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_provider_name;
+    use agentos_types::LLMProvider;
+
+    #[test]
+    fn parse_provider_name_known_variants() {
+        assert_eq!(parse_provider_name("ollama"), LLMProvider::Ollama);
+        assert_eq!(parse_provider_name("OpenAI"), LLMProvider::OpenAI);
+        assert_eq!(parse_provider_name("anthropic"), LLMProvider::Anthropic);
+        assert_eq!(parse_provider_name("gemini"), LLMProvider::Gemini);
+    }
+
+    #[test]
+    fn parse_provider_name_custom_and_catalog() {
+        // Bare catalog name → Custom(name); resolved against the catalog at build.
+        assert_eq!(
+            parse_provider_name("nvidia"),
+            LLMProvider::Custom("nvidia".to_string())
+        );
+        // `custom:<name>` form.
+        assert_eq!(
+            parse_provider_name("custom:groq"),
+            LLMProvider::Custom("groq".to_string())
+        );
+        // Bare `custom`.
+        assert_eq!(
+            parse_provider_name("custom"),
+            LLMProvider::Custom("custom".to_string())
+        );
+        // Empty name after the colon normalizes to "custom" rather than "".
+        assert_eq!(
+            parse_provider_name("custom:"),
+            LLMProvider::Custom("custom".to_string())
+        );
+    }
 }

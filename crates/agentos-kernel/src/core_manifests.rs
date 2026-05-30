@@ -201,6 +201,21 @@ impl Kernel {
             "web-fetch.toml",
             include_str!("../../../tools/core/web-fetch.toml"),
         ),
+        (
+            "skill-prompt.toml",
+            include_str!("../../../tools/core/skill-prompt.toml"),
+        ),
+        // `skill-create` MUST be embedded: the ApprovalHook resolves a tool's
+        // risk_class by looking up its manifest in the runtime tool_registry,
+        // defaulting to ExecCapable when absent. Under approval mode `auto`,
+        // ExecCapable auto-approves — which would let an agent author + install
+        // skills with NO human review. Embedding the manifest guarantees the
+        // top-level `risk_class = control_plane` reaches the registry on a
+        // fresh data dir so every skill-create call is gated.
+        (
+            "skill-create.toml",
+            include_str!("../../../tools/core/skill-create.toml"),
+        ),
     ];
 
     /// Install bundled core tool manifests into the runtime directory if not already present.
@@ -216,5 +231,44 @@ impl Kernel {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentos_types::RiskClass;
+
+    /// Regression guard for the deployment gap where a control-plane tool's
+    /// manifest is authored under `tools/core/` but never embedded in
+    /// `CORE_MANIFESTS`. On a fresh data dir, `install_core_manifests` seeds
+    /// only the embedded subset; if `skill-create.toml` is missing, the
+    /// ApprovalHook can't find its `risk_class` and defaults to `ExecCapable`
+    /// — which auto-approves under approval mode `auto`, silently removing the
+    /// human-review gate on runtime skill authoring.
+    ///
+    /// This boots the install into an EMPTY dir (the shipped-binary path) and
+    /// asserts the manifest lands with `risk_class = ControlPlane`.
+    #[test]
+    fn install_core_manifests_seeds_skill_create_with_control_plane() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        Kernel::install_core_manifests(tmp.path()).expect("install must succeed");
+
+        let path = tmp.path().join("skill-create.toml");
+        assert!(
+            path.exists(),
+            "skill-create.toml must be embedded in CORE_MANIFESTS so it reaches \
+             a fresh data dir — otherwise the control-plane approval gate is bypassed"
+        );
+
+        let loaded =
+            agentos_tools::loader::load_manifest(&path).expect("manifest must parse and verify");
+        assert_eq!(loaded.manifest.manifest.name, "skill-create");
+        assert_eq!(
+            loaded.manifest.risk_class,
+            RiskClass::ControlPlane,
+            "skill-create must register as ControlPlane so every skill-authoring \
+             call is gated by the approval hook"
+        );
     }
 }

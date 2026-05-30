@@ -848,6 +848,58 @@ impl agentos_llm::ImageResolver for FileStoreImageResolver {
     }
 }
 
+/// Persists inbound channel media (Telegram photos/docs/voice) into the
+/// FileStore at global scope, mirroring the HTTP upload path. Backs the kernel's
+/// `AttachmentSink` so downloaded media gets a stable, resolvable file id.
+pub struct FileStoreAttachmentSink {
+    store: Arc<crate::file_store::FileStore>,
+}
+
+impl FileStoreAttachmentSink {
+    pub fn new(store: Arc<crate::file_store::FileStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait::async_trait]
+impl agentos_kernel::attachment_sink::AttachmentSink for FileStoreAttachmentSink {
+    async fn store(
+        &self,
+        original_name: &str,
+        mime: &str,
+        bytes: Vec<u8>,
+    ) -> Result<String, String> {
+        let store = Arc::clone(&self.store);
+        let original_name = original_name.to_string();
+        let mime = mime.to_string();
+        tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let file_id = Uuid::new_v4().to_string();
+            let safe_part = crate::file_store::sanitize_storage_name(&original_name);
+            let stored_name = format!("{file_id}_{safe_part}");
+            let disk_path = store.uploads_dir.join(&stored_name);
+            let disk_path_str = disk_path.to_string_lossy().to_string();
+            let size = bytes.len() as u64;
+            std::fs::write(&disk_path, &bytes).map_err(|e| format!("write to disk: {e}"))?;
+            if let Err(e) = store.register_file(
+                &file_id,
+                &original_name,
+                &mime,
+                size,
+                &disk_path_str,
+                "inbound,telegram",
+                "",
+                "global",
+            ) {
+                let _ = std::fs::remove_file(&disk_path_str);
+                return Err(format!("register in db: {e}"));
+            }
+            Ok(file_id)
+        })
+        .await
+        .map_err(|e| format!("storage task join error: {e}"))?
+    }
+}
+
 /// GET /api/files/search?q=...&session_id=... — fuzzy file search for the @mention typeahead.
 pub async fn search_api(
     State(state): State<AppState>,

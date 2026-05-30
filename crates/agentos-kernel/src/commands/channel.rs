@@ -89,12 +89,13 @@ impl Kernel {
                     .await;
             }
             Ok(None) => {
-                // No adapter available (e.g. email stub).
-                tracing::info!(
-                    channel_id = %ch_id,
-                    kind = %kind,
-                    "Channel registered but no runtime adapter available for this kind"
-                );
+                if let Err(e) = self.register_channel_manager_adapter(&ch_id).await {
+                    let _ = self.channel_registry.deregister(&ch_id).await;
+                    self.refresh_connected_channels_snapshot().await;
+                    return KernelResponse::Error {
+                        message: format!("Failed to register channel manager adapter: {e}"),
+                    };
+                }
             }
             Err(e) => {
                 return KernelResponse::Error {
@@ -134,6 +135,121 @@ impl Kernel {
                 "message": status_msg,
             })),
         }
+    }
+
+    /// Connect every enabled channel declared in the `[gateway]` config block.
+    ///
+    /// Used by `agentos gateway run` to bring channels up declaratively at boot,
+    /// reusing the exact same path as `agentos channel connect`. Idempotent: a
+    /// channel already active with the same `(kind, display_name)` — e.g. one
+    /// restored from a prior `channel connect` — is skipped. Fails closed: an
+    /// invalid kind, or a token-bearing channel with an empty `credential_key`,
+    /// aborts boot rather than starting a partially-configured bot.
+    pub async fn connect_configured_channels(&self) -> Result<(), anyhow::Error> {
+        let gw = &self.config.gateway;
+        if !gw.enabled {
+            return Ok(());
+        }
+
+        // Snapshot already-active channels for idempotency.
+        let existing = self
+            .channel_registry
+            .list_active()
+            .await
+            .map_err(|e| anyhow::anyhow!("gateway: failed to list active channels: {e}"))?;
+
+        let mut connected = 0usize;
+        for ch in &gw.channels {
+            if !ch.enabled {
+                continue;
+            }
+            // `ChannelKind::from_str` is infallible (an unknown string parses to
+            // `Custom`), so validate explicitly: a typo'd / unsupported kind must
+            // FAIL CLOSED rather than register a dead `Custom` channel that has no
+            // adapter yet falsely reports "connected".
+            let kind: ChannelKind = ch
+                .kind
+                .parse()
+                .unwrap_or_else(|_| ChannelKind::Custom(ch.kind.clone()));
+            if matches!(kind, ChannelKind::Custom(_)) {
+                anyhow::bail!(
+                    "gateway channel '{}': unsupported kind '{}' (supported: telegram, ntfy, email, discord, slack, whatsapp, webhook)",
+                    if ch.display_name.trim().is_empty() {
+                        ch.kind.as_str()
+                    } else {
+                        ch.display_name.as_str()
+                    },
+                    ch.kind
+                );
+            }
+
+            let display_name = if ch.display_name.trim().is_empty() {
+                ch.kind.clone()
+            } else {
+                ch.display_name.clone()
+            };
+
+            // Fail closed: token-bearing channels need a vault credential_key.
+            let needs_token = matches!(
+                kind,
+                ChannelKind::Telegram | ChannelKind::Discord | ChannelKind::Slack
+            );
+            if needs_token && ch.credential_key.trim().is_empty() {
+                anyhow::bail!(
+                    "gateway channel '{display_name}' ({}) requires a non-empty credential_key (vault key)",
+                    ch.kind
+                );
+            }
+
+            // Idempotent: skip if an active channel with this kind+display_name exists.
+            if existing
+                .iter()
+                .any(|e| e.kind == kind && e.display_name == display_name)
+            {
+                // The gateway only ADDS missing channels — it never reconciles a
+                // config change (active_agent, credential_key, …) onto an already
+                // active channel. Disconnect it first to re-apply. Warn so this
+                // isn't silent.
+                tracing::warn!(
+                    channel = %display_name,
+                    "Gateway: a channel with this kind+name is already active — skipping (gateway adds only, never reconciles)"
+                );
+                continue;
+            }
+
+            let resp = self
+                .cmd_connect_channel(
+                    kind,
+                    ch.external_id.clone().unwrap_or_default(),
+                    display_name.clone(),
+                    ch.credential_key.clone(),
+                    ch.reply_topic.clone(),
+                    ch.server_url.clone(),
+                    ch.webhook_url.clone(),
+                    ch.active_agent.clone(),
+                )
+                .await;
+
+            match resp {
+                KernelResponse::Success { .. } => {
+                    connected += 1;
+                    tracing::info!(channel = %display_name, "Gateway: connected channel");
+                }
+                KernelResponse::Error { message } => {
+                    anyhow::bail!("gateway channel '{display_name}' failed to connect: {message}");
+                }
+                _ => {
+                    anyhow::bail!(
+                        "gateway channel '{display_name}' failed to connect (unexpected kernel response)"
+                    );
+                }
+            }
+        }
+
+        if connected > 0 {
+            tracing::info!("Gateway: connected {connected} configured channel(s)");
+        }
+        Ok(())
     }
 
     /// Deregister a channel and stop its listener.
@@ -323,6 +439,7 @@ impl Kernel {
             read: false,
             thread_id: Some(format!("channel:{id}")),
             reply_to_external_id: None,
+            attachment: None,
         };
 
         match self.notification_router.deliver(test_msg).await {
@@ -477,5 +594,125 @@ impl Kernel {
                 Ok(None)
             }
         }
+    }
+
+    pub(crate) async fn register_channel_manager_adapter(
+        &self,
+        channel_id: &ChannelInstanceID,
+    ) -> Result<(), String> {
+        use agentos_channels::ChannelAdapter;
+
+        let ch = self
+            .channel_registry
+            .get_by_id(channel_id)
+            .await
+            .map_err(|e| format!("failed to look up channel: {e}"))?
+            .ok_or_else(|| format!("channel '{channel_id}' not found"))?;
+
+        let adapter: Option<Arc<dyn ChannelAdapter>> = match ch.kind {
+            ChannelKind::Discord => {
+                if ch.credential_key.trim().is_empty() || ch.external_id.trim().is_empty() {
+                    return Err(
+                        "Discord requires credential_key (bot token vault key) and external_id (channel id)"
+                            .to_string(),
+                    );
+                }
+                let token = self
+                    .vault
+                    .get(&ch.credential_key)
+                    .await
+                    .map_err(|e| format!("failed to retrieve Discord token from vault: {e}"))?;
+                Some(Arc::new(agentos_channels::discord::DiscordAdapter::new(
+                    token.as_str().to_string(),
+                    ch.external_id.clone(),
+                    channel_id.to_string(),
+                )))
+            }
+            ChannelKind::Slack => {
+                if ch.credential_key.trim().is_empty() || ch.external_id.trim().is_empty() {
+                    return Err(
+                        "Slack requires credential_key (bot token vault key) and external_id (channel id)"
+                            .to_string(),
+                    );
+                }
+                let token = self
+                    .vault
+                    .get(&ch.credential_key)
+                    .await
+                    .map_err(|e| format!("failed to retrieve Slack token from vault: {e}"))?;
+                Some(Arc::new(agentos_channels::slack::SlackAdapter::new(
+                    token.as_str().to_string(),
+                    ch.external_id.clone(),
+                    channel_id.to_string(),
+                )))
+            }
+            ChannelKind::Webhook => {
+                let target_url = ch
+                    .webhook_url
+                    .clone()
+                    .ok_or_else(|| "Webhook requires webhook_url target".to_string())?;
+                agentos_channels::webhook::validate_webhook_url(&target_url)
+                    .map_err(|e| e.to_string())?;
+                let secret = if ch.credential_key.trim().is_empty() {
+                    return Err("Webhook requires credential_key (signing secret vault key)".into());
+                } else {
+                    self.vault
+                        .get(&ch.credential_key)
+                        .await
+                        .map_err(|e| format!("failed to retrieve webhook secret from vault: {e}"))?
+                        .as_str()
+                        .to_string()
+                };
+                Some(Arc::new(agentos_channels::webhook::WebhookAdapter::new(
+                    target_url,
+                    secret,
+                    channel_id.to_string(),
+                )))
+            }
+            ChannelKind::WhatsApp => {
+                if ch.credential_key.trim().is_empty()
+                    || ch.external_id.trim().is_empty()
+                    || ch.reply_topic.as_deref().unwrap_or("").trim().is_empty()
+                {
+                    return Err(
+                        "WhatsApp requires credential_key (access token vault key), external_id (recipient phone), and reply_topic (phone_number_id)"
+                            .to_string(),
+                    );
+                }
+                let token =
+                    self.vault.get(&ch.credential_key).await.map_err(|e| {
+                        format!("failed to retrieve WhatsApp token from vault: {e}")
+                    })?;
+                let phone_number_id = ch.reply_topic.clone().unwrap_or_default();
+                let adapter = agentos_channels::whatsapp::WhatsAppAdapter::new(
+                    token.as_str().to_string(),
+                    phone_number_id,
+                    ch.external_id.clone(),
+                    channel_id.to_string(),
+                )
+                .map_err(|e| e.to_string())?;
+                Some(Arc::new(adapter))
+            }
+            _ => None,
+        };
+
+        if let Some(adapter) = adapter {
+            self.channel_manager
+                .register(&channel_id.to_string(), adapter)
+                .await
+                .map_err(|e| e.to_string())?;
+            tracing::info!(
+                channel_id = %channel_id,
+                kind = %ch.kind,
+                "Registered channel-manager adapter"
+            );
+        } else {
+            tracing::info!(
+                channel_id = %channel_id,
+                kind = %ch.kind,
+                "Channel registered without runtime adapter"
+            );
+        }
+        Ok(())
     }
 }

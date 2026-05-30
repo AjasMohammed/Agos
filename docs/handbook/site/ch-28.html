@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Inbox and Notifications · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a><div class="nav-subs"><a class="nav-sub" href="#overview" data-target="overview">Overview</a><a class="nav-sub" href="#notification-inbox" data-target="notification-inbox">Notification Inbox</a><a class="nav-sub" href="#message-inbox-agent-to-agent" data-target="message-inbox-agent-to-agent">Message Inbox (Agent-to-Agent)</a><a class="nav-sub" href="#system-prompt-segment" data-target="system-prompt-segment">System Prompt Segment</a><a class="nav-sub" href="#tools" data-target="tools">Tools</a><a class="nav-sub" href="#retention-and-cleanup" data-target="retention-and-cleanup">Retention and Cleanup</a><a class="nav-sub" href="#inbox-vs-user-notifications" data-target="inbox-vs-user-notifications">Inbox vs User Notifications</a><a class="nav-sub" href="#related" data-target="related">Related</a></div></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 28 · Agent Inbox and Notifications</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 28</div><h1 class="ch-title">Agent Inbox and Notifications</h1><p class="ch-summary">Agent async notification inbox + agent-to-agent message inbox — SQLite persistence, idempotent writes, capacity-based eviction, system prompt segment design, 6 tools</p></div>
+    <article class="prose"><h1 id="agent-inbox-and-notifications" class="anchored"><a class="hanchor" href="#agent-inbox-and-notifications" aria-label="link">#</a>Agent Inbox and Notifications</h1>
+<blockquote><p>AgentOS maintains two persistent async inboxes for each agent: a <strong>notification inbox</strong> for system events (scheduled task completions, timer fires, sub-agent callbacks) and a <strong>message inbox</strong> for agent-to-agent direct messages. Both are SQLite-backed and survive kernel restarts.</p></blockquote>
+<hr>
+<h2 id="overview" class="anchored"><a class="hanchor" href="#overview" aria-label="link">#</a>Overview</h2>
+<p>The inbox system decouples event delivery from task execution. When a scheduled task fires at 3 AM and the owning agent is not running, the result is written to its notification inbox. The next time the agent runs a task, it sees a compact count segment in its system prompt and can pull the details with <code>agent-inbox-list</code>.</p>
+<p>Two inboxes, two stores:</p>
+<div class="table-wrap"><table><thead><tr><th>Store</th><th>DB File</th><th>Purpose</th><th>Tools</th></tr></thead><tbody><tr><td><code>AgentInbox</code></td><td><code>agent_inbox.db</code></td><td>System notifications (schedules, timers, events)</td><td><code>agent-inbox-{list,read,dismiss}</code></td></tr><tr><td><code>AgentMessageInbox</code></td><td><code>agent_messages.db</code></td><td>Agent-to-agent direct messages</td><td><code>agent-messages-{list,read,dismiss}</code></td></tr></tbody></table></div>
+<hr>
+<h2 id="notification-inbox" class="anchored"><a class="hanchor" href="#notification-inbox" aria-label="link">#</a>Notification Inbox</h2>
+<h3 id="schema" class="anchored"><a class="hanchor" href="#schema" aria-label="link">#</a>Schema</h3>
+<div class="code-block" data-lang="sql"><div class="code-bar"><span class="code-lang">sql</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">agent_inbox</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">          </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="n">agent_id</span><span class="w">    </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">kind</span><span class="w">        </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">     </span><span class="c1">-- AgentInboxKind variant</span>
+<span class="w">    </span><span class="n">title</span><span class="w">       </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">     </span><span class="c1">-- short summary (shown in prompt segment)</span>
+<span class="w">    </span><span class="n">body</span><span class="w">        </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span><span class="w">     </span><span class="c1">-- full JSON payload (only available via read tool)</span>
+<span class="w">    </span><span class="n">ref_id</span><span class="w">      </span><span class="nb">TEXT</span><span class="p">,</span><span class="w">              </span><span class="c1">-- idempotence key (nullable)</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">  </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">expires_at</span><span class="w">  </span><span class="nb">TEXT</span><span class="p">,</span><span class="w">              </span><span class="c1">-- NULL = no expiry</span>
+<span class="w">    </span><span class="k">read</span><span class="w">        </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span>
+<span class="p">);</span>
+</pre></div>
+</div>
+<h3 id="idempotence" class="anchored"><a class="hanchor" href="#idempotence" aria-label="link">#</a>Idempotence</h3>
+<p>Writes that supply a non-NULL <code>ref_id</code> are deduplicated via a partial unique index on <code>(agent_id, kind, ref_id) WHERE ref_id IS NOT NULL</code>. A second write with the same <code>(agent_id, kind, ref_id)</code> silently returns without creating a duplicate row. Writes with <code>ref_id = NULL</code> always create a new row.</p>
+<p>This prevents repeated schedule fires from flooding the inbox if a task retries or the kernel restarts mid-delivery.</p>
+<h3 id="capacity" class="anchored"><a class="hanchor" href="#capacity" aria-label="link">#</a>Capacity</h3>
+<p>Each agent's inbox is capped at <code>max_per_agent</code> entries (default: <strong>200</strong>). When the cap is reached, the oldest read entries are purged in batches of up to 32 before the new entry is written. Unread entries are not evicted.</p>
+<h3 id="agentinboxkind" class="anchored"><a class="hanchor" href="#agentinboxkind" aria-label="link">#</a>AgentInboxKind</h3>
+<div class="table-wrap"><table><thead><tr><th>Kind</th><th>Produced by</th></tr></thead><tbody><tr><td><code>Scheduled</code></td><td>Scheduled task completed (cron, once, timer)</td></tr><tr><td><code>SubAgentCallback</code></td><td>Sub-agent task completed and result is ready</td></tr><tr><td><code>EventTrigger</code></td><td>An event subscription fired for this agent</td></tr><tr><td><code>SystemAlert</code></td><td>Kernel-generated alert (quota warning, health degraded, etc.)</td></tr><tr><td><code>Custom</code></td><td>Arbitrary notification from another tool</td></tr></tbody></table></div>
+<hr>
+<h2 id="message-inbox-agent-to-agent" class="anchored"><a class="hanchor" href="#message-inbox-agent-to-agent" aria-label="link">#</a>Message Inbox (Agent-to-Agent)</h2>
+<h3 id="schema-2" class="anchored"><a class="hanchor" href="#schema-2" aria-label="link">#</a>Schema</h3>
+<div class="code-block" data-lang="sql"><div class="code-bar"><span class="code-lang">sql</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">agent_messages</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">               </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="n">from_agent_id</span><span class="w">    </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">from_agent_name</span><span class="w">  </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">to_agent_id</span><span class="w">      </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">body</span><span class="w">             </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">reply_to</span><span class="w">         </span><span class="nb">TEXT</span><span class="p">,</span><span class="w">          </span><span class="c1">-- optional: ID of message being replied to</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w">       </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">expires_at</span><span class="w">       </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="k">read</span><span class="w">             </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="mi">0</span>
+<span class="p">);</span>
+</pre></div>
+</div>
+<p>Messages are written by the <code>agent-message</code> tool (which fans out to in-memory event bus AND the persistent store). The persistent store ensures messages survive agent restarts.</p>
+<h3 id="capacity-2" class="anchored"><a class="hanchor" href="#capacity-2" aria-label="link">#</a>Capacity</h3>
+<p>Same cap and eviction logic as the notification inbox. Default: <strong>200 messages per agent</strong>.</p>
+<hr>
+<h2 id="system-prompt-segment" class="anchored"><a class="hanchor" href="#system-prompt-segment" aria-label="link">#</a>System Prompt Segment</h2>
+<p>The <code>InboxPromptRenderer</code> is called once per task turn (from <code>context_injector::setup_task_context</code>). It appends a compact segment at the tail of the system prompt — after all stable content, maximising Anthropic prompt cache hits.</p>
+<p><strong>Segment format (both inboxes non-empty):</strong></p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>## Notifications
+Unread notifications: 3
+Unread messages from: planner (2), researcher (1)
+
+Use the `agent-inbox-list` tool to view notifications, `agent-messages-list` to view messages.
+</pre></div>
+</div>
+<p><strong>Design invariants:</strong></p>
+<ul><li>Renders <strong>nothing</strong> when both inboxes are empty (zero token overhead)</li><li>Never exposes notification titles, subjects, or bodies in the segment (counts only)</li><li>Message senders ordered by count DESC, then name ASC — stable order for cache hits</li><li>Placed at the <strong>tail</strong> of the system prompt so preceding stable content stays cached</li></ul>
+<hr>
+<h2 id="tools" class="anchored"><a class="hanchor" href="#tools" aria-label="link">#</a>Tools</h2>
+<h3 id="agent-inbox-list" class="anchored"><a class="hanchor" href="#agent-inbox-list" aria-label="link">#</a><code>agent-inbox-list</code></h3>
+<p>List unread (and optionally all) notification inbox entries. Returns entry IDs, kinds, titles, and timestamps. Does not return bodies (use <code>agent-inbox-read</code> to get the full body of a specific entry).</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1">// Input</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">&quot;unread_only&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">20</span><span class="w"> </span><span class="p">}</span>
+
+<span class="c1">// Output (array of entries)</span>
+<span class="p">[</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;01JT...&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Scheduled&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;scheduled task completed: nightly-report&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;created_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-04-30T03:00:01Z&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;read&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">]</span>
+</pre></div>
+</div>
+<h3 id="agent-inbox-read" class="anchored"><a class="hanchor" href="#agent-inbox-read" aria-label="link">#</a><code>agent-inbox-read</code></h3>
+<p>Mark a notification as read and return its full JSON body.</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1">// Input</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;01JT...&quot;</span><span class="w"> </span><span class="p">}</span>
+
+<span class="c1">// Output</span>
+<span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;01JT...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Scheduled&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;scheduled task completed: nightly-report&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;body&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;task_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;result&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;duration_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4200</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;read&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<h3 id="agent-inbox-dismiss" class="anchored"><a class="hanchor" href="#agent-inbox-dismiss" aria-label="link">#</a><code>agent-inbox-dismiss</code></h3>
+<p>Permanently delete a notification.</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;01JT...&quot;</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<h3 id="agent-messages-list" class="anchored"><a class="hanchor" href="#agent-messages-list" aria-label="link">#</a><code>agent-messages-list</code></h3>
+<p>List unread agent-to-agent messages, grouped by sender.</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1">// Input</span>
+<span class="p">{</span><span class="w"> </span><span class="nt">&quot;unread_only&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
+
+<span class="c1">// Output</span>
+<span class="p">[</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;01JU...&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;from_agent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;from_agent_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;planner&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;body&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Analysis complete — see file report.md&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;reply_to&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;created_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-04-30T10:12:00Z&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;read&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">]</span>
+</pre></div>
+</div>
+<h3 id="agent-messages-read" class="anchored"><a class="hanchor" href="#agent-messages-read" aria-label="link">#</a><code>agent-messages-read</code></h3>
+<p>Mark a message as read and return its body.</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;01JU...&quot;</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<h3 id="agent-messages-dismiss" class="anchored"><a class="hanchor" href="#agent-messages-dismiss" aria-label="link">#</a><code>agent-messages-dismiss</code></h3>
+<p>Permanently delete a message.</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;01JU...&quot;</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="retention-and-cleanup" class="anchored"><a class="hanchor" href="#retention-and-cleanup" aria-label="link">#</a>Retention and Cleanup</h2>
+<p>Both inboxes use a capacity-based eviction model rather than a time-based TTL:</p>
+<ul><li>Entries are evicted when the per-agent cap is reached</li><li>Eviction removes the oldest <strong>read</strong> entries first (up to 32 per write)</li><li>Unread entries are never evicted automatically</li><li>Setting <code>expires_at</code> on an entry enables time-based expiry; the <code>TimeoutChecker</code> sweeps expired entries every 10 minutes alongside snapshot and checkpoint cleanup</li></ul>
+<hr>
+<h2 id="inbox-vs-user-notifications" class="anchored"><a class="hanchor" href="#inbox-vs-user-notifications" aria-label="link">#</a>Inbox vs User Notifications</h2>
+<p>The agent inbox is <strong>not</strong> the same as the user-facing notification system:</p>
+<div class="table-wrap"><table><thead><tr><th>System</th><th>Audience</th><th>Written by</th><th>Viewed via</th></tr></thead><tbody><tr><td>Agent Inbox</td><td>Agent (LLM)</td><td>Kernel (scheduled tasks, events)</td><td><code>agent-inbox-list</code> tool</td></tr><tr><td>Agent Messages</td><td>Agent (LLM)</td><td>Other agents</td><td><code>agent-messages-list</code> tool</td></tr><tr><td>User Inbox</td><td>Human operator</td><td><code>notify-user</code> tool</td><td><code>agentos notifications list</code> CLI</td></tr><tr><td>Channel Delivery</td><td>Human operator</td><td><code>notify-user</code> tool</td><td>Telegram, Slack, etc.</td></tr></tbody></table></div>
+<p>Inbound channel messages (from Telegram, Slack, etc.) do <strong>not</strong> route to the agent inbox — they go through the <code>ChannelChatBridge</code> into a task directly.</p>
+<hr>
+<h2 id="related" class="anchored"><a class="hanchor" href="#related" aria-label="link">#</a>Related</h2>
+<ul><li><a class="wikilink" href="ch-07.html">Tool System</a> — full tool reference including inbox tools</li><li><a class="wikilink" href="ch-06.html">Task System</a> — scheduled tasks, checkpointing</li><li><a class="wikilink" href="ch-12.html">Event System</a> — event subscriptions that can populate the inbox</li><li><a class="wikilink" href="ch-21.html">User Notifications and Channels</a> — user-facing notification system</li></ul></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-27.html"><span class="pn-dir">← Previous</span><span class="pn-title">Kernel Mediated Capabilities</span></a><span></span></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#overview" data-target="overview">Overview</a></li><li class="toc-h2"><a href="#notification-inbox" data-target="notification-inbox">Notification Inbox</a></li><li class="toc-h3"><a href="#schema" data-target="schema">Schema</a></li><li class="toc-h3"><a href="#idempotence" data-target="idempotence">Idempotence</a></li><li class="toc-h3"><a href="#capacity" data-target="capacity">Capacity</a></li><li class="toc-h3"><a href="#agentinboxkind" data-target="agentinboxkind">AgentInboxKind</a></li><li class="toc-h2"><a href="#message-inbox-agent-to-agent" data-target="message-inbox-agent-to-agent">Message Inbox (Agent-to-Agent)</a></li><li class="toc-h3"><a href="#schema-2" data-target="schema-2">Schema</a></li><li class="toc-h3"><a href="#capacity-2" data-target="capacity-2">Capacity</a></li><li class="toc-h2"><a href="#system-prompt-segment" data-target="system-prompt-segment">System Prompt Segment</a></li><li class="toc-h2"><a href="#tools" data-target="tools">Tools</a></li><li class="toc-h3"><a href="#agent-inbox-list" data-target="agent-inbox-list"><code>agent-inbox-list</code></a></li><li class="toc-h3"><a href="#agent-inbox-read" data-target="agent-inbox-read"><code>agent-inbox-read</code></a></li><li class="toc-h3"><a href="#agent-inbox-dismiss" data-target="agent-inbox-dismiss"><code>agent-inbox-dismiss</code></a></li><li class="toc-h3"><a href="#agent-messages-list" data-target="agent-messages-list"><code>agent-messages-list</code></a></li><li class="toc-h3"><a href="#agent-messages-read" data-target="agent-messages-read"><code>agent-messages-read</code></a></li><li class="toc-h3"><a href="#agent-messages-dismiss" data-target="agent-messages-dismiss"><code>agent-messages-dismiss</code></a></li><li class="toc-h2"><a href="#retention-and-cleanup" data-target="retention-and-cleanup">Retention and Cleanup</a></li><li class="toc-h2"><a href="#inbox-vs-user-notifications" data-target="inbox-vs-user-notifications">Inbox vs User Notifications</a></li><li class="toc-h2"><a href="#related" data-target="related">Related</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

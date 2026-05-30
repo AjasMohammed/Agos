@@ -8,7 +8,7 @@ This guide walks you through building, configuring, and running AgentOS from sou
 
 | Requirement           | Minimum Version   | Notes                                             |
 | --------------------- | ----------------- | ------------------------------------------------- |
-| **Rust**              | 1.75+             | Install via [rustup](https://rustup.rs/)          |
+| **Rust**              | 1.91+             | Install via [rustup](https://rustup.rs/)          |
 | **Cargo**             | (ships with Rust) | Workspace build tool                              |
 | **Linux**             | Any modern distro | Required for seccomp sandboxing                   |
 | **SQLite**            | 3.x               | Bundled via `rusqlite` (no system install needed) |
@@ -147,7 +147,7 @@ Enter vault passphrase: ••••••••
    Bus: /tmp/agentos/agentos.sock
    Tools: 6 loaded
 
-AgentOS is running. Use another terminal to run agentctl commands.
+AgentOS is running. Use another terminal to run agentos commands.
 Press Ctrl+C to shutdown.
 ```
 
@@ -161,7 +161,7 @@ cargo run --bin agentos-cli -- start --vault-passphrase "your-passphrase"
 
 ### Step 2: Open a Second Terminal
 
-All `agentctl` commands communicate with the running kernel over a Unix domain socket. Open a new terminal window for commands.
+All `agentos` commands communicate with the running kernel over a Unix domain socket. Open a new terminal window for commands.
 
 ### Step 3: Check System Status
 
@@ -296,6 +296,6 @@ cargo run --bin agentos-cli -- agent disconnect <agent-id>
 ## Next Steps
 
 - **[Architecture](03-architecture.md)** — Understand how all the pieces fit together
-- **[CLI Reference](04-cli-reference.md)** — Full command reference for every `agentctl` command
+- **[CLI Reference](04-cli-reference.md)** — Full command reference for every `agentos` command
 - **[Tools Guide](05-tools-guide.md)** — Learn about built-in tools and how to install more
 - **[Security Model](06-security.md)** — Deep dive into secrets, permissions, and sandboxing

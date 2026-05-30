@@ -114,6 +114,9 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         chat: Default::default(),
         user_adaptation: Default::default(),
         env: Default::default(),
+        gateway: Default::default(),
+        scheduler: Default::default(),
+        transcription: Default::default(),
     }
 }
 

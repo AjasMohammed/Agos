@@ -1,4 +1,9 @@
 tags = ["meta", "read"]
+# `risk_class` is a top-level field on `ToolManifest` (NOT inside [manifest]).
+# Nesting it under [manifest] makes serde silently drop it and default the
+# outer field — kept top-level here so the intent is provable, matching
+# skill-create.toml.
+risk_class = "readonly_scoped"
 
 [manifest]
 name        = "skill-prompt"
@@ -7,7 +12,6 @@ description = "Fetch an installed skill's full system prompt + required-tool all
 author      = "agentos-core"
 trust_tier  = "core"
 group       = "skills"
-risk_class  = "readonly_scoped"
 
 [manifest.usage_hints]
 use_for = [

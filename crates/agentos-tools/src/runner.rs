@@ -36,9 +36,12 @@ use crate::file_lock::FileLockRegistry;
 use crate::file_move::FileMove;
 use crate::file_reader::FileReader;
 use crate::file_writer::FileWriter;
+use crate::get_schedule_runs::GetScheduleRunsTool;
+use crate::get_task_logs::GetTaskLogsTool;
 use crate::hardware_info::HardwareInfoTool;
 use crate::host_package::{resolve_escalator, EscalatorPolicy, HostPackageInstallTool};
 use crate::http_client::HttpClientTool;
+use crate::list_my_schedules::ListMySchedulesTool;
 use crate::log_reader::LogReaderTool;
 use crate::memory_block_delete::MemoryBlockDeleteTool;
 use crate::memory_block_list::MemoryBlockListTool;
@@ -50,6 +53,7 @@ use crate::memory_search::MemorySearch;
 use crate::memory_stats::MemoryStats;
 use crate::memory_write::MemoryWrite;
 use crate::network_monitor::NetworkMonitorTool;
+use crate::network_sockets::NetworkSocketsTool;
 use crate::notify_user::NotifyUserTool;
 use crate::poll_agent::PollAgentTool;
 use crate::printer::PrinterTool;
@@ -65,6 +69,9 @@ use crate::schedule_recurring::ScheduleRecurringTool;
 use crate::set_timer::{CancelTimerTool, ListTimersTool, SetTimerTool};
 use crate::shell_exec::ShellExec;
 use crate::sys_monitor::SysMonitorTool;
+use crate::system_mounts::SystemMountsTool;
+use crate::system_open_files::SystemOpenFilesTool;
+use crate::system_services::SystemServicesTool;
 use crate::task_delegate::TaskDelegate;
 use crate::task_list::TaskListTool;
 use crate::task_spawn_async::TaskSpawnAsyncTool;
@@ -225,6 +232,12 @@ impl ToolRunner {
         self.register(Box::new(RawUsbTool::new()));
         self.register(Box::new(UsbStorageTool::new()));
         self.register(Box::new(WebcamTool::new()));
+        // Host-introspection tools — read real host state via HAL (procfs / D-Bus),
+        // since shell-exec runs in a sandboxed PID/network namespace.
+        self.register(Box::new(NetworkSocketsTool::new()));
+        self.register(Box::new(SystemMountsTool::new()));
+        self.register(Box::new(SystemOpenFilesTool::new()));
+        self.register(Box::new(SystemServicesTool::new()));
         self.register(Box::new(ThinkTool::new()));
         self.register(Box::new(DatetimeTool::new()));
         match WebFetch::new() {
@@ -268,6 +281,11 @@ impl ToolRunner {
         self.register(Box::new(ScheduleControlTool::new()));
         self.register(Box::new(CancelOnceJobTool::new()));
         self.register(Box::new(ListOnceJobsTool::new()));
+        // Schedule self-inspection — agents query their own schedules + run
+        // history; ownership enforced kernel-side via creator_agent_id.
+        self.register(Box::new(ListMySchedulesTool::new()));
+        self.register(Box::new(GetScheduleRunsTool::new()));
+        self.register(Box::new(GetTaskLogsTool::new()));
 
         // KMC bridge tools — route to kernel capability providers.
         for name in crate::kmc_tools::KMC_TOOL_NAMES {
@@ -383,6 +401,22 @@ impl ToolRunner {
         installed_skills: crate::agent_manual::SharedInstalledSkills,
     ) {
         self.register(Box::new(crate::skill_prompt::SkillPromptTool::new(
+            installed_skills,
+        )));
+    }
+
+    /// Register the skill-create tool. Lets an agent author and install a
+    /// skill at runtime; gated by `risk_class = control_plane` in the
+    /// manifest so every call requires explicit human approval.
+    pub fn register_skill_create(
+        &mut self,
+        user_skills_dir: std::path::PathBuf,
+        installer: crate::skill_create::SharedSkillInstaller,
+        installed_skills: crate::agent_manual::SharedInstalledSkills,
+    ) {
+        self.register(Box::new(crate::skill_create::SkillCreateTool::new(
+            user_skills_dir,
+            installer,
             installed_skills,
         )));
     }

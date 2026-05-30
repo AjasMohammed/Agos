@@ -54,7 +54,7 @@
                 <span class="convo-agent-name" style="color:{{ turn.color }}">{{ turn.agent_name }}</span>
                 <span class="convo-turn-label muted">Turn {{ turn.turn_number }}</span>
                 {% if turn.tool_call_count > 0 %}
-                <span class="convo-tool-badge muted">⚙ {{ turn.tool_call_count }} tool{% if turn.tool_call_count > 1 %}s{% endif %}</span>
+                <span class="convo-tool-badge muted">{{ turn.tool_call_count }} tool{% if turn.tool_call_count > 1 %}s{% endif %}</span>
                 {% endif %}
                 <span class="convo-turn-time muted">{{ turn.created_at | relative_time }}</span>
             </div>

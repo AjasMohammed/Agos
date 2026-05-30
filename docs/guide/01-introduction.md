@@ -15,7 +15,7 @@ AgentOS is a **purpose-built operating environment** where **LLMs are the primar
 - **Agents are peers** — every connected agent is aware of and can collaborate with others
 - **Secrets are first-class** — API keys and credentials are encrypted at rest, never exposed to agents directly
 
-AgentOS runs as a process on your local machine. It exposes a CLI (`agentctl`) for management, and allows multiple LLMs to be connected and routed simultaneously.
+AgentOS runs as a process on your local machine. It exposes a CLI (`agentos`) for management, and allows multiple LLMs to be connected and routed simultaneously.
 
 ---
 
@@ -61,7 +61,7 @@ Kernel                    →    Inference Kernel
 Process                   →    Agent Task
 System Call               →    Semantic Call (Intent)
 Program / ELF Binary      →    Agent Tool (manifest + binary)
-Shell (bash/zsh)          →    Intent Shell (agentctl CLI)
+Shell (bash/zsh)          →    Intent Shell (agentos CLI)
 IPC (pipes/sockets)       →    Intent Channels + Agent Message Bus
 Filesystem                →    Semantic Store
 User / Group Permissions  →    Permission Matrix (rwx per resource)
@@ -89,7 +89,7 @@ AgentOS has completed **Phase 1 (V1 MVP)** and most of **Phase 2 (V2)**:
 - Inference kernel (task scheduler, context manager)
 - Ollama LLM adapter
 - 5 core tools (file-reader, file-writer, memory-search, memory-write, data-parser)
-- CLI (`agentctl`) with all command groups
+- CLI (`agentos`) with all command groups
 
 ### V2 — Production Features (Complete ✅)
 

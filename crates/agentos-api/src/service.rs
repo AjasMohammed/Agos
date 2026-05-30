@@ -1,9 +1,21 @@
 use crate::error::ApiError;
 use crate::types::*;
+use agentos_audit::AuditEventType;
 use agentos_kernel::ChatStreamEvent;
 use agentos_types::{NotificationID, SecretMetadata, TaskID, ToolID};
 use async_trait::async_trait;
 use tokio::sync::mpsc;
+
+/// Result of verifying an operator login credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialCheck {
+    /// Credential matched the configured operator token.
+    Valid,
+    /// Credential did not match.
+    Invalid,
+    /// No operator token is configured — login is disabled server-side.
+    NotConfigured,
+}
 
 /// Core service trait defining the complete API surface for interacting with
 /// the AgentOS kernel. Implemented by `Kernel` in `kernel_impl.rs`.
@@ -151,4 +163,154 @@ pub trait KernelService: Send + Sync {
         &self,
         message: agentos_kernel::notification_router::InboundMessage,
     ) -> Result<(), ApiError>;
+
+    // ── Control-plane auth (React control panel) ─────────────────────────────
+
+    /// Verify an operator login credential (constant-time) against the configured
+    /// `[api] operator_token`. Backs `POST /api/v1/auth/login`.
+    async fn verify_operator_credential(&self, credential: &str) -> CredentialCheck;
+
+    /// Record a control-plane audit event (login attempts, key issue/revoke).
+    ///
+    /// `details` must **never** contain secret material (raw API keys or the
+    /// login credential) — only non-secret identifiers like the public key id.
+    async fn record_audit(&self, event_type: AuditEventType, details: serde_json::Value);
+
+    // ── Escalations (HITL) ───────────────────────────────────────────────────
+
+    async fn list_escalations(&self, pending_only: bool) -> Result<Vec<ApiEscalation>, ApiError>;
+
+    async fn get_escalation(&self, id: u64) -> Result<ApiEscalation, ApiError>;
+
+    async fn resolve_escalation(
+        &self,
+        id: u64,
+        decision: String,
+        note: Option<String>,
+    ) -> Result<ResolveEscalationResponse, ApiError>;
+
+    // ── User-preference proposals (governance) ───────────────────────────────
+
+    async fn list_pref_proposals(
+        &self,
+        status: String,
+        limit: u32,
+    ) -> Result<Vec<ApiPrefProposal>, ApiError>;
+
+    async fn accept_pref_proposal(&self, id: String) -> Result<(), ApiError>;
+
+    async fn reject_pref_proposal(&self, id: String) -> Result<(), ApiError>;
+
+    async fn pref_proposal_stats(&self) -> Result<ApiProposalStats, ApiError>;
+
+    // ── Roles (governance) ───────────────────────────────────────────────────
+
+    async fn list_roles(&self) -> Result<Vec<ApiRole>, ApiError>;
+
+    async fn create_role(&self, req: CreateRoleRequest) -> Result<ApiRole, ApiError>;
+
+    async fn get_role(&self, name: &str) -> Result<ApiRole, ApiError>;
+
+    async fn delete_role(&self, name: &str) -> Result<(), ApiError>;
+
+    // ── Audit integrity ──────────────────────────────────────────────────────
+
+    async fn verify_audit_chain(&self) -> Result<serde_json::Value, ApiError>;
+
+    // ── Observability & system (config / doctor / logs / resources / hal) ────
+
+    /// Full config tree as JSON with secret-bearing leaves redacted.
+    async fn get_config_tree(&self) -> Result<serde_json::Value, ApiError>;
+
+    /// Resolve a dotted config key (e.g. `"llm.primary"`) from the live file.
+    async fn get_config_key(&self, key: &str) -> Result<serde_json::Value, ApiError>;
+
+    /// Write a dotted config key to the live file (preserving comments).
+    async fn set_config_key(&self, key: &str, value: serde_json::Value) -> Result<(), ApiError>;
+
+    /// Whether `[api] config_writable` is enabled.
+    fn config_writable(&self) -> bool;
+
+    async fn run_doctor(&self) -> Result<Vec<DoctorCheck>, ApiError>;
+
+    async fn apply_doctor_fix(&self, check: &str) -> Result<(), ApiError>;
+
+    async fn query_logs(
+        &self,
+        level: Option<String>,
+        since: Option<String>,
+        limit: u32,
+    ) -> Result<Vec<LogLine>, ApiError>;
+
+    async fn get_resources(&self) -> Result<ResourceInfo, ApiError>;
+
+    async fn get_hal_info(&self) -> Result<HalInfo, ApiError>;
+
+    // ── Automation (Phase 03) ────────────────────────────────────────────────
+
+    async fn resume_task(&self, id: TaskID) -> Result<serde_json::Value, ApiError>;
+    async fn list_task_checkpoints(
+        &self,
+        id: TaskID,
+    ) -> Result<Vec<ApiCheckpointSummary>, ApiError>;
+
+    async fn import_pipeline(&self, yaml: String) -> Result<String, ApiError>;
+    async fn export_pipeline(&self, name: &str) -> Result<String, ApiError>;
+    async fn get_pipeline_definition(&self, name: &str) -> Result<serde_json::Value, ApiError>;
+    async fn get_pipeline_run(&self, run_id: String) -> Result<serde_json::Value, ApiError>;
+
+    async fn list_schedules(&self) -> Result<Vec<ApiScheduleSummary>, ApiError>;
+    async fn create_schedule(
+        &self,
+        req: CreateScheduleRequest,
+    ) -> Result<ApiScheduleSummary, ApiError>;
+    async fn pause_schedule(&self, id: &str) -> Result<(), ApiError>;
+    async fn resume_schedule(&self, id: &str) -> Result<(), ApiError>;
+    async fn delete_schedule(&self, id: &str) -> Result<(), ApiError>;
+    async fn get_schedule_runs(
+        &self,
+        id: &str,
+        limit: u32,
+    ) -> Result<Vec<ApiScheduleRun>, ApiError>;
+
+    async fn list_workflows(&self) -> Result<Vec<ApiWorkflowSummary>, ApiError>;
+    async fn get_workflow(&self, id: &str) -> Result<serde_json::Value, ApiError>;
+    async fn save_workflow(&self, req: SaveWorkflowRequest) -> Result<String, ApiError>;
+    async fn delete_workflow(&self, id: &str) -> Result<(), ApiError>;
+
+    // ── Extensibility (Phase 05) ─────────────────────────────────────────────
+
+    async fn list_plugins(&self) -> Result<Vec<ApiPluginSummary>, ApiError>;
+    async fn get_plugin(&self, id: &str) -> Result<ApiPluginDetail, ApiError>;
+    async fn discover_plugins(&self) -> Result<DiscoverPluginsResponse, ApiError>;
+    async fn set_plugin_enabled(&self, id: &str, enabled: bool) -> Result<(), ApiError>;
+
+    async fn list_channels(&self) -> Result<Vec<ApiChannelSummary>, ApiError>;
+    async fn get_channel(&self, id: &str) -> Result<ApiChannelSummary, ApiError>;
+    async fn disconnect_channel(&self, id: &str) -> Result<(), ApiError>;
+
+    async fn list_mcp_servers(&self) -> Result<Vec<ApiMcpServer>, ApiError>;
+    async fn detach_mcp_server(&self, name: &str) -> Result<(), ApiError>;
+
+    async fn list_connectors(&self) -> Result<Vec<ApiConnectorSummary>, ApiError>;
+    async fn get_connector(&self, id: &str) -> Result<ApiConnectorDetail, ApiError>;
+    async fn disconnect_connector(&self, id: &str) -> Result<(), ApiError>;
+
+    async fn list_event_subscriptions(&self) -> Result<Vec<ApiEventSubscription>, ApiError>;
+    async fn create_event_subscription(
+        &self,
+        req: CreateSubscriptionRequest,
+    ) -> Result<ApiEventSubscription, ApiError>;
+    async fn delete_event_subscription(&self, id: &str) -> Result<(), ApiError>;
+    async fn emit_event(&self, req: EmitEventRequest) -> Result<(), ApiError>;
+
+    async fn list_webhooks(&self) -> Result<Vec<ApiWebhookEndpoint>, ApiError>;
+    async fn create_webhook(
+        &self,
+        req: CreateWebhookRequest,
+    ) -> Result<WebhookSecretResponse, ApiError>;
+    async fn rotate_webhook(&self, id: &str) -> Result<WebhookSecretResponse, ApiError>;
+    async fn delete_webhook(&self, id: &str) -> Result<(), ApiError>;
+
+    async fn get_agent_identity(&self, name: &str) -> Result<ApiAgentIdentity, ApiError>;
 }

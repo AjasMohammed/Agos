@@ -1,0 +1,1086 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLI Reference Complete · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a><div class="nav-subs"><a class="nav-sub" href="#global-options" data-target="global-options">Global Options</a><a class="nav-sub" href="#connection-model" data-target="connection-model">Connection Model</a><a class="nav-sub" href="#start-boot-the-agentos-kernel" data-target="start-boot-the-agentos-kernel"><code>start</code> — Boot the AgentOS kernel</a><a class="nav-sub" href="#stop-shut-down-the-agentos-kernel" data-target="stop-shut-down-the-agentos-kernel"><code>stop</code> — Shut down the AgentOS kernel</a><a class="nav-sub" href="#agent-manage-llm-agents" data-target="agent-manage-llm-agents"><code>agent</code> — Manage LLM agents</a><a class="nav-sub" href="#task-manage-tasks" data-target="task-manage-tasks"><code>task</code> — Manage tasks</a><a class="nav-sub" href="#tool-manage-tools" data-target="tool-manage-tools"><code>tool</code> — Manage tools</a><a class="nav-sub" href="#secret-manage-secrets" data-target="secret-manage-secrets"><code>secret</code> — Manage secrets</a><a class="nav-sub" href="#perm-manage-agent-permissions" data-target="perm-manage-agent-permissions"><code>perm</code> — Manage agent permissions</a><a class="nav-sub" href="#role-manage-os-roles" data-target="role-manage-os-roles"><code>role</code> — Manage OS roles</a><a class="nav-sub" href="#schedule-manage-scheduled-background-jobs" data-target="schedule-manage-scheduled-background-jobs"><code>schedule</code> — Manage scheduled background jobs</a><a class="nav-sub" href="#bg-manage-background-tasks" data-target="bg-manage-background-tasks"><code>bg</code> — Manage background tasks</a><a class="nav-sub" href="#status-show-system-status" data-target="status-show-system-status"><code>status</code> — Show system status</a><a class="nav-sub" href="#audit-view-audit-logs" data-target="audit-view-audit-logs"><code>audit</code> — View audit logs</a><a class="nav-sub" href="#pipeline-manage-multi-agent-pipelines" data-target="pipeline-manage-multi-agent-pipelines"><code>pipeline</code> — Manage multi-agent pipelines</a><a class="nav-sub" href="#cost-view-agent-cost-and-budget-reports" data-target="cost-view-agent-cost-and-budget-reports"><code>cost</code> — View agent cost and budget reports</a><a class="nav-sub" href="#resource-manage-resource-locks-arbitration" data-target="resource-manage-resource-locks-arbitration"><code>resource</code> — Manage resource locks (arbitration)</a><a class="nav-sub" href="#escalation-view-and-resolve-human-approval-requests" data-target="escalation-view-and-resolve-human-approval-requests"><code>escalation</code> — View and resolve human approval requests</a><a class="nav-sub" href="#snapshot-manage-task-snapshots-and-rollback" data-target="snapshot-manage-task-snapshots-and-rollback"><code>snapshot</code> — Manage task snapshots and rollback</a><a class="nav-sub" href="#scratchpad-manage-agent-scratchpad-pages" data-target="scratchpad-manage-agent-scratchpad-pages"><code>scratchpad</code> — Manage agent scratchpad pages</a><a class="nav-sub" href="#event-manage-event-subscriptions-and-view-event-history" data-target="event-manage-event-subscriptions-and-view-event-history"><code>event</code> — Manage event subscriptions and view event history</a><a class="nav-sub" href="#identity-manage-agent-cryptographic-identities" data-target="identity-manage-agent-cryptographic-identities"><code>identity</code> — Manage agent cryptographic identities</a><a class="nav-sub" href="#hal-manage-hardware-device-access-hal" data-target="hal-manage-hardware-device-access-hal"><code>hal</code> — Manage hardware device access (HAL)</a><a class="nav-sub" href="#healthz-kernel-health-check" data-target="healthz-kernel-health-check"><code>healthz</code> — Kernel health check</a><a class="nav-sub" href="#log-control-runtime-logging" data-target="log-control-runtime-logging"><code>log</code> — Control runtime logging</a><a class="nav-sub" href="#notifications-manage-the-user-notification-inbox" data-target="notifications-manage-the-user-notification-inbox"><code>notifications</code> — Manage the user notification inbox</a><a class="nav-sub" href="#channel-manage-external-delivery-channels" data-target="channel-manage-external-delivery-channels"><code>channel</code> — Manage external delivery channels</a><a class="nav-sub" href="#mcp-model-context-protocol-integration" data-target="mcp-model-context-protocol-integration"><code>mcp</code> — Model Context Protocol integration</a><a class="nav-sub" href="#web-start-the-web-ui-server" data-target="web-start-the-web-ui-server"><code>web</code> — Start the web UI server</a><a class="nav-sub" href="#team-run-and-manage-agent-teams" data-target="team-run-and-manage-agent-teams"><code>team</code> — Run and manage agent teams</a><a class="nav-sub" href="#skill-manage-autonomous-skill-packages" data-target="skill-manage-autonomous-skill-packages"><code>skill</code> — Manage autonomous skill packages</a><a class="nav-sub" href="#mcp-extended-runtime-attach-oauth-a2a-status" data-target="mcp-extended-runtime-attach-oauth-a2a-status"><code>mcp</code> (extended) — runtime attach, OAuth, A2A, status</a><a class="nav-sub" href="#a2a-agent-to-agent-protocol" data-target="a2a-agent-to-agent-protocol"><code>a2a</code> — Agent-to-Agent protocol</a><a class="nav-sub" href="#provider-llm-provider-catalog" data-target="provider-llm-provider-catalog"><code>provider</code> — LLM provider catalog</a><a class="nav-sub" href="#plugin-plugin-lifecycle" data-target="plugin-plugin-lifecycle"><code>plugin</code> — Plugin lifecycle</a><a class="nav-sub" href="#onboard-interactive-setup-wizard" data-target="onboard-interactive-setup-wizard"><code>onboard</code> — Interactive setup wizard</a><a class="nav-sub" href="#doctor-diagnose-configuration-issues" data-target="doctor-diagnose-configuration-issues"><code>doctor</code> — Diagnose configuration issues</a><a class="nav-sub" href="#config-read-and-write-configuration-values" data-target="config-read-and-write-configuration-values"><code>config</code> — Read and write configuration values</a><a class="nav-sub" href="#init-scaffold-a-new-agentos-project" data-target="init-scaffold-a-new-agentos-project"><code>init</code> — Scaffold a new AgentOS project</a><a class="nav-sub" href="#workspace-manage-agent-filesystem-access" data-target="workspace-manage-agent-filesystem-access"><code>workspace</code> — Manage agent filesystem access</a><a class="nav-sub" href="#permission-reference-table" data-target="permission-reference-table">Permission Reference Table</a><a class="nav-sub" href="#quick-reference-all-command-groups" data-target="quick-reference-all-command-groups">Quick Reference: All Command Groups</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 04 · CLI Reference Complete</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 04</div><h1 class="ch-title">CLI Reference Complete</h1><p class="ch-summary">All 38 `agentos` command groups with flags, arguments, and examples — includes `team`, `skill`, `mcp` (attach/detach/oauth-store/a2a-*), `a2a` (card/discover/delegate/tasks), `workspace`, `provider`, `plugin`, `onboard`, `doctor`, `config`, `init`, plus `start`, `stop`, `scratchpad`, `healthz`, `log`, `notifications`, `channel`, and `web`</p></div>
+    <article class="prose"><h1 id="cli-reference" class="anchored"><a class="hanchor" href="#cli-reference" aria-label="link">#</a>CLI Reference</h1>
+<blockquote><p>Exhaustive reference for every <code>agentos</code> command, subcommand, flag, and option — extracted directly from the clap definitions in <code>crates/agentos-cli/src/</code>.</p></blockquote>
+<hr>
+<h2 id="global-options" class="anchored"><a class="hanchor" href="#global-options" aria-label="link">#</a>Global Options</h2>
+<p>These options apply to every <code>agentos</code> invocation.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--config &lt;path&gt;</code></td><td><code>String</code></td><td><code>&quot;config/default.toml&quot;</code></td><td>Path to kernel config file</td></tr><tr><td><code>--version</code></td><td>flag</td><td>—</td><td>Show version information</td></tr><tr><td><code>--help</code></td><td>flag</td><td>—</td><td>Show help for any command or subcommand</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>--config<span class="w"> </span>/etc/agentos/prod.toml<span class="w"> </span>status
+</pre></div>
+</div>
+<hr>
+<h2 id="connection-model" class="anchored"><a class="hanchor" href="#connection-model" aria-label="link">#</a>Connection Model</h2>
+<p>Most commands require a running kernel and communicate over a Unix domain socket (configured in the config file under <code>[bus].socket_path</code>). The following commands are <strong>offline</strong> and do not require a kernel connection:</p>
+<ul><li><code>agentos tool keygen</code></li><li><code>agentos tool sign</code></li><li><code>agentos tool verify</code></li><li><code>agentos mcp serve</code></li><li><code>agentos mcp list</code></li></ul>
+<p>All other commands will fail with a connection error if the kernel is not running.</p>
+<hr>
+<h2 id="start-boot-the-agentos-kernel" class="anchored"><a class="hanchor" href="#start-boot-the-agentos-kernel" aria-label="link">#</a><code>start</code> — Boot the AgentOS kernel</h2>
+<p>Starts the kernel process. The kernel loads config, initializes the vault, registers tools, and begins listening on the bus socket. Blocks until Ctrl+C.</p>
+<p>The vault passphrase is resolved from:</p>
+<ol><li><code>AGENTOS_VAULT_PASSPHRASE</code> environment variable</li><li>Interactive prompt (if env var is not set)</li></ol>
+<p><em>No additional flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Interactive passphrase prompt</span>
+agentos<span class="w"> </span>start
+
+<span class="c1"># Via environment variable (CI/scripts)</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">AGENTOS_VAULT_PASSPHRASE</span><span class="o">=</span><span class="s2">&quot;my-secret&quot;</span>
+agentos<span class="w"> </span>start
+</pre></div>
+</div>
+<hr>
+<h2 id="stop-shut-down-the-agentos-kernel" class="anchored"><a class="hanchor" href="#stop-shut-down-the-agentos-kernel" aria-label="link">#</a><code>stop</code> — Shut down the AgentOS kernel</h2>
+<p>Gracefully shuts down the running kernel. The kernel completes in-flight operations, closes the bus socket, and exits.</p>
+<p><em>No flags or arguments.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>stop
+</pre></div>
+</div>
+<hr>
+<h2 id="agent-manage-llm-agents" class="anchored"><a class="hanchor" href="#agent-manage-llm-agents" aria-label="link">#</a><code>agent</code> — Manage LLM agents</h2>
+<h3 id="agent-connect" class="anchored"><a class="hanchor" href="#agent-connect" aria-label="link">#</a><code>agent connect</code></h3>
+<p>Connect a new LLM agent to the kernel.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--provider</code></td><td><code>String</code></td><td><em>required</em></td><td>LLM provider: <code>ollama</code>, <code>openai</code>, <code>anthropic</code>, <code>gemini</code>, <code>custom</code>, or <code>custom:&lt;name&gt;</code></td></tr><tr><td><code>--model</code></td><td><code>String</code></td><td><em>required</em></td><td>Model name (e.g. <code>gpt-4</code>, <code>claude-sonnet-4-6</code>, <code>llama3</code>)</td></tr><tr><td><code>--name</code></td><td><code>String</code></td><td><em>required</em></td><td>Agent display name (must be unique)</td></tr><tr><td><code>--base-url</code></td><td><code>Option&lt;String&gt;</code></td><td>—</td><td>Custom base URL for the LLM provider endpoint</td></tr><tr><td><code>--role</code></td><td><code>Vec&lt;String&gt;</code></td><td><code>[&quot;general&quot;]</code></td><td>Role(s) for the agent. May be repeated. Supported: <code>orchestrator</code>, <code>security-monitor</code>, <code>sysops</code>, <code>memory-manager</code>, <code>tool-manager</code>, <code>general</code></td></tr><tr><td><code>--grant</code></td><td><code>Vec&lt;String&gt;</code></td><td><code>[]</code></td><td>Extra permissions to grant at connect time (format: <code>resource:flags</code>). May be repeated.</td></tr><tr><td><code>--root</code></td><td>flag</td><td><code>false</code></td><td>Mark the agent/task as a root agent (top of the spawn hierarchy)</td></tr><tr><td><code>--no-health-check</code></td><td>flag</td><td><code>false</code></td><td>Skip the LLM health probe performed on connect</td></tr><tr><td><code>--test</code></td><td>flag</td><td><code>false</code></td><td>Connect in test mode: agent receives an ecosystem-evaluation prompt asking for usability feedback</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>openai<span class="w"> </span>--model<span class="w"> </span>gpt-4<span class="w"> </span>--name<span class="w"> </span>analyst-1
+
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>anthropic<span class="w"> </span>--model<span class="w"> </span>claude-sonnet-4-6<span class="w"> </span>--name<span class="w"> </span>orchestrator<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--role<span class="w"> </span>orchestrator<span class="w"> </span>--role<span class="w"> </span>security-monitor
+
+<span class="c1"># Grant notify and interact permissions at connect time</span>
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--provider<span class="w"> </span>anthropic<span class="w"> </span>--model<span class="w"> </span>claude-sonnet-4-6<span class="w"> </span>--name<span class="w"> </span>worker<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--grant<span class="w"> </span>user.notify:w<span class="w"> </span>--grant<span class="w"> </span>user.interact:x
+</pre></div>
+</div>
+<h3 id="agent-list" class="anchored"><a class="hanchor" href="#agent-list" aria-label="link">#</a><code>agent list</code></h3>
+<p>List all connected agents. Displays name, provider, and model.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>list
+</pre></div>
+</div>
+<h3 id="agent-disconnect" class="anchored"><a class="hanchor" href="#agent-disconnect" aria-label="link">#</a><code>agent disconnect</code></h3>
+<p>Disconnect an agent by name.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>Agent name to disconnect</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>disconnect<span class="w"> </span>analyst-1
+</pre></div>
+</div>
+<h3 id="agent-message" class="anchored"><a class="hanchor" href="#agent-message" aria-label="link">#</a><code>agent message</code></h3>
+<p>Send a direct message from one agent to another.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>--from</code></td><td><code>String</code></td><td>Sender agent name</td></tr><tr><td><code>to</code></td><td><code>String</code></td><td>Target agent name (positional)</td></tr><tr><td><code>content</code></td><td><code>String</code></td><td>Message content (positional)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>message<span class="w"> </span>--from<span class="w"> </span>orchestrator<span class="w"> </span>analyst-1<span class="w"> </span><span class="s2">&quot;Summarize the latest logs&quot;</span>
+</pre></div>
+</div>
+<h3 id="agent-messages" class="anchored"><a class="hanchor" href="#agent-messages" aria-label="link">#</a><code>agent messages</code></h3>
+<p>List recent messages for an agent.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>agent</code></td><td><code>String</code></td><td><em>required</em></td><td>Agent name (positional)</td></tr><tr><td><code>--last</code></td><td><code>u32</code></td><td><code>10</code></td><td>Number of recent messages to show</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>messages<span class="w"> </span>analyst-1<span class="w"> </span>--last<span class="w"> </span><span class="m">25</span>
+</pre></div>
+</div>
+<h3 id="agent-group-create" class="anchored"><a class="hanchor" href="#agent-group-create" aria-label="link">#</a><code>agent group create</code></h3>
+<p>Create a named agent group for broadcast messaging.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>Group name (positional)</td></tr><tr><td><code>--members</code></td><td><code>String</code></td><td>Comma-separated list of agent names</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>group<span class="w"> </span>create<span class="w"> </span>analysts<span class="w"> </span>--members<span class="w"> </span><span class="s2">&quot;analyst-1,analyst-2,analyst-3&quot;</span>
+</pre></div>
+</div>
+<h3 id="agent-broadcast" class="anchored"><a class="hanchor" href="#agent-broadcast" aria-label="link">#</a><code>agent broadcast</code></h3>
+<p>Broadcast a message to all agents in a group.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>--from</code></td><td><code>String</code></td><td>Sender agent name</td></tr><tr><td><code>group</code></td><td><code>String</code></td><td>Target group name (positional)</td></tr><tr><td><code>content</code></td><td><code>String</code></td><td>Message content (positional)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>broadcast<span class="w"> </span>--from<span class="w"> </span>orchestrator<span class="w"> </span>analysts<span class="w"> </span><span class="s2">&quot;Begin analysis phase&quot;</span>
+</pre></div>
+</div>
+<h3 id="agent-memory-show" class="anchored"><a class="hanchor" href="#agent-memory-show" aria-label="link">#</a><code>agent memory show</code></h3>
+<p>Show the current context memory for an agent.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>agent</code></td><td><code>String</code></td><td>Agent name (positional)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>memory<span class="w"> </span>show<span class="w"> </span>analyst-1
+</pre></div>
+</div>
+<h3 id="agent-memory-history" class="anchored"><a class="hanchor" href="#agent-memory-history" aria-label="link">#</a><code>agent memory history</code></h3>
+<p>Show the context memory version history for an agent.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>agent</code></td><td><code>String</code></td><td><em>required</em></td><td>Agent name (positional)</td></tr><tr><td><code>--limit</code></td><td><code>u32</code></td><td>—</td><td>Maximum number of history entries to show</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>memory<span class="w"> </span><span class="nb">history</span><span class="w"> </span>analyst-1
+agentos<span class="w"> </span>agent<span class="w"> </span>memory<span class="w"> </span><span class="nb">history</span><span class="w"> </span>analyst-1<span class="w"> </span>--limit<span class="w"> </span><span class="m">10</span>
+</pre></div>
+</div>
+<h3 id="agent-memory-rollback" class="anchored"><a class="hanchor" href="#agent-memory-rollback" aria-label="link">#</a><code>agent memory rollback</code></h3>
+<p>Rollback an agent's context memory to a specific version.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>agent</code></td><td><code>String</code></td><td>Agent name (positional)</td></tr><tr><td><code>--version</code></td><td><code>u64</code></td><td>Version number to rollback to</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>memory<span class="w"> </span>rollback<span class="w"> </span>analyst-1<span class="w"> </span>--version<span class="w"> </span><span class="m">3</span>
+</pre></div>
+</div>
+<h3 id="agent-memory-clear" class="anchored"><a class="hanchor" href="#agent-memory-clear" aria-label="link">#</a><code>agent memory clear</code></h3>
+<p>Clear an agent's context memory entirely.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>agent</code></td><td><code>String</code></td><td>Agent name (positional)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>memory<span class="w"> </span>clear<span class="w"> </span>analyst-1
+</pre></div>
+</div>
+<h3 id="agent-memory-set" class="anchored"><a class="hanchor" href="#agent-memory-set" aria-label="link">#</a><code>agent memory set</code></h3>
+<p>Set an agent's context memory from a file.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>agent</code></td><td><code>String</code></td><td>Agent name (positional)</td></tr><tr><td><code>--file</code></td><td><code>String</code></td><td>Path to a file containing the context memory content</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>memory<span class="w"> </span><span class="nb">set</span><span class="w"> </span>analyst-1<span class="w"> </span>--file<span class="w"> </span>memory-snapshot.json
+</pre></div>
+</div>
+<hr>
+<h2 id="task-manage-tasks" class="anchored"><a class="hanchor" href="#task-manage-tasks" aria-label="link">#</a><code>task</code> — Manage tasks</h2>
+<h3 id="task-run" class="anchored"><a class="hanchor" href="#task-run" aria-label="link">#</a><code>task run</code></h3>
+<p>Submit a task prompt for execution. If <code>--agent</code> is omitted, the kernel auto-routes to the best available agent.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--agent</code></td><td><code>Option&lt;String&gt;</code></td><td>—</td><td>Agent name to assign the task to. Omit for auto-routing</td></tr><tr><td><code>prompt</code></td><td><code>String</code></td><td><em>required</em></td><td>The task prompt (positional)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Auto-routed</span>
+agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span><span class="s2">&quot;Summarize the server logs from today&quot;</span>
+
+<span class="c1"># Assigned to a specific agent</span>
+agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--agent<span class="w"> </span>analyst-1<span class="w"> </span><span class="s2">&quot;Find anomalies in the auth logs&quot;</span>
+</pre></div>
+</div>
+<h3 id="task-list" class="anchored"><a class="hanchor" href="#task-list" aria-label="link">#</a><code>task list</code></h3>
+<p>List all tasks with their ID, state, assigned agent, and prompt preview.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>list
+</pre></div>
+</div>
+<h3 id="task-logs" class="anchored"><a class="hanchor" href="#task-logs" aria-label="link">#</a><code>task logs</code></h3>
+<p>View the execution logs for a specific task.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>task_id</code></td><td><code>String</code></td><td>Task UUID</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>logs<span class="w"> </span>a3b2c1d0-1234-5678-9abc-def012345678
+</pre></div>
+</div>
+<h3 id="task-trace" class="anchored"><a class="hanchor" href="#task-trace" aria-label="link">#</a><code>task trace</code></h3>
+<p>Show the execution trace for a completed task. Includes tool calls, LLM inferences, and timing data.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>task_id</code></td><td><code>String</code></td><td><em>required</em></td><td>Task UUID (positional)</td></tr><tr><td><code>--json</code></td><td>flag</td><td><code>false</code></td><td>Output the trace as JSON</td></tr><tr><td><code>--iter</code></td><td><code>Option&lt;u32&gt;</code></td><td>—</td><td>Filter to a specific iteration number</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>trace<span class="w"> </span>a3b2c1d0-1234-5678-9abc-def012345678
+agentos<span class="w"> </span>task<span class="w"> </span>trace<span class="w"> </span>a3b2c1d0-1234-5678-9abc-def012345678<span class="w"> </span>--json
+agentos<span class="w"> </span>task<span class="w"> </span>trace<span class="w"> </span>a3b2c1d0-1234-5678-9abc-def012345678<span class="w"> </span>--iter<span class="w"> </span><span class="m">2</span>
+</pre></div>
+</div>
+<h3 id="task-traces" class="anchored"><a class="hanchor" href="#task-traces" aria-label="link">#</a><code>task traces</code></h3>
+<p>List recent task execution traces.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--limit</code></td><td><code>u32</code></td><td>—</td><td>Maximum number of traces to show</td></tr><tr><td><code>--agent</code></td><td><code>Option&lt;String&gt;</code></td><td>—</td><td>Filter traces by agent name</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>traces
+agentos<span class="w"> </span>task<span class="w"> </span>traces<span class="w"> </span>--limit<span class="w"> </span><span class="m">20</span>
+agentos<span class="w"> </span>task<span class="w"> </span>traces<span class="w"> </span>--agent<span class="w"> </span>analyst-1
+</pre></div>
+</div>
+<h3 id="task-cancel" class="anchored"><a class="hanchor" href="#task-cancel" aria-label="link">#</a><code>task cancel</code></h3>
+<p>Cancel a running task.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>task_id</code></td><td><code>String</code></td><td>Task UUID</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>task<span class="w"> </span>cancel<span class="w"> </span>a3b2c1d0-1234-5678-9abc-def012345678
+</pre></div>
+</div>
+<hr>
+<h2 id="tool-manage-tools" class="anchored"><a class="hanchor" href="#tool-manage-tools" aria-label="link">#</a><code>tool</code> — Manage tools</h2>
+<h3 id="tool-list" class="anchored"><a class="hanchor" href="#tool-list" aria-label="link">#</a><code>tool list</code></h3>
+<p>List all installed tools with name, version, trust tier, and description.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>tool<span class="w"> </span>list
+</pre></div>
+</div>
+<h3 id="tool-install" class="anchored"><a class="hanchor" href="#tool-install" aria-label="link">#</a><code>tool install</code></h3>
+<p>Install a tool from its manifest file. The kernel validates the trust tier and signature before registration.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>path</code></td><td><code>String</code></td><td>Path to the tool manifest (<code>.toml</code>)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span>tools/user/my-tool.toml
+</pre></div>
+</div>
+<h3 id="tool-remove" class="anchored"><a class="hanchor" href="#tool-remove" aria-label="link">#</a><code>tool remove</code></h3>
+<p>Remove an installed tool by name.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>Tool name to remove</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>tool<span class="w"> </span>remove<span class="w"> </span>my-tool
+</pre></div>
+</div>
+<h3 id="tool-keygen-offline" class="anchored"><a class="hanchor" href="#tool-keygen-offline" aria-label="link">#</a><code>tool keygen</code> (offline)</h3>
+<p>Generate a new Ed25519 keypair for tool signing. <strong>Does not require a running kernel.</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--output</code></td><td><code>String</code></td><td><code>&quot;tool-keypair.json&quot;</code></td><td>Path to write the keypair JSON file</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>tool<span class="w"> </span>keygen<span class="w"> </span>--output<span class="w"> </span>my-keys.json
+</pre></div>
+</div>
+<p>The output file contains <code>pubkey</code>, <code>seed</code>, and <code>algorithm</code> fields. Keep the seed secret — only distribute the public key.</p>
+<h3 id="tool-sign-offline" class="anchored"><a class="hanchor" href="#tool-sign-offline" aria-label="link">#</a><code>tool sign</code> (offline)</h3>
+<p>Sign a tool manifest with an Ed25519 private key. <strong>Does not require a running kernel.</strong> Performs a self-verification after signing.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--manifest</code></td><td><code>String</code></td><td><em>required</em></td><td>Path to the tool manifest (<code>.toml</code>) to sign</td></tr><tr><td><code>--key</code></td><td><code>String</code></td><td><em>required</em></td><td>Path to keypair JSON file produced by <code>tool keygen</code></td></tr><tr><td><code>--output</code></td><td><code>Option&lt;String&gt;</code></td><td>—</td><td>Write signed manifest here. Defaults to overwriting the source manifest</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>tool<span class="w"> </span>sign<span class="w"> </span>--manifest<span class="w"> </span>tools/user/my-tool.toml<span class="w"> </span>--key<span class="w"> </span>my-keys.json
+
+<span class="c1"># Write to a separate file</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>sign<span class="w"> </span>--manifest<span class="w"> </span>my-tool.toml<span class="w"> </span>--key<span class="w"> </span>my-keys.json<span class="w"> </span>--output<span class="w"> </span>my-tool-signed.toml
+</pre></div>
+</div>
+<h3 id="tool-verify-offline" class="anchored"><a class="hanchor" href="#tool-verify-offline" aria-label="link">#</a><code>tool verify</code> (offline)</h3>
+<p>Verify the Ed25519 signature on a tool manifest. <strong>Does not require a running kernel.</strong> Exits with code 1 if verification fails.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>manifest</code></td><td><code>String</code></td><td>Path to the tool manifest (<code>.toml</code>) to verify</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>tool<span class="w"> </span>verify<span class="w"> </span>tools/user/my-tool.toml
+</pre></div>
+</div>
+<hr>
+<h2 id="secret-manage-secrets" class="anchored"><a class="hanchor" href="#secret-manage-secrets" aria-label="link">#</a><code>secret</code> — Manage secrets</h2>
+<p>Secrets are stored in an AES-256-GCM encrypted vault with Argon2id key derivation. Values are never displayed in CLI output.</p>
+<h3 id="secret-set" class="anchored"><a class="hanchor" href="#secret-set" aria-label="link">#</a><code>secret set</code></h3>
+<p>Store a secret. The value is entered interactively (hidden input) — never passed as a shell argument.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td><em>required</em></td><td>Secret name, e.g. <code>OPENAI_API_KEY</code> (positional)</td></tr><tr><td><code>--scope</code></td><td><code>String</code></td><td><code>&quot;global&quot;</code></td><td>Access scope: <code>global</code>, <code>agent:&lt;name&gt;</code>, or <code>tool:&lt;name&gt;</code></td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>OPENAI_API_KEY
+agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>SLACK_TOKEN<span class="w"> </span>--scope<span class="w"> </span>agent:notifier
+</pre></div>
+</div>
+<h3 id="secret-list" class="anchored"><a class="hanchor" href="#secret-list" aria-label="link">#</a><code>secret list</code></h3>
+<p>List all stored secrets (metadata only — values are never shown).</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span>list
+</pre></div>
+</div>
+<h3 id="secret-revoke" class="anchored"><a class="hanchor" href="#secret-revoke" aria-label="link">#</a><code>secret revoke</code></h3>
+<p>Delete a secret from the vault.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>Secret name to revoke</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span>revoke<span class="w"> </span>OLD_API_KEY
+</pre></div>
+</div>
+<h3 id="secret-rotate" class="anchored"><a class="hanchor" href="#secret-rotate" aria-label="link">#</a><code>secret rotate</code></h3>
+<p>Replace a secret's value. The new value is entered interactively (hidden input).</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>Secret name to rotate</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span>rotate<span class="w"> </span>OPENAI_API_KEY
+</pre></div>
+</div>
+<h3 id="secret-lockdown" class="anchored"><a class="hanchor" href="#secret-lockdown" aria-label="link">#</a><code>secret lockdown</code></h3>
+<p>Emergency vault lockdown: revokes all proxy tokens and blocks new issuance. Use in security incidents.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>secret<span class="w"> </span>lockdown
+</pre></div>
+</div>
+<hr>
+<h2 id="perm-manage-agent-permissions" class="anchored"><a class="hanchor" href="#perm-manage-agent-permissions" aria-label="link">#</a><code>perm</code> — Manage agent permissions</h2>
+<h3 id="perm-grant" class="anchored"><a class="hanchor" href="#perm-grant" aria-label="link">#</a><code>perm grant</code></h3>
+<p>Grant a permission to an agent. Optionally set an expiration.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>agent</code></td><td><code>String</code></td><td><em>required</em></td><td>Agent name (positional)</td></tr><tr><td><code>permission</code></td><td><code>String</code></td><td><em>required</em></td><td>Permission string, e.g. <code>fs.user_data:rw</code> (positional)</td></tr><tr><td><code>--expires</code></td><td><code>Option&lt;u64&gt;</code></td><td>—</td><td>Expiration time in seconds from now</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>perm<span class="w"> </span>grant<span class="w"> </span>analyst-1<span class="w"> </span>fs.user_data:rw
+agentos<span class="w"> </span>perm<span class="w"> </span>grant<span class="w"> </span>worker<span class="w"> </span>network.outbound:x<span class="w"> </span>--expires<span class="w"> </span><span class="m">3600</span>
+</pre></div>
+</div>
+<h3 id="perm-revoke" class="anchored"><a class="hanchor" href="#perm-revoke" aria-label="link">#</a><code>perm revoke</code></h3>
+<p>Revoke a permission from an agent.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>agent</code></td><td><code>String</code></td><td>Agent name (positional)</td></tr><tr><td><code>permission</code></td><td><code>String</code></td><td>Permission string (positional)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>perm<span class="w"> </span>revoke<span class="w"> </span>analyst-1<span class="w"> </span>fs.user_data:rw
+</pre></div>
+</div>
+<h3 id="perm-show" class="anchored"><a class="hanchor" href="#perm-show" aria-label="link">#</a><code>perm show</code></h3>
+<p>Show all permissions currently held by an agent.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>agent</code></td><td><code>String</code></td><td>Agent name</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>perm<span class="w"> </span>show<span class="w"> </span>analyst-1
+</pre></div>
+</div>
+<h3 id="perm-profile-create" class="anchored"><a class="hanchor" href="#perm-profile-create" aria-label="link">#</a><code>perm profile create</code></h3>
+<p>Create a reusable permission profile.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>Profile name (positional)</td></tr><tr><td><code>description</code></td><td><code>String</code></td><td>Profile description (positional)</td></tr><tr><td><code>permissions</code></td><td><code>Vec&lt;String&gt;</code></td><td>Permission strings (positional, variadic)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>perm<span class="w"> </span>profile<span class="w"> </span>create<span class="w"> </span>reader<span class="w"> </span><span class="s2">&quot;Read-only access&quot;</span><span class="w"> </span>fs.user_data:r<span class="w"> </span>fs.app_logs:r
+</pre></div>
+</div>
+<h3 id="perm-profile-delete" class="anchored"><a class="hanchor" href="#perm-profile-delete" aria-label="link">#</a><code>perm profile delete</code></h3>
+<p>Delete a permission profile.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>Profile name</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>perm<span class="w"> </span>profile<span class="w"> </span>delete<span class="w"> </span>reader
+</pre></div>
+</div>
+<h3 id="perm-profile-list" class="anchored"><a class="hanchor" href="#perm-profile-list" aria-label="link">#</a><code>perm profile list</code></h3>
+<p>List all permission profiles.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>perm<span class="w"> </span>profile<span class="w"> </span>list
+</pre></div>
+</div>
+<h3 id="perm-profile-assign" class="anchored"><a class="hanchor" href="#perm-profile-assign" aria-label="link">#</a><code>perm profile assign</code></h3>
+<p>Assign a permission profile to an agent. Grants all permissions defined in the profile.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>agent_name</code></td><td><code>String</code></td><td>Agent name (positional)</td></tr><tr><td><code>profile_name</code></td><td><code>String</code></td><td>Profile name (positional)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>perm<span class="w"> </span>profile<span class="w"> </span>assign<span class="w"> </span>analyst-1<span class="w"> </span>reader
+</pre></div>
+</div>
+<hr>
+<h2 id="role-manage-os-roles" class="anchored"><a class="hanchor" href="#role-manage-os-roles" aria-label="link">#</a><code>role</code> — Manage OS roles</h2>
+<p>Roles are named bundles of permissions. Create roles, assign permissions to them, then assign roles to agents.</p>
+<h3 id="role-create" class="anchored"><a class="hanchor" href="#role-create" aria-label="link">#</a><code>role create</code></h3>
+<p>Create a new role.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td><em>required</em></td><td>Role name (positional)</td></tr><tr><td><code>--description</code></td><td><code>String</code></td><td><code>&quot;&quot;</code></td><td>Role description</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>role<span class="w"> </span>create<span class="w"> </span>log-reader<span class="w"> </span>--description<span class="w"> </span><span class="s2">&quot;Can read all log files&quot;</span>
+</pre></div>
+</div>
+<h3 id="role-delete" class="anchored"><a class="hanchor" href="#role-delete" aria-label="link">#</a><code>role delete</code></h3>
+<p>Delete a role.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>Role name</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>role<span class="w"> </span>delete<span class="w"> </span>log-reader
+</pre></div>
+</div>
+<h3 id="role-list" class="anchored"><a class="hanchor" href="#role-list" aria-label="link">#</a><code>role list</code></h3>
+<p>List all roles with their descriptions and permissions.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>role<span class="w"> </span>list
+</pre></div>
+</div>
+<h3 id="role-grant" class="anchored"><a class="hanchor" href="#role-grant" aria-label="link">#</a><code>role grant</code></h3>
+<p>Grant a permission to a role.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>role</code></td><td><code>String</code></td><td>Role name (positional)</td></tr><tr><td><code>permission</code></td><td><code>String</code></td><td>Permission string (positional)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>role<span class="w"> </span>grant<span class="w"> </span>log-reader<span class="w"> </span>fs.app_logs:r
+agentos<span class="w"> </span>role<span class="w"> </span>grant<span class="w"> </span>log-reader<span class="w"> </span>fs.system_logs:r
+</pre></div>
+</div>
+<h3 id="role-revoke" class="anchored"><a class="hanchor" href="#role-revoke" aria-label="link">#</a><code>role revoke</code></h3>
+<p>Revoke a permission from a role.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>role</code></td><td><code>String</code></td><td>Role name (positional)</td></tr><tr><td><code>permission</code></td><td><code>String</code></td><td>Permission string (positional)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>role<span class="w"> </span>revoke<span class="w"> </span>log-reader<span class="w"> </span>fs.system_logs:r
+</pre></div>
+</div>
+<h3 id="role-assign" class="anchored"><a class="hanchor" href="#role-assign" aria-label="link">#</a><code>role assign</code></h3>
+<p>Assign a role to an agent.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>agent</code></td><td><code>String</code></td><td>Agent name (positional)</td></tr><tr><td><code>role</code></td><td><code>String</code></td><td>Role name (positional)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>role<span class="w"> </span>assign<span class="w"> </span>analyst-1<span class="w"> </span>log-reader
+</pre></div>
+</div>
+<h3 id="role-remove" class="anchored"><a class="hanchor" href="#role-remove" aria-label="link">#</a><code>role remove</code></h3>
+<p>Remove a role from an agent.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>agent</code></td><td><code>String</code></td><td>Agent name (positional)</td></tr><tr><td><code>role</code></td><td><code>String</code></td><td>Role name (positional)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>role<span class="w"> </span>remove<span class="w"> </span>analyst-1<span class="w"> </span>log-reader
+</pre></div>
+</div>
+<hr>
+<h2 id="schedule-manage-scheduled-background-jobs" class="anchored"><a class="hanchor" href="#schedule-manage-scheduled-background-jobs" aria-label="link">#</a><code>schedule</code> — Manage scheduled background jobs</h2>
+<h3 id="schedule-create" class="anchored"><a class="hanchor" href="#schedule-create" aria-label="link">#</a><code>schedule create</code></h3>
+<p>Create a recurring job on a cron schedule.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--name</code></td><td><code>String</code></td><td><em>required</em></td><td>Schedule name</td></tr><tr><td><code>--cron</code></td><td><code>String</code></td><td><em>required</em></td><td>Cron expression (6-field: <code>sec min hour day month weekday</code>)</td></tr><tr><td><code>--agent</code></td><td><code>String</code></td><td><em>required</em></td><td>Agent name to execute the task</td></tr><tr><td><code>--task</code></td><td><code>String</code></td><td><em>required</em></td><td>Task prompt/description</td></tr><tr><td><code>--permissions</code></td><td><code>String</code></td><td><code>&quot;&quot;</code></td><td>Comma-separated permissions for the task</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>schedule<span class="w"> </span>create<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--name<span class="w"> </span>daily-report<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cron<span class="w"> </span><span class="s2">&quot;0 0 * * * *&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--agent<span class="w"> </span>analyst<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--task<span class="w"> </span><span class="s2">&quot;Summarize today&#39;s logs&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--permissions<span class="w"> </span><span class="s2">&quot;fs.app_logs:r,fs.system_logs:r&quot;</span>
+</pre></div>
+</div>
+<h3 id="schedule-list" class="anchored"><a class="hanchor" href="#schedule-list" aria-label="link">#</a><code>schedule list</code></h3>
+<p>List all scheduled jobs with their cron expression, agent, state, next run time, and run count.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>schedule<span class="w"> </span>list
+</pre></div>
+</div>
+<h3 id="schedule-pause" class="anchored"><a class="hanchor" href="#schedule-pause" aria-label="link">#</a><code>schedule pause</code></h3>
+<p>Pause a scheduled job (prevents next execution).</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>Schedule name</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>schedule<span class="w"> </span>pause<span class="w"> </span>daily-report
+</pre></div>
+</div>
+<h3 id="schedule-resume" class="anchored"><a class="hanchor" href="#schedule-resume" aria-label="link">#</a><code>schedule resume</code></h3>
+<p>Resume a paused scheduled job.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>Schedule name</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>schedule<span class="w"> </span>resume<span class="w"> </span>daily-report
+</pre></div>
+</div>
+<h3 id="schedule-delete" class="anchored"><a class="hanchor" href="#schedule-delete" aria-label="link">#</a><code>schedule delete</code></h3>
+<p>Delete a scheduled job permanently.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>Schedule name</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>schedule<span class="w"> </span>delete<span class="w"> </span>daily-report
+</pre></div>
+</div>
+<hr>
+<h2 id="bg-manage-background-tasks" class="anchored"><a class="hanchor" href="#bg-manage-background-tasks" aria-label="link">#</a><code>bg</code> — Manage background tasks</h2>
+<p>One-shot detached tasks that run independently of the CLI session.</p>
+<h3 id="bg-run" class="anchored"><a class="hanchor" href="#bg-run" aria-label="link">#</a><code>bg run</code></h3>
+<p>Launch a one-shot background task.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--name</code></td><td><code>String</code></td><td><em>required</em></td><td>Background task name</td></tr><tr><td><code>--agent</code></td><td><code>String</code></td><td><em>required</em></td><td>Agent name to run the task</td></tr><tr><td><code>--task</code></td><td><code>String</code></td><td><em>required</em></td><td>Task prompt/description</td></tr><tr><td><code>--detach</code></td><td><code>bool</code></td><td><code>false</code></td><td>Detach the task immediately (return control to shell)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>run<span class="w"> </span>--name<span class="w"> </span>process-data<span class="w"> </span>--agent<span class="w"> </span>worker<span class="w"> </span>--task<span class="w"> </span><span class="s2">&quot;Process all CSV files&quot;</span><span class="w"> </span>--detach
+</pre></div>
+</div>
+<h3 id="bg-list" class="anchored"><a class="hanchor" href="#bg-list" aria-label="link">#</a><code>bg list</code></h3>
+<p>List all background tasks with name, agent, state, start time, and completion time.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>list
+</pre></div>
+</div>
+<h3 id="bg-logs" class="anchored"><a class="hanchor" href="#bg-logs" aria-label="link">#</a><code>bg logs</code></h3>
+<p>View logs for a background task.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td><em>required</em></td><td>Background task name (positional)</td></tr><tr><td><code>--follow</code></td><td><code>bool</code></td><td><code>false</code></td><td>Follow logs continuously (like <code>tail -f</code>)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>logs<span class="w"> </span>process-data
+agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span>logs<span class="w"> </span>process-data<span class="w"> </span>--follow
+</pre></div>
+</div>
+<h3 id="bg-kill" class="anchored"><a class="hanchor" href="#bg-kill" aria-label="link">#</a><code>bg kill</code></h3>
+<p>Kill a running background task.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>Background task name</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span><span class="nb">bg</span><span class="w"> </span><span class="nb">kill</span><span class="w"> </span>process-data
+</pre></div>
+</div>
+<hr>
+<h2 id="status-show-system-status" class="anchored"><a class="hanchor" href="#status-show-system-status" aria-label="link">#</a><code>status</code> — Show system status</h2>
+<p>Displays kernel uptime, connected agent count, active tasks, installed tools, and total audit entries. No subcommands.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>status
+</pre></div>
+</div>
+<hr>
+<h2 id="audit-view-audit-logs" class="anchored"><a class="hanchor" href="#audit-view-audit-logs" aria-label="link">#</a><code>audit</code> — View audit logs</h2>
+<p>The audit system uses an append-only SQLite log with Merkle hash chain integrity.</p>
+<h3 id="audit-logs" class="anchored"><a class="hanchor" href="#audit-logs" aria-label="link">#</a><code>audit logs</code></h3>
+<p>View recent audit log entries.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--last</code></td><td><code>u32</code></td><td><code>50</code></td><td>Number of recent entries to show</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>audit<span class="w"> </span>logs<span class="w"> </span>--last<span class="w"> </span><span class="m">100</span>
+</pre></div>
+</div>
+<h3 id="audit-verify" class="anchored"><a class="hanchor" href="#audit-verify" aria-label="link">#</a><code>audit verify</code></h3>
+<p>Verify the Merkle hash chain integrity of the audit log. Detects any tampering or corruption.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--from</code></td><td><code>Option&lt;i64&gt;</code></td><td>—</td><td>Start verification from this sequence number (default: beginning)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>audit<span class="w"> </span>verify
+agentos<span class="w"> </span>audit<span class="w"> </span>verify<span class="w"> </span>--from<span class="w"> </span><span class="m">1000</span>
+</pre></div>
+</div>
+<h3 id="audit-snapshots" class="anchored"><a class="hanchor" href="#audit-snapshots" aria-label="link">#</a><code>audit snapshots</code></h3>
+<p>List context snapshots for a specific task.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>--task</code></td><td><code>String</code></td><td>Task UUID</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>audit<span class="w"> </span>snapshots<span class="w"> </span>--task<span class="w"> </span>a3b2c1d0-1234-5678-9abc-def012345678
+</pre></div>
+</div>
+<h3 id="audit-export" class="anchored"><a class="hanchor" href="#audit-export" aria-label="link">#</a><code>audit export</code></h3>
+<p>Export the full audit chain as JSONL.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--limit</code></td><td><code>Option&lt;u32&gt;</code></td><td>—</td><td>Maximum number of entries to export</td></tr><tr><td><code>--output</code></td><td><code>Option&lt;String&gt;</code></td><td>—</td><td>Write to file instead of stdout</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>audit<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--output<span class="w"> </span>audit-dump.jsonl
+agentos<span class="w"> </span>audit<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--limit<span class="w"> </span><span class="m">500</span>
+</pre></div>
+</div>
+<h3 id="audit-rollback" class="anchored"><a class="hanchor" href="#audit-rollback" aria-label="link">#</a><code>audit rollback</code></h3>
+<p>Roll back a task's context to a saved snapshot.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--task</code></td><td><code>String</code></td><td><em>required</em></td><td>Task UUID</td></tr><tr><td><code>--snapshot</code></td><td><code>Option&lt;String&gt;</code></td><td>—</td><td>Snapshot reference (e.g. <code>snap_0001</code>). Defaults to most recent</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>audit<span class="w"> </span>rollback<span class="w"> </span>--task<span class="w"> </span>a3b2c1d0-...<span class="w"> </span>--snapshot<span class="w"> </span>snap_0003
+</pre></div>
+</div>
+<hr>
+<h2 id="pipeline-manage-multi-agent-pipelines" class="anchored"><a class="hanchor" href="#pipeline-manage-multi-agent-pipelines" aria-label="link">#</a><code>pipeline</code> — Manage multi-agent pipelines</h2>
+<p>Pipelines are multi-step workflows defined in YAML files and executed by the pipeline engine.</p>
+<h3 id="pipeline-install" class="anchored"><a class="hanchor" href="#pipeline-install" aria-label="link">#</a><code>pipeline install</code></h3>
+<p>Install a pipeline from a YAML definition file.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>path</code></td><td><code>String</code></td><td>Path to the pipeline YAML file</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>pipeline<span class="w"> </span>install<span class="w"> </span>pipelines/data-processing.yaml
+</pre></div>
+</div>
+<h3 id="pipeline-list" class="anchored"><a class="hanchor" href="#pipeline-list" aria-label="link">#</a><code>pipeline list</code></h3>
+<p>List all installed pipelines with name, version, step count, and description.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>pipeline<span class="w"> </span>list
+</pre></div>
+</div>
+<h3 id="pipeline-run" class="anchored"><a class="hanchor" href="#pipeline-run" aria-label="link">#</a><code>pipeline run</code></h3>
+<p>Execute a pipeline with an input string.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td><em>required</em></td><td>Pipeline name (positional)</td></tr><tr><td><code>--input</code></td><td><code>String</code></td><td><em>required</em></td><td>Input string for the pipeline</td></tr><tr><td><code>--detach</code></td><td><code>bool</code></td><td><code>false</code></td><td>Run in background (detached)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>pipeline<span class="w"> </span>run<span class="w"> </span>data-processing<span class="w"> </span>--input<span class="w"> </span><span class="s2">&quot;Process Q1 reports&quot;</span>
+agentos<span class="w"> </span>pipeline<span class="w"> </span>run<span class="w"> </span>data-processing<span class="w"> </span>--input<span class="w"> </span><span class="s2">&quot;Process Q1 reports&quot;</span><span class="w"> </span>--detach
+</pre></div>
+</div>
+<h3 id="pipeline-status" class="anchored"><a class="hanchor" href="#pipeline-status" aria-label="link">#</a><code>pipeline status</code></h3>
+<p>Get the status of a specific pipeline run, including per-step results.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>Pipeline name (positional)</td></tr><tr><td><code>--run-id</code></td><td><code>String</code></td><td>Run UUID</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>pipeline<span class="w"> </span>status<span class="w"> </span>data-processing<span class="w"> </span>--run-id<span class="w"> </span>abc123
+</pre></div>
+</div>
+<h3 id="pipeline-logs" class="anchored"><a class="hanchor" href="#pipeline-logs" aria-label="link">#</a><code>pipeline logs</code></h3>
+<p>View step-level logs for a pipeline run.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>Pipeline name (positional)</td></tr><tr><td><code>--run-id</code></td><td><code>String</code></td><td>Run UUID</td></tr><tr><td><code>--step</code></td><td><code>String</code></td><td>Step ID to view logs for</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>pipeline<span class="w"> </span>logs<span class="w"> </span>data-processing<span class="w"> </span>--run-id<span class="w"> </span>abc123<span class="w"> </span>--step<span class="w"> </span>parse-csv
+</pre></div>
+</div>
+<h3 id="pipeline-remove" class="anchored"><a class="hanchor" href="#pipeline-remove" aria-label="link">#</a><code>pipeline remove</code></h3>
+<p>Remove an installed pipeline.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>String</code></td><td>Pipeline name</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>pipeline<span class="w"> </span>remove<span class="w"> </span>data-processing
+</pre></div>
+</div>
+<hr>
+<h2 id="cost-view-agent-cost-and-budget-reports" class="anchored"><a class="hanchor" href="#cost-view-agent-cost-and-budget-reports" aria-label="link">#</a><code>cost</code> — View agent cost and budget reports</h2>
+<h3 id="cost-show" class="anchored"><a class="hanchor" href="#cost-show" aria-label="link">#</a><code>cost show</code></h3>
+<p>Show cost report with token usage, USD cost, and tool calls — per agent and totals.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--agent</code></td><td><code>Option&lt;String&gt;</code></td><td>—</td><td>Filter to a specific agent. Omit for all agents</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>cost<span class="w"> </span>show
+agentos<span class="w"> </span>cost<span class="w"> </span>show<span class="w"> </span>--agent<span class="w"> </span>analyst-1
+</pre></div>
+</div>
+<h3 id="cost-retrieval" class="anchored"><a class="hanchor" href="#cost-retrieval" aria-label="link">#</a><code>cost retrieval</code></h3>
+<p>Show retrieval refresh/reuse efficiency metrics — how often the kernel refreshes vs reuses cached context.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>cost<span class="w"> </span>retrieval
+</pre></div>
+</div>
+<hr>
+<h2 id="resource-manage-resource-locks-arbitration" class="anchored"><a class="hanchor" href="#resource-manage-resource-locks-arbitration" aria-label="link">#</a><code>resource</code> — Manage resource locks (arbitration)</h2>
+<p>The resource arbiter prevents concurrent access conflicts between agents.</p>
+<h3 id="resource-list" class="anchored"><a class="hanchor" href="#resource-list" aria-label="link">#</a><code>resource list</code></h3>
+<p>List all currently held resource locks with resource ID, mode, holder, and TTL.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>resource<span class="w"> </span>list
+</pre></div>
+</div>
+<h3 id="resource-release" class="anchored"><a class="hanchor" href="#resource-release" aria-label="link">#</a><code>resource release</code></h3>
+<p>Forcibly release a specific resource lock.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>--resource</code></td><td><code>String</code></td><td>Resource ID to release</td></tr><tr><td><code>--agent</code></td><td><code>String</code></td><td>Agent name that holds the lock</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>resource<span class="w"> </span>release<span class="w"> </span>--resource<span class="w"> </span><span class="s2">&quot;/data/reports.csv&quot;</span><span class="w"> </span>--agent<span class="w"> </span>analyst-1
+</pre></div>
+</div>
+<h3 id="resource-contention" class="anchored"><a class="hanchor" href="#resource-contention" aria-label="link">#</a><code>resource contention</code></h3>
+<p>Show resource contention statistics: which resources have waiters and blocked agents.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>resource<span class="w"> </span>contention
+</pre></div>
+</div>
+<h3 id="resource-release-all" class="anchored"><a class="hanchor" href="#resource-release-all" aria-label="link">#</a><code>resource release-all</code></h3>
+<p>Release all resource locks held by an agent.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>--agent</code></td><td><code>String</code></td><td>Agent name whose locks should be released</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>resource<span class="w"> </span>release-all<span class="w"> </span>--agent<span class="w"> </span>worker
+</pre></div>
+</div>
+<hr>
+<h2 id="escalation-view-and-resolve-human-approval-requests" class="anchored"><a class="hanchor" href="#escalation-view-and-resolve-human-approval-requests" aria-label="link">#</a><code>escalation</code> — View and resolve human approval requests</h2>
+<p>Agents can escalate decisions to a human operator when they need approval. Escalations auto-expire after 5 minutes if unresolved.</p>
+<h3 id="escalation-list" class="anchored"><a class="hanchor" href="#escalation-list" aria-label="link">#</a><code>escalation list</code></h3>
+<p>List escalations. By default, shows only pending (unresolved) escalations.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--all</code></td><td><code>bool</code></td><td><code>false</code></td><td>Show all escalations including resolved ones</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>escalation<span class="w"> </span>list
+agentos<span class="w"> </span>escalation<span class="w"> </span>list<span class="w"> </span>--all
+</pre></div>
+</div>
+<h3 id="escalation-get" class="anchored"><a class="hanchor" href="#escalation-get" aria-label="link">#</a><code>escalation get</code></h3>
+<p>Show full details of a specific escalation including reason, urgency, blocking status, options, and resolution.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>id</code></td><td><code>u64</code></td><td>Escalation ID</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>escalation<span class="w"> </span>get<span class="w"> </span><span class="m">42</span>
+</pre></div>
+</div>
+<h3 id="escalation-resolve" class="anchored"><a class="hanchor" href="#escalation-resolve" aria-label="link">#</a><code>escalation resolve</code></h3>
+<p>Resolve an escalation with a decision. If the escalation was blocking a task, the task resumes.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>id</code></td><td><code>u64</code></td><td>Escalation ID (positional)</td></tr><tr><td><code>--decision</code> / <code>-d</code></td><td><code>String</code></td><td>Decision string (e.g. <code>&quot;Approved&quot;</code>, <code>&quot;Denied&quot;</code>, <code>&quot;Acknowledged&quot;</code>)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>escalation<span class="w"> </span>resolve<span class="w"> </span><span class="m">42</span><span class="w"> </span>--decision<span class="w"> </span><span class="s2">&quot;Approved&quot;</span>
+agentos<span class="w"> </span>escalation<span class="w"> </span>resolve<span class="w"> </span><span class="m">42</span><span class="w"> </span>-d<span class="w"> </span><span class="s2">&quot;Denied&quot;</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="snapshot-manage-task-snapshots-and-rollback" class="anchored"><a class="hanchor" href="#snapshot-manage-task-snapshots-and-rollback" aria-label="link">#</a><code>snapshot</code> — Manage task snapshots and rollback</h2>
+<p>Snapshots capture a task's context state at a point in time for later rollback. Snapshots older than 72 hours are automatically expired.</p>
+<h3 id="snapshot-list" class="anchored"><a class="hanchor" href="#snapshot-list" aria-label="link">#</a><code>snapshot list</code></h3>
+<p>List all snapshots for a task.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>--task</code></td><td><code>String</code></td><td>Task UUID</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>snapshot<span class="w"> </span>list<span class="w"> </span>--task<span class="w"> </span>a3b2c1d0-1234-5678-9abc-def012345678
+</pre></div>
+</div>
+<h3 id="snapshot-rollback" class="anchored"><a class="hanchor" href="#snapshot-rollback" aria-label="link">#</a><code>snapshot rollback</code></h3>
+<p>Roll back a task to a specific snapshot or the latest one.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--task</code></td><td><code>String</code></td><td><em>required</em></td><td>Task UUID</td></tr><tr><td><code>--snapshot</code></td><td><code>Option&lt;String&gt;</code></td><td>—</td><td>Snapshot reference (e.g. <code>snap_0001</code>). Defaults to latest</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>snapshot<span class="w"> </span>rollback<span class="w"> </span>--task<span class="w"> </span>a3b2c1d0-...<span class="w"> </span>--snapshot<span class="w"> </span>snap_0002
+agentos<span class="w"> </span>snapshot<span class="w"> </span>rollback<span class="w"> </span>--task<span class="w"> </span>a3b2c1d0-...
+</pre></div>
+</div>
+<hr>
+<h2 id="scratchpad-manage-agent-scratchpad-pages" class="anchored"><a class="hanchor" href="#scratchpad-manage-agent-scratchpad-pages" aria-label="link">#</a><code>scratchpad</code> — Manage agent scratchpad pages</h2>
+<p>The scratchpad provides Obsidian-inspired markdown pages with wikilink support for agent working memory. Each agent has its own scratchpad namespace.</p>
+<h3 id="scratchpad-list" class="anchored"><a class="hanchor" href="#scratchpad-list" aria-label="link">#</a><code>scratchpad list</code></h3>
+<p>List all scratchpad pages for an agent.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>--agent</code></td><td><code>String</code></td><td>Agent name</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>scratchpad<span class="w"> </span>list<span class="w"> </span>--agent<span class="w"> </span>analyst-1
+</pre></div>
+</div>
+<h3 id="scratchpad-read" class="anchored"><a class="hanchor" href="#scratchpad-read" aria-label="link">#</a><code>scratchpad read</code></h3>
+<p>Read a scratchpad page by title.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>--title</code></td><td><code>String</code></td><td>Page title</td></tr><tr><td><code>--agent</code></td><td><code>String</code></td><td>Agent name</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>scratchpad<span class="w"> </span><span class="nb">read</span><span class="w"> </span>--title<span class="w"> </span><span class="s2">&quot;Research Notes&quot;</span><span class="w"> </span>--agent<span class="w"> </span>analyst-1
+</pre></div>
+</div>
+<h3 id="scratchpad-delete" class="anchored"><a class="hanchor" href="#scratchpad-delete" aria-label="link">#</a><code>scratchpad delete</code></h3>
+<p>Delete a scratchpad page.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>--title</code></td><td><code>String</code></td><td>Page title</td></tr><tr><td><code>--agent</code></td><td><code>String</code></td><td>Agent name</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>scratchpad<span class="w"> </span>delete<span class="w"> </span>--title<span class="w"> </span><span class="s2">&quot;Scratch&quot;</span><span class="w"> </span>--agent<span class="w"> </span>analyst-1
+</pre></div>
+</div>
+<h3 id="scratchpad-graph" class="anchored"><a class="hanchor" href="#scratchpad-graph" aria-label="link">#</a><code>scratchpad graph</code></h3>
+<p>Show the wikilink graph for a scratchpad page, including backlinks and forward links.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--title</code></td><td><code>String</code></td><td><em>required</em></td><td>Page title</td></tr><tr><td><code>--agent</code></td><td><code>String</code></td><td><em>required</em></td><td>Agent name</td></tr><tr><td><code>--depth</code></td><td><code>u32</code></td><td><code>1</code></td><td>Graph traversal depth</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>scratchpad<span class="w"> </span>graph<span class="w"> </span>--title<span class="w"> </span><span class="s2">&quot;Research Notes&quot;</span><span class="w"> </span>--agent<span class="w"> </span>analyst-1
+agentos<span class="w"> </span>scratchpad<span class="w"> </span>graph<span class="w"> </span>--title<span class="w"> </span><span class="s2">&quot;Research Notes&quot;</span><span class="w"> </span>--agent<span class="w"> </span>analyst-1<span class="w"> </span>--depth<span class="w"> </span><span class="m">3</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="event-manage-event-subscriptions-and-view-event-history" class="anchored"><a class="hanchor" href="#event-manage-event-subscriptions-and-view-event-history" aria-label="link">#</a><code>event</code> — Manage event subscriptions and view event history</h2>
+<p>The event system supports subscription-based reactive messaging with filters, throttling, and priority levels.</p>
+<h3 id="event-subscribe" class="anchored"><a class="hanchor" href="#event-subscribe" aria-label="link">#</a><code>event subscribe</code></h3>
+<p>Subscribe an agent to an event type with optional filtering and throttling.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--agent</code></td><td><code>String</code></td><td><em>required</em></td><td>Agent name to subscribe</td></tr><tr><td><code>--event</code></td><td><code>String</code></td><td><em>required</em></td><td>Event filter: <code>&quot;all&quot;</code>, <code>&quot;category:&lt;name&gt;&quot;</code>, or exact event type like <code>&quot;AgentAdded&quot;</code></td></tr><tr><td><code>--filter</code></td><td><code>Option&lt;String&gt;</code></td><td>—</td><td>Payload filter expression (e.g. <code>&quot;cpu_percent &gt; 85 AND severity == Critical&quot;</code>)</td></tr><tr><td><code>--throttle</code></td><td><code>Option&lt;String&gt;</code></td><td>—</td><td>Throttle policy: <code>&quot;none&quot;</code>, <code>&quot;once_per:&lt;dur&gt;&quot;</code>, <code>&quot;max:&lt;count&gt;/&lt;dur&gt;&quot;</code> (e.g. <code>&quot;once_per:30s&quot;</code>)</td></tr><tr><td><code>--priority</code></td><td><code>String</code></td><td><code>&quot;normal&quot;</code></td><td>Subscription priority: <code>critical</code>, <code>high</code>, <code>normal</code>, <code>low</code></td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>event<span class="w"> </span>subscribe<span class="w"> </span>--agent<span class="w"> </span>analyst<span class="w"> </span>--event<span class="w"> </span>AgentAdded
+
+agentos<span class="w"> </span>event<span class="w"> </span>subscribe<span class="w"> </span>--agent<span class="w"> </span>monitor<span class="w"> </span>--event<span class="w"> </span>CPUSpikeDetected<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--filter<span class="w"> </span><span class="s2">&quot;cpu_percent &gt; 90 AND severity == Critical&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--throttle<span class="w"> </span><span class="s2">&quot;once_per:30s&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--priority<span class="w"> </span>high
+</pre></div>
+</div>
+<h3 id="event-unsubscribe" class="anchored"><a class="hanchor" href="#event-unsubscribe" aria-label="link">#</a><code>event unsubscribe</code></h3>
+<p>Remove an event subscription.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>id</code></td><td><code>String</code></td><td>Subscription UUID</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>event<span class="w"> </span>unsubscribe<span class="w"> </span>a3b2c1d0-1234-5678-9abc-def012345678
+</pre></div>
+</div>
+<h3 id="event-subscriptions-list" class="anchored"><a class="hanchor" href="#event-subscriptions-list" aria-label="link">#</a><code>event subscriptions list</code></h3>
+<p>List all subscriptions, optionally filtered by agent.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--agent</code></td><td><code>Option&lt;String&gt;</code></td><td>—</td><td>Filter by agent name</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>event<span class="w"> </span>subscriptions<span class="w"> </span>list
+agentos<span class="w"> </span>event<span class="w"> </span>subscriptions<span class="w"> </span>list<span class="w"> </span>--agent<span class="w"> </span>analyst
+</pre></div>
+</div>
+<h3 id="event-subscriptions-show" class="anchored"><a class="hanchor" href="#event-subscriptions-show" aria-label="link">#</a><code>event subscriptions show</code></h3>
+<p>Show full details of a subscription.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>--id</code></td><td><code>String</code></td><td>Subscription UUID</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>event<span class="w"> </span>subscriptions<span class="w"> </span>show<span class="w"> </span>--id<span class="w"> </span>a3b2c1d0-...
+</pre></div>
+</div>
+<h3 id="event-subscriptions-enable" class="anchored"><a class="hanchor" href="#event-subscriptions-enable" aria-label="link">#</a><code>event subscriptions enable</code></h3>
+<p>Re-enable a disabled subscription.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>--id</code></td><td><code>String</code></td><td>Subscription UUID</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>event<span class="w"> </span>subscriptions<span class="w"> </span><span class="nb">enable</span><span class="w"> </span>--id<span class="w"> </span>a3b2c1d0-...
+</pre></div>
+</div>
+<h3 id="event-subscriptions-disable" class="anchored"><a class="hanchor" href="#event-subscriptions-disable" aria-label="link">#</a><code>event subscriptions disable</code></h3>
+<p>Disable a subscription without removing it.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>--id</code></td><td><code>String</code></td><td>Subscription UUID</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>event<span class="w"> </span>subscriptions<span class="w"> </span>disable<span class="w"> </span>--id<span class="w"> </span>a3b2c1d0-...
+</pre></div>
+</div>
+<h3 id="event-history" class="anchored"><a class="hanchor" href="#event-history" aria-label="link">#</a><code>event history</code></h3>
+<p>View recent event history.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--last</code></td><td><code>u32</code></td><td><code>20</code></td><td>Number of recent events to show</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>event<span class="w"> </span><span class="nb">history</span>
+agentos<span class="w"> </span>event<span class="w"> </span><span class="nb">history</span><span class="w"> </span>--last<span class="w"> </span><span class="m">100</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="identity-manage-agent-cryptographic-identities" class="anchored"><a class="hanchor" href="#identity-manage-agent-cryptographic-identities" aria-label="link">#</a><code>identity</code> — Manage agent cryptographic identities</h2>
+<p>Each agent has an Ed25519 keypair generated at connection time for signing and authentication.</p>
+<h3 id="identity-show" class="anchored"><a class="hanchor" href="#identity-show" aria-label="link">#</a><code>identity show</code></h3>
+<p>Show an agent's cryptographic identity: public key and signing key status.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>&lt;agent&gt;</code></td><td><code>String</code></td><td>Agent name (positional)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>identity<span class="w"> </span>show<span class="w"> </span>analyst-1
+</pre></div>
+</div>
+<h3 id="identity-revoke" class="anchored"><a class="hanchor" href="#identity-revoke" aria-label="link">#</a><code>identity revoke</code></h3>
+<p>Revoke an agent's cryptographic identity and all associated permissions. This is a destructive operation.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>&lt;agent&gt;</code></td><td><code>String</code></td><td>Agent name (positional)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>identity<span class="w"> </span>revoke<span class="w"> </span>compromised-agent
+</pre></div>
+</div>
+<hr>
+<h2 id="hal-manage-hardware-device-access-hal" class="anchored"><a class="hanchor" href="#hal-manage-hardware-device-access-hal" aria-label="link">#</a><code>hal</code> — Manage hardware device access (HAL)</h2>
+<p>The Hardware Abstraction Layer controls which agents can access which physical devices. New devices start in quarantine until explicitly approved.</p>
+<h3 id="hal-list" class="anchored"><a class="hanchor" href="#hal-list" aria-label="link">#</a><code>hal list</code></h3>
+<p>List all registered hardware devices with their ID, type, status, and number of agents granted access.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>hal<span class="w"> </span>list
+</pre></div>
+</div>
+<h3 id="hal-register" class="anchored"><a class="hanchor" href="#hal-register" aria-label="link">#</a><code>hal register</code></h3>
+<p>Register a new hardware device. The device enters quarantine pending approval.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>--id</code></td><td><code>String</code></td><td>Device ID (e.g. <code>gpu:0</code>, <code>usb:1</code>, <code>cam:0</code>)</td></tr><tr><td><code>--type</code></td><td><code>String</code></td><td>Human-readable device type (e.g. <code>&quot;nvidia-rtx-4090&quot;</code>, <code>&quot;webcam&quot;</code>)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>hal<span class="w"> </span>register<span class="w"> </span>--id<span class="w"> </span>gpu:0<span class="w"> </span>--type<span class="w"> </span>nvidia-rtx-4090
+</pre></div>
+</div>
+<h3 id="hal-approve" class="anchored"><a class="hanchor" href="#hal-approve" aria-label="link">#</a><code>hal approve</code></h3>
+<p>Approve a quarantined device for a specific agent.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>device</code></td><td><code>String</code></td><td>Device ID (positional)</td></tr><tr><td><code>--agent</code></td><td><code>String</code></td><td>Agent name to grant access to</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>hal<span class="w"> </span>approve<span class="w"> </span>gpu:0<span class="w"> </span>--agent<span class="w"> </span>worker
+</pre></div>
+</div>
+<h3 id="hal-deny" class="anchored"><a class="hanchor" href="#hal-deny" aria-label="link">#</a><code>hal deny</code></h3>
+<p>Permanently deny a device for all agents. The device cannot be approved until re-registered.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>device</code></td><td><code>String</code></td><td>Device ID</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>hal<span class="w"> </span>deny<span class="w"> </span>usb:1
+</pre></div>
+</div>
+<h3 id="hal-revoke" class="anchored"><a class="hanchor" href="#hal-revoke" aria-label="link">#</a><code>hal revoke</code></h3>
+<p>Revoke a specific agent's access to a device.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>device</code></td><td><code>String</code></td><td>Device ID (positional)</td></tr><tr><td><code>--agent</code></td><td><code>String</code></td><td>Agent name to revoke access from</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>hal<span class="w"> </span>revoke<span class="w"> </span>gpu:0<span class="w"> </span>--agent<span class="w"> </span>worker
+</pre></div>
+</div>
+<hr>
+<h2 id="healthz-kernel-health-check" class="anchored"><a class="hanchor" href="#healthz-kernel-health-check" aria-label="link">#</a><code>healthz</code> — Kernel health check</h2>
+<p>Check if the kernel health endpoint is responding. Designed for use by Docker HEALTHCHECK, load balancers, and monitoring probes.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--port</code></td><td><code>u16</code></td><td><code>9091</code></td><td>Port the health endpoint is listening on</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>healthz
+agentos<span class="w"> </span>healthz<span class="w"> </span>--port<span class="w"> </span><span class="m">9091</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="log-control-runtime-logging" class="anchored"><a class="hanchor" href="#log-control-runtime-logging" aria-label="link">#</a><code>log</code> — Control runtime logging</h2>
+<p>Controls the kernel's runtime logging configuration, including log level and format. Changes take effect immediately without a restart.</p>
+<p><em>Refer to the kernel's logging documentation for supported levels and formats.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>log
+</pre></div>
+</div>
+<hr>
+<h2 id="notifications-manage-the-user-notification-inbox" class="anchored"><a class="hanchor" href="#notifications-manage-the-user-notification-inbox" aria-label="link">#</a><code>notifications</code> — Manage the user notification inbox</h2>
+<p>Agents can send messages to the operator via <code>notify-user</code> (fire-and-forget) and <code>ask-user</code> (blocking question). This command group manages those messages. See <a class="wikilink" href="ch-21.html">User Notifications and Channels</a> for full details.</p>
+<h3 id="notifications-list" class="anchored"><a class="hanchor" href="#notifications-list" aria-label="link">#</a><code>notifications list</code></h3>
+<p>List notifications from the inbox.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--unread</code> / <code>-u</code></td><td>flag</td><td><code>false</code></td><td>Show only unread notifications</td></tr><tr><td><code>--limit</code> / <code>-n</code></td><td><code>u32</code></td><td><code>50</code></td><td>Maximum number of notifications to return</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>notifications<span class="w"> </span>list
+agentos<span class="w"> </span>notifications<span class="w"> </span>list<span class="w"> </span>--unread<span class="w"> </span>--limit<span class="w"> </span><span class="m">20</span>
+</pre></div>
+</div>
+<h3 id="notifications-read" class="anchored"><a class="hanchor" href="#notifications-read" aria-label="link">#</a><code>notifications read</code></h3>
+<p>Show the full body of a notification and mark it as read. For <code>Question</code> messages, also shows the question, options, and any existing response.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>id</code></td><td><code>String</code></td><td>Notification UUID</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>notifications<span class="w"> </span><span class="nb">read</span><span class="w"> </span>a3b2c1d0-1234-5678-9abc-def012345678
+</pre></div>
+</div>
+<h3 id="notifications-respond" class="anchored"><a class="hanchor" href="#notifications-respond" aria-label="link">#</a><code>notifications respond</code></h3>
+<p>Submit a response to an interactive <code>Question</code> notification. If the question was blocking a task, the task resumes immediately.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag / Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>id</code></td><td><code>String</code></td><td>Notification UUID (positional)</td></tr><tr><td><code>--response</code> / <code>-r</code></td><td><code>String</code></td><td>Your response text</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>notifications<span class="w"> </span>respond<span class="w"> </span>a3b2c1d0-...<span class="w"> </span>--response<span class="w"> </span><span class="s2">&quot;Yes, proceed&quot;</span>
+</pre></div>
+</div>
+<h3 id="notifications-watch" class="anchored"><a class="hanchor" href="#notifications-watch" aria-label="link">#</a><code>notifications watch</code></h3>
+<p>Poll for new notifications every 5 seconds. Silently registers existing unread notifications on first poll to avoid flooding the terminal. Press Ctrl-C to stop.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>notifications<span class="w"> </span>watch
+</pre></div>
+</div>
+<hr>
+<h2 id="channel-manage-external-delivery-channels" class="anchored"><a class="hanchor" href="#channel-manage-external-delivery-channels" aria-label="link">#</a><code>channel</code> — Manage external delivery channels</h2>
+<p>Register external channels (Telegram, ntfy, email) so notifications are delivered beyond the CLI inbox. Credentials are stored in the vault; the channel record stores only non-sensitive routing metadata.</p>
+<h3 id="channel-connect" class="anchored"><a class="hanchor" href="#channel-connect" aria-label="link">#</a><code>channel connect</code></h3>
+<p>Register a new external delivery channel.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Required</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--kind</code> / <code>-k</code></td><td><code>String</code></td><td>Yes</td><td>—</td><td><code>telegram</code>, <code>ntfy</code>, <code>email</code>, or a custom string</td></tr><tr><td><code>--external-id</code> / <code>-e</code></td><td><code>String</code></td><td>Yes</td><td>—</td><td>Telegram: <code>chat_id</code>; ntfy: topic name; email: to-address</td></tr><tr><td><code>--display-name</code> / <code>-d</code></td><td><code>String</code></td><td>Yes</td><td>—</td><td>Human-readable label (e.g. <code>@johndoe</code>)</td></tr><tr><td><code>--credential-key</code> / <code>-c</code></td><td><code>String</code></td><td>No</td><td><code>&quot;&quot;</code></td><td>Vault key holding the bot token or password</td></tr><tr><td><code>--reply-topic</code></td><td><code>String</code></td><td>No</td><td>—</td><td>ntfy only: topic to listen on for inbound replies</td></tr><tr><td><code>--server-url</code></td><td><code>String</code></td><td>No</td><td>—</td><td>ntfy only: server URL (default: <code>https://ntfy.sh</code>)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Telegram: first store token in vault, then connect</span>
+agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>TELEGRAM_BOT_TOKEN
+agentos<span class="w"> </span>channel<span class="w"> </span>connect<span class="w"> </span>--kind<span class="w"> </span>telegram<span class="w"> </span>--external-id<span class="w"> </span><span class="s2">&quot;123456789&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--display-name<span class="w"> </span><span class="s2">&quot;@myhandle&quot;</span><span class="w"> </span>--credential-key<span class="w"> </span>TELEGRAM_BOT_TOKEN
+
+<span class="c1"># ntfy</span>
+agentos<span class="w"> </span>channel<span class="w"> </span>connect<span class="w"> </span>--kind<span class="w"> </span>ntfy<span class="w"> </span>--external-id<span class="w"> </span><span class="s2">&quot;agentos-alerts&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--display-name<span class="w"> </span><span class="s2">&quot;ntfy/agentos-alerts&quot;</span>
+</pre></div>
+</div>
+<h3 id="channel-list" class="anchored"><a class="hanchor" href="#channel-list" aria-label="link">#</a><code>channel list</code></h3>
+<p>List all registered channels with ID, kind, display name, external ID, and connection time.</p>
+<p><em>No flags.</em></p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>channel<span class="w"> </span>list
+</pre></div>
+</div>
+<h3 id="channel-test" class="anchored"><a class="hanchor" href="#channel-test" aria-label="link">#</a><code>channel test</code></h3>
+<p>Send a test notification to a channel to verify delivery is working.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>id</code></td><td><code>String</code></td><td>Channel UUID (from <code>channel list</code>)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>channel<span class="w"> </span><span class="nb">test</span><span class="w"> </span>a3b2c1d0-1234-5678-9abc-def012345678
+</pre></div>
+</div>
+<h3 id="channel-disconnect" class="anchored"><a class="hanchor" href="#channel-disconnect" aria-label="link">#</a><code>channel disconnect</code></h3>
+<p>Remove a registered channel.</p>
+<div class="table-wrap"><table><thead><tr><th>Argument</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>id</code></td><td><code>String</code></td><td>Channel UUID (from <code>channel list</code>)</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>channel<span class="w"> </span>disconnect<span class="w"> </span>a3b2c1d0-1234-5678-9abc-def012345678
+</pre></div>
+</div>
+<hr>
+<h2 id="mcp-model-context-protocol-integration" class="anchored"><a class="hanchor" href="#mcp-model-context-protocol-integration" aria-label="link">#</a><code>mcp</code> — Model Context Protocol integration</h2>
+<p>Bidirectional MCP bridge. <code>serve</code> and <code>list</code> are <strong>offline</strong> commands. <code>status</code> requires a running kernel.</p>
+<p>See <a class="wikilink" href="ch-22.html">MCP Integration</a> for the full feature guide including configuration, security model, and Claude Desktop setup.</p>
+<h3 id="mcp-serve-offline" class="anchored"><a class="hanchor" href="#mcp-serve-offline" aria-label="link">#</a><code>mcp serve</code> (offline)</h3>
+<p>Expose all registered AgentOS tools as an MCP server over stdin/stdout. Intended for use with Claude Desktop, Cursor, and any MCP-compatible client.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Used by MCP clients automatically (stdio transport)</span>
+agentos<span class="w"> </span>mcp<span class="w"> </span>serve
+
+<span class="c1"># Test from the shell</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s1">&#39;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;tools/list&quot;}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>agentos<span class="w"> </span>mcp<span class="w"> </span>serve
+</pre></div>
+</div>
+<p>No flags. The command reads tool manifests directly from disk — no running kernel required.</p>
+<h3 id="mcp-list-offline" class="anchored"><a class="hanchor" href="#mcp-list-offline" aria-label="link">#</a><code>mcp list</code> (offline)</h3>
+<p>List all MCP servers configured in the current config file. Shows config values only — does not check live connection state.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>mcp<span class="w"> </span>list
+agentos<span class="w"> </span>--config<span class="w"> </span>/etc/agentos/prod.toml<span class="w"> </span>mcp<span class="w"> </span>list
+</pre></div>
+</div>
+<h3 id="mcp-status" class="anchored"><a class="hanchor" href="#mcp-status" aria-label="link">#</a><code>mcp status</code></h3>
+<p>Query the running kernel for live health of all configured MCP server connections. Requires a running kernel.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>mcp<span class="w"> </span>status
+</pre></div>
+</div>
+<p><strong>Output:</strong></p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>NAME                 STATUS       TOOLS    LAST ERROR
+----------------------------------------------------------------------
+filesystem           connected    8        -
+web-search           disconnected 0        MCP server &#39;web-search&#39; reconnect failed: ...
+</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Column</th><th>Description</th></tr></thead><tbody><tr><td><code>NAME</code></td><td>Server name from <code>config.mcp.servers[*].name</code></td></tr><tr><td><code>STATUS</code></td><td><code>connected</code> or <code>disconnected</code></td></tr><tr><td><code>TOOLS</code></td><td>Tool count registered from this server at boot</td></tr><tr><td><code>LAST ERROR</code></td><td>Last connection-level error, or <code>-</code> if none</td></tr></tbody></table></div>
+<hr>
+<h2 id="web-start-the-web-ui-server" class="anchored"><a class="hanchor" href="#web-start-the-web-ui-server" aria-label="link">#</a><code>web</code> — Start the web UI server</h2>
+<h3 id="web-serve" class="anchored"><a class="hanchor" href="#web-serve" aria-label="link">#</a><code>web serve</code></h3>
+<p>Start the AgentOS web UI. Boots the kernel internally and serves the dashboard at the given address. The vault passphrase is resolved from <code>AGENTOS_VAULT_PASSPHRASE</code> or via interactive prompt.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--port</code></td><td><code>u16</code></td><td><code>8080</code></td><td>Port to bind on</td></tr><tr><td><code>--host</code></td><td><code>String</code></td><td><code>&quot;127.0.0.1&quot;</code></td><td>IP address to bind on</td></tr></tbody></table></div>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>web<span class="w"> </span>serve
+agentos<span class="w"> </span>web<span class="w"> </span>serve<span class="w"> </span>--port<span class="w"> </span><span class="m">3000</span><span class="w"> </span>--host<span class="w"> </span><span class="m">0</span>.0.0.0
+</pre></div>
+</div>
+<p>The server prints <code>Web UI: http://&lt;host&gt;:&lt;port&gt;</code> on startup. Press Ctrl-C to shut down both the web server and the kernel gracefully. SIGTERM is also handled (for systemd).</p>
+<blockquote><p><strong>Note:</strong> <code>web serve</code> boots its own embedded kernel. Do not run both <code>agentos start</code> and <code>agentos web serve</code> simultaneously — they would conflict on the bus socket and vault.</p></blockquote>
+<hr>
+<h2 id="team-run-and-manage-agent-teams" class="anchored"><a class="hanchor" href="#team-run-and-manage-agent-teams" aria-label="link">#</a><code>team</code> — Run and manage agent teams</h2>
+<h3 id="team-run" class="anchored"><a class="hanchor" href="#team-run" aria-label="link">#</a><code>team run</code></h3>
+<p>Run a coordinator + workers agent team. The coordinator orchestrates a set of worker agents and aggregates their results into a final response.</p>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--coordinator</code></td><td><code>String</code></td><td><em>required</em></td><td>Coordinator agent name</td></tr><tr><td><code>--workers</code></td><td><code>Vec&lt;String&gt;</code></td><td><em>required</em></td><td>Worker agent names (repeat flag)</td></tr><tr><td><code>--task</code></td><td><code>String</code></td><td><em>required</em></td><td>Task description</td></tr></tbody></table></div>
+<h3 id="team-list" class="anchored"><a class="hanchor" href="#team-list" aria-label="link">#</a><code>team list</code></h3>
+<p>List configured agent teams.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>team<span class="w"> </span>run<span class="w"> </span>--coordinator<span class="w"> </span>orchestrator<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--workers<span class="w"> </span>researcher<span class="w"> </span>--workers<span class="w"> </span>coder<span class="w"> </span>--workers<span class="w"> </span>reviewer<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--task<span class="w"> </span><span class="s2">&quot;Build a CSV importer&quot;</span>
+
+agentos<span class="w"> </span>team<span class="w"> </span>list
+</pre></div>
+</div>
+<hr>
+<h2 id="skill-manage-autonomous-skill-packages" class="anchored"><a class="hanchor" href="#skill-manage-autonomous-skill-packages" aria-label="link">#</a><code>skill</code> — Manage autonomous skill packages</h2>
+<p>A skill bundles a system prompt, a curated tool allowlist, optional event triggers, and a budget into a single installable unit. Core skills ship under <code>skills/core/</code>.</p>
+<div class="table-wrap"><table><thead><tr><th>Subcommand</th><th>Description</th></tr></thead><tbody><tr><td><code>skill list</code></td><td>List installed skills</td></tr><tr><td><code>skill install &lt;path&gt;</code></td><td>Install a skill from a directory or archive</td></tr><tr><td><code>skill remove &lt;id&gt;</code></td><td>Remove an installed skill</td></tr><tr><td><code>skill run &lt;id&gt; --input &lt;prompt&gt;</code></td><td>Run a skill against an input prompt</td></tr><tr><td><code>skill status &lt;id&gt;</code></td><td>Inspect the status of a running skill</td></tr></tbody></table></div>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>skill<span class="w"> </span>list
+agentos<span class="w"> </span>skill<span class="w"> </span>run<span class="w"> </span>cost-optimizer<span class="w"> </span>--input<span class="w"> </span><span class="s2">&quot;find expensive tasks today&quot;</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="mcp-extended-runtime-attach-oauth-a2a-status" class="anchored"><a class="hanchor" href="#mcp-extended-runtime-attach-oauth-a2a-status" aria-label="link">#</a><code>mcp</code> (extended) — runtime attach, OAuth, A2A, status</h2>
+<p>Beyond the offline <code>serve</code>/<code>list</code> subcommands, the <code>mcp</code> group has runtime attach/detach commands that connect to external MCP servers without restarting the kernel. Attachments persist to SQLite and are restored on next boot.</p>
+<div class="table-wrap"><table><thead><tr><th>Subcommand</th><th>Description</th></tr></thead><tbody><tr><td><code>mcp status</code></td><td>Show health, tool count, and last error per attached server</td></tr><tr><td><code>mcp attach &lt;name&gt;</code></td><td>Attach a new MCP server (stdio or HTTP transport)</td></tr><tr><td><code>mcp detach &lt;name&gt;</code></td><td>Detach a previously attached MCP server</td></tr><tr><td><code>mcp oauth-store &lt;connector-id&gt;</code></td><td>Store OAuth2 credentials for an MCP server in the vault</td></tr><tr><td><code>mcp tools</code></td><td>List MCP tools currently exposed by attached servers</td></tr><tr><td><code>mcp call --tool &lt;name&gt; --input &lt;json&gt;</code></td><td>Direct invocation against a specific MCP tool</td></tr><tr><td><code>mcp a2a-discover &lt;url&gt;</code></td><td>Fetch the Agent Card from a remote A2A-capable agent</td></tr><tr><td><code>mcp a2a-delegate --url &lt;url&gt; --capability &lt;name&gt; --input &lt;json&gt;</code></td><td>Delegate a task to a remote A2A agent</td></tr><tr><td><code>mcp a2a-card</code></td><td>Display this agent's own A2A card</td></tr></tbody></table></div>
+<h3 id="mcp-attach-flags" class="anchored"><a class="hanchor" href="#mcp-attach-flags" aria-label="link">#</a><code>mcp attach</code> flags</h3>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody><tr><td><code>-- &lt;cmd&gt;</code></td><td>Command and arguments for stdio transport (after <code>--</code>)</td></tr><tr><td><code>--url &lt;url&gt;</code></td><td>HTTP endpoint for HTTP transport</td></tr><tr><td><code>--token &lt;token&gt;</code></td><td>Static Bearer token for HTTP auth</td></tr><tr><td><code>--oauth-connector &lt;id&gt;</code></td><td>OAuth2 connector ID (stored via <code>oauth-store</code>); enables auto-refresh</td></tr><tr><td><code>--env KEY=VALUE</code></td><td>Environment variable for the subprocess; repeat for multiple; use <code>vault:&lt;name&gt;</code> to inject from the vault</td></tr><tr><td><code>--timeout &lt;secs&gt;</code></td><td>Per-request timeout in seconds (default: 30)</td></tr></tbody></table></div>
+<h3 id="mcp-oauth-store-flags" class="anchored"><a class="hanchor" href="#mcp-oauth-store-flags" aria-label="link">#</a><code>mcp oauth-store</code> flags</h3>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody><tr><td><code>--provider &lt;name&gt;</code></td><td>Human-readable provider name (default: <code>custom</code>)</td></tr><tr><td><code>--access-token &lt;token&gt;</code></td><td>OAuth2 access token</td></tr><tr><td><code>--refresh-token &lt;token&gt;</code></td><td>OAuth2 refresh token</td></tr><tr><td><code>--token-endpoint &lt;url&gt;</code></td><td>OAuth2 token endpoint for refresh</td></tr><tr><td><code>--client-id &lt;id&gt;</code></td><td>OAuth2 client ID</td></tr><tr><td><code>--client-secret &lt;secret&gt;</code></td><td>OAuth2 client secret (confidential clients)</td></tr><tr><td><code>--scopes &lt;list&gt;</code></td><td>Comma-separated granted scopes</td></tr><tr><td><code>--expires-in &lt;secs&gt;</code></td><td>Token lifetime in seconds</td></tr></tbody></table></div>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># stdio — attach GitHub MCP server using a vault secret</span>
+agentos<span class="w"> </span>mcp<span class="w"> </span>attach<span class="w"> </span>github<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--env<span class="w"> </span><span class="nv">GITHUB_TOKEN</span><span class="o">=</span>vault:github_token<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--<span class="w"> </span>npx<span class="w"> </span>-y<span class="w"> </span>@modelcontextprotocol/server-github
+
+<span class="c1"># HTTP — attach with OAuth credentials</span>
+agentos<span class="w"> </span>mcp<span class="w"> </span>oauth-store<span class="w"> </span>zomato<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>zomato<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--access-token<span class="w"> </span><span class="s2">&quot;eyJ...&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--refresh-token<span class="w"> </span><span class="s2">&quot;dGhp...&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--token-endpoint<span class="w"> </span><span class="s2">&quot;https://accounts.zomato.com/oauth/token&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--client-id<span class="w"> </span><span class="s2">&quot;myapp_client_id&quot;</span>
+agentos<span class="w"> </span>mcp<span class="w"> </span>attach<span class="w"> </span>zomato<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--url<span class="w"> </span>https://mcp-server.zomato.com/mcp<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--oauth-connector<span class="w"> </span>zomato
+
+agentos<span class="w"> </span>mcp<span class="w"> </span>status
+agentos<span class="w"> </span>mcp<span class="w"> </span>a2a-discover<span class="w"> </span>http://remote-agent.example.com
+</pre></div>
+</div>
+<hr>
+<h2 id="a2a-agent-to-agent-protocol" class="anchored"><a class="hanchor" href="#a2a-agent-to-agent-protocol" aria-label="link">#</a><code>a2a</code> — Agent-to-Agent protocol</h2>
+<p>The A2A protocol lets one AgentOS instance discover and delegate tasks to agents on another instance. Each delegated call goes through the same capability checks as a local tool call.</p>
+<div class="table-wrap"><table><thead><tr><th>Subcommand</th><th>Description</th></tr></thead><tbody><tr><td><code>a2a card [--url &lt;url&gt;]</code></td><td>Display this instance's A2A identity card (fetched from <code>/.well-known/agent.json</code>)</td></tr><tr><td><code>a2a discover &lt;agent-url&gt;</code></td><td>Discover a remote agent's capabilities (name, capabilities, endpoint)</td></tr><tr><td><code>a2a delegate --agent &lt;url&gt; --capability &lt;name&gt; --input &lt;json&gt;</code></td><td>Delegate a task to a remote agent</td></tr><tr><td><code>a2a tasks [--url &lt;url&gt;]</code></td><td>List active A2A task delegations on the local instance</td></tr></tbody></table></div>
+<h3 id="a2a-delegate-flags" class="anchored"><a class="hanchor" href="#a2a-delegate-flags" aria-label="link">#</a><code>a2a delegate</code> flags</h3>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody><tr><td><code>--agent &lt;url&gt;</code></td><td>Base URL of the remote A2A agent</td></tr><tr><td><code>--capability &lt;name&gt;</code></td><td>Capability name to invoke</td></tr><tr><td><code>--input &lt;json&gt;</code></td><td>JSON input (default: <code>{}</code>)</td></tr><tr><td><code>--token &lt;token&gt;</code></td><td>Bearer token for authenticating with the remote agent</td></tr><tr><td><code>--wait</code></td><td>Poll until the delegated task completes and print the final result (10-minute timeout)</td></tr></tbody></table></div>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>a2a<span class="w"> </span>discover<span class="w"> </span>http://remote.example.com
+agentos<span class="w"> </span>a2a<span class="w"> </span>delegate<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--agent<span class="w"> </span>http://remote.example.com<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--capability<span class="w"> </span>summarize<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--input<span class="w"> </span><span class="s1">&#39;{&quot;text&quot;: &quot;long article...&quot;}&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--wait
+agentos<span class="w"> </span>a2a<span class="w"> </span>card
+</pre></div>
+</div>
+<hr>
+<h2 id="provider-llm-provider-catalog" class="anchored"><a class="hanchor" href="#provider-llm-provider-catalog" aria-label="link">#</a><code>provider</code> — LLM provider catalog</h2>
+<p>Lists every LLM provider known to the kernel. Built-in adapters (Ollama, OpenAI, Anthropic, Gemini) plus the OpenAI-compatible provider catalog loaded from <code>config/providers.toml</code> (Mistral, XAI, Cohere, Cerebras, Moonshot, NVIDIA, Hyperbolic, Azure, …).</p>
+<div class="table-wrap"><table><thead><tr><th>Subcommand</th><th>Description</th></tr></thead><tbody><tr><td><code>provider list</code></td><td>List built-in adapters and catalog entries</td></tr><tr><td><code>provider set-url &lt;name&gt; &lt;url&gt;</code></td><td>Override the base URL for a provider</td></tr><tr><td><code>provider add &lt;name&gt; &lt;url&gt;</code></td><td>Add a new OpenAI-compatible provider to the catalog</td></tr><tr><td><code>provider remove &lt;name&gt;</code></td><td>Remove a provider from the catalog</td></tr><tr><td><code>provider probe &lt;name&gt;</code></td><td>Probe <code>&lt;base_url&gt;&lt;models_path&gt;</code> and refresh the provider's model list</td></tr></tbody></table></div>
+<hr>
+<h2 id="plugin-plugin-lifecycle" class="anchored"><a class="hanchor" href="#plugin-plugin-lifecycle" aria-label="link">#</a><code>plugin</code> — Plugin lifecycle</h2>
+<p>Plugins are manifest-described bundles that contribute tools, channel adapters, or skills. Discover at boot, signature-verify for non-Core tiers, and activate explicitly.</p>
+<div class="table-wrap"><table><thead><tr><th>Subcommand</th><th>Description</th></tr></thead><tbody><tr><td><code>plugin list</code></td><td>List discovered plugins and their state (Discovered/Active/Disabled/Blocked)</td></tr><tr><td><code>plugin enable &lt;id&gt;</code></td><td>Activate a discovered plugin</td></tr><tr><td><code>plugin disable &lt;id&gt;</code></td><td>Disable an active plugin</td></tr><tr><td><code>plugin info &lt;id&gt;</code></td><td>Show manifest details for a plugin</td></tr></tbody></table></div>
+<hr>
+<h2 id="onboard-interactive-setup-wizard" class="anchored"><a class="hanchor" href="#onboard-interactive-setup-wizard" aria-label="link">#</a><code>onboard</code> — Interactive setup wizard</h2>
+<p>Walks the operator through provider selection, API key resolution (stored as env-var references — never to disk), default agent creation, and data-directory setup. Refuses to overwrite a config file with parse errors.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>onboard
+</pre></div>
+</div>
+<hr>
+<h2 id="doctor-diagnose-configuration-issues" class="anchored"><a class="hanchor" href="#doctor-diagnose-configuration-issues" aria-label="link">#</a><code>doctor</code> — Diagnose configuration issues</h2>
+<p>Runs six checks: config file existence, TOML validity, vault directory write probe, audit directory write probe, bus socket reachability, and tool registry sanity. Pass <code>--fix</code> to attempt safe auto-repair (creates missing directories, fixes permissions).</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>doctor
+agentos<span class="w"> </span>doctor<span class="w"> </span>--fix
+</pre></div>
+</div>
+<hr>
+<h2 id="config-read-and-write-configuration-values" class="anchored"><a class="hanchor" href="#config-read-and-write-configuration-values" aria-label="link">#</a><code>config</code> — Read and write configuration values</h2>
+<p>Edits <code>config/default.toml</code> (or the <code>--config</code> override) without editing TOML by hand. Uses <code>toml_edit</code> so comments and formatting are preserved. Supports arbitrary depth dotted keys (e.g. <code>kernel.autonomous_mode.iter_cap</code>).</p>
+<div class="table-wrap"><table><thead><tr><th>Subcommand</th><th>Description</th></tr></thead><tbody><tr><td><code>config get &lt;key&gt;</code></td><td>Read a value by dotted key</td></tr><tr><td><code>config set &lt;key&gt; &lt;value&gt;</code></td><td>Write a value by dotted key</td></tr><tr><td><code>config list</code></td><td>List all top-level config sections</td></tr></tbody></table></div>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>config<span class="w"> </span>get<span class="w"> </span>llm.primary
+agentos<span class="w"> </span>config<span class="w"> </span><span class="nb">set</span><span class="w"> </span>kernel.task_timeout_seconds<span class="w"> </span><span class="m">7200</span>
+agentos<span class="w"> </span>config<span class="w"> </span>list
+</pre></div>
+</div>
+<hr>
+<h2 id="init-scaffold-a-new-agentos-project" class="anchored"><a class="hanchor" href="#init-scaffold-a-new-agentos-project" aria-label="link">#</a><code>init</code> — Scaffold a new AgentOS project</h2>
+<p>Creates a project directory with a working agent configuration, tool manifests, and an inline README explaining the security model.</p>
+<div class="table-wrap"><table><thead><tr><th>Template</th><th>Description</th></tr></thead><tbody><tr><td><code>hello-world</code></td><td>Minimal agent that responds to a prompt</td></tr><tr><td><code>secure-agent</code></td><td>Agent with restricted CapabilityToken (recommended)</td></tr><tr><td><code>mcp-server</code></td><td>Agent exposed as an MCP server</td></tr><tr><td><code>multi-agent</code></td><td>Coordinator + 2 specialist agents</td></tr></tbody></table></div>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>init<span class="w"> </span>my-project
+agentos<span class="w"> </span>init<span class="w"> </span>my-project<span class="w"> </span>--template<span class="w"> </span>secure-agent
+</pre></div>
+</div>
+<hr>
+<h2 id="workspace-manage-agent-filesystem-access" class="anchored"><a class="hanchor" href="#workspace-manage-agent-filesystem-access" aria-label="link">#</a><code>workspace</code> — Manage agent filesystem access</h2>
+<p>Controls which host directories agents can read, write, or execute in beyond the default <code>data_dir</code>. Grants are <strong>persistent</strong> — they are stored by the kernel and survive restarts. A grant can target a single agent or all agents.</p>
+<div class="table-wrap"><table><thead><tr><th>Subcommand</th><th>Description</th></tr></thead><tbody><tr><td><code>workspace grant &lt;path&gt; [--mode rw] [--agent &lt;name&gt;] [--yes]</code></td><td>Grant an agent (or all agents) r/w/x access to a host directory</td></tr><tr><td><code>workspace revoke &lt;path&gt; [--agent &lt;name&gt;]</code></td><td>Revoke a grant</td></tr><tr><td><code>workspace list [--agent &lt;name&gt;]</code></td><td>List active grants</td></tr></tbody></table></div>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>workspace<span class="w"> </span>grant<span class="w"> </span>~/project<span class="w"> </span>--mode<span class="w"> </span>rw
+agentos<span class="w"> </span>workspace<span class="w"> </span>list
+agentos<span class="w"> </span>workspace<span class="w"> </span>revoke<span class="w"> </span>~/project
+</pre></div>
+</div>
+<blockquote><p>Granted paths are canonicalized and take effect immediately for all new tool calls. Grants are stored persistently by the kernel, so they remain in effect across restarts without editing the config file.</p></blockquote>
+<hr>
+<h2 id="permission-reference-table" class="anchored"><a class="hanchor" href="#permission-reference-table" aria-label="link">#</a>Permission Reference Table</h2>
+<p>Permissions follow the format <code>&lt;resource&gt;:&lt;flags&gt;</code> where flags are <code>r</code> (read), <code>w</code> (write), and <code>x</code> (execute).</p>
+<div class="table-wrap"><table><thead><tr><th>Resource</th><th><code>r</code></th><th><code>w</code></th><th><code>x</code></th></tr></thead><tbody><tr><td><code>network.logs</code></td><td>Read logs</td><td>—</td><td>—</td></tr><tr><td><code>network.outbound</code></td><td>—</td><td>—</td><td>Make HTTP calls</td></tr><tr><td><code>process.list</code></td><td>List processes</td><td>—</td><td>—</td></tr><tr><td><code>process.kill</code></td><td>—</td><td>—</td><td>Kill processes</td></tr><tr><td><code>fs.app_logs</code></td><td>Read app logs</td><td>—</td><td>—</td></tr><tr><td><code>fs.system_logs</code></td><td>Read system logs</td><td>—</td><td>—</td></tr><tr><td><code>fs.user_data</code></td><td>Read files</td><td>Write files</td><td>—</td></tr><tr><td><code>hardware.sensors</code></td><td>Read values</td><td>—</td><td>—</td></tr><tr><td><code>hardware.gpu</code></td><td>Query info</td><td>—</td><td>Use for compute</td></tr><tr><td><code>cron.jobs</code></td><td>View scheduled</td><td>Create new</td><td>Delete / run</td></tr><tr><td><code>memory.semantic</code></td><td>Read</td><td>Write</td><td>—</td></tr><tr><td><code>memory.episodic</code></td><td>Read</td><td>—</td><td>—</td></tr><tr><td><code>memory.blocks</code></td><td>Read blocks</td><td>Write blocks</td><td>—</td></tr><tr><td><code>memory.procedural</code></td><td>Read procedures</td><td>Write procedures</td><td>—</td></tr><tr><td><code>agent.message</code></td><td>Receive msgs</td><td>—</td><td>Send msgs</td></tr><tr><td><code>agent.broadcast</code></td><td>Receive</td><td>—</td><td>Broadcast</td></tr><tr><td><code>agent.delegate</code></td><td>—</td><td>—</td><td>Delegate subtasks</td></tr><tr><td><code>agent.registry</code></td><td>List agents</td><td>—</td><td>—</td></tr><tr><td><code>task.query</code></td><td>Query tasks</td><td>—</td><td>—</td></tr><tr><td><code>user.notify</code></td><td>—</td><td>Send notifications</td><td>—</td></tr><tr><td><code>user.interact</code></td><td>—</td><td>—</td><td>Ask blocking questions</td></tr></tbody></table></div>
+<p><strong>Examples:</strong></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Read and write user data</span>
+agentos<span class="w"> </span>perm<span class="w"> </span>grant<span class="w"> </span>analyst<span class="w"> </span>fs.user_data:rw
+
+<span class="c1"># Execute outbound network calls</span>
+agentos<span class="w"> </span>perm<span class="w"> </span>grant<span class="w"> </span>worker<span class="w"> </span>network.outbound:x
+
+<span class="c1"># Read-only access to GPU info</span>
+agentos<span class="w"> </span>perm<span class="w"> </span>grant<span class="w"> </span>monitor<span class="w"> </span>hardware.gpu:r
+</pre></div>
+</div>
+<hr>
+<h2 id="quick-reference-all-command-groups" class="anchored"><a class="hanchor" href="#quick-reference-all-command-groups" aria-label="link">#</a>Quick Reference: All Command Groups</h2>
+<p>All <strong>39</strong> top-level command groups (an asterisk marks subcommands that work offline without a kernel connection):</p>
+<div class="table-wrap"><table><thead><tr><th>Group</th><th>Description</th><th>Subcommands</th></tr></thead><tbody><tr><td><code>start</code></td><td>Boot the kernel</td><td>—</td></tr><tr><td><code>stop</code></td><td>Shut down the kernel</td><td>—</td></tr><tr><td><code>agent</code></td><td>Manage LLM agents</td><td><code>connect</code>, <code>list</code>, <code>disconnect</code>, <code>ping</code>, <code>remove</code>, <code>set-url</code>, <code>message</code>, <code>messages</code>, <code>group create</code>, <code>broadcast</code>, <code>memory show</code>, <code>memory history</code>, <code>memory rollback</code>, <code>memory clear</code>, <code>memory set</code></td></tr><tr><td><code>task</code></td><td>Manage tasks</td><td><code>run</code>, <code>list</code>, <code>logs</code>, <code>trace</code>, <code>traces</code>, <code>cancel</code>, <code>resume</code>, <code>checkpoints</code></td></tr><tr><td><code>tool</code></td><td>Manage tools</td><td><code>list</code>, <code>search</code>, <code>install</code>, <code>add</code>, <code>publish</code>, <code>remove</code>, <code>keygen</code><em>, <code>sign</code></em>, <code>verify</code>*</td></tr><tr><td><code>secret</code></td><td>Manage encrypted vault</td><td><code>set</code>, <code>list</code>, <code>revoke</code>, <code>rotate</code>, <code>lockdown</code></td></tr><tr><td><code>perm</code></td><td>Manage permissions</td><td><code>grant</code>, <code>revoke</code>, <code>show</code>, <code>profile create</code>, <code>profile delete</code>, <code>profile list</code>, <code>profile assign</code></td></tr><tr><td><code>role</code></td><td>Manage OS roles</td><td><code>create</code>, <code>delete</code>, <code>list</code>, <code>grant</code>, <code>revoke</code>, <code>assign</code>, <code>remove</code></td></tr><tr><td><code>schedule</code></td><td>Manage cron jobs</td><td><code>create</code>, <code>list</code>, <code>pause</code>, <code>resume</code>, <code>delete</code></td></tr><tr><td><code>bg</code></td><td>Manage background tasks</td><td><code>run</code>, <code>list</code>, <code>logs</code>, <code>kill</code></td></tr><tr><td><code>status</code></td><td>Show system status</td><td>—</td></tr><tr><td><code>audit</code></td><td>View audit logs</td><td><code>logs</code>, <code>verify</code>, <code>snapshots</code>, <code>export</code>, <code>rollback</code></td></tr><tr><td><code>pipeline</code></td><td>Manage pipelines</td><td><code>install</code>, <code>list</code>, <code>run</code>, <code>status</code>, <code>logs</code>, <code>remove</code></td></tr><tr><td><code>team</code></td><td>Coordinator + worker teams</td><td><code>run</code>, <code>list</code></td></tr><tr><td><code>cost</code></td><td>View cost reports</td><td><code>show</code>, <code>retrieval</code></td></tr><tr><td><code>resource</code></td><td>Manage resource locks</td><td><code>list</code>, <code>release</code>, <code>contention</code>, <code>release-all</code></td></tr><tr><td><code>escalation</code></td><td>Human approval requests</td><td><code>list</code>, <code>get</code>, <code>resolve</code></td></tr><tr><td><code>snapshot</code></td><td>Task snapshots</td><td><code>list</code>, <code>rollback</code></td></tr><tr><td><code>scratchpad</code></td><td>Agent scratchpad pages</td><td><code>list</code>, <code>read</code>, <code>delete</code>, <code>graph</code></td></tr><tr><td><code>event</code></td><td>Event subscriptions</td><td><code>subscribe</code>, <code>unsubscribe</code>, <code>subscriptions list</code>, <code>subscriptions show</code>, <code>subscriptions enable</code>, <code>subscriptions disable</code>, <code>history</code></td></tr><tr><td><code>identity</code></td><td>Agent identities</td><td><code>show</code>, <code>revoke</code></td></tr><tr><td><code>hal</code></td><td>Hardware device access</td><td><code>list</code>, <code>register</code>, <code>approve</code>, <code>deny</code>, <code>revoke</code></td></tr><tr><td><code>healthz</code></td><td>Kernel health check</td><td>—</td></tr><tr><td><code>log</code></td><td>Control runtime logging</td><td>—</td></tr><tr><td><code>notifications</code></td><td>User notification inbox</td><td><code>list</code>, <code>read</code>, <code>respond</code>, <code>watch</code></td></tr><tr><td><code>channel</code></td><td>External delivery channels</td><td><code>connect</code>, <code>list</code>, <code>test</code>, <code>set-agent</code>, <code>disconnect</code></td></tr><tr><td><code>skill</code></td><td>Autonomous skill packages</td><td><code>list</code>, <code>new</code>, <code>validate</code>, <code>install</code>, <code>publish</code>, <code>search</code>, <code>remove</code>, <code>run</code>, <code>status</code></td></tr><tr><td><code>mcp</code></td><td>MCP integration</td><td><code>serve</code><em>, <code>list</code></em>, <code>tools</code><em>, <code>call</code></em>, <code>status</code>, <code>attach</code>, <code>detach</code>, <code>oauth-store</code>, <code>a2a-discover</code>, <code>a2a-delegate</code>, <code>a2a-card</code></td></tr><tr><td><code>a2a</code></td><td>Agent-to-Agent protocol</td><td><code>card</code>, <code>discover</code>, <code>delegate</code>, <code>tasks</code></td></tr><tr><td><code>provider</code></td><td>LLM provider catalog</td><td><code>list</code>, <code>set-url</code>, <code>add</code>, <code>remove</code>, <code>probe</code></td></tr><tr><td><code>plugin</code></td><td>Plugin lifecycle</td><td><code>list</code>, <code>enable</code>, <code>disable</code>, <code>info</code></td></tr><tr><td><code>onboard</code></td><td>Interactive setup wizard</td><td>—</td></tr><tr><td><code>doctor</code></td><td>Diagnose / auto-repair</td><td>— (<code>--fix</code> flag)</td></tr><tr><td><code>config</code></td><td>Read/write configuration</td><td><code>get</code>, <code>set</code>, <code>list</code></td></tr><tr><td><code>init</code></td><td>Scaffold new project</td><td>— (<code>--template</code>)</td></tr><tr><td><code>workspace</code></td><td>Persistent agent filesystem grants</td><td><code>grant</code>, <code>revoke</code>, <code>list</code></td></tr><tr><td><code>prefs</code></td><td>Review user-preference adaptation proposals</td><td><code>review</code>, <code>accept</code>, <code>reject</code>, <code>stats</code></td></tr><tr><td><code>approval</code></td><td>Tool-call approval mode + learned allow-policy</td><td><code>mode get</code>, <code>mode set</code>, <code>mode clear</code>, <code>allow</code>, <code>list</code>, <code>revoke</code></td></tr><tr><td><code>web</code></td><td>Web UI server</td><td><code>serve</code></td></tr></tbody></table></div>
+<p><em>\</em> Offline commands — do not require a running kernel.*</p></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-03.html"><span class="pn-dir">← Previous</span><span class="pn-title">Architecture Overview</span></a><a class="pn pn-next" href="ch-05.html"><span class="pn-dir">Next →</span><span class="pn-title">Agent Management</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#global-options" data-target="global-options">Global Options</a></li><li class="toc-h2"><a href="#connection-model" data-target="connection-model">Connection Model</a></li><li class="toc-h2"><a href="#start-boot-the-agentos-kernel" data-target="start-boot-the-agentos-kernel"><code>start</code> — Boot the AgentOS kernel</a></li><li class="toc-h2"><a href="#stop-shut-down-the-agentos-kernel" data-target="stop-shut-down-the-agentos-kernel"><code>stop</code> — Shut down the AgentOS kernel</a></li><li class="toc-h2"><a href="#agent-manage-llm-agents" data-target="agent-manage-llm-agents"><code>agent</code> — Manage LLM agents</a></li><li class="toc-h3"><a href="#agent-connect" data-target="agent-connect"><code>agent connect</code></a></li><li class="toc-h3"><a href="#agent-list" data-target="agent-list"><code>agent list</code></a></li><li class="toc-h3"><a href="#agent-disconnect" data-target="agent-disconnect"><code>agent disconnect</code></a></li><li class="toc-h3"><a href="#agent-message" data-target="agent-message"><code>agent message</code></a></li><li class="toc-h3"><a href="#agent-messages" data-target="agent-messages"><code>agent messages</code></a></li><li class="toc-h3"><a href="#agent-group-create" data-target="agent-group-create"><code>agent group create</code></a></li><li class="toc-h3"><a href="#agent-broadcast" data-target="agent-broadcast"><code>agent broadcast</code></a></li><li class="toc-h3"><a href="#agent-memory-show" data-target="agent-memory-show"><code>agent memory show</code></a></li><li class="toc-h3"><a href="#agent-memory-history" data-target="agent-memory-history"><code>agent memory history</code></a></li><li class="toc-h3"><a href="#agent-memory-rollback" data-target="agent-memory-rollback"><code>agent memory rollback</code></a></li><li class="toc-h3"><a href="#agent-memory-clear" data-target="agent-memory-clear"><code>agent memory clear</code></a></li><li class="toc-h3"><a href="#agent-memory-set" data-target="agent-memory-set"><code>agent memory set</code></a></li><li class="toc-h2"><a href="#task-manage-tasks" data-target="task-manage-tasks"><code>task</code> — Manage tasks</a></li><li class="toc-h3"><a href="#task-run" data-target="task-run"><code>task run</code></a></li><li class="toc-h3"><a href="#task-list" data-target="task-list"><code>task list</code></a></li><li class="toc-h3"><a href="#task-logs" data-target="task-logs"><code>task logs</code></a></li><li class="toc-h3"><a href="#task-trace" data-target="task-trace"><code>task trace</code></a></li><li class="toc-h3"><a href="#task-traces" data-target="task-traces"><code>task traces</code></a></li><li class="toc-h3"><a href="#task-cancel" data-target="task-cancel"><code>task cancel</code></a></li><li class="toc-h2"><a href="#tool-manage-tools" data-target="tool-manage-tools"><code>tool</code> — Manage tools</a></li><li class="toc-h3"><a href="#tool-list" data-target="tool-list"><code>tool list</code></a></li><li class="toc-h3"><a href="#tool-install" data-target="tool-install"><code>tool install</code></a></li><li class="toc-h3"><a href="#tool-remove" data-target="tool-remove"><code>tool remove</code></a></li><li class="toc-h3"><a href="#tool-keygen-offline" data-target="tool-keygen-offline"><code>tool keygen</code> (offline)</a></li><li class="toc-h3"><a href="#tool-sign-offline" data-target="tool-sign-offline"><code>tool sign</code> (offline)</a></li><li class="toc-h3"><a href="#tool-verify-offline" data-target="tool-verify-offline"><code>tool verify</code> (offline)</a></li><li class="toc-h2"><a href="#secret-manage-secrets" data-target="secret-manage-secrets"><code>secret</code> — Manage secrets</a></li><li class="toc-h3"><a href="#secret-set" data-target="secret-set"><code>secret set</code></a></li><li class="toc-h3"><a href="#secret-list" data-target="secret-list"><code>secret list</code></a></li><li class="toc-h3"><a href="#secret-revoke" data-target="secret-revoke"><code>secret revoke</code></a></li><li class="toc-h3"><a href="#secret-rotate" data-target="secret-rotate"><code>secret rotate</code></a></li><li class="toc-h3"><a href="#secret-lockdown" data-target="secret-lockdown"><code>secret lockdown</code></a></li><li class="toc-h2"><a href="#perm-manage-agent-permissions" data-target="perm-manage-agent-permissions"><code>perm</code> — Manage agent permissions</a></li><li class="toc-h3"><a href="#perm-grant" data-target="perm-grant"><code>perm grant</code></a></li><li class="toc-h3"><a href="#perm-revoke" data-target="perm-revoke"><code>perm revoke</code></a></li><li class="toc-h3"><a href="#perm-show" data-target="perm-show"><code>perm show</code></a></li><li class="toc-h3"><a href="#perm-profile-create" data-target="perm-profile-create"><code>perm profile create</code></a></li><li class="toc-h3"><a href="#perm-profile-delete" data-target="perm-profile-delete"><code>perm profile delete</code></a></li><li class="toc-h3"><a href="#perm-profile-list" data-target="perm-profile-list"><code>perm profile list</code></a></li><li class="toc-h3"><a href="#perm-profile-assign" data-target="perm-profile-assign"><code>perm profile assign</code></a></li><li class="toc-h2"><a href="#role-manage-os-roles" data-target="role-manage-os-roles"><code>role</code> — Manage OS roles</a></li><li class="toc-h3"><a href="#role-create" data-target="role-create"><code>role create</code></a></li><li class="toc-h3"><a href="#role-delete" data-target="role-delete"><code>role delete</code></a></li><li class="toc-h3"><a href="#role-list" data-target="role-list"><code>role list</code></a></li><li class="toc-h3"><a href="#role-grant" data-target="role-grant"><code>role grant</code></a></li><li class="toc-h3"><a href="#role-revoke" data-target="role-revoke"><code>role revoke</code></a></li><li class="toc-h3"><a href="#role-assign" data-target="role-assign"><code>role assign</code></a></li><li class="toc-h3"><a href="#role-remove" data-target="role-remove"><code>role remove</code></a></li><li class="toc-h2"><a href="#schedule-manage-scheduled-background-jobs" data-target="schedule-manage-scheduled-background-jobs"><code>schedule</code> — Manage scheduled background jobs</a></li><li class="toc-h3"><a href="#schedule-create" data-target="schedule-create"><code>schedule create</code></a></li><li class="toc-h3"><a href="#schedule-list" data-target="schedule-list"><code>schedule list</code></a></li><li class="toc-h3"><a href="#schedule-pause" data-target="schedule-pause"><code>schedule pause</code></a></li><li class="toc-h3"><a href="#schedule-resume" data-target="schedule-resume"><code>schedule resume</code></a></li><li class="toc-h3"><a href="#schedule-delete" data-target="schedule-delete"><code>schedule delete</code></a></li><li class="toc-h2"><a href="#bg-manage-background-tasks" data-target="bg-manage-background-tasks"><code>bg</code> — Manage background tasks</a></li><li class="toc-h3"><a href="#bg-run" data-target="bg-run"><code>bg run</code></a></li><li class="toc-h3"><a href="#bg-list" data-target="bg-list"><code>bg list</code></a></li><li class="toc-h3"><a href="#bg-logs" data-target="bg-logs"><code>bg logs</code></a></li><li class="toc-h3"><a href="#bg-kill" data-target="bg-kill"><code>bg kill</code></a></li><li class="toc-h2"><a href="#status-show-system-status" data-target="status-show-system-status"><code>status</code> — Show system status</a></li><li class="toc-h2"><a href="#audit-view-audit-logs" data-target="audit-view-audit-logs"><code>audit</code> — View audit logs</a></li><li class="toc-h3"><a href="#audit-logs" data-target="audit-logs"><code>audit logs</code></a></li><li class="toc-h3"><a href="#audit-verify" data-target="audit-verify"><code>audit verify</code></a></li><li class="toc-h3"><a href="#audit-snapshots" data-target="audit-snapshots"><code>audit snapshots</code></a></li><li class="toc-h3"><a href="#audit-export" data-target="audit-export"><code>audit export</code></a></li><li class="toc-h3"><a href="#audit-rollback" data-target="audit-rollback"><code>audit rollback</code></a></li><li class="toc-h2"><a href="#pipeline-manage-multi-agent-pipelines" data-target="pipeline-manage-multi-agent-pipelines"><code>pipeline</code> — Manage multi-agent pipelines</a></li><li class="toc-h3"><a href="#pipeline-install" data-target="pipeline-install"><code>pipeline install</code></a></li><li class="toc-h3"><a href="#pipeline-list" data-target="pipeline-list"><code>pipeline list</code></a></li><li class="toc-h3"><a href="#pipeline-run" data-target="pipeline-run"><code>pipeline run</code></a></li><li class="toc-h3"><a href="#pipeline-status" data-target="pipeline-status"><code>pipeline status</code></a></li><li class="toc-h3"><a href="#pipeline-logs" data-target="pipeline-logs"><code>pipeline logs</code></a></li><li class="toc-h3"><a href="#pipeline-remove" data-target="pipeline-remove"><code>pipeline remove</code></a></li><li class="toc-h2"><a href="#cost-view-agent-cost-and-budget-reports" data-target="cost-view-agent-cost-and-budget-reports"><code>cost</code> — View agent cost and budget reports</a></li><li class="toc-h3"><a href="#cost-show" data-target="cost-show"><code>cost show</code></a></li><li class="toc-h3"><a href="#cost-retrieval" data-target="cost-retrieval"><code>cost retrieval</code></a></li><li class="toc-h2"><a href="#resource-manage-resource-locks-arbitration" data-target="resource-manage-resource-locks-arbitration"><code>resource</code> — Manage resource locks (arbitration)</a></li><li class="toc-h3"><a href="#resource-list" data-target="resource-list"><code>resource list</code></a></li><li class="toc-h3"><a href="#resource-release" data-target="resource-release"><code>resource release</code></a></li><li class="toc-h3"><a href="#resource-contention" data-target="resource-contention"><code>resource contention</code></a></li><li class="toc-h3"><a href="#resource-release-all" data-target="resource-release-all"><code>resource release-all</code></a></li><li class="toc-h2"><a href="#escalation-view-and-resolve-human-approval-requests" data-target="escalation-view-and-resolve-human-approval-requests"><code>escalation</code> — View and resolve human approval requests</a></li><li class="toc-h3"><a href="#escalation-list" data-target="escalation-list"><code>escalation list</code></a></li><li class="toc-h3"><a href="#escalation-get" data-target="escalation-get"><code>escalation get</code></a></li><li class="toc-h3"><a href="#escalation-resolve" data-target="escalation-resolve"><code>escalation resolve</code></a></li><li class="toc-h2"><a href="#snapshot-manage-task-snapshots-and-rollback" data-target="snapshot-manage-task-snapshots-and-rollback"><code>snapshot</code> — Manage task snapshots and rollback</a></li><li class="toc-h3"><a href="#snapshot-list" data-target="snapshot-list"><code>snapshot list</code></a></li><li class="toc-h3"><a href="#snapshot-rollback" data-target="snapshot-rollback"><code>snapshot rollback</code></a></li><li class="toc-h2"><a href="#scratchpad-manage-agent-scratchpad-pages" data-target="scratchpad-manage-agent-scratchpad-pages"><code>scratchpad</code> — Manage agent scratchpad pages</a></li><li class="toc-h3"><a href="#scratchpad-list" data-target="scratchpad-list"><code>scratchpad list</code></a></li><li class="toc-h3"><a href="#scratchpad-read" data-target="scratchpad-read"><code>scratchpad read</code></a></li><li class="toc-h3"><a href="#scratchpad-delete" data-target="scratchpad-delete"><code>scratchpad delete</code></a></li><li class="toc-h3"><a href="#scratchpad-graph" data-target="scratchpad-graph"><code>scratchpad graph</code></a></li><li class="toc-h2"><a href="#event-manage-event-subscriptions-and-view-event-history" data-target="event-manage-event-subscriptions-and-view-event-history"><code>event</code> — Manage event subscriptions and view event history</a></li><li class="toc-h3"><a href="#event-subscribe" data-target="event-subscribe"><code>event subscribe</code></a></li><li class="toc-h3"><a href="#event-unsubscribe" data-target="event-unsubscribe"><code>event unsubscribe</code></a></li><li class="toc-h3"><a href="#event-subscriptions-list" data-target="event-subscriptions-list"><code>event subscriptions list</code></a></li><li class="toc-h3"><a href="#event-subscriptions-show" data-target="event-subscriptions-show"><code>event subscriptions show</code></a></li><li class="toc-h3"><a href="#event-subscriptions-enable" data-target="event-subscriptions-enable"><code>event subscriptions enable</code></a></li><li class="toc-h3"><a href="#event-subscriptions-disable" data-target="event-subscriptions-disable"><code>event subscriptions disable</code></a></li><li class="toc-h3"><a href="#event-history" data-target="event-history"><code>event history</code></a></li><li class="toc-h2"><a href="#identity-manage-agent-cryptographic-identities" data-target="identity-manage-agent-cryptographic-identities"><code>identity</code> — Manage agent cryptographic identities</a></li><li class="toc-h3"><a href="#identity-show" data-target="identity-show"><code>identity show</code></a></li><li class="toc-h3"><a href="#identity-revoke" data-target="identity-revoke"><code>identity revoke</code></a></li><li class="toc-h2"><a href="#hal-manage-hardware-device-access-hal" data-target="hal-manage-hardware-device-access-hal"><code>hal</code> — Manage hardware device access (HAL)</a></li><li class="toc-h3"><a href="#hal-list" data-target="hal-list"><code>hal list</code></a></li><li class="toc-h3"><a href="#hal-register" data-target="hal-register"><code>hal register</code></a></li><li class="toc-h3"><a href="#hal-approve" data-target="hal-approve"><code>hal approve</code></a></li><li class="toc-h3"><a href="#hal-deny" data-target="hal-deny"><code>hal deny</code></a></li><li class="toc-h3"><a href="#hal-revoke" data-target="hal-revoke"><code>hal revoke</code></a></li><li class="toc-h2"><a href="#healthz-kernel-health-check" data-target="healthz-kernel-health-check"><code>healthz</code> — Kernel health check</a></li><li class="toc-h2"><a href="#log-control-runtime-logging" data-target="log-control-runtime-logging"><code>log</code> — Control runtime logging</a></li><li class="toc-h2"><a href="#notifications-manage-the-user-notification-inbox" data-target="notifications-manage-the-user-notification-inbox"><code>notifications</code> — Manage the user notification inbox</a></li><li class="toc-h3"><a href="#notifications-list" data-target="notifications-list"><code>notifications list</code></a></li><li class="toc-h3"><a href="#notifications-read" data-target="notifications-read"><code>notifications read</code></a></li><li class="toc-h3"><a href="#notifications-respond" data-target="notifications-respond"><code>notifications respond</code></a></li><li class="toc-h3"><a href="#notifications-watch" data-target="notifications-watch"><code>notifications watch</code></a></li><li class="toc-h2"><a href="#channel-manage-external-delivery-channels" data-target="channel-manage-external-delivery-channels"><code>channel</code> — Manage external delivery channels</a></li><li class="toc-h3"><a href="#channel-connect" data-target="channel-connect"><code>channel connect</code></a></li><li class="toc-h3"><a href="#channel-list" data-target="channel-list"><code>channel list</code></a></li><li class="toc-h3"><a href="#channel-test" data-target="channel-test"><code>channel test</code></a></li><li class="toc-h3"><a href="#channel-disconnect" data-target="channel-disconnect"><code>channel disconnect</code></a></li><li class="toc-h2"><a href="#mcp-model-context-protocol-integration" data-target="mcp-model-context-protocol-integration"><code>mcp</code> — Model Context Protocol integration</a></li><li class="toc-h3"><a href="#mcp-serve-offline" data-target="mcp-serve-offline"><code>mcp serve</code> (offline)</a></li><li class="toc-h3"><a href="#mcp-list-offline" data-target="mcp-list-offline"><code>mcp list</code> (offline)</a></li><li class="toc-h3"><a href="#mcp-status" data-target="mcp-status"><code>mcp status</code></a></li><li class="toc-h2"><a href="#web-start-the-web-ui-server" data-target="web-start-the-web-ui-server"><code>web</code> — Start the web UI server</a></li><li class="toc-h3"><a href="#web-serve" data-target="web-serve"><code>web serve</code></a></li><li class="toc-h2"><a href="#team-run-and-manage-agent-teams" data-target="team-run-and-manage-agent-teams"><code>team</code> — Run and manage agent teams</a></li><li class="toc-h3"><a href="#team-run" data-target="team-run"><code>team run</code></a></li><li class="toc-h3"><a href="#team-list" data-target="team-list"><code>team list</code></a></li><li class="toc-h2"><a href="#skill-manage-autonomous-skill-packages" data-target="skill-manage-autonomous-skill-packages"><code>skill</code> — Manage autonomous skill packages</a></li><li class="toc-h2"><a href="#mcp-extended-runtime-attach-oauth-a2a-status" data-target="mcp-extended-runtime-attach-oauth-a2a-status"><code>mcp</code> (extended) — runtime attach, OAuth, A2A, status</a></li><li class="toc-h3"><a href="#mcp-attach-flags" data-target="mcp-attach-flags"><code>mcp attach</code> flags</a></li><li class="toc-h3"><a href="#mcp-oauth-store-flags" data-target="mcp-oauth-store-flags"><code>mcp oauth-store</code> flags</a></li><li class="toc-h2"><a href="#a2a-agent-to-agent-protocol" data-target="a2a-agent-to-agent-protocol"><code>a2a</code> — Agent-to-Agent protocol</a></li><li class="toc-h3"><a href="#a2a-delegate-flags" data-target="a2a-delegate-flags"><code>a2a delegate</code> flags</a></li><li class="toc-h2"><a href="#provider-llm-provider-catalog" data-target="provider-llm-provider-catalog"><code>provider</code> — LLM provider catalog</a></li><li class="toc-h2"><a href="#plugin-plugin-lifecycle" data-target="plugin-plugin-lifecycle"><code>plugin</code> — Plugin lifecycle</a></li><li class="toc-h2"><a href="#onboard-interactive-setup-wizard" data-target="onboard-interactive-setup-wizard"><code>onboard</code> — Interactive setup wizard</a></li><li class="toc-h2"><a href="#doctor-diagnose-configuration-issues" data-target="doctor-diagnose-configuration-issues"><code>doctor</code> — Diagnose configuration issues</a></li><li class="toc-h2"><a href="#config-read-and-write-configuration-values" data-target="config-read-and-write-configuration-values"><code>config</code> — Read and write configuration values</a></li><li class="toc-h2"><a href="#init-scaffold-a-new-agentos-project" data-target="init-scaffold-a-new-agentos-project"><code>init</code> — Scaffold a new AgentOS project</a></li><li class="toc-h2"><a href="#workspace-manage-agent-filesystem-access" data-target="workspace-manage-agent-filesystem-access"><code>workspace</code> — Manage agent filesystem access</a></li><li class="toc-h2"><a href="#permission-reference-table" data-target="permission-reference-table">Permission Reference Table</a></li><li class="toc-h2"><a href="#quick-reference-all-command-groups" data-target="quick-reference-all-command-groups">Quick Reference: All Command Groups</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

@@ -174,6 +174,15 @@ pub(crate) enum KernelAction {
         limit: u32,
         state_filter: Option<String>,
     },
+    /// List the calling agent's own schedules (cron / once / timer).
+    ListMySchedules {
+        kinds: Vec<String>,
+        include_inactive: bool,
+    },
+    /// Fetch the recorded output + audit logs for one scheduled run.
+    GetTaskLogs {
+        run_id: String,
+    },
     /// Create a recurring cron schedule.
     CreateSchedule {
         name: String,
@@ -199,9 +208,12 @@ pub(crate) enum KernelAction {
         /// Display name (e.g. "telegram-main") or `ChannelInstanceID` UUID.
         channel: String,
         /// Message body. Markdown is rendered per-platform when supported.
+        /// May be empty when an `attachment` is present.
         text: String,
         /// Optional thread/reply target (platform-specific).
         thread_id: Option<String>,
+        /// Optional media attachment (image/document by URL).
+        attachment: Option<MessageAttachment>,
     },
     AgentInboxList {
         limit: u32,
@@ -405,9 +417,44 @@ impl KernelAction {
             }
             "channel_send" => {
                 let channel = value.get("channel")?.as_str()?;
-                let text = value.get("text")?.as_str()?;
-                if channel.trim().is_empty() || text.is_empty() {
-                    tracing::warn!("Dropping channel_send: channel/text must be non-empty");
+                let text = value
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let str_field = |key: &str| {
+                    value
+                        .get(key)
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                };
+                let image_url = str_field("image_url");
+                let document_url = str_field("document_url");
+                let caption = str_field("caption");
+                let filename = str_field("filename");
+
+                // Build the attachment (image takes priority; mutual exclusion
+                // is enforced in ChannelSendTool::execute).
+                let attachment = match (image_url, document_url) {
+                    (Some(url), _) => Some(MessageAttachment {
+                        url,
+                        kind: AttachmentKind::Image,
+                        filename: filename.clone(),
+                        caption: caption.clone(),
+                    }),
+                    (None, Some(url)) => Some(MessageAttachment {
+                        url,
+                        kind: AttachmentKind::Document,
+                        filename: filename.clone(),
+                        caption: caption.clone(),
+                    }),
+                    (None, None) => None,
+                };
+
+                if channel.trim().is_empty() || (text.is_empty() && attachment.is_none()) {
+                    tracing::warn!(
+                        "Dropping channel_send: channel must be non-empty and a message needs text or an attachment"
+                    );
                     return None;
                 }
                 let thread_id = value
@@ -419,6 +466,7 @@ impl KernelAction {
                     channel: channel.to_string(),
                     text: text.to_string(),
                     thread_id,
+                    attachment,
                 })
             }
             "ask_user" => {
@@ -703,6 +751,29 @@ impl KernelAction {
                     state_filter,
                 })
             }
+            "list_my_schedules" => {
+                let kinds = value
+                    .get("kinds")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let include_inactive = value
+                    .get("include_inactive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                Some(Self::ListMySchedules {
+                    kinds,
+                    include_inactive,
+                })
+            }
+            "get_task_logs" => {
+                let run_id = value.get("run_id")?.as_str()?.to_string();
+                Some(Self::GetTaskLogs { run_id })
+            }
             "create_schedule" => {
                 let name = value.get("name")?.as_str()?.to_string();
                 let cron = value.get("cron")?.as_str()?.to_string();
@@ -804,6 +875,8 @@ impl Kernel {
             KernelAction::CancelOnceJob { .. } => "cancel_once_job",
             KernelAction::ListOnceJobs => "list_once_jobs",
             KernelAction::GetScheduleRuns { .. } => "get_schedule_runs",
+            KernelAction::ListMySchedules { .. } => "list_my_schedules",
+            KernelAction::GetTaskLogs { .. } => "get_task_logs",
             KernelAction::CreateSchedule { .. } => "create_schedule",
             KernelAction::ControlSchedule { .. } => "control_schedule",
             KernelAction::ChannelSend { .. } => "channel_send",
@@ -1444,6 +1517,14 @@ impl Kernel {
                 self.execute_get_schedule_runs(task, schedule_id, limit, state_filter)
                     .await
             }
+            KernelAction::ListMySchedules {
+                kinds,
+                include_inactive,
+            } => {
+                self.execute_list_my_schedules(task, kinds, include_inactive)
+                    .await
+            }
+            KernelAction::GetTaskLogs { run_id } => self.execute_get_task_logs(task, run_id).await,
             KernelAction::CreateSchedule {
                 name,
                 cron,
@@ -1478,8 +1559,9 @@ impl Kernel {
                 channel,
                 text,
                 thread_id,
+                attachment,
             } => {
-                self.execute_channel_send(task, channel, text, thread_id, trace_id)
+                self.execute_channel_send(task, channel, text, thread_id, attachment, trace_id)
                     .await
             }
         };
@@ -2267,6 +2349,7 @@ impl Kernel {
             read: false,
             thread_id: Some(task.id.to_string()),
             reply_to_external_id: None,
+            attachment: None,
         };
 
         let notification_id = msg.id;
@@ -2392,6 +2475,7 @@ impl Kernel {
             read: false,
             thread_id: Some(task.id.to_string()),
             reply_to_external_id: None,
+            attachment: None,
         };
 
         let notification_id = msg.id;
@@ -3751,8 +3835,26 @@ impl Kernel {
             }
         };
 
-        let filtered: Vec<&agentos_types::schedule::ScheduledRun> = match state_filter.as_deref() {
-            Some(s) => runs.iter().filter(|r| r.state.as_str() == s).collect(),
+        // Validate the optional state filter up front so a bad value fails
+        // loudly instead of silently returning an empty list. Accept any case.
+        let state_filter = match state_filter {
+            Some(s) => match agentos_types::schedule::RunState::parse(&s.to_ascii_lowercase()) {
+                Some(rs) => Some(rs),
+                None => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!("Invalid state filter '{}'. Valid values: running, complete, failed, missed.", s),
+                            "error_kind": "invalid_input",
+                        }),
+                    };
+                }
+            },
+            None => None,
+        };
+
+        let filtered: Vec<&agentos_types::schedule::ScheduledRun> = match state_filter {
+            Some(rs) => runs.iter().filter(|r| r.state == rs).collect(),
             None => runs.iter().collect(),
         };
 
@@ -3779,6 +3881,226 @@ impl Kernel {
                 "runs": out,
                 "count": out.len(),
                 "schedule_id": schedule_id.to_string(),
+            }),
+        }
+    }
+
+    /// List the calling agent's own schedules across all three kinds
+    /// (cron / once / timer). Only schedules whose `creator_agent_id` matches
+    /// the caller are returned — operator/CLI-created schedules (creator `None`)
+    /// are never visible to agents. `kinds` optionally narrows by kind; an
+    /// empty list means all. `include_inactive` adds paused/disabled cron jobs
+    /// and fired/cancelled once-jobs (default: active only).
+    async fn execute_list_my_schedules(
+        &self,
+        task: &AgentTask,
+        kinds: Vec<String>,
+        include_inactive: bool,
+    ) -> KernelActionResult {
+        let me = task.agent_id;
+        let want = |k: &str| kinds.is_empty() || kinds.iter().any(|x| x == k);
+        let owned = |c: &Option<AgentID>| *c == Some(me);
+        let mut out: Vec<serde_json::Value> = Vec::new();
+
+        // Cron schedules
+        if want("cron") || want("schedule") {
+            for job in self.schedule_manager.list_jobs().await {
+                if !owned(&job.creator_agent_id) {
+                    continue;
+                }
+                let active = job.state == agentos_types::schedule::ScheduleState::Active;
+                if !active && !include_inactive {
+                    continue;
+                }
+                out.push(serde_json::json!({
+                    "id": job.id.to_string(),
+                    "name": job.name,
+                    "kind": "cron",
+                    "schedule": job.cron_expression,
+                    "timezone": job.timezone,
+                    "state": serde_json::to_value(job.state).unwrap_or(serde_json::Value::Null),
+                    "next_run_at": job.next_run_at.map(|t| t.to_rfc3339()),
+                    "last_run_at": job.last_run_at.map(|t| t.to_rfc3339()),
+                    "run_count": job.run_count,
+                    "delivery": serde_json::to_value(&job.delivery).unwrap_or(serde_json::Value::Null),
+                }));
+            }
+        }
+
+        // One-shot jobs
+        if want("once") {
+            for job in self.schedule_manager.list_once_jobs().await {
+                if !owned(&job.creator_agent_id) {
+                    continue;
+                }
+                let active = job.state == agentos_types::schedule::OnceJobState::Pending;
+                if !active && !include_inactive {
+                    continue;
+                }
+                out.push(serde_json::json!({
+                    "id": job.id.to_string(),
+                    "name": job.name,
+                    "kind": "once",
+                    "fire_at": job.fire_at.to_rfc3339(),
+                    "state": serde_json::to_value(job.state).unwrap_or(serde_json::Value::Null),
+                    "delivery": serde_json::to_value(&job.delivery).unwrap_or(serde_json::Value::Null),
+                }));
+            }
+        }
+
+        // Timers (always pending while listed)
+        if want("timer") {
+            for timer in self.schedule_manager.list_timers().await {
+                if !owned(&timer.creator_agent_id) {
+                    continue;
+                }
+                out.push(serde_json::json!({
+                    "id": timer.id.to_string(),
+                    "name": timer.name,
+                    "kind": "timer",
+                    "fire_at": timer.fire_at.to_rfc3339(),
+                    "state": "pending",
+                    "delivery": serde_json::to_value(&timer.delivery).unwrap_or(serde_json::Value::Null),
+                }));
+            }
+        }
+
+        // Cap the response so a prolific agent's schedule list cannot exhaust
+        // the context window on a single tool result.
+        const MAX_SCHEDULES: usize = 200;
+        let total = out.len();
+        let truncated = total > MAX_SCHEDULES;
+        out.truncate(MAX_SCHEDULES);
+
+        KernelActionResult {
+            success: true,
+            result: serde_json::json!({
+                "schedules": out,
+                "count": out.len(),
+                "total": total,
+                "truncated": truncated,
+            }),
+        }
+    }
+
+    /// Fetch the recorded outcome plus audit-log trail for a single scheduled
+    /// run, identified by its `RunID`. Ownership is enforced via the run's
+    /// denormalised `creator_agent_id`: an agent may only inspect runs of its
+    /// own schedules.
+    async fn execute_get_task_logs(
+        &self,
+        task: &AgentTask,
+        run_id_str: String,
+    ) -> KernelActionResult {
+        let run_id = match run_id_str.parse::<RunID>() {
+            Ok(id) => id,
+            Err(_) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("'{}' is not a valid run_id (expected a UUID)", run_id_str),
+                        "error_kind": "invalid_input",
+                    }),
+                };
+            }
+        };
+
+        let store = match self.schedule_manager.store() {
+            Some(s) => s.clone(),
+            None => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": "Run-history store not configured on this kernel",
+                        "error_kind": "unavailable",
+                    }),
+                };
+            }
+        };
+
+        let run = match store.get_run(run_id).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": format!("Run '{}' not found", run_id_str),
+                        "error_kind": "not_found",
+                    }),
+                };
+            }
+            Err(e) => {
+                return KernelActionResult {
+                    success: false,
+                    result: serde_json::json!({
+                        "error": e.to_string(),
+                        "error_kind": "store_error",
+                    }),
+                };
+            }
+        };
+
+        // Ownership check: only the schedule's creator may read its run logs.
+        if run.creator_agent_id != Some(task.agent_id) {
+            return KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": format!("Permission denied: run '{}' is not owned by the calling agent", run_id_str),
+                    "error_kind": "permission_denied",
+                }),
+            };
+        }
+
+        // Pull the audit-log trail for the backing task, if one was spawned.
+        // The audit query is a synchronous SQLite read, so run it off the async
+        // runtime via spawn_blocking (per the "never block the runtime" rule).
+        let logs: Vec<String> = match run.task_id {
+            Some(tid) => {
+                let audit = self.audit.clone();
+                tokio::task::spawn_blocking(move || {
+                    audit
+                        .query_since_for_task(&tid, 0, 500)
+                        .map(|entries| {
+                            entries
+                                .into_iter()
+                                .map(|(_, e)| {
+                                    format!(
+                                        "[{}] {:?} {}",
+                                        e.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                                        e.event_type,
+                                        e.details
+                                    )
+                                })
+                                .collect::<Vec<String>>()
+                        })
+                        .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default()
+            }
+            None => Vec::new(),
+        };
+        // Direct notify/tool runs have no backing task, hence no audit trail.
+        let logs_note = if run.task_id.is_none() {
+            Some("No backing task for this run (direct notify/tool action) — no audit trail.")
+        } else {
+            None
+        };
+
+        KernelActionResult {
+            success: true,
+            result: serde_json::json!({
+                "run_id": run.run_id.to_string(),
+                "schedule_id": run.parent_id.to_string(),
+                "schedule_name": run.parent_name,
+                "state": run.state.as_str(),
+                "task_id": run.task_id.map(|t| t.to_string()),
+                "started_at": run.started_at.to_rfc3339(),
+                "completed_at": run.completed_at.map(|t| t.to_rfc3339()),
+                "result": run.result,
+                "error": run.error,
+                "logs": logs,
+                "logs_note": logs_note,
             }),
         }
     }
@@ -4122,6 +4444,7 @@ impl Kernel {
         channel: String,
         text: String,
         thread_id: Option<String>,
+        attachment: Option<MessageAttachment>,
         trace_id: TraceID,
     ) -> KernelActionResult {
         use agentos_types::ChannelKind;
@@ -4152,11 +4475,11 @@ impl Kernel {
                 }),
             };
         }
-        if text.is_empty() {
+        if text.is_empty() && attachment.is_none() {
             return KernelActionResult {
                 success: false,
                 result: serde_json::json!({
-                    "error": "channel-send 'text' must be non-empty"
+                    "error": "channel-send requires non-empty 'text' or an attachment"
                 }),
             };
         }
@@ -4242,6 +4565,34 @@ impl Kernel {
         let target_name = target.display_name.clone();
         let target_kind = target.kind.clone();
 
+        // Media attachments are only honored by the Telegram delivery path today.
+        // Fail closed for other kinds rather than reporting a false "delivered"
+        // while silently dropping the attachment.
+        if attachment.is_some() && !matches!(target_kind, ChannelKind::Telegram) {
+            return KernelActionResult {
+                success: false,
+                result: serde_json::json!({
+                    "error": format!(
+                        "Media attachments are currently only supported on Telegram channels, not {}",
+                        target_kind
+                    ),
+                    "channel_id": target_id.to_string(),
+                    "kind": target_kind.to_string(),
+                }),
+            };
+        }
+
+        let max_chars = match &target_kind {
+            ChannelKind::Discord => 2_000,
+            ChannelKind::Slack => 40_000,
+            ChannelKind::WhatsApp => 4_096,
+            ChannelKind::Telegram => 4_096,
+            ChannelKind::Ntfy => 4_096,
+            ChannelKind::Webhook => 100_000,
+            _ => 16_000,
+        };
+        let send_text: String = text.chars().take(max_chars).collect();
+
         // Dispatch by kind. Notification-router-owned kinds wrap the text in a
         // UserMessage and route via deliver_to_channel (single-target). The
         // remaining kinds use the channel_manager outbound path.
@@ -4262,7 +4613,7 @@ impl Kernel {
                     kind: UserMessageKind::Notification,
                     priority: NotificationPriority::Info,
                     subject: subject_line,
-                    body: text.clone(),
+                    body: send_text.clone(),
                     interaction: None,
                     delivery_status: HashMap::new(),
                     response: None,
@@ -4271,6 +4622,7 @@ impl Kernel {
                     read: false,
                     thread_id: thread_id.clone().or_else(|| Some(task.id.to_string())),
                     reply_to_external_id: thread_id.clone(),
+                    attachment: attachment.clone(),
                 };
                 self.notification_router
                     .deliver_to_channel(msg, &target_id.to_string())
@@ -4279,7 +4631,7 @@ impl Kernel {
             _ => {
                 let outbound = agentos_channels::types::OutboundMessage {
                     channel_instance_id: target_id.to_string(),
-                    content: agentos_channels::types::MessageContent::Text(text.clone()),
+                    content: agentos_channels::types::MessageContent::Text(send_text.clone()),
                     thread_id: thread_id.clone(),
                 };
                 self.channel_manager
@@ -4291,7 +4643,7 @@ impl Kernel {
 
         match send_result {
             Ok(()) => {
-                let preview: String = text.chars().take(120).collect();
+                let preview: String = send_text.chars().take(120).collect();
                 self.audit_log(agentos_audit::AuditEntry {
                     timestamp: Utc::now(),
                     trace_id,
@@ -4306,6 +4658,13 @@ impl Kernel {
                         "thread_id": thread_id,
                         "text_preview": preview,
                         "text_len": text.chars().count(),
+                        "sent_text_len": send_text.chars().count(),
+                        "has_attachment": attachment.is_some(),
+                        "attachment_kind": attachment.as_ref().map(|a| match a.kind {
+                            agentos_types::AttachmentKind::Image => "image",
+                            agentos_types::AttachmentKind::Document => "document",
+                        }),
+                        "attachment_url": attachment.as_ref().map(|a| a.url.clone()),
                     }),
                     severity: agentos_audit::AuditSeverity::Info,
                     reversible: false,
@@ -4330,5 +4689,59 @@ impl Kernel {
                 }),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod schedule_visibility_parse_tests {
+    use super::KernelAction;
+
+    #[test]
+    fn parses_list_my_schedules() {
+        let v = serde_json::json!({
+            "_kernel_action": "list_my_schedules",
+            "kinds": ["cron", "once"],
+            "include_inactive": true,
+        });
+        match KernelAction::from_tool_result(&v) {
+            Some(KernelAction::ListMySchedules {
+                kinds,
+                include_inactive,
+            }) => {
+                assert_eq!(kinds, vec!["cron".to_string(), "once".to_string()]);
+                assert!(include_inactive);
+            }
+            other => panic!("expected ListMySchedules, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_my_schedules_defaults() {
+        let v = serde_json::json!({ "_kernel_action": "list_my_schedules" });
+        match KernelAction::from_tool_result(&v) {
+            Some(KernelAction::ListMySchedules {
+                kinds,
+                include_inactive,
+            }) => {
+                assert!(kinds.is_empty());
+                assert!(!include_inactive);
+            }
+            other => panic!("expected ListMySchedules, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_get_task_logs() {
+        let v = serde_json::json!({ "_kernel_action": "get_task_logs", "run_id": "r-1" });
+        match KernelAction::from_tool_result(&v) {
+            Some(KernelAction::GetTaskLogs { run_id }) => assert_eq!(run_id, "r-1"),
+            other => panic!("expected GetTaskLogs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_task_logs_requires_run_id() {
+        let v = serde_json::json!({ "_kernel_action": "get_task_logs" });
+        assert!(KernelAction::from_tool_result(&v).is_none());
     }
 }

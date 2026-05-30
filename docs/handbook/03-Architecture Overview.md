@@ -18,7 +18,7 @@ status: complete
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          agentos (CLI)                             │
-│                     clap-based, 17+ commands                        │
+│                     clap-based, 39 commands                        │
 └──────────────────────────────┬──────────────────────────────────────┘
                                │ Unix Domain Socket (length-prefixed JSON)
                                │
@@ -62,7 +62,7 @@ status: complete
 │ LLM  │ │Tools │ │ Security │ │Memory │ │ Audit  │ │  HAL   │
 │      │ │      │ │          │ │       │ │        │ │        │
 │Ollama│ │file  │ │Capability│ │Episod.│ │SQLite  │ │System  │
-│OpenAI│ │shell │ │  Vault   │ │Semant.│ │85+ evt │ │Process │
+│OpenAI│ │shell │ │  Vault   │ │Semant.│ │146 evt │ │Process │
 │Anthro│ │memory│ │ Sandbox  │ │Proced.│ │  types │ │Network │
 │Gemini│ │data  │ │  WASM    │ │Embedd.│ │        │ │GPU     │
 │Mock  │ │coord │ │          │ │       │ │        │ │Storage │
@@ -74,7 +74,7 @@ status: complete
 
 ## Crate Dependency Graph
 
-The 18 crates form a layered dependency tree. Dependencies flow downward — no circular dependencies.
+The 28 crates form a layered dependency tree. Dependencies flow downward — no circular dependencies.
 
 ```
 agentos-cli
@@ -442,7 +442,7 @@ All file tools reject any path containing `..` — this is a hard-coded security
 
 ### Audit trail
 
-Every security-relevant operation is logged to the append-only SQLite audit log (`agentos-audit`), which supports 85+ event types. The log cannot be modified or deleted through normal operation.
+Every security-relevant operation is logged to the append-only SQLite audit log (`agentos-audit`), which supports 146 event types. The log cannot be modified or deleted through normal operation.
 
 ---
 

@@ -6,7 +6,7 @@ impl Kernel {
     /// Parse a permission string like `"fs.data:rwq"` into individual op flags.
     ///
     /// Supported flag characters: r=Read, w=Write, x=Execute, q=Query, o=Observe.
-    pub(crate) fn parse_permission(perm: &str) -> Option<(String, bool, bool, bool, bool, bool)> {
+    pub fn parse_permission(perm: &str) -> Option<(String, bool, bool, bool, bool, bool)> {
         let parts: Vec<&str> = perm.splitn(2, ':').collect();
         if parts.len() != 2 {
             return None;

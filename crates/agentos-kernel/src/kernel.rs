@@ -639,6 +639,10 @@ pub struct Kernel {
     pub active_llms: Arc<RwLock<HashMap<AgentID, Arc<dyn LLMCore>>>>,
     /// Resolves chat `ImageSource::FileRef` to base64; replaced by the web UI with a file-store implementation.
     pub image_resolver: std::sync::RwLock<Arc<dyn agentos_llm::ImageResolver>>,
+    /// Persists inbound channel media (Telegram photos/docs/voice). Replaced by
+    /// the web UI with a FileStore-backed sink. `Arc`-wrapped so the InboundRouter
+    /// shares the same slot and sees a post-boot `set_attachment_sink`.
+    pub attachment_sink: Arc<std::sync::RwLock<Arc<dyn crate::attachment_sink::AttachmentSink>>>,
     pub message_bus: Arc<crate::agent_message_bus::AgentMessageBus>,
     pub profile_manager: Arc<ProfileManager>,
     pub episodic_memory: Arc<agentos_memory::EpisodicStore>,
@@ -738,6 +742,10 @@ pub struct Kernel {
         tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::webhook_batcher::BatchReady>>>,
     >,
     pub status_update_sender: tokio::sync::broadcast::Sender<agentos_bus::StatusUpdate>,
+    /// Lossy broadcast of coarse realtime events for WS/SSE fan-out to the control
+    /// panel. Fed from `process_event` (every kernel event), consumed by the API's
+    /// `WsBroadcaster::start_realtime_relay`. Capacity-bounded; old events evicted.
+    pub realtime_event_sender: tokio::sync::broadcast::Sender<agentos_types::RealtimeEvent>,
     /// Task-scoped subscriptions that should be removed when a task reaches terminal state.
     pub(crate) task_scoped_subscriptions: Arc<RwLock<HashMap<TaskID, Vec<SubscriptionID>>>>,
     pub(crate) event_sender: tokio::sync::mpsc::Sender<agentos_types::EventMessage>,
@@ -943,6 +951,26 @@ pub fn resolve_boot_vault_passphrase(
         }
     }
 
+    // Docker/K8s secret-mount sourcing: AGENTOS_VAULT_PASSPHRASE_FILE points at
+    // a file (e.g. /run/secrets/vault_pass) whose contents are the passphrase,
+    // so the secret never needs to live in the process environment. Read at
+    // boot, trailing whitespace trimmed, held in ZeroizingString.
+    if let Ok(passphrase_file) = std::env::var("AGENTOS_VAULT_PASSPHRASE_FILE") {
+        if !passphrase_file.trim().is_empty() {
+            let contents = std::fs::read_to_string(&passphrase_file).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to read AGENTOS_VAULT_PASSPHRASE_FILE ({passphrase_file}): {e}"
+                )
+            })?;
+            let passphrase = contents.trim().to_string();
+            anyhow::ensure!(
+                !passphrase.is_empty(),
+                "AGENTOS_VAULT_PASSPHRASE_FILE ({passphrase_file}) is empty"
+            );
+            return Ok(Some(ZeroizingString::new(passphrase)));
+        }
+    }
+
     let vault_path = Path::new(&config.secrets.vault_path);
     let passphrase_path = vault_passphrase_path(vault_path);
 
@@ -1088,6 +1116,11 @@ impl Kernel {
         &self.data_dir
     }
 
+    /// Canonical path to the config file this kernel was booted from.
+    pub fn config_path(&self) -> &std::path::Path {
+        &self.config_path
+    }
+
     /// Drop the dedup cache for a chat session. Call when the session is
     /// deleted from `chat_store` so the kernel doesn't leak memory keyed by a
     /// session id no caller can reach again.
@@ -1137,7 +1170,7 @@ impl Kernel {
     /// `read().await` or a synchronous `try_read()` without lifetime gymnastics.
     /// Mirrors how `refresh_connected_channels_snapshot` materializes
     /// `ConnectedChannel` records out of `UserChannelRegistry`.
-    fn build_skill_snapshot(
+    pub(crate) fn build_skill_snapshot(
         registry: &agentos_skills::SkillRegistry,
     ) -> Vec<agentos_tools::agent_manual::SkillSummary> {
         // `list()` returns only manifests; iterate the names so we can pull the
@@ -1235,9 +1268,23 @@ impl Kernel {
                         "Restored channel from registry"
                     );
                 }
-                Ok(None) => {
-                    tracing::debug!(channel_id = %ch.id, kind = %ch.kind, "No adapter for restored channel");
-                }
+                Ok(None) => match self.register_channel_manager_adapter(&ch.id).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            channel_id = %ch.id,
+                            kind = %ch.kind,
+                            "Restored channel-manager adapter from registry"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            channel_id = %ch.id,
+                            kind = %ch.kind,
+                            error = %e,
+                            "Failed to restore channel-manager adapter"
+                        );
+                    }
+                },
                 Err(e) => {
                     tracing::warn!(
                         channel_id = %ch.id,
@@ -1256,6 +1303,17 @@ impl Kernel {
             .image_resolver
             .write()
             .expect("image_resolver lock poisoned") = resolver;
+    }
+
+    /// Install the sink used to persist inbound channel media (web `FileStore`).
+    /// The InboundRouter shares this slot, so the change is visible to it.
+    pub fn set_attachment_sink(&self, sink: Arc<dyn crate::attachment_sink::AttachmentSink>) {
+        // Tolerate poisoning to match the InboundRouter reader; the critical
+        // section is panic-free so a poisoned lock is practically impossible.
+        *self
+            .attachment_sink
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = sink;
     }
 
     fn merge_chat_user_parts(
@@ -1411,6 +1469,13 @@ impl Kernel {
     /// injects the result back into the context window, and re-infers until the LLM
     /// produces a final natural-language answer. Cap is `chat.max_tool_iterations`
     /// (default 25) — `CHAT_MAX_TOOL_ITERATIONS_FALLBACK` is used when config is 0.
+    ///
+    /// When `user_parts` is `Some(non-empty)`, those parts become the user
+    /// turn's content verbatim and `new_message` is used ONLY for history
+    /// persistence — callers must therefore pass the same text in `new_message`
+    /// as in the leading `ContentPart::Text` of `user_parts` (see
+    /// `merge_chat_user_parts`). When `user_parts` is `None`, `new_message`
+    /// becomes the single text part.
     pub async fn chat_infer_with_tools(
         &self,
         agent_name: &str,
@@ -3663,6 +3728,44 @@ impl Kernel {
         let installed_skills_shared: agentos_tools::agent_manual::SharedInstalledSkills =
             std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
+        // Build skill registry, loading from configured skill directories.
+        // Done here (before tool runner registration) so the `skill-create`
+        // tool can be wired up with a live installer reference.
+        let skill_registry = {
+            let mut sr = agentos_skills::SkillRegistry::new();
+            let core_skills_dir = Path::new(&config.skills.core_skills_dir);
+            let user_skills_dir = Path::new(&config.skills.user_skills_dir);
+            match sr.load_from_dir(core_skills_dir) {
+                Ok(n) if n > 0 => {
+                    tracing::info!(count = n, dir = %core_skills_dir.display(), "Loaded core skills")
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, dir = %core_skills_dir.display(), "Failed to scan core skills directory")
+                }
+            }
+            match sr.load_from_dir(user_skills_dir) {
+                Ok(n) if n > 0 => {
+                    tracing::info!(count = n, dir = %user_skills_dir.display(), "Loaded user skills")
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, dir = %user_skills_dir.display(), "Failed to scan user skills directory")
+                }
+            }
+            Arc::new(RwLock::new(sr))
+        };
+
+        // Hydrate the live skills snapshot now that the registry is loaded.
+        // Subsequent install/remove paths refresh via
+        // `refresh_installed_skills_snapshot`.
+        {
+            let sr = skill_registry.read().await;
+            let snapshot = Self::build_skill_snapshot(&sr);
+            let mut guard = installed_skills_shared.write().await;
+            *guard = snapshot;
+        }
+
         {
             // Collect tool names before registering agent-self so the list
             // includes every other tool but not agent-self itself (which is
@@ -3678,6 +3781,20 @@ impl Kernel {
             tool_runner.register_describe_tool(std::sync::Arc::clone(&tool_summaries_shared));
             tool_runner.register_search_tools(std::sync::Arc::clone(&tool_summaries_shared));
             tool_runner.register_skill_prompt(std::sync::Arc::clone(&installed_skills_shared));
+            // `skill-create` writes the manifest + prompt under
+            // `config.skills.user_skills_dir` and asks the kernel installer
+            // to load it. The approval hook enforces `risk_class =
+            // control_plane` from `tools/core/skill-create.toml`.
+            let skill_installer: std::sync::Arc<dyn agentos_tools::SkillInstaller> =
+                std::sync::Arc::new(crate::skill_installer::KernelSkillInstaller::new(
+                    std::sync::Arc::clone(&skill_registry),
+                    std::sync::Arc::clone(&installed_skills_shared),
+                ));
+            tool_runner.register_skill_create(
+                std::path::PathBuf::from(&config.skills.user_skills_dir),
+                skill_installer,
+                std::sync::Arc::clone(&installed_skills_shared),
+            );
             tool_runner.register_agent_self(tool_count);
         }
 
@@ -4513,6 +4630,11 @@ impl Kernel {
         let (status_update_sender, _status_update_receiver_placeholder) =
             tokio::sync::broadcast::channel::<agentos_bus::StatusUpdate>(256);
 
+        // Lossy broadcast of coarse realtime events for the control panel's
+        // WebSocket/SSE layer. Capacity 512 — old events evicted when receivers lag.
+        let (realtime_event_sender, _realtime_event_receiver_placeholder) =
+            tokio::sync::broadcast::channel::<agentos_types::RealtimeEvent>(512);
+
         // Initialise the Unified Notification and Interaction System (UNIS).
         let agent_inbox = Arc::new(
             crate::agent_inbox::AgentInbox::new(
@@ -4602,42 +4724,6 @@ impl Kernel {
             tokio::sync::mpsc::channel::<crate::notification_router::InboundMessage>(512);
         // InboundRouter is spawned in `wire_inbound_chat_bridge` (after Arc::new(kernel))
         // so the bridge is guaranteed to be wired before the first inbound message is processed.
-
-        // Build skill registry, loading from configured skill directories.
-        let skill_registry = {
-            let mut sr = agentos_skills::SkillRegistry::new();
-            let core_skills_dir = Path::new(&config.skills.core_skills_dir);
-            let user_skills_dir = Path::new(&config.skills.user_skills_dir);
-            match sr.load_from_dir(core_skills_dir) {
-                Ok(n) if n > 0 => {
-                    tracing::info!(count = n, dir = %core_skills_dir.display(), "Loaded core skills")
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, dir = %core_skills_dir.display(), "Failed to scan core skills directory")
-                }
-            }
-            match sr.load_from_dir(user_skills_dir) {
-                Ok(n) if n > 0 => {
-                    tracing::info!(count = n, dir = %user_skills_dir.display(), "Loaded user skills")
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, dir = %user_skills_dir.display(), "Failed to scan user skills directory")
-                }
-            }
-            Arc::new(RwLock::new(sr))
-        };
-
-        // Hydrate the live skills snapshot now that the registry is loaded.
-        // Subsequent install/remove paths refresh via
-        // `refresh_installed_skills_snapshot`.
-        {
-            let sr = skill_registry.read().await;
-            let snapshot = Self::build_skill_snapshot(&sr);
-            let mut guard = installed_skills_shared.write().await;
-            *guard = snapshot;
-        }
 
         // Initialize ChannelManager for bidirectional adapter management.
         let (channel_manager_inbound_tx, channel_manager_inbound_rx) =
@@ -4729,6 +4815,9 @@ impl Kernel {
             router,
             active_llms,
             image_resolver: std::sync::RwLock::new(Arc::new(NoopImageResolver)),
+            attachment_sink: Arc::new(std::sync::RwLock::new(Arc::new(
+                crate::attachment_sink::NoopAttachmentSink,
+            ))),
             message_bus,
             profile_manager,
             episodic_memory,
@@ -4790,6 +4879,7 @@ impl Kernel {
             webhook_batcher,
             webhook_batch_rx: Arc::new(tokio::sync::Mutex::new(Some(webhook_batch_rx))),
             status_update_sender,
+            realtime_event_sender,
             task_scoped_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             event_sender,
             event_receiver: Arc::new(tokio::sync::Mutex::new(event_receiver)),
@@ -4868,6 +4958,7 @@ impl Kernel {
             // warning, not a hard crash.
             let workspaces_db =
                 std::path::PathBuf::from(&kernel.config.tools.data_dir).join("workspaces.db");
+            let data_dir_for_drift = std::path::PathBuf::from(&kernel.config.tools.data_dir);
             let env_provider = match crate::workspace_store::WorkspaceStore::open(workspaces_db)
                 .await
             {
@@ -4879,7 +4970,12 @@ impl Kernel {
                     )
                     .await
                     {
-                        Ok(p) => Arc::new(p),
+                        Ok(p) => {
+                            // Best-effort warn-only reconciliation between
+                            // workspaces.db and on-disk workspace directories.
+                            p.warn_on_disk_drift(&data_dir_for_drift).await;
+                            Arc::new(p)
+                        }
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to load workspaces from DB; starting with empty in-memory state");
                             Arc::new(crate::managed_env::EnvProvider::from_config(
@@ -5102,6 +5198,9 @@ impl Kernel {
                     self.audit.clone(),
                     self.escalation_manager.clone(),
                     self.pairing_manager.clone(),
+                    self.vault.clone(),
+                    self.attachment_sink.clone(),
+                    self.config.transcription.clone(),
                     rx,
                 )
                 .run(),
@@ -5471,11 +5570,25 @@ fn preflight_checks(config: &KernelConfig) -> Result<(), anyhow::Error> {
     // 2. Writability checks for database parent directories
     if config.preflight.check_db_writable {
         let state_db_path = resolve_state_db_path(&config.kernel.state_db_path, data_dir);
-        let writable_paths = vec![
+        let mut writable_paths = vec![
             ("audit", PathBuf::from(&config.audit.log_path)),
             ("vault", PathBuf::from(&config.secrets.vault_path)),
             ("state", state_db_path),
+            // Bus socket runtime dir (e.g. /run/agentos on systemd); the loop
+            // probes the socket path's parent directory.
+            ("bus", PathBuf::from(&config.bus.socket_path)),
         ];
+        // Log directory (Phase 02 writes JSON logs here). Skip when file logging
+        // is disabled (log_dir = ""), so we never probe the process CWD. The
+        // sentinel child makes the loop's `.parent()` resolve to the log dir.
+        // The dir is normally created by the binary's logging init before boot;
+        // this probe is defense-in-depth and no-ops if it does not exist yet.
+        if !config.logging.log_dir.is_empty() {
+            writable_paths.push((
+                "logs",
+                PathBuf::from(&config.logging.log_dir).join(".agentos_logdir_probe"),
+            ));
+        }
 
         for (label, path) in writable_paths {
             if let Some(parent) = path.parent() {
@@ -5705,6 +5818,9 @@ mod preflight_tests {
             chat: Default::default(),
             user_adaptation: Default::default(),
             env: Default::default(),
+            gateway: Default::default(),
+            scheduler: Default::default(),
+            transcription: Default::default(),
         }
     }
 
@@ -5807,6 +5923,78 @@ mod preflight_tests {
             msg
         );
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn preflight_log_dir_not_writable_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Skip if running as root (root bypasses permission checks).
+        let is_root = std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "0");
+        if is_root {
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        // audit + vault live in a writable dir so the failure is specifically
+        // the new log-directory probe, not an earlier one.
+        let audit_path = dir.path().join("audit.db").to_string_lossy().into_owned();
+        let vault_path = dir.path().join("vault.db").to_string_lossy().into_owned();
+        let readonly_logs = dir.path().join("logs_ro");
+        std::fs::create_dir(&readonly_logs).unwrap();
+        std::fs::set_permissions(&readonly_logs, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let mut config = make_test_config(
+            dir.path().to_str().unwrap(),
+            &audit_path,
+            &vault_path,
+            0,
+            true,
+        );
+        config.logging.log_dir = readonly_logs.to_string_lossy().into_owned();
+
+        let result = preflight_checks(&config);
+        // Restore permissions so tempdir cleanup succeeds.
+        let _ = std::fs::set_permissions(&readonly_logs, std::fs::Permissions::from_mode(0o755));
+
+        let msg = match result {
+            Ok(()) => panic!("Expected pre-flight to fail on a read-only log directory"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            msg.contains("logs") && msg.contains("not writable"),
+            "Error should mention the log dir is not writable: {msg}"
+        );
+    }
+
+    #[test]
+    fn preflight_all_dirs_writable_passes() {
+        let dir = tempdir().unwrap();
+        let audit_path = dir.path().join("audit.db").to_string_lossy().into_owned();
+        let vault_path = dir.path().join("vault.db").to_string_lossy().into_owned();
+        let mut config = make_test_config(
+            dir.path().to_str().unwrap(),
+            &audit_path,
+            &vault_path,
+            0,
+            true,
+        );
+        // Point the new logs + bus probes at the writable tempdir.
+        config.logging.log_dir = dir.path().to_string_lossy().into_owned();
+        config.bus.socket_path = dir
+            .path()
+            .join("agentos.sock")
+            .to_string_lossy()
+            .into_owned();
+
+        assert!(
+            preflight_checks(&config).is_ok(),
+            "Pre-flight should pass when every probed directory is writable"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -5885,6 +6073,9 @@ mod vault_bootstrap_tests {
             chat: Default::default(),
             user_adaptation: Default::default(),
             env: Default::default(),
+            gateway: Default::default(),
+            scheduler: Default::default(),
+            transcription: Default::default(),
         }
     }
 

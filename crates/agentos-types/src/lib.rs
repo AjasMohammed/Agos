@@ -43,7 +43,8 @@ pub use context::{
 pub use error::AgentOSError;
 pub use event::{
     EventCategory, EventMessage, EventSeverity, EventSource, EventSubscription, EventType,
-    EventTypeFilter, RawUsbDeviceOpened, RawUsbTransfer, SubscriptionPriority, ThrottlePolicy,
+    EventTypeFilter, RawUsbDeviceOpened, RawUsbTransfer, RealtimeEvent, SubscriptionPriority,
+    ThrottlePolicy,
 };
 pub use fallback::{apply_transforms, TransformOp};
 pub use hook::{HookEvent, HookResult};
@@ -55,8 +56,9 @@ pub use intent::{
     SubscriptionDuration, UnsubscribePayload,
 };
 pub use notification::{
-    DeliveryChannel, DeliveryStatus, InteractionRequest, NotificationPriority, NotificationSource,
-    TaskOutcome, UserMessage, UserMessageKind, UserResponse,
+    AttachmentKind, DeliveryChannel, DeliveryStatus, InteractionRequest, MessageAttachment,
+    NotificationPriority, NotificationSource, TaskOutcome, UserMessage, UserMessageKind,
+    UserResponse,
 };
 pub use plugin::{ChannelDeclaration, PluginManifest};
 pub use registry_query::{

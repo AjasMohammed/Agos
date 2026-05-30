@@ -25,6 +25,12 @@ pub enum AgentOSError {
     #[error("Kernel is shutting down")]
     KernelShutdown,
 
+    #[error("MCP catalog parse error: {0}")]
+    CatalogParse(String),
+
+    #[error("MCP catalog entry not found: {0}")]
+    CatalogEntryNotFound(String),
+
     #[error("Kernel error: {reason}")]
     KernelError { reason: String },
 
@@ -166,6 +172,8 @@ impl AgentOSError {
             Self::BudgetExceeded { .. } => "BudgetExceeded",
             Self::RateLimited { .. } => "RateLimited",
             Self::KernelShutdown => "KernelShutdown",
+            Self::CatalogParse(_) => "CatalogParse",
+            Self::CatalogEntryNotFound(_) => "CatalogEntryNotFound",
             Self::KernelError { .. } => "KernelError",
             Self::PermissionDenied { .. } => "PermissionDenied",
             Self::InvalidToken { .. } => "InvalidToken",

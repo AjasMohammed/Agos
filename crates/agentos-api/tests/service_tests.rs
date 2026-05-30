@@ -99,6 +99,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             extraction: Default::default(),
             consolidation: Default::default(),
             context: Default::default(),
+            disable_embedder: true,
         },
         context_budget: Default::default(),
         context: Default::default(),
@@ -116,6 +117,9 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         chat: Default::default(),
         user_adaptation: Default::default(),
         env: Default::default(),
+        gateway: Default::default(),
+        scheduler: Default::default(),
+        transcription: Default::default(),
     }
 }
 
@@ -432,4 +436,275 @@ fn test_audit_filter_default_all_none() {
     assert!(f.severity.is_none());
     assert!(f.from.is_none());
     assert!(f.to.is_none());
+}
+
+// ── Control-plane auth (Phase 01) ──────────────────────────────────────────
+
+/// Boot a kernel with `[api] operator_token` set, for login-credential tests.
+async fn boot_kernel_with_operator_token(token: &str) -> (Arc<Kernel>, tempfile::TempDir) {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let mut config = create_test_config(&temp_dir);
+    config.api.operator_token = Some(token.to_string());
+    let config_path = temp_dir.path().join("config.toml");
+    std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+
+    std::fs::create_dir_all(temp_dir.path().join("data")).unwrap();
+    std::fs::create_dir_all(temp_dir.path().join("vault")).unwrap();
+    std::fs::create_dir_all(temp_dir.path().join("tools/core")).unwrap();
+    std::fs::create_dir_all(temp_dir.path().join("tools/user")).unwrap();
+
+    let kernel = Arc::new(
+        Kernel::boot(
+            &config_path,
+            &ZeroizingString::new("test-passphrase".to_string()),
+        )
+        .await
+        .unwrap(),
+    );
+    (kernel, temp_dir)
+}
+
+/// With no `operator_token` configured, login is disabled (`NotConfigured`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn verify_operator_credential_not_configured_by_default() {
+    let (kernel, _td) = boot_test_kernel().await;
+    assert_eq!(
+        kernel.verify_operator_credential("anything").await,
+        agentos_api::service::CredentialCheck::NotConfigured
+    );
+}
+
+/// A configured operator token accepts the exact credential and rejects others.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn verify_operator_credential_valid_and_invalid() {
+    use agentos_api::service::CredentialCheck;
+    let (kernel, _td) = boot_kernel_with_operator_token("s3cret-operator-token").await;
+    assert_eq!(
+        kernel
+            .verify_operator_credential("s3cret-operator-token")
+            .await,
+        CredentialCheck::Valid
+    );
+    assert_eq!(
+        kernel.verify_operator_credential("wrong").await,
+        CredentialCheck::Invalid
+    );
+    assert_eq!(
+        kernel.verify_operator_credential("").await,
+        CredentialCheck::Invalid
+    );
+}
+
+// ── HTTP-level integration: drive the real `build_router` end-to-end ────────
+
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::{Method, Request, StatusCode};
+use tower::ServiceExt;
+
+/// Build the production router around a real kernel + a fresh in-memory key store.
+fn auth_router(kernel: &Arc<Kernel>, cors: Vec<String>, refresh: bool) -> axum::Router {
+    let svc: Arc<dyn agentos_api::KernelService> = kernel.clone();
+    let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+    agentos_api::build_router(
+        svc,
+        agentos_api::ApiKeyStore::new(),
+        agentos_api::ws::broadcaster::WsBroadcaster::new(),
+        addr,
+        true,
+        cors,
+        refresh,
+    )
+    .expect("router builds")
+}
+
+/// Send a request through the router. Injects `ConnectInfo` so the rate-limit
+/// governor's peer-IP key extractor works under `oneshot` (no real connection).
+async fn send(
+    app: &axum::Router,
+    method: Method,
+    uri: &str,
+    bearer: Option<&str>,
+    body: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(b) = bearer {
+        builder = builder.header("authorization", format!("Bearer {b}"));
+    }
+    let req = match body {
+        Some(json) => builder
+            .header("content-type", "application/json")
+            .body(Body::from(json.to_owned()))
+            .unwrap(),
+        None => builder.body(Body::empty()).unwrap(),
+    };
+    let mut req = req;
+    req.extensions_mut().insert(ConnectInfo(
+        "127.0.0.1:40000".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, json)
+}
+
+/// Full operator-login → use key → create/list/revoke key lifecycle over HTTP.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn http_auth_login_keys_lifecycle() {
+    let (kernel, _td) = boot_kernel_with_operator_token("op-token").await;
+    let app = auth_router(&kernel, vec!["http://localhost:5173".to_string()], true);
+
+    // Wrong credential → 401.
+    let (s, _) = send(
+        &app,
+        Method::POST,
+        "/api/v1/auth/login",
+        None,
+        Some(r#"{"credential":"nope"}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // Correct credential → 200 with a one-time key.
+    let (s, body) = send(
+        &app,
+        Method::POST,
+        "/api/v1/auth/login",
+        None,
+        Some(r#"{"credential":"op-token"}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let op_key = body["data"]["api_key"].as_str().unwrap().to_string();
+    assert!(op_key.starts_with("agos_"));
+    assert_eq!(body["data"]["scopes"][0], "*:rw");
+
+    // The minted key authenticates a protected route.
+    let (s, me) = send(&app, Method::GET, "/api/v1/auth/me", Some(&op_key), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(me["data"]["scopes"][0], "*:rw");
+
+    // Create a scoped key.
+    let (s, body) = send(
+        &app,
+        Method::POST,
+        "/api/v1/keys",
+        Some(&op_key),
+        Some(r#"{"name":"ci","scopes":["agents:r"]}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let new_id = body["data"]["key_id"].as_str().unwrap().to_string();
+    let new_key = body["data"]["api_key"].as_str().unwrap().to_string();
+
+    // List shows metadata by id but never the raw key material.
+    let (s, list) = send(&app, Method::GET, "/api/v1/keys", Some(&op_key), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let list_str = serde_json::to_string(&list).unwrap();
+    assert!(
+        list_str.contains(&new_id),
+        "list should reference the key id"
+    );
+    assert!(
+        !list_str.contains(&new_key),
+        "list must never leak raw key material"
+    );
+
+    // The new key works until revoked, then is rejected.
+    let (s, _) = send(&app, Method::GET, "/api/v1/auth/me", Some(&new_key), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send(
+        &app,
+        Method::DELETE,
+        &format!("/api/v1/keys/{new_id}"),
+        Some(&op_key),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send(&app, Method::GET, "/api/v1/auth/me", Some(&new_key), None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+/// Login is disabled (503) when no operator token is configured.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn http_login_disabled_without_operator_token() {
+    let (kernel, _td) = boot_test_kernel().await;
+    let app = auth_router(&kernel, vec![], false);
+    let (s, _) = send(
+        &app,
+        Method::POST,
+        "/api/v1/auth/login",
+        None,
+        Some(r#"{"credential":"anything"}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Unauthenticated access to a protected route is rejected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn http_protected_route_requires_bearer() {
+    let (kernel, _td) = boot_test_kernel().await;
+    let app = auth_router(&kernel, vec![], false);
+    let (s, _) = send(&app, Method::GET, "/api/v1/keys", None, None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+/// `POST /auth/refresh` is absent (404) when `[api] refresh_enabled` is false.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn http_refresh_absent_when_disabled() {
+    let (kernel, _td) = boot_kernel_with_operator_token("op-token").await;
+    let app = auth_router(&kernel, vec![], false);
+    // Log in first to get a valid key, then attempt refresh.
+    let (_, body) = send(
+        &app,
+        Method::POST,
+        "/api/v1/auth/login",
+        None,
+        Some(r#"{"credential":"op-token"}"#),
+    )
+    .await;
+    let key = body["data"]["api_key"].as_str().unwrap().to_string();
+    let (s, _) = send(&app, Method::POST, "/api/v1/auth/refresh", Some(&key), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+/// A CORS preflight from an allowed origin is reflected in the response headers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn http_cors_preflight_allows_configured_origin() {
+    let (kernel, _td) = boot_test_kernel().await;
+    let app = auth_router(&kernel, vec!["http://localhost:5173".to_string()], false);
+    let mut req = Request::builder()
+        .method(Method::OPTIONS)
+        .uri("/api/v1/agents")
+        .header("origin", "http://localhost:5173")
+        .header("access-control-request-method", "GET")
+        .header("access-control-request-headers", "authorization")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(ConnectInfo(
+        "127.0.0.1:40000".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let resp = app.oneshot(req).await.unwrap();
+    let allow_origin = resp
+        .headers()
+        .get("access-control-allow-origin")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(allow_origin, "http://localhost:5173");
 }

@@ -53,6 +53,12 @@ impl WebServer {
             };
         kernel.set_image_resolver(resolver);
 
+        // Persist inbound channel media (Telegram photos/docs/voice) into the
+        // same FileStore so downloaded attachments get a resolvable file id.
+        kernel.set_attachment_sink(Arc::new(
+            crate::handlers::files::FileStoreAttachmentSink::new(Arc::clone(&file_store)),
+        ));
+
         // Create the notification broadcast channel and register the SSE adapter
         // with the kernel's NotificationRouter so it receives real-time pushes.
         let (notification_tx, _) = tokio::sync::broadcast::channel(256);

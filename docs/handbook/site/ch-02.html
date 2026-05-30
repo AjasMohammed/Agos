@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Installation and First Run · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a><div class="nav-subs"><a class="nav-sub" href="#prerequisites" data-target="prerequisites">Prerequisites</a><a class="nav-sub" href="#building-from-source" data-target="building-from-source">Building from Source</a><a class="nav-sub" href="#development-configuration" data-target="development-configuration">Development Configuration</a><a class="nav-sub" href="#production-configuration" data-target="production-configuration">Production Configuration</a><a class="nav-sub" href="#starting-the-kernel" data-target="starting-the-kernel">Starting the Kernel</a><a class="nav-sub" href="#connecting-your-first-agent" data-target="connecting-your-first-agent">Connecting Your First Agent</a><a class="nav-sub" href="#running-your-first-task" data-target="running-your-first-task">Running Your First Task</a><a class="nav-sub" href="#quick-example-session" data-target="quick-example-session">Quick Example Session</a><a class="nav-sub" href="#migration-from-development-to-production" data-target="migration-from-development-to-production">Migration from Development to Production</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 02 · Installation and First Run</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 02</div><h1 class="ch-title">Installation and First Run</h1><p class="ch-summary">Prerequisites, building from source, configuration, first kernel boot</p></div>
+    <article class="prose"><h1 id="installation-and-first-run" class="anchored"><a class="hanchor" href="#installation-and-first-run" aria-label="link">#</a>Installation and First Run</h1>
+<blockquote><p>Build AgentOS from source, configure the kernel, connect your first LLM agent, and run your first task.</p></blockquote>
+<hr>
+<h2 id="prerequisites" class="anchored"><a class="hanchor" href="#prerequisites" aria-label="link">#</a>Prerequisites</h2>
+<div class="table-wrap"><table><thead><tr><th>Requirement</th><th>Version</th><th>Notes</th></tr></thead><tbody><tr><td><strong>Rust</strong></td><td>stable (latest) — install via rustup</td><td>Edition 2021. Pinned via <code>rust-toolchain.toml</code> (<code>channel = &quot;stable&quot;</code>)</td></tr><tr><td><strong>Cargo</strong></td><td>(bundled with Rust)</td><td>Workspace resolver v2</td></tr><tr><td><strong>Linux</strong></td><td>x86_64</td><td>Required for seccomp sandboxing. Other platforms build but skip sandbox features</td></tr><tr><td><strong>SQLite</strong></td><td>(bundled)</td><td><code>rusqlite</code> compiles SQLite from source via the <code>bundled</code> feature</td></tr><tr><td><strong>Ollama</strong></td><td>(optional)</td><td>Local LLM inference at <code>http://localhost:11434</code>. Install from <a href="https://ollama.ai/" target="_blank" rel="noopener">ollama.ai</a></td></tr><tr><td><strong>API Keys</strong></td><td>(optional)</td><td>OpenAI, Anthropic, or Google Gemini keys for cloud LLM providers</td></tr></tbody></table></div>
+<hr>
+<h2 id="building-from-source" class="anchored"><a class="hanchor" href="#building-from-source" aria-label="link">#</a>Building from Source</h2>
+<p>Clone the repository and build the entire workspace:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Clone</span>
+git<span class="w"> </span>clone<span class="w"> </span>https://github.com/agentos/agentos.git
+<span class="nb">cd</span><span class="w"> </span>agentos
+
+<span class="c1"># Build all 28 workspace crates (debug mode)</span>
+cargo<span class="w"> </span>build<span class="w"> </span>--workspace
+
+<span class="c1"># Run all tests</span>
+cargo<span class="w"> </span><span class="nb">test</span><span class="w"> </span>--workspace
+
+<span class="c1"># Release build (optimized)</span>
+cargo<span class="w"> </span>build<span class="w"> </span>--workspace<span class="w"> </span>--release
+</pre></div>
+</div>
+<p>The CLI binary is at <code>target/debug/agentos</code> (or <code>target/release/agentos</code> for release builds).</p>
+<div class="callout callout-tip"><div class="callout-title">Lint and Format</div><p>CI enforces these checks. Run them locally before committing:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>cargo<span class="w"> </span>clippy<span class="w"> </span>--workspace<span class="w"> </span>--<span class="w"> </span>-D<span class="w"> </span>warnings
+cargo<span class="w"> </span>fmt<span class="w"> </span>--all<span class="w"> </span>--<span class="w"> </span>--check
+</pre></div>
+</div></div>
+<hr>
+<h2 id="development-configuration" class="anchored"><a class="hanchor" href="#development-configuration" aria-label="link">#</a>Development Configuration</h2>
+<p>The default development configuration lives at <code>config/default.toml</code>. All paths use <code>/tmp/agentos/</code> for easy cleanup.</p>
+<h3 id="kernel-core-kernel-settings" class="anchored"><a class="hanchor" href="#kernel-core-kernel-settings" aria-label="link">#</a><code>[kernel]</code> — Core kernel settings</h3>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>max_concurrent_tasks</code></td><td><code>4</code></td><td>Maximum agent tasks running in parallel</td></tr><tr><td><code>default_task_timeout_secs</code></td><td><code>3600</code></td><td>Seconds before a task is forcibly terminated</td></tr><tr><td><code>context_window_max_entries</code></td><td><code>500</code></td><td>Maximum entries per context window before eviction</td></tr><tr><td><code>context_window_token_budget</code></td><td><code>32000</code></td><td>Token budget per context window. Compress at 80%, checkpoint at 95%</td></tr></tbody></table></div>
+<h3 id="secrets-encrypted-secrets-store" class="anchored"><a class="hanchor" href="#secrets-encrypted-secrets-store" aria-label="link">#</a><code>[secrets]</code> — Encrypted secrets store</h3>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>vault_path</code></td><td><code>&quot;/tmp/agentos/vault/secrets.db&quot;</code></td><td>SQLite database for encrypted secrets</td></tr></tbody></table></div>
+<div class="callout callout-note"><div class="callout-title">Note</div><p>Argon2id key derivation parameters (64 MiB memory, 3 iterations, 4 lanes) are hardcoded for security — they cannot be weakened via config.</p></div>
+<h3 id="audit-append-only-audit-log" class="anchored"><a class="hanchor" href="#audit-append-only-audit-log" aria-label="link">#</a><code>[audit]</code> — Append-only audit log</h3>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>log_path</code></td><td><code>&quot;/tmp/agentos/data/audit.db&quot;</code></td><td>SQLite database for audit events</td></tr><tr><td><code>max_audit_entries</code></td><td><code>0</code></td><td>Maximum audit entries before pruning (0 = unlimited)</td></tr></tbody></table></div>
+<h3 id="tools-tool-discovery-and-execution" class="anchored"><a class="hanchor" href="#tools-tool-discovery-and-execution" aria-label="link">#</a><code>[tools]</code> — Tool discovery and execution</h3>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>core_tools_dir</code></td><td><code>&quot;/tmp/agentos/tools/core&quot;</code></td><td>Directory containing built-in tool manifests</td></tr><tr><td><code>user_tools_dir</code></td><td><code>&quot;/tmp/agentos/tools/user&quot;</code></td><td>Directory for user-installed tool manifests</td></tr><tr><td><code>data_dir</code></td><td><code>&quot;/tmp/agentos/data&quot;</code></td><td>Agent data directory root</td></tr></tbody></table></div>
+<h3 id="bus-ipc-socket" class="anchored"><a class="hanchor" href="#bus-ipc-socket" aria-label="link">#</a><code>[bus]</code> — IPC socket</h3>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>socket_path</code></td><td><code>&quot;/tmp/agentos/agentos.sock&quot;</code></td><td>Unix domain socket for CLI ↔ kernel communication</td></tr></tbody></table></div>
+<h3 id="ollama-ollama-llm-provider" class="anchored"><a class="hanchor" href="#ollama-ollama-llm-provider" aria-label="link">#</a><code>[ollama]</code> — Ollama LLM provider</h3>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>host</code></td><td><code>&quot;http://localhost:11434&quot;</code></td><td>Ollama API endpoint</td></tr><tr><td><code>default_model</code></td><td><code>&quot;llama3.2&quot;</code></td><td>Default model for Ollama inference</td></tr></tbody></table></div>
+<h3 id="llm-cloud-llm-provider-endpoints" class="anchored"><a class="hanchor" href="#llm-cloud-llm-provider-endpoints" aria-label="link">#</a><code>[llm]</code> — Cloud LLM provider endpoints</h3>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>openai_base_url</code></td><td><code>&quot;https://api.openai.com/v1&quot;</code></td><td>OpenAI API endpoint</td></tr><tr><td><code>anthropic_base_url</code></td><td><code>&quot;https://api.anthropic.com/v1&quot;</code></td><td>Anthropic API endpoint</td></tr><tr><td><code>gemini_base_url</code></td><td><code>&quot;https://generativelanguage.googleapis.com/v1beta&quot;</code></td><td>Gemini API endpoint</td></tr></tbody></table></div>
+<h3 id="memory-memoryextraction-memoryconsolidation-memory-subsystem" class="anchored"><a class="hanchor" href="#memory-memoryextraction-memoryconsolidation-memory-subsystem" aria-label="link">#</a><code>[memory]</code> / <code>[memory.extraction]</code> / <code>[memory.consolidation]</code> — Memory subsystem</h3>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>memory.model_cache_dir</code></td><td><code>&quot;models&quot;</code></td><td>Directory for embedding model cache</td></tr><tr><td><code>memory.extraction.enabled</code></td><td><code>true</code></td><td>Auto-extract memories from task results</td></tr><tr><td><code>memory.consolidation.enabled</code></td><td><code>true</code></td><td>Enable episodic → semantic memory consolidation</td></tr><tr><td><code>memory.consolidation.time_trigger_hours</code></td><td><code>24</code></td><td>Hours between consolidation cycles</td></tr></tbody></table></div>
+<h3 id="context-budget-context-window-budget-allocation" class="anchored"><a class="hanchor" href="#context-budget-context-window-budget-allocation" aria-label="link">#</a><code>[context_budget]</code> — Context window budget allocation</h3>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>total_tokens</code></td><td><code>128000</code></td><td>Total context window token budget</td></tr><tr><td><code>reserve_pct</code></td><td><code>0.25</code></td><td>Fraction reserved for response generation</td></tr><tr><td><code>system_pct</code></td><td><code>0.15</code></td><td>Fraction reserved for system prompt</td></tr><tr><td><code>tools_pct</code></td><td><code>0.18</code></td><td>Fraction reserved for tool execution results</td></tr><tr><td><code>knowledge_pct</code></td><td><code>0.30</code></td><td>Fraction reserved for retrieved knowledge/memory</td></tr><tr><td><code>history_pct</code></td><td><code>0.25</code></td><td>Fraction reserved for conversation history</td></tr><tr><td><code>task_pct</code></td><td><code>0.12</code></td><td>Fraction reserved for current task context</td></tr></tbody></table></div>
+<div class="callout callout-note"><div class="callout-title">Note</div><p>Budget fractions are proportional weights, not strict percentages. The context manager uses these to allocate the <code>total_tokens</code> budget across entry types, compressing or evicting lower-priority entries when a category overflows.</p></div>
+<h3 id="health-monitor-system-health-monitoring" class="anchored"><a class="hanchor" href="#health-monitor-system-health-monitoring" aria-label="link">#</a><code>[health_monitor]</code> — System health monitoring</h3>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>enabled</code></td><td><code>true</code></td><td>Enable periodic health checks</td></tr><tr><td><code>check_interval_secs</code></td><td><code>30</code></td><td>Health check interval</td></tr><tr><td><code>thresholds.cpu_warning_percent</code></td><td><code>85.0</code></td><td>CPU usage warning threshold</td></tr><tr><td><code>thresholds.memory_warning_percent</code></td><td><code>80.0</code></td><td>Memory usage warning threshold</td></tr><tr><td><code>thresholds.disk_warning_percent</code></td><td><code>85.0</code></td><td>Disk usage warning threshold</td></tr><tr><td><code>thresholds.disk_critical_percent</code></td><td><code>95.0</code></td><td>Disk usage critical threshold</td></tr></tbody></table></div>
+<hr>
+<h2 id="production-configuration" class="anchored"><a class="hanchor" href="#production-configuration" aria-label="link">#</a>Production Configuration</h2>
+<p>Production configuration lives at <code>config/production.toml</code>. It uses persistent paths and higher limits.</p>
+<h3 id="key-differences-from-development" class="anchored"><a class="hanchor" href="#key-differences-from-development" aria-label="link">#</a>Key differences from development</h3>
+<div class="table-wrap"><table><thead><tr><th>Setting</th><th>Development</th><th>Production</th></tr></thead><tbody><tr><td><code>kernel.max_concurrent_tasks</code></td><td>4</td><td>8</td></tr><tr><td><code>kernel.default_task_timeout_secs</code></td><td>60</td><td>120</td></tr><tr><td><code>kernel.context_window_max_entries</code></td><td>100</td><td>200</td></tr><tr><td><code>kernel.context_window_token_budget</code></td><td>8000</td><td>16000</td></tr><tr><td><code>secrets.vault_path</code></td><td><code>/tmp/agentos/vault/secrets.db</code></td><td><code>/var/lib/agentos/vault/secrets.db</code></td></tr><tr><td><code>audit.log_path</code></td><td><code>/tmp/agentos/data/audit.db</code></td><td><code>/var/lib/agentos/data/audit.db</code></td></tr><tr><td><code>audit.max_audit_entries</code></td><td>0 (unlimited)</td><td>500,000</td></tr><tr><td><code>bus.socket_path</code></td><td><code>/tmp/agentos/agentos.sock</code></td><td><code>/run/agentos/agentos.sock</code></td></tr><tr><td><code>tools.core_tools_dir</code></td><td><code>/tmp/agentos/tools/core</code></td><td><code>/var/lib/agentos/tools/core</code></td></tr><tr><td><code>tools.user_tools_dir</code></td><td><code>/tmp/agentos/tools/user</code></td><td><code>/var/lib/agentos/tools/user</code></td></tr><tr><td><code>ollama.host</code></td><td><code>http://localhost:11434</code></td><td><code>http://ollama.service.consul:11434</code></td></tr></tbody></table></div>
+<p>Production also adds:</p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Value</th><th>Description</th></tr></thead><tbody><tr><td><code>kernel.health_port</code></td><td><code>9091</code></td><td>HTTP health check endpoint for load balancers</td></tr><tr><td><code>llm.gateway_url</code></td><td><code>https://llm-gateway.internal/v1</code></td><td>Centralized LLM gateway for cloud providers</td></tr></tbody></table></div>
+<hr>
+<h2 id="starting-the-kernel" class="anchored"><a class="hanchor" href="#starting-the-kernel" aria-label="link">#</a>Starting the Kernel</h2>
+<p>The kernel is started via the <code>agentos start</code> command:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Using default config (config/default.toml)</span>
+agentos<span class="w"> </span>start
+
+<span class="c1"># Using a specific config file</span>
+agentos<span class="w"> </span>--config<span class="w"> </span>config/production.toml<span class="w"> </span>start
+
+<span class="c1"># Providing vault passphrase via environment variable</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">AGENTOS_VAULT_PASSPHRASE</span><span class="o">=</span><span class="s2">&quot;my-secret-passphrase&quot;</span>
+agentos<span class="w"> </span>start
+</pre></div>
+</div>
+<h3 id="what-happens-during-boot" class="anchored"><a class="hanchor" href="#what-happens-during-boot" aria-label="link">#</a>What happens during boot</h3>
+<p>When you run <code>agentos start</code>, the kernel performs the following initialization sequence:</p>
+<ol><li><strong>Load configuration</strong> from the specified TOML file</li><li><strong>Create directories</strong> for audit, vault, tools, and bus socket</li><li><strong>Install core tool manifests</strong> from the tools directory</li><li><strong>Open audit log</strong> — initializes the SQLite database</li><li><strong>Open secrets vault</strong> — decrypts with the provided passphrase (Argon2id key derivation)</li><li><strong>Initialize capability engine</strong> — loads permission matrix</li><li><strong>Initialize HAL</strong> — registers 6 hardware drivers (System, Process, Network, Sensor, GPU, Storage)</li><li><strong>Load tools</strong> — reads manifests, validates trust tiers and signatures</li><li><strong>Build schema registry</strong> — extracts JSON schemas from tool manifests</li><li><strong>Initialize memory stores</strong> — episodic, semantic, and procedural stores with embedder</li><li><strong>Register WASM tools</strong> — loads any WASM-based tools from manifests</li><li><strong>Initialize scheduler, context manager, agent registry, and router</strong></li><li><strong>Create pipeline engine</strong> for multi-step workflow orchestration</li><li><strong>Start bus server</strong> — listens on the Unix domain socket for CLI commands</li><li><strong>Initialize V3 subsystems</strong> — cost tracker, escalation manager, injection scanner, risk classifier, snapshot manager, event bus</li><li><strong>Create IPC channels</strong> — bounded channels (capacity 1024) for internal communication</li><li><strong>Emit <code>KernelStarted</code> audit event</strong> — the system is now ready</li><li><strong>Start API server</strong> (if <code>api.enabled = true</code>) — opens <code>data/api_keys.db</code>, revokes any stale bootstrap key from a previous run, issues a fresh bootstrap key printed to the console, and begins serving on <code>host:port</code></li></ol>
+<p>After boot, the kernel enters its main event loop, running these subsystems as concurrent tasks:</p>
+<ul><li><strong>Acceptor</strong> — accepts new bus connections from <code>agentos</code></li><li><strong>Executor</strong> — processes pending agent tasks</li><li><strong>TimeoutChecker</strong> — sweeps expired tasks, escalations, snapshots, and resource locks</li><li><strong>Scheduler</strong> — triggers cron-scheduled jobs</li><li><strong>EventDispatcher</strong> — delivers events to subscribers</li><li><strong>ToolLifecycleListener</strong> — handles tool install/uninstall</li><li><strong>CommNotificationListener</strong> — handles agent-to-agent messaging</li><li><strong>ScheduleNotificationListener</strong> — handles schedule triggers</li><li><strong>HealthMonitor</strong> — periodic system health checks</li></ul>
+<p>Each subsystem auto-restarts on failure (up to 5 restarts per 60-second window).</p>
+<h3 id="vault-passphrase" class="anchored"><a class="hanchor" href="#vault-passphrase" aria-label="link">#</a>Vault passphrase</h3>
+<p>The vault passphrase is required to decrypt the secrets store. It is resolved in this order:</p>
+<ol><li><code>AGENTOS_VAULT_PASSPHRASE</code> environment variable</li><li>Interactive prompt (recommended for production)</li></ol>
+<div class="callout callout-warning"><div class="callout-title">Warning</div><p>Never store the vault passphrase in plain text files or shell history. Use the interactive prompt or a secrets manager to inject the environment variable.</p></div>
+<hr>
+<h2 id="connecting-your-first-agent" class="anchored"><a class="hanchor" href="#connecting-your-first-agent" aria-label="link">#</a>Connecting Your First Agent</h2>
+<p>AgentOS supports multiple LLM providers simultaneously. Here are examples for each:</p>
+<h3 id="ollama-local-free" class="anchored"><a class="hanchor" href="#ollama-local-free" aria-label="link">#</a>Ollama (local, free)</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Start Ollama (separate terminal)</span>
+ollama<span class="w"> </span>serve
+
+<span class="c1"># Pull a model</span>
+ollama<span class="w"> </span>pull<span class="w"> </span>llama3.2
+
+<span class="c1"># Connect an Ollama agent</span>
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;local-agent&quot;</span><span class="w"> </span>--provider<span class="w"> </span>ollama<span class="w"> </span>--model<span class="w"> </span>llama3.2
+</pre></div>
+</div>
+<h3 id="openai" class="anchored"><a class="hanchor" href="#openai" aria-label="link">#</a>OpenAI</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Store your API key in the vault</span>
+agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>openai-api-key
+
+<span class="c1"># Connect an OpenAI agent</span>
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;gpt-agent&quot;</span><span class="w"> </span>--provider<span class="w"> </span>openai<span class="w"> </span>--model<span class="w"> </span>gpt-4
+</pre></div>
+</div>
+<h3 id="anthropic" class="anchored"><a class="hanchor" href="#anthropic" aria-label="link">#</a>Anthropic</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Store your API key in the vault</span>
+agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>anthropic-api-key
+
+<span class="c1"># Connect an Anthropic agent</span>
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;claude-agent&quot;</span><span class="w"> </span>--provider<span class="w"> </span>anthropic<span class="w"> </span>--model<span class="w"> </span>claude-sonnet-4-20250514
+</pre></div>
+</div>
+<h3 id="google-gemini" class="anchored"><a class="hanchor" href="#google-gemini" aria-label="link">#</a>Google Gemini</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Store your API key in the vault</span>
+agentos<span class="w"> </span>secret<span class="w"> </span><span class="nb">set</span><span class="w"> </span>gemini-api-key
+
+<span class="c1"># Connect a Gemini agent</span>
+agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;gemini-agent&quot;</span><span class="w"> </span>--provider<span class="w"> </span>gemini<span class="w"> </span>--model<span class="w"> </span>gemini-pro
+</pre></div>
+</div>
+<p>After connecting, verify your agents are listed:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>agent<span class="w"> </span>list
+</pre></div>
+</div>
+<hr>
+<h2 id="running-your-first-task" class="anchored"><a class="hanchor" href="#running-your-first-task" aria-label="link">#</a>Running Your First Task</h2>
+<p>With an agent connected, you can run a task:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Run a simple task</span>
+agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--agent<span class="w"> </span>local-agent<span class="w"> </span><span class="s2">&quot;List the files in the current directory&quot;</span>
+
+<span class="c1"># Check task status</span>
+agentos<span class="w"> </span>task<span class="w"> </span>list
+
+<span class="c1"># View task logs</span>
+agentos<span class="w"> </span>task<span class="w"> </span>logs<span class="w"> </span>&lt;task-id&gt;
+</pre></div>
+</div>
+<hr>
+<h2 id="quick-example-session" class="anchored"><a class="hanchor" href="#quick-example-session" aria-label="link">#</a>Quick Example Session</h2>
+<p>Here is a complete end-to-end session from build to first task:</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># 1. Build AgentOS</span>
+$<span class="w"> </span><span class="nb">cd</span><span class="w"> </span>agentos
+$<span class="w"> </span>cargo<span class="w"> </span>build<span class="w"> </span>--workspace
+<span class="w">   </span>Compiling<span class="w"> </span>agentos-types<span class="w"> </span>v0.1.0
+<span class="w">   </span>Compiling<span class="w"> </span>agentos-audit<span class="w"> </span>v0.1.0
+<span class="w">   </span>...<span class="w"> </span><span class="o">(</span><span class="m">28</span><span class="w"> </span>crates<span class="o">)</span>
+<span class="w">   </span>Compiling<span class="w"> </span>agentos-cli<span class="w"> </span>v0.1.0
+<span class="w">    </span>Finished<span class="w"> </span><span class="sb">`</span>dev<span class="sb">`</span><span class="w"> </span>profile<span class="w"> </span><span class="o">[</span>unoptimized<span class="w"> </span>+<span class="w"> </span>debuginfo<span class="o">]</span>
+
+<span class="c1"># 2. Start Ollama (separate terminal)</span>
+$<span class="w"> </span>ollama<span class="w"> </span>serve
+$<span class="w"> </span>ollama<span class="w"> </span>pull<span class="w"> </span>llama3.2
+
+<span class="c1"># 3. Start the kernel</span>
+$<span class="w"> </span>./target/debug/agentos<span class="w"> </span>start
+Enter<span class="w"> </span>vault<span class="w"> </span>passphrase:<span class="w"> </span>********
+<span class="o">[</span>INFO<span class="o">]</span><span class="w"> </span>Audit<span class="w"> </span>log<span class="w"> </span>initialized<span class="w"> </span>at<span class="w"> </span>/tmp/agentos/audit.db
+<span class="o">[</span>INFO<span class="o">]</span><span class="w"> </span>Secrets<span class="w"> </span>vault<span class="w"> </span>opened
+<span class="o">[</span>INFO<span class="o">]</span><span class="w"> </span>Loaded<span class="w"> </span><span class="m">132</span><span class="w"> </span>core<span class="w"> </span>tools
+<span class="o">[</span>INFO<span class="o">]</span><span class="w"> </span>Bus<span class="w"> </span>server<span class="w"> </span>listening<span class="w"> </span>on<span class="w"> </span>/tmp/agentos/agentos.sock
+<span class="o">[</span>INFO<span class="o">]</span><span class="w"> </span>Kernel<span class="w"> </span>started<span class="w"> </span>successfully
+
+<span class="c1"># 4. Connect an agent (separate terminal)</span>
+$<span class="w"> </span>./target/debug/agentos<span class="w"> </span>agent<span class="w"> </span>connect<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;my-agent&quot;</span><span class="w"> </span>--provider<span class="w"> </span>ollama<span class="w"> </span>--model<span class="w"> </span>llama3.2
+Agent<span class="w"> </span>connected:<span class="w"> </span>my-agent<span class="w"> </span><span class="o">(</span>id:<span class="w"> </span>a1b2c3d4-...<span class="o">)</span>
+
+<span class="c1"># 5. Run a task</span>
+$<span class="w"> </span>./target/debug/agentos<span class="w"> </span>task<span class="w"> </span>run<span class="w"> </span>--agent<span class="w"> </span>my-agent<span class="w"> </span><span class="s2">&quot;What is 2 + 2?&quot;</span>
+Task<span class="w"> </span>created:<span class="w"> </span>t5e6f7g8-...
+Result:<span class="w"> </span><span class="m">2</span><span class="w"> </span>+<span class="w"> </span><span class="nv">2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="m">4</span>
+
+<span class="c1"># 6. Check system status</span>
+$<span class="w"> </span>./target/debug/agentos<span class="w"> </span>status
+Kernel:<span class="w"> </span>running
+Agents:<span class="w"> </span><span class="m">1</span><span class="w"> </span>online
+Tasks:<span class="w"> </span><span class="m">1</span><span class="w"> </span>completed,<span class="w"> </span><span class="m">0</span><span class="w"> </span>pending
+Uptime:<span class="w"> </span>45s
+
+<span class="c1"># 7. View audit log</span>
+$<span class="w"> </span>./target/debug/agentos<span class="w"> </span>audit<span class="w"> </span>logs<span class="w"> </span>--last<span class="w"> </span><span class="m">5</span>
+<span class="o">[</span><span class="m">2026</span>-03-16T10:00:01Z<span class="o">]</span><span class="w"> </span>KernelStarted
+<span class="o">[</span><span class="m">2026</span>-03-16T10:00:15Z<span class="o">]</span><span class="w"> </span>AgentConnected<span class="w"> </span><span class="nv">agent</span><span class="o">=</span>my-agent
+<span class="o">[</span><span class="m">2026</span>-03-16T10:00:20Z<span class="o">]</span><span class="w"> </span>TaskCreated<span class="w"> </span><span class="nv">task</span><span class="o">=</span>t5e6f7g8
+<span class="o">[</span><span class="m">2026</span>-03-16T10:00:21Z<span class="o">]</span><span class="w"> </span>InferenceCompleted<span class="w"> </span><span class="nv">agent</span><span class="o">=</span>my-agent<span class="w"> </span><span class="nv">tokens</span><span class="o">=</span><span class="m">42</span>
+<span class="o">[</span><span class="m">2026</span>-03-16T10:00:21Z<span class="o">]</span><span class="w"> </span>TaskCompleted<span class="w"> </span><span class="nv">task</span><span class="o">=</span>t5e6f7g8
+</pre></div>
+</div>
+<hr>
+<h2 id="migration-from-development-to-production" class="anchored"><a class="hanchor" href="#migration-from-development-to-production" aria-label="link">#</a>Migration from Development to Production</h2>
+<p>When you are ready to move from development to production, follow this checklist:</p>
+<h3 id="1-create-production-directories" class="anchored"><a class="hanchor" href="#1-create-production-directories" aria-label="link">#</a>1. Create production directories</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>sudo<span class="w"> </span>mkdir<span class="w"> </span>-p<span class="w"> </span>/var/lib/agentos/<span class="o">{</span>vault,audit,tools/core,tools/user<span class="o">}</span>
+sudo<span class="w"> </span>mkdir<span class="w"> </span>-p<span class="w"> </span>/run/agentos
+sudo<span class="w"> </span>chown<span class="w"> </span>agentos:agentos<span class="w"> </span>/var/lib/agentos<span class="w"> </span>/run/agentos
+</pre></div>
+</div>
+<h3 id="2-copy-tool-manifests" class="anchored"><a class="hanchor" href="#2-copy-tool-manifests" aria-label="link">#</a>2. Copy tool manifests</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>sudo<span class="w"> </span>cp<span class="w"> </span>-r<span class="w"> </span>tools/core/*<span class="w"> </span>/var/lib/agentos/tools/core/
+</pre></div>
+</div>
+<h3 id="3-switch-configuration" class="anchored"><a class="hanchor" href="#3-switch-configuration" aria-label="link">#</a>3. Switch configuration</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Use production config</span>
+agentos<span class="w"> </span>--config<span class="w"> </span>config/production.toml<span class="w"> </span>start
+</pre></div>
+</div>
+<h3 id="4-production-checklist" class="anchored"><a class="hanchor" href="#4-production-checklist" aria-label="link">#</a>4. Production checklist</h3>
+<ul><li>[ ] Create dedicated <code>agentos</code> system user and group</li><li>[ ] Set directory ownership to <code>agentos:agentos</code></li><li>[ ] Copy <code>config/production.toml</code> and review all paths</li><li>[ ] Set <code>AGENTOS_VAULT_PASSPHRASE</code> via secrets manager (not env file)</li><li>[ ] Configure Ollama at the production endpoint (e.g., Consul service discovery)</li><li>[ ] Set up the LLM gateway URL for cloud providers</li><li>[ ] Verify <code>health_port = 9091</code> is accessible to your load balancer</li><li>[ ] Set up log rotation for audit database</li><li>[ ] Set <code>audit.max_entries</code> appropriate for your retention policy</li><li>[ ] Build with <code>--release</code> for optimized binary</li><li>[ ] Set up systemd service for automatic restarts</li></ul>
+<h3 id="5-systemd-service-example" class="anchored"><a class="hanchor" href="#5-systemd-service-example" aria-label="link">#</a>5. Systemd service example</h3>
+<div class="code-block" data-lang="ini"><div class="code-bar"><span class="code-lang">ini</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[Unit]</span>
+<span class="na">Description</span><span class="o">=</span><span class="s">AgentOS Kernel</span>
+<span class="na">After</span><span class="o">=</span><span class="s">network.target</span>
+
+<span class="k">[Service]</span>
+<span class="na">Type</span><span class="o">=</span><span class="s">simple</span>
+<span class="na">User</span><span class="o">=</span><span class="s">agentos</span>
+<span class="na">Group</span><span class="o">=</span><span class="s">agentos</span>
+<span class="na">ExecStart</span><span class="o">=</span><span class="s">/usr/local/bin/agentos --config /etc/agentos/production.toml start</span>
+<span class="na">Environment</span><span class="o">=</span><span class="s">AGENTOS_VAULT_PASSPHRASE_FILE=/run/secrets/agentos-vault</span>
+<span class="na">Restart</span><span class="o">=</span><span class="s">on-failure</span>
+<span class="na">RestartSec</span><span class="o">=</span><span class="s">5</span>
+
+<span class="k">[Install]</span>
+<span class="na">WantedBy</span><span class="o">=</span><span class="s">multi-user.target</span>
+</pre></div>
+</div>
+<div class="callout callout-tip"><div class="callout-title">Docker</div><p>For container deployments, see the Docker deployment plan in the project's <code>obsidian-vault/plans/</code> directory.</p></div></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-01.html"><span class="pn-dir">← Previous</span><span class="pn-title">Introduction and Philosophy</span></a><a class="pn pn-next" href="ch-03.html"><span class="pn-dir">Next →</span><span class="pn-title">Architecture Overview</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#prerequisites" data-target="prerequisites">Prerequisites</a></li><li class="toc-h2"><a href="#building-from-source" data-target="building-from-source">Building from Source</a></li><li class="toc-h2"><a href="#development-configuration" data-target="development-configuration">Development Configuration</a></li><li class="toc-h3"><a href="#kernel-core-kernel-settings" data-target="kernel-core-kernel-settings"><code>[kernel]</code> — Core kernel settings</a></li><li class="toc-h3"><a href="#secrets-encrypted-secrets-store" data-target="secrets-encrypted-secrets-store"><code>[secrets]</code> — Encrypted secrets store</a></li><li class="toc-h3"><a href="#audit-append-only-audit-log" data-target="audit-append-only-audit-log"><code>[audit]</code> — Append-only audit log</a></li><li class="toc-h3"><a href="#tools-tool-discovery-and-execution" data-target="tools-tool-discovery-and-execution"><code>[tools]</code> — Tool discovery and execution</a></li><li class="toc-h3"><a href="#bus-ipc-socket" data-target="bus-ipc-socket"><code>[bus]</code> — IPC socket</a></li><li class="toc-h3"><a href="#ollama-ollama-llm-provider" data-target="ollama-ollama-llm-provider"><code>[ollama]</code> — Ollama LLM provider</a></li><li class="toc-h3"><a href="#llm-cloud-llm-provider-endpoints" data-target="llm-cloud-llm-provider-endpoints"><code>[llm]</code> — Cloud LLM provider endpoints</a></li><li class="toc-h3"><a href="#memory-memoryextraction-memoryconsolidation-memory-subsystem" data-target="memory-memoryextraction-memoryconsolidation-memory-subsystem"><code>[memory]</code> / <code>[memory.extraction]</code> / <code>[memory.consolidation]</code> — Memory subsystem</a></li><li class="toc-h3"><a href="#context-budget-context-window-budget-allocation" data-target="context-budget-context-window-budget-allocation"><code>[context_budget]</code> — Context window budget allocation</a></li><li class="toc-h3"><a href="#health-monitor-system-health-monitoring" data-target="health-monitor-system-health-monitoring"><code>[health_monitor]</code> — System health monitoring</a></li><li class="toc-h2"><a href="#production-configuration" data-target="production-configuration">Production Configuration</a></li><li class="toc-h3"><a href="#key-differences-from-development" data-target="key-differences-from-development">Key differences from development</a></li><li class="toc-h2"><a href="#starting-the-kernel" data-target="starting-the-kernel">Starting the Kernel</a></li><li class="toc-h3"><a href="#what-happens-during-boot" data-target="what-happens-during-boot">What happens during boot</a></li><li class="toc-h3"><a href="#vault-passphrase" data-target="vault-passphrase">Vault passphrase</a></li><li class="toc-h2"><a href="#connecting-your-first-agent" data-target="connecting-your-first-agent">Connecting Your First Agent</a></li><li class="toc-h3"><a href="#ollama-local-free" data-target="ollama-local-free">Ollama (local, free)</a></li><li class="toc-h3"><a href="#openai" data-target="openai">OpenAI</a></li><li class="toc-h3"><a href="#anthropic" data-target="anthropic">Anthropic</a></li><li class="toc-h3"><a href="#google-gemini" data-target="google-gemini">Google Gemini</a></li><li class="toc-h2"><a href="#running-your-first-task" data-target="running-your-first-task">Running Your First Task</a></li><li class="toc-h2"><a href="#quick-example-session" data-target="quick-example-session">Quick Example Session</a></li><li class="toc-h2"><a href="#migration-from-development-to-production" data-target="migration-from-development-to-production">Migration from Development to Production</a></li><li class="toc-h3"><a href="#1-create-production-directories" data-target="1-create-production-directories">1. Create production directories</a></li><li class="toc-h3"><a href="#2-copy-tool-manifests" data-target="2-copy-tool-manifests">2. Copy tool manifests</a></li><li class="toc-h3"><a href="#3-switch-configuration" data-target="3-switch-configuration">3. Switch configuration</a></li><li class="toc-h3"><a href="#4-production-checklist" data-target="4-production-checklist">4. Production checklist</a></li><li class="toc-h3"><a href="#5-systemd-service-example" data-target="5-systemd-service-example">5. Systemd service example</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

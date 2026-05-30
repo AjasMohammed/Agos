@@ -67,7 +67,7 @@ The key philosophical shift: **an LLM does not "execute" tools the way a human r
 | **Agent collaboration** | Framework-specific orchestration | Native message bus with direct, delegation, and broadcast modes |
 | **Tool execution** | Direct function calls | Sandboxed execution with capability validation, audit logging, and optional WASM isolation |
 | **Memory** | Vector DB bolted on | Native 3-tier memory architecture (working, episodic, semantic) with embeddings |
-| **Audit trail** | Optional logging | Mandatory append-only SQLite audit log (83+ event types) |
+| **Audit trail** | Optional logging | Mandatory append-only SQLite audit log (146 event types) |
 | **Cost control** | Manual tracking | Per-agent budgets with automatic model downgrade and hard limits |
 | **Extensibility** | Python packages | Signed tool manifests with trust tiers (Core / Verified / Community / Blocked) |
 
@@ -75,20 +75,20 @@ The key philosophical shift: **an LLM does not "execute" tools the way a human r
 
 ## Crate Overview
 
-AgentOS is organized as a Rust workspace with 18 crates. Each crate has a single responsibility; the dependency graph flows downward with no circular dependencies.
+AgentOS is organized as a Rust workspace with 28 crates. Each crate has a single responsibility; the dependency graph flows downward with no circular dependencies.
 
 | Crate | Description |
 |-------|-------------|
 | `agentos-types` | Shared type definitions — IDs, IntentMessage, AgentTask, error types |
 | `agentos-kernel` | Central orchestrator — scheduler, router, context manager, agent registry |
-| `agentos-cli` | CLI binary `agentos` (clap-based, 17+ command groups) |
+| `agentos-cli` | CLI binary `agentos` (clap-based, 39 command groups) |
 | `agentos-bus` | Unix domain socket IPC between CLI and kernel |
 | `agentos-api` | REST API + WebSocket server — `KernelService` trait, auth, 30+ endpoints |
 | `agentos-llm` | LLM adapter trait + Ollama, OpenAI, Anthropic, Gemini, Mock implementations |
 | `agentos-tools` | Built-in tools (file I/O, memory, shell, data parser, signing, etc.) |
 | `agentos-capability` | HMAC-SHA256 signed capability tokens and permission system |
 | `agentos-vault` | AES-256-GCM encrypted secrets store with Argon2id key derivation |
-| `agentos-audit` | Append-only SQLite audit log (83+ event types) |
+| `agentos-audit` | Append-only SQLite audit log (146 event types) |
 | `agentos-memory` | Multi-tier memory (episodic + semantic + procedural) with embeddings |
 | `agentos-pipeline` | Multi-step workflow orchestration engine |
 | `agentos-sandbox` | Seccomp-BPF syscall filtering (Linux-only) |

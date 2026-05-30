@@ -60,7 +60,7 @@ impl ChannelAdapter for DiscordAdapter {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
-        let text = msg.content.as_text();
+        let text: String = msg.content.as_text().chars().take(2000).collect();
         let url = self.rest_url(&format!("/channels/{}/messages", self.channel_id));
         let client = &self.client;
         let auth = self.auth_header();

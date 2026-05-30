@@ -6,15 +6,34 @@
 
 pub mod agents;
 pub mod audit;
+pub mod auth;
+pub mod channels;
 pub mod chat;
+pub mod config;
+pub mod connectors;
 pub mod costs;
+pub mod dashboard;
+pub mod doctor;
+pub mod escalations;
+pub mod events;
+pub mod identity;
+pub mod keys;
+pub mod logs;
+pub mod mcp;
 pub mod notifications;
 pub mod pipelines;
+pub mod plugins;
+pub mod prefs;
+pub mod roles;
+pub mod schedules;
 pub mod secrets;
 pub mod system;
+pub mod system_info;
 pub mod tasks;
 pub mod tools;
 pub mod webhooks;
+pub mod webhooks_admin;
+pub mod workflows;
 
 use crate::auth::AuthenticatedKey;
 use crate::error::ApiError;

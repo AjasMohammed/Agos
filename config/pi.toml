@@ -113,6 +113,11 @@ log_dir = "/home/pi/.agentos/logs"
 log_level = "info"
 log_format = "text"
 
+# Boot pre-flight — lean disk threshold for SD-card hosts.
+[preflight]
+min_free_disk_mb = 128
+check_db_writable = true
+
 [otel]
 enabled = false
 

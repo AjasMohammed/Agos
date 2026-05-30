@@ -44,3 +44,52 @@ impl AgentTool for GetTaskLogsTool {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentos_types::{AgentID, PermissionSet, TaskID, TraceID};
+    use std::path::PathBuf;
+
+    fn ctx() -> ToolExecutionContext {
+        ToolExecutionContext {
+            data_dir: PathBuf::from("/tmp"),
+            task_id: TaskID::new(),
+            agent_id: AgentID::new(),
+            trace_id: TraceID::new(),
+            permissions: PermissionSet::new(),
+            vault: None,
+            hal: None,
+            file_lock_registry: None,
+            agent_registry: None,
+            task_registry: None,
+            escalation_query: None,
+            workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
+            capability_registry: None,
+            capability_dispatcher: None,
+            storage_zone_query: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tool_categories: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn emits_kernel_action_with_run_id() {
+        let out = GetTaskLogsTool::new()
+            .execute(serde_json::json!({"run_id": "abc-123"}), ctx())
+            .await
+            .unwrap();
+        assert_eq!(out["_kernel_action"], "get_task_logs");
+        assert_eq!(out["run_id"], "abc-123");
+    }
+
+    #[tokio::test]
+    async fn missing_run_id_is_error() {
+        let err = GetTaskLogsTool::new()
+            .execute(serde_json::json!({}), ctx())
+            .await;
+        assert!(err.is_err());
+    }
+}

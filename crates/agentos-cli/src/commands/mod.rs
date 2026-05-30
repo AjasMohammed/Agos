@@ -12,6 +12,7 @@ pub mod cost;
 pub mod doctor;
 pub mod escalation;
 pub mod event;
+pub mod gateway;
 pub mod hal;
 pub mod healthz;
 pub mod identity;

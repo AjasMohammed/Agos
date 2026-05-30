@@ -338,12 +338,12 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
     prompt.push_str(
         "\n\n## Scheduling\n\
          Defer work to a future time: `schedule-once` (one-shot via fire_at ISO 8601 or delay_secs 1\u{2013}86400), \
-         `set-timer` / `cancel-timer` / `list-timers`, `list-my-schedules`, `get-schedule-runs`. \
+         `set-timer` / `cancel-timer` / `list-timers`, `schedule-recurring` / `schedule-control`; \
+         inspect your own with `list-my-schedules` / `get-schedule-runs` / `get-task-logs`. \
          **Pick the right mode for `schedule-once`:** \
-         use `mode=\"notify\"` with `notify_subject`/`notify_body` for a plain reminder (no LLM at fire time — fastest, cheapest, no loop risk); \
-         use `mode=\"tool\"` with `tool`/`tool_args` to invoke one tool with fixed args; \
-         only use `mode=\"task\"` (default) when fire-time reasoning is required. \
-         Do NOT use `mode=\"task\"` with a prompt that just says \"call notify-user\" — use `mode=\"notify\"` instead. \
+         `mode=\"notify\"` with `notify_subject`/`notify_body` for a plain reminder (no LLM at fire time — fastest, no loop risk); \
+         `mode=\"tool\"` with `tool`/`tool_args` to invoke one tool with fixed args; \
+         `mode=\"task\"` (default) only when fire-time reasoning is required. \
          See `agent-manual` section \"scheduling\" for patterns.",
     );
 

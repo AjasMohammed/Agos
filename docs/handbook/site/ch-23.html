@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>REST API Reference · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a><div class="nav-subs"><a class="nav-sub" href="#overview" data-target="overview">Overview</a><a class="nav-sub" href="#authentication" data-target="authentication">Authentication</a><a class="nav-sub" href="#rate-limiting" data-target="rate-limiting">Rate Limiting</a><a class="nav-sub" href="#response-format" data-target="response-format">Response Format</a><a class="nav-sub" href="#error-format" data-target="error-format">Error Format</a><a class="nav-sub" href="#endpoints" data-target="endpoints">Endpoints</a><a class="nav-sub" href="#security-headers" data-target="security-headers">Security Headers</a><a class="nav-sub" href="#middleware-stack" data-target="middleware-stack">Middleware Stack</a><a class="nav-sub" href="#related" data-target="related">Related</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 23 · REST API Reference</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 23</div><h1 class="ch-title">REST API Reference</h1><p class="ch-summary">35+ REST endpoints under `/api/v1/*` plus the OpenAI-compatible `/v1/chat/completions` SSE endpoint — auth, permissions, request/response shapes, rate limiting, error codes</p></div>
+    <article class="prose"><h1 id="rest-api-reference" class="anchored"><a class="hanchor" href="#rest-api-reference" aria-label="link">#</a>REST API Reference</h1>
+<blockquote><p>Complete reference for the AgentOS HTTP REST API (<code>agentos-api</code>). All endpoints are under the base path <code>/api/v1</code>.</p></blockquote>
+<hr>
+<h2 id="overview" class="anchored"><a class="hanchor" href="#overview" aria-label="link">#</a>Overview</h2>
+<p>The REST API is served by the <code>agentos-api</code> crate alongside the kernel. It is disabled by default and must be enabled in <code>config/default.toml</code>:</p>
+<div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[api]</span>
+<span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<span class="n">host</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;127.0.0.1&quot;</span>
+<span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8080</span>
+</pre></div>
+</div>
+<p>Once enabled, the API server starts when the kernel boots and listens at the configured <code>host:port</code>.</p>
+<hr>
+<h2 id="authentication" class="anchored"><a class="hanchor" href="#authentication" aria-label="link">#</a>Authentication</h2>
+<p>All endpoints except <code>GET /api/v1/health</code> require a Bearer token in the <code>Authorization</code> header:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Authorization: Bearer agos_&lt;64-hex-chars&gt;
+</pre></div>
+</div>
+<p>API keys have the format <code>agos_</code> followed by 64 lowercase hex characters. They are issued through the <code>agentos-api</code> <code>ApiKeyStore</code>. See <a class="wikilink" href="ch-25.html">API Authentication and Keys</a> for key management.</p>
+<p>On missing or invalid auth:</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;error&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;code&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;UNAUTHORIZED&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Missing or invalid Authorization header. Expected: Bearer agos_&lt;key&gt;&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">401</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<h3 id="permission-scopes" class="anchored"><a class="hanchor" href="#permission-scopes" aria-label="link">#</a>Permission Scopes</h3>
+<p>Each key carries a list of permission scopes. An empty list grants full access (bootstrap key). Scope format: <code>&lt;resource&gt;:&lt;op&gt;</code> where op is <code>r</code> (read) or <code>w</code> (write).</p>
+<div class="table-wrap"><table><thead><tr><th>Resource</th><th>Read scope</th><th>Write scope</th><th>Covers</th></tr></thead><tbody><tr><td>agents</td><td><code>agents:r</code></td><td><code>agents:w</code></td><td>List, get, connect, disconnect, permissions</td></tr><tr><td>tasks</td><td><code>tasks:r</code></td><td><code>tasks:w</code></td><td>List, get, run, cancel, trace</td></tr><tr><td>tools</td><td><code>tools:r</code></td><td><code>tools:w</code></td><td>List, get, install, remove</td></tr><tr><td>secrets</td><td><code>secrets:r</code></td><td><code>secrets:w</code></td><td>List, set, revoke</td></tr><tr><td>pipelines</td><td><code>pipelines:r</code></td><td><code>pipelines:w</code></td><td>List, save, run, delete</td></tr><tr><td>audit</td><td><code>audit:r</code></td><td>—</td><td>Logs, detail, verify</td></tr><tr><td>costs</td><td><code>costs:r</code></td><td>—</td><td>Summary, per-agent costs</td></tr><tr><td>notifications</td><td><code>notifications:r</code></td><td><code>notifications:w</code></td><td>List, get, unread count, respond</td></tr><tr><td>chat</td><td>—</td><td><code>chat:w</code></td><td>OpenAI-compatible chat completions</td></tr><tr><td>system</td><td><code>system:r</code></td><td>—</td><td>Status</td></tr></tbody></table></div>
+<p>Wildcard scope <code>*:r</code> or <code>*:w</code> grants read or write across all resources.</p>
+<hr>
+<h2 id="rate-limiting" class="anchored"><a class="hanchor" href="#rate-limiting" aria-label="link">#</a>Rate Limiting</h2>
+<ul><li>Burst: <strong>120 requests</strong></li><li>Steady state: <strong>2 requests / second</strong> per IP address</li><li>Excess requests receive <code>429 Too Many Requests</code></li></ul>
+<hr>
+<h2 id="response-format" class="anchored"><a class="hanchor" href="#response-format" aria-label="link">#</a>Response Format</h2>
+<p>All responses wrap their payload in a <code>data</code> field:</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;data&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<p>List responses include pagination metadata:</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;data&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="err">...</span><span class="p">],</span><span class="w"> </span><span class="nt">&quot;meta&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="error-format" class="anchored"><a class="hanchor" href="#error-format" aria-label="link">#</a>Error Format</h2>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;error&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;code&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;NOT_FOUND&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Agent &#39;worker&#39; not found&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">404</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>Common error codes: <code>UNAUTHORIZED</code> (401), <code>FORBIDDEN</code> (403), <code>NOT_FOUND</code> (404), <code>BAD_REQUEST</code> (400), <code>INTERNAL_ERROR</code> (500).</p>
+<hr>
+<h2 id="endpoints" class="anchored"><a class="hanchor" href="#endpoints" aria-label="link">#</a>Endpoints</h2>
+<h3 id="system" class="anchored"><a class="hanchor" href="#system" aria-label="link">#</a>System</h3>
+<h4 id="get-apiv1health-health-check" class="anchored"><a class="hanchor" href="#get-apiv1health-health-check" aria-label="link">#</a><code>GET /api/v1/health</code> — Health check</h4>
+<p><strong>Auth:</strong> None required.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>http://localhost:8080/api/v1/health
+</pre></div>
+</div>
+<p><strong>Response:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ok&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;service&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;agentos-api&quot;</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="get-apiv1status-system-status" class="anchored"><a class="hanchor" href="#get-apiv1status-system-status" aria-label="link">#</a><code>GET /api/v1/status</code> — System status</h4>
+<p><strong>Auth:</strong> <code>system:r</code></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span><span class="w"> </span>http://localhost:8080/api/v1/status
+</pre></div>
+</div>
+<p><strong>Response:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;data&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;agent_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;running_task_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;tool_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">15</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;uptime_secs&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3600</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0.1.0&quot;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h3 id="agents" class="anchored"><a class="hanchor" href="#agents" aria-label="link">#</a>Agents</h3>
+<h4 id="get-apiv1agents-list-agents" class="anchored"><a class="hanchor" href="#get-apiv1agents-list-agents" aria-label="link">#</a><code>GET /api/v1/agents</code> — List agents</h4>
+<p><strong>Auth:</strong> <code>agents:r</code></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span><span class="w"> </span>http://localhost:8080/api/v1/agents
+</pre></div>
+</div>
+<p><strong>Response:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;data&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;uuid&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;worker&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;anthropic&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;claude-sonnet-4-6&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;idle&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="post-apiv1agents-connect-an-agent" class="anchored"><a class="hanchor" href="#post-apiv1agents-connect-an-agent" aria-label="link">#</a><code>POST /api/v1/agents</code> — Connect an agent</h4>
+<p><strong>Auth:</strong> <code>agents:w</code></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8080/api/v1/agents<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{ &quot;name&quot;: &quot;worker&quot;, &quot;provider&quot;: &quot;anthropic&quot;, &quot;model&quot;: &quot;claude-sonnet-4-6&quot; }&#39;</span>
+</pre></div>
+</div>
+<p><strong>Request fields:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td>string</td><td>Yes</td><td>Unique agent name</td></tr><tr><td><code>provider</code></td><td>string</td><td>Yes</td><td><code>ollama</code>, <code>openai</code>, <code>anthropic</code>, <code>gemini</code>, <code>custom</code>, <code>mock</code></td></tr><tr><td><code>model</code></td><td>string</td><td>Yes</td><td>Model identifier</td></tr><tr><td><code>base_url</code></td><td>string</td><td>No</td><td>Override the provider base URL</td></tr><tr><td><code>roles</code></td><td>array</td><td>No</td><td>Role names to assign at connect time</td></tr></tbody></table></div>
+<hr>
+<h4 id="get-apiv1agentsname-agent-detail" class="anchored"><a class="hanchor" href="#get-apiv1agentsname-agent-detail" aria-label="link">#</a><code>GET /api/v1/agents/{name}</code> — Agent detail</h4>
+<p><strong>Auth:</strong> <code>agents:r</code></p>
+<p>Returns full agent detail including permissions, cost stats, and task history summary.</p>
+<hr>
+<h4 id="delete-apiv1agentsname-disconnect-agent" class="anchored"><a class="hanchor" href="#delete-apiv1agentsname-disconnect-agent" aria-label="link">#</a><code>DELETE /api/v1/agents/{name}</code> — Disconnect agent</h4>
+<p><strong>Auth:</strong> <code>agents:w</code></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>DELETE<span class="w"> </span>http://localhost:8080/api/v1/agents/worker<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span>
+</pre></div>
+</div>
+<p><strong>Response:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;data&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;disconnected&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;worker&quot;</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="post-apiv1agentsnamepermissions-grant-permission" class="anchored"><a class="hanchor" href="#post-apiv1agentsnamepermissions-grant-permission" aria-label="link">#</a><code>POST /api/v1/agents/{name}/permissions</code> — Grant permission</h4>
+<p><strong>Auth:</strong> <code>agents:w</code></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8080/api/v1/agents/worker/permissions<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{ &quot;permission&quot;: &quot;fs:/tmp/:rw&quot; }&#39;</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="post-apiv1agentsnamepermissionsrevoke-revoke-permission" class="anchored"><a class="hanchor" href="#post-apiv1agentsnamepermissionsrevoke-revoke-permission" aria-label="link">#</a><code>POST /api/v1/agents/{name}/permissions/revoke</code> — Revoke permission</h4>
+<p><strong>Auth:</strong> <code>agents:w</code></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8080/api/v1/agents/worker/permissions/revoke<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{ &quot;permission&quot;: &quot;fs:/tmp/:rw&quot; }&#39;</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="post-apiv1agentsnamesettings-update-agent-settings" class="anchored"><a class="hanchor" href="#post-apiv1agentsnamesettings-update-agent-settings" aria-label="link">#</a><code>POST /api/v1/agents/{name}/settings</code> — Update agent settings</h4>
+<p><strong>Auth:</strong> <code>agents:w</code></p>
+<p>Updates an agent's settings (e.g. provider/model overrides, runtime options).</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8080/api/v1/agents/worker/settings<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{ ... }&#39;</span>
+</pre></div>
+</div>
+<hr>
+<h3 id="tasks" class="anchored"><a class="hanchor" href="#tasks" aria-label="link">#</a>Tasks</h3>
+<h4 id="get-apiv1tasks-list-tasks" class="anchored"><a class="hanchor" href="#get-apiv1tasks-list-tasks" aria-label="link">#</a><code>GET /api/v1/tasks</code> — List tasks</h4>
+<p><strong>Auth:</strong> <code>tasks:r</code></p>
+<p><strong>Query parameters:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Param</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>status</code></td><td>string</td><td>Filter by status: <code>pending</code>, <code>running</code>, <code>completed</code>, <code>failed</code>, <code>cancelled</code></td></tr><tr><td><code>agent_name</code></td><td>string</td><td>Filter by agent name</td></tr><tr><td><code>limit</code></td><td>integer</td><td>Max results (default 50)</td></tr><tr><td><code>offset</code></td><td>integer</td><td>Pagination offset</td></tr></tbody></table></div>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span><span class="s2">&quot;http://localhost:8080/api/v1/tasks?status=running&amp;limit=10&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span>
+</pre></div>
+</div>
+<p><strong>Response:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;data&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;uuid&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;agent_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;worker&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;running&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;prompt&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;created_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;meta&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="w"> </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="post-apiv1tasksrun-run-a-task" class="anchored"><a class="hanchor" href="#post-apiv1tasksrun-run-a-task" aria-label="link">#</a><code>POST /api/v1/tasks/run</code> — Run a task</h4>
+<p><strong>Auth:</strong> <code>tasks:w</code></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8080/api/v1/tasks/run<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{ &quot;agent_name&quot;: &quot;worker&quot;, &quot;prompt&quot;: &quot;Summarize /tmp/report.txt&quot;, &quot;autonomous&quot;: false }&#39;</span>
+</pre></div>
+</div>
+<p><strong>Request fields:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>agent_name</code></td><td>string</td><td>Yes</td><td>Target agent name</td></tr><tr><td><code>prompt</code></td><td>string</td><td>Yes</td><td>Task instruction</td></tr><tr><td><code>autonomous</code></td><td>bool</td><td>No</td><td>Run without iteration limits (default <code>false</code>)</td></tr></tbody></table></div>
+<p><strong>Response:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;data&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;task_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;uuid&quot;</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="get-apiv1tasksid-task-detail" class="anchored"><a class="hanchor" href="#get-apiv1tasksid-task-detail" aria-label="link">#</a><code>GET /api/v1/tasks/{id}</code> — Task detail</h4>
+<p><strong>Auth:</strong> <code>tasks:r</code></p>
+<p>Returns full task detail including status, result, error, and timing.</p>
+<hr>
+<h4 id="post-apiv1tasksidcancel-cancel-task" class="anchored"><a class="hanchor" href="#post-apiv1tasksidcancel-cancel-task" aria-label="link">#</a><code>POST /api/v1/tasks/{id}/cancel</code> — Cancel task</h4>
+<p><strong>Auth:</strong> <code>tasks:w</code></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8080/api/v1/tasks/uuid/cancel<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="get-apiv1tasksidtrace-task-trace" class="anchored"><a class="hanchor" href="#get-apiv1tasksidtrace-task-trace" aria-label="link">#</a><code>GET /api/v1/tasks/{id}/trace</code> — Task trace</h4>
+<p><strong>Auth:</strong> <code>tasks:r</code></p>
+<p>Returns the full execution trace — every LLM turn, tool call, and result. Useful for debugging and auditing.</p>
+<hr>
+<h3 id="chat-openai-compatible" class="anchored"><a class="hanchor" href="#chat-openai-compatible" aria-label="link">#</a>Chat (OpenAI-Compatible)</h3>
+<h4 id="post-apiv1chatcompletions-chat-completion" class="anchored"><a class="hanchor" href="#post-apiv1chatcompletions-chat-completion" aria-label="link">#</a><code>POST /api/v1/chat/completions</code> — Chat completion</h4>
+<p><strong>Auth:</strong> <code>chat:w</code></p>
+<p>Drop-in replacement for the OpenAI <code>/v1/chat/completions</code> endpoint. Routes the request through a connected agent. Supports streaming via <code>&quot;stream&quot;: true</code>.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8080/api/v1/chat/completions<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;model&quot;: &quot;worker&quot;,</span>
+<span class="s1">    &quot;messages&quot;: [{ &quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Hello&quot; }],</span>
+<span class="s1">    &quot;stream&quot;: false</span>
+<span class="s1">  }&#39;</span>
+</pre></div>
+</div>
+<p><strong>Request fields:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>model</code></td><td>string</td><td>Yes</td><td>Agent name used to select the target agent. Also accepts <code>&quot;provider/model&quot;</code> — the provider portion is used as the agent name.</td></tr><tr><td><code>messages</code></td><td>array</td><td>Yes</td><td>Conversation history. Must strictly alternate <code>user</code> → <code>assistant</code> → <code>user</code> → .... The last message must be a <code>user</code> message.</td></tr><tr><td><code>stream</code></td><td>bool</td><td>No</td><td>Return SSE-streamed chunks in OpenAI format. Default <code>false</code>.</td></tr><tr><td><code>temperature</code></td><td>float</td><td>No</td><td>Temperature hint (passed through; agent may ignore).</td></tr><tr><td><code>max_tokens</code></td><td>integer</td><td>No</td><td>Max tokens hint (passed through; agent may ignore).</td></tr></tbody></table></div>
+<p><strong>Constraints:</strong></p>
+<ul><li>Messages must strictly alternate <code>user</code> and <code>assistant</code> roles. Two consecutive messages with the same role return <code>400 Bad Request</code>:</li></ul>
+<p>``<code>json { &quot;error&quot;: { &quot;code&quot;: &quot;BAD_REQUEST&quot;, &quot;message&quot;: &quot;consecutive &#x27;user&#x27; messages are not valid; messages must alternate roles&quot;, &quot;status&quot;: 400 } } </code>``</p>
+<ul><li>The final message must have <code>role: &quot;user&quot;</code>. If no user message is present, <code>400 Bad Request</code> is returned.</li></ul>
+<div class="callout callout-note"><div class="callout-title">Note</div><p>Some OpenAI-compatible clients silently tolerate consecutive same-role messages. AgentOS enforces strict alternation and will reject these with a 400. If your client merges or deduplicates messages, ensure it produces a properly alternating history before sending.</p></div>
+<hr>
+<h3 id="tools" class="anchored"><a class="hanchor" href="#tools" aria-label="link">#</a>Tools</h3>
+<h4 id="get-apiv1tools-list-tools" class="anchored"><a class="hanchor" href="#get-apiv1tools-list-tools" aria-label="link">#</a><code>GET /api/v1/tools</code> — List tools</h4>
+<p><strong>Auth:</strong> <code>tools:r</code></p>
+<p>Returns all registered tools including MCP-sourced tools (identified by a <code>source: &quot;mcp:&lt;server&gt;&quot;</code> field).</p>
+<hr>
+<h4 id="get-apiv1toolsname-tool-detail" class="anchored"><a class="hanchor" href="#get-apiv1toolsname-tool-detail" aria-label="link">#</a><code>GET /api/v1/tools/{name}</code> — Tool detail</h4>
+<p><strong>Auth:</strong> <code>tools:r</code></p>
+<p>Returns the full tool manifest — name, description, input schema, trust tier, permissions.</p>
+<hr>
+<h4 id="post-apiv1tools-install-tool" class="anchored"><a class="hanchor" href="#post-apiv1tools-install-tool" aria-label="link">#</a><code>POST /api/v1/tools</code> — Install tool</h4>
+<p><strong>Auth:</strong> <code>tools:w</code></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8080/api/v1/tools<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{ &quot;manifest_path&quot;: &quot;/path/to/tool.toml&quot; }&#39;</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="delete-apiv1toolsname-remove-tool" class="anchored"><a class="hanchor" href="#delete-apiv1toolsname-remove-tool" aria-label="link">#</a><code>DELETE /api/v1/tools/{name}</code> — Remove tool</h4>
+<p><strong>Auth:</strong> <code>tools:w</code></p>
+<hr>
+<h3 id="secrets" class="anchored"><a class="hanchor" href="#secrets" aria-label="link">#</a>Secrets</h3>
+<h4 id="get-apiv1secrets-list-secrets" class="anchored"><a class="hanchor" href="#get-apiv1secrets-list-secrets" aria-label="link">#</a><code>GET /api/v1/secrets</code> — List secrets</h4>
+<p><strong>Auth:</strong> <code>secrets:r</code></p>
+<p>Returns secret metadata only — names, scopes, creation dates. Raw values are never returned.</p>
+<hr>
+<h4 id="post-apiv1secrets-set-secret" class="anchored"><a class="hanchor" href="#post-apiv1secrets-set-secret" aria-label="link">#</a><code>POST /api/v1/secrets</code> — Set secret</h4>
+<p><strong>Auth:</strong> <code>secrets:w</code></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8080/api/v1/secrets<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{ &quot;name&quot;: &quot;OPENAI_API_KEY&quot;, &quot;value&quot;: &quot;sk-...&quot;, &quot;scope&quot;: &quot;global&quot; }&#39;</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="delete-apiv1secretsname-revoke-secret" class="anchored"><a class="hanchor" href="#delete-apiv1secretsname-revoke-secret" aria-label="link">#</a><code>DELETE /api/v1/secrets/{name}</code> — Revoke secret</h4>
+<p><strong>Auth:</strong> <code>secrets:w</code></p>
+<hr>
+<h3 id="pipelines" class="anchored"><a class="hanchor" href="#pipelines" aria-label="link">#</a>Pipelines</h3>
+<h4 id="get-apiv1pipelines-list-pipelines" class="anchored"><a class="hanchor" href="#get-apiv1pipelines-list-pipelines" aria-label="link">#</a><code>GET /api/v1/pipelines</code> — List pipelines</h4>
+<p><strong>Auth:</strong> <code>pipelines:r</code></p>
+<hr>
+<h4 id="post-apiv1pipelines-save-pipeline" class="anchored"><a class="hanchor" href="#post-apiv1pipelines-save-pipeline" aria-label="link">#</a><code>POST /api/v1/pipelines</code> — Save pipeline</h4>
+<p><strong>Auth:</strong> <code>pipelines:w</code></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8080/api/v1/pipelines<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{ &quot;name&quot;: &quot;my-pipeline&quot;, &quot;yaml&quot;: &quot;steps:\n  - name: step1\n    agent: worker\n    prompt: ...&quot; }&#39;</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="post-apiv1pipelinesnamerun-run-pipeline" class="anchored"><a class="hanchor" href="#post-apiv1pipelinesnamerun-run-pipeline" aria-label="link">#</a><code>POST /api/v1/pipelines/{name}/run</code> — Run pipeline</h4>
+<p><strong>Auth:</strong> <code>pipelines:w</code></p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8080/api/v1/pipelines/my-pipeline/run<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{ &quot;inputs&quot;: { &quot;topic&quot;: &quot;quarterly report&quot; } }&#39;</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="delete-apiv1pipelinesname-delete-pipeline" class="anchored"><a class="hanchor" href="#delete-apiv1pipelinesname-delete-pipeline" aria-label="link">#</a><code>DELETE /api/v1/pipelines/{name}</code> — Delete pipeline</h4>
+<p><strong>Auth:</strong> <code>pipelines:w</code></p>
+<hr>
+<h3 id="audit" class="anchored"><a class="hanchor" href="#audit" aria-label="link">#</a>Audit</h3>
+<h4 id="get-apiv1auditlogs-query-audit-log" class="anchored"><a class="hanchor" href="#get-apiv1auditlogs-query-audit-log" aria-label="link">#</a><code>GET /api/v1/audit/logs</code> — Query audit log</h4>
+<p><strong>Auth:</strong> <code>audit:r</code></p>
+<p><strong>Query parameters:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Param</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>event_type</code></td><td>string</td><td>Filter by event type (e.g. <code>ToolExecuted</code>)</td></tr><tr><td><code>agent_id</code></td><td>string</td><td>Filter by agent UUID</td></tr><tr><td><code>from</code></td><td>ISO 8601</td><td>Start timestamp</td></tr><tr><td><code>to</code></td><td>ISO 8601</td><td>End timestamp</td></tr><tr><td><code>limit</code></td><td>integer</td><td>Max results (default 100)</td></tr></tbody></table></div>
+<hr>
+<h4 id="get-apiv1auditlogstrace-id-audit-entry-detail" class="anchored"><a class="hanchor" href="#get-apiv1auditlogstrace-id-audit-entry-detail" aria-label="link">#</a><code>GET /api/v1/audit/logs/{trace_id}</code> — Audit entry detail</h4>
+<p><strong>Auth:</strong> <code>audit:r</code></p>
+<p>Returns the full audit entry for a specific trace ID, including all chained events.</p>
+<hr>
+<h4 id="get-apiv1auditverify-verify-audit-chain" class="anchored"><a class="hanchor" href="#get-apiv1auditverify-verify-audit-chain" aria-label="link">#</a><code>GET /api/v1/audit/verify</code> — Verify audit chain</h4>
+<p><strong>Auth:</strong> <code>audit:r</code></p>
+<p>Triggers integrity verification of the Merkle hash chain for the last N entries (configured by <code>audit.verify_last_n_entries</code>). Returns <code>{ &quot;data&quot;: { &quot;valid&quot;: true, &quot;entries_checked&quot;: 1000 } }</code>.</p>
+<hr>
+<h3 id="costs" class="anchored"><a class="hanchor" href="#costs" aria-label="link">#</a>Costs</h3>
+<h4 id="get-apiv1costssummary-cost-summary" class="anchored"><a class="hanchor" href="#get-apiv1costssummary-cost-summary" aria-label="link">#</a><code>GET /api/v1/costs/summary</code> — Cost summary</h4>
+<p><strong>Auth:</strong> <code>costs:r</code></p>
+<p>Returns per-agent cost breakdown for the current 24-hour budget period.</p>
+<hr>
+<h4 id="get-apiv1costsagentsname-per-agent-costs" class="anchored"><a class="hanchor" href="#get-apiv1costsagentsname-per-agent-costs" aria-label="link">#</a><code>GET /api/v1/costs/agents/{name}</code> — Per-agent costs</h4>
+<p><strong>Auth:</strong> <code>costs:r</code></p>
+<p>Returns the cost entry for a specific agent: tokens used, cost in micro-USD, tool call count, and budget threshold status.</p>
+<hr>
+<h3 id="notifications" class="anchored"><a class="hanchor" href="#notifications" aria-label="link">#</a>Notifications</h3>
+<h4 id="get-apiv1notifications-list-notifications" class="anchored"><a class="hanchor" href="#get-apiv1notifications-list-notifications" aria-label="link">#</a><code>GET /api/v1/notifications</code> — List notifications</h4>
+<p><strong>Auth:</strong> <code>notifications:r</code></p>
+<p><strong>Query parameters:</strong> <code>read</code> (bool), <code>limit</code>, <code>offset</code>.</p>
+<hr>
+<h4 id="get-apiv1notificationsunread-unread-count" class="anchored"><a class="hanchor" href="#get-apiv1notificationsunread-unread-count" aria-label="link">#</a><code>GET /api/v1/notifications/unread</code> — Unread count</h4>
+<p><strong>Auth:</strong> <code>notifications:r</code></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;data&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="get-apiv1notificationsid-get-notification" class="anchored"><a class="hanchor" href="#get-apiv1notificationsid-get-notification" aria-label="link">#</a><code>GET /api/v1/notifications/{id}</code> — Get notification</h4>
+<p><strong>Auth:</strong> <code>notifications:r</code></p>
+<hr>
+<h4 id="delete-apiv1notificationsid-dismiss-notification" class="anchored"><a class="hanchor" href="#delete-apiv1notificationsid-dismiss-notification" aria-label="link">#</a><code>DELETE /api/v1/notifications/{id}</code> — Dismiss notification</h4>
+<p><strong>Auth:</strong> <code>notifications:w</code></p>
+<p>Dismisses (removes) a single notification by ID.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>DELETE<span class="w"> </span>http://localhost:8080/api/v1/notifications/uuid<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="delete-apiv1notificationsread-clear-read-notifications" class="anchored"><a class="hanchor" href="#delete-apiv1notificationsread-clear-read-notifications" aria-label="link">#</a><code>DELETE /api/v1/notifications/read</code> — Clear read notifications</h4>
+<p><strong>Auth:</strong> <code>notifications:w</code></p>
+<p>Clears all notifications that have been marked as read.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>DELETE<span class="w"> </span>http://localhost:8080/api/v1/notifications/read<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span>
+</pre></div>
+</div>
+<hr>
+<h4 id="post-apiv1notificationsidrespond-respond-to-notification" class="anchored"><a class="hanchor" href="#post-apiv1notificationsidrespond-respond-to-notification" aria-label="link">#</a><code>POST /api/v1/notifications/{id}/respond</code> — Respond to notification</h4>
+<p><strong>Auth:</strong> <code>notifications:w</code></p>
+<p>Used to answer <code>ask-user</code> questions from agents.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8080/api/v1/notifications/uuid/respond<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer agos_...&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{ &quot;text&quot;: &quot;Yes, proceed.&quot; }&#39;</span>
+</pre></div>
+</div>
+<hr>
+<h3 id="webhooks" class="anchored"><a class="hanchor" href="#webhooks" aria-label="link">#</a>Webhooks</h3>
+<h4 id="post-apiv1webhookstelegramchannel-id-telegram-webhook-ingress" class="anchored"><a class="hanchor" href="#post-apiv1webhookstelegramchannel-id-telegram-webhook-ingress" aria-label="link">#</a><code>POST /api/v1/webhooks/telegram/{channel_id}</code> — Telegram webhook ingress</h4>
+<p><strong>Auth:</strong> None required (public).</p>
+<p>Public inbound webhook endpoint for Telegram updates. Telegram POSTs updates here for the channel adapter instance identified by <code>{channel_id}</code>.</p>
+<hr>
+<h3 id="developer-openapi" class="anchored"><a class="hanchor" href="#developer-openapi" aria-label="link">#</a>Developer / OpenAPI</h3>
+<h4 id="get-apiv1openapijson-openapi-specification" class="anchored"><a class="hanchor" href="#get-apiv1openapijson-openapi-specification" aria-label="link">#</a><code>GET /api/v1/openapi.json</code> — OpenAPI specification</h4>
+<p><strong>Auth:</strong> None required (public).</p>
+<p>Returns the OpenAPI 3.1 specification document describing the REST API.</p>
+<h4 id="get-apiv1docs-interactive-api-docs" class="anchored"><a class="hanchor" href="#get-apiv1docs-interactive-api-docs" aria-label="link">#</a><code>GET /api/v1/docs</code> — Interactive API docs</h4>
+<p><strong>Auth:</strong> None required (public).</p>
+<p>Serves the <a href="https://scalar.com/" target="_blank" rel="noopener">Scalar</a> interactive API documentation UI, rendered from the OpenAPI spec.</p>
+<hr>
+<h2 id="security-headers" class="anchored"><a class="hanchor" href="#security-headers" aria-label="link">#</a>Security Headers</h2>
+<p>All API responses include:</p>
+<div class="table-wrap"><table><thead><tr><th>Header</th><th>Value</th></tr></thead><tbody><tr><td><code>X-Content-Type-Options</code></td><td><code>nosniff</code></td></tr><tr><td><code>X-Frame-Options</code></td><td><code>DENY</code></td></tr><tr><td><code>Cache-Control</code></td><td><code>no-store</code></td></tr></tbody></table></div>
+<hr>
+<h2 id="middleware-stack" class="anchored"><a class="hanchor" href="#middleware-stack" aria-label="link">#</a>Middleware Stack</h2>
+<p>Requests pass through this middleware chain (outermost to innermost):</p>
+<ol><li><strong>Rate limiting</strong> — 120 burst / 2 per second per IP</li><li><strong>CORS</strong> — allow origin from the configured <code>host:port</code></li><li><strong>Tracing</strong> — structured HTTP trace spans</li><li><strong>Compression</strong> — response body compression</li><li><strong>Security headers</strong> — see above</li><li><strong>Bearer auth</strong> — on protected routes only</li></ol>
+<hr>
+<h2 id="related" class="anchored"><a class="hanchor" href="#related" aria-label="link">#</a>Related</h2>
+<ul><li><a class="wikilink" href="ch-25.html">API Authentication and Keys</a> — API key lifecycle and best practices</li><li><a class="wikilink" href="ch-24.html">WebSocket Guide</a> — Real-time event subscriptions and chat</li><li><a class="wikilink" href="ch-08.html">Security Model</a> — Capability tokens, permission scopes, and API auth layer</li><li><a class="wikilink" href="ch-16.html">Configuration Reference</a> — <code>[api]</code> config section</li></ul></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-22.html"><span class="pn-dir">← Previous</span><span class="pn-title">MCP Integration</span></a><a class="pn pn-next" href="ch-24.html"><span class="pn-dir">Next →</span><span class="pn-title">WebSocket Guide</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#overview" data-target="overview">Overview</a></li><li class="toc-h2"><a href="#authentication" data-target="authentication">Authentication</a></li><li class="toc-h3"><a href="#permission-scopes" data-target="permission-scopes">Permission Scopes</a></li><li class="toc-h2"><a href="#rate-limiting" data-target="rate-limiting">Rate Limiting</a></li><li class="toc-h2"><a href="#response-format" data-target="response-format">Response Format</a></li><li class="toc-h2"><a href="#error-format" data-target="error-format">Error Format</a></li><li class="toc-h2"><a href="#endpoints" data-target="endpoints">Endpoints</a></li><li class="toc-h3"><a href="#system" data-target="system">System</a></li><li class="toc-h3"><a href="#agents" data-target="agents">Agents</a></li><li class="toc-h3"><a href="#tasks" data-target="tasks">Tasks</a></li><li class="toc-h3"><a href="#chat-openai-compatible" data-target="chat-openai-compatible">Chat (OpenAI-Compatible)</a></li><li class="toc-h3"><a href="#tools" data-target="tools">Tools</a></li><li class="toc-h3"><a href="#secrets" data-target="secrets">Secrets</a></li><li class="toc-h3"><a href="#pipelines" data-target="pipelines">Pipelines</a></li><li class="toc-h3"><a href="#audit" data-target="audit">Audit</a></li><li class="toc-h3"><a href="#costs" data-target="costs">Costs</a></li><li class="toc-h3"><a href="#notifications" data-target="notifications">Notifications</a></li><li class="toc-h3"><a href="#webhooks" data-target="webhooks">Webhooks</a></li><li class="toc-h3"><a href="#developer-openapi" data-target="developer-openapi">Developer / OpenAPI</a></li><li class="toc-h2"><a href="#security-headers" data-target="security-headers">Security Headers</a></li><li class="toc-h2"><a href="#middleware-stack" data-target="middleware-stack">Middleware Stack</a></li><li class="toc-h2"><a href="#related" data-target="related">Related</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

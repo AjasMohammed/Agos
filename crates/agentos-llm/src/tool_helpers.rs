@@ -128,7 +128,13 @@ pub fn normalize_tool_input_schema(input_schema: Option<&Value>) -> Value {
     };
     sanitize_schema_node(&mut schema);
     ensure_object_has_properties(&mut schema);
-    add_object_additional_properties_false(&mut schema);
+    // NOTE: `additionalProperties: false` is intentionally NOT added here.
+    // It is only required by OpenAI *strict* function calling, and closed
+    // object schemas (especially empty `properties: {}`) are a known irritant
+    // for guided-decoding backends on other OpenAI-compatible hosts — NVIDIA's
+    // NIM gateway intermittently 500s with `unhashable type: 'dict'` on
+    // tool-calling payloads. The OpenAI adapter closes objects itself, but only
+    // when it actually emits `strict: true`. See `add_object_additional_properties_false`.
     schema
 }
 
@@ -642,6 +648,43 @@ mod tests {
         let variants = &normalized["properties"]["x"]["anyOf"];
         assert!(variants[0].is_object());
         assert!(variants[1].is_object());
+    }
+
+    #[test]
+    fn test_normalize_tool_input_schema_does_not_close_objects() {
+        // `additionalProperties: false` must NOT be added by the shared
+        // normalizer — closed object schemas (especially empty `properties`)
+        // trip some OpenAI-compatible guided-decoding backends (NVIDIA NIM
+        // 500s with `unhashable type: 'dict'`). Only the OpenAI adapter closes
+        // schemas, and only when it emits `strict: true`.
+        let schema = json!({"type": "object", "properties": {"path": {"type": "string"}}});
+        let normalized = normalize_tool_input_schema(Some(&schema));
+        assert!(normalized.get("additionalProperties").is_none());
+        assert!(normalized["properties"]["path"]
+            .get("additionalProperties")
+            .is_none());
+
+        // The empty-object case (e.g. the `datetime` tool) also stays open.
+        let empty = normalize_tool_input_schema(Some(&json!({"type": "object"})));
+        assert!(empty.get("additionalProperties").is_none());
+    }
+
+    #[test]
+    fn test_add_object_additional_properties_false_closes_explicitly() {
+        // The OpenAI strict path calls this directly; it must still close every
+        // object node recursively.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "nested": {"type": "object", "properties": {"x": {"type": "string"}}},
+            },
+        });
+        add_object_additional_properties_false(&mut schema);
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["nested"]["additionalProperties"],
+            false
+        );
     }
 
     #[test]

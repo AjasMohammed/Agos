@@ -443,7 +443,7 @@ fn resolve_workspace_binary(ws: &WorkspaceInfo, binary: &str) -> Option<PathBuf>
         || binary.contains('/')
         || binary.contains('\\')
         || binary.contains('\0')
-        || binary.split(|c| c == '/' || c == '\\').any(|seg| seg == "..")
+        || binary.split(['/', '\\']).any(|seg| seg == "..")
     {
         return None;
     }

@@ -564,29 +564,32 @@ impl LLMCore for GeminiCore {
             body["tools"] = json!([{ "functionDeclarations": function_declarations }]);
         }
 
-        let res = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("x-goog-api-key", self.api_key.expose_secret())
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AgentOSError::LLMError {
-                provider: "gemini".to_string(),
-                reason: format!("Reqwest failed: {}", e),
-            })?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let text = res.text().await.unwrap_or_default();
-            let err_msg = format!("Gemini API error {}: {}", status, text);
-            let _ = tx.send(InferenceEvent::Error(err_msg.clone())).await;
-            return Err(AgentOSError::LLMError {
-                provider: "gemini".to_string(),
-                reason: err_msg,
-            });
-        }
+        // Retry the initial POST + status check (before any SSE event is
+        // forwarded) so a transient upstream 5xx / network blip doesn't fail
+        // the whole chat turn — matching the resilience of the non-streaming
+        // path. `send_with_retry` returns the live `Response` with its body
+        // stream intact on 2xx.
+        let res = crate::retry::send_with_retry(
+            "gemini",
+            &self.retry_policy,
+            &self.circuit_breaker,
+            Some(&self.concurrency),
+            || {
+                self.client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("x-goog-api-key", self.api_key.expose_secret())
+                    .json(&body)
+            },
+        )
+        .await;
+        let res = match res {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(InferenceEvent::Error(e.to_string())).await;
+                return Err(e);
+            }
+        };
 
         let mut full_text = String::new();
         let mut tool_calls: Vec<InferenceToolCall> = Vec::new();

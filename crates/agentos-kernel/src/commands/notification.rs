@@ -59,6 +59,7 @@ impl Kernel {
             read: false,
             thread_id: None,
             reply_to_external_id: None,
+            attachment: None,
         };
 
         let notification_id = msg.id;

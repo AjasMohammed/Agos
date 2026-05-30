@@ -1,0 +1,30 @@
+id = "filesystem"
+display_name = "Filesystem"
+description = "Read, write, and search files within explicitly allowed directories via MCP."
+trust_tier = "verified"
+homepage = "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem"
+
+[mcp]
+transport = "stdio"
+
+[install]
+strategy = "npx"
+package = "@modelcontextprotocol/server-filesystem"
+runtime = "node"
+min_runtime_version = "18"
+# {home} is expanded at install time. Scope this to a project dir in production —
+# the server can only touch the directories passed here.
+args = ["{home}/projects"]
+
+[auth]
+type = "none"
+
+[tools]
+default_risk_class = "readonly_external"
+
+# Mutating tools escalate through the approval hook instead of auto-approving.
+[tools.overrides]
+write_file = "write_scoped"
+edit_file = "write_scoped"
+move_file = "write_scoped"
+create_directory = "write_scoped"

@@ -30,12 +30,84 @@ pub fn markdown_to_telegram_html(input: &str) -> String {
     let with_pre = extract_fenced_blocks(&escaped, &mut placeholders);
     let with_code = extract_inline_code(&with_pre, &mut placeholders);
 
-    let with_bold = replace_paired(&with_code, "**", "<b>", "</b>");
+    // Block-level transforms (headers, bullets, blockquotes, rules) run before
+    // inline ones so the inline passes still see their markers inside the line.
+    let with_blocks = apply_block_formatting(&with_code);
+
+    let with_bold = replace_paired(&with_blocks, "**", "<b>", "</b>");
     let with_strike = replace_paired(&with_bold, "~~", "<s>", "</s>");
     let with_italic = replace_italic(&with_strike);
     let with_links = replace_links(&with_italic);
 
     restore_placeholders(&with_links, &placeholders)
+}
+
+/// Apply line-based (block-level) markdown that Telegram HTML cannot express
+/// directly: ATX headers (`## x` → bold), bullet markers (`- x`/`* x`/`+ x` →
+/// `• x`), blockquotes (`> x` → `<blockquote>`), and horizontal rules.
+///
+/// Operates on already-escaped text with code spans extracted to placeholders,
+/// so it never rewrites code content. Note `>` is already `&gt;` at this stage.
+fn apply_block_formatting(input: &str) -> String {
+    let mut out: Vec<String> = Vec::with_capacity(input.split('\n').count());
+    for line in input.split('\n') {
+        let trimmed_start = line.trim_start();
+        let indent = &line[..line.len() - trimmed_start.len()];
+        let t = trimmed_start.trim_end();
+
+        // Horizontal rule: a line of only -, *, or _ (3 or more).
+        if t.len() >= 3
+            && (t.chars().all(|c| c == '-')
+                || t.chars().all(|c| c == '*')
+                || t.chars().all(|c| c == '_'))
+        {
+            out.push("──────────".to_string());
+            continue;
+        }
+
+        // ATX header: 1-6 leading '#' followed by a space → bold line.
+        if let Some(content) = parse_atx_header(trimmed_start) {
+            out.push(format!("<b>{content}</b>"));
+            continue;
+        }
+
+        // Bullet list: -, *, or + followed by a space → "• ".
+        if let Some(rest) = parse_bullet(trimmed_start) {
+            out.push(format!("{indent}• {rest}"));
+            continue;
+        }
+
+        // Blockquote: escaped '>' followed by a space.
+        if let Some(rest) = trimmed_start.strip_prefix("&gt; ") {
+            out.push(format!("<blockquote>{rest}</blockquote>"));
+            continue;
+        }
+
+        out.push(line.to_string());
+    }
+    out.join("\n")
+}
+
+/// Parse an ATX header (`#`..`######` + space), returning the trimmed title
+/// with any trailing `#` closing sequence removed. `None` if not a header.
+fn parse_atx_header(line: &str) -> Option<String> {
+    let hashes = line.chars().take_while(|c| *c == '#').count();
+    if (1..=6).contains(&hashes) {
+        let rest = &line[hashes..];
+        if let Some(title) = rest.strip_prefix(' ') {
+            return Some(title.trim().trim_end_matches('#').trim_end().to_string());
+        }
+    }
+    None
+}
+
+/// Parse a bullet list item (`-`/`*`/`+` + space), returning the item text.
+fn parse_bullet(line: &str) -> Option<String> {
+    let mut chars = line.chars();
+    match (chars.next(), chars.next()) {
+        (Some('-' | '*' | '+'), Some(' ')) => Some(line[2..].to_string()),
+        _ => None,
+    }
 }
 
 fn escape_html(s: &str) -> String {
@@ -216,7 +288,7 @@ fn is_adjacent_same(chars: &[char], i: usize, c: char) -> bool {
 /// Replace markdown links `[label](url)` with `<a href="url">label</a>`.
 /// URLs containing nested parens are not supported — kept simple on purpose.
 fn replace_links(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
+    let mut out: Vec<u8> = Vec::with_capacity(input.len());
     let bytes = input.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -231,11 +303,10 @@ fn replace_links(input: &str) -> String {
                             std::str::from_utf8(&bytes[i + 1..i + 1 + label_end]).unwrap_or("");
                         let url = std::str::from_utf8(&bytes[url_start..url_end]).unwrap_or("");
                         if is_safe_url(url) {
-                            out.push_str(&format!(
-                                "<a href=\"{}\">{}</a>",
-                                attr_escape(url),
-                                label
-                            ));
+                            out.extend_from_slice(
+                                format!("<a href=\"{}\">{}</a>", attr_escape(url), label)
+                                    .as_bytes(),
+                            );
                             i = url_end + 1;
                             continue;
                         }
@@ -243,10 +314,12 @@ fn replace_links(input: &str) -> String {
                 }
             }
         }
-        out.push(bytes[i] as char);
+        // Push the raw byte; multibyte UTF-8 sequences are preserved intact
+        // because `[`, `]`, `(`, `)` are all ASCII and never split a sequence.
+        out.push(bytes[i]);
         i += 1;
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn find_unescaped(haystack: &[u8], needle: u8) -> Option<usize> {
@@ -369,6 +442,58 @@ mod tests {
     #[test]
     fn empty_input() {
         assert_eq!(markdown_to_telegram_html(""), "");
+    }
+
+    #[test]
+    fn atx_header_becomes_bold() {
+        assert_eq!(markdown_to_telegram_html("## Section"), "<b>Section</b>");
+        assert_eq!(markdown_to_telegram_html("# Title #"), "<b>Title</b>");
+    }
+
+    #[test]
+    fn header_with_inline_markdown_still_converts() {
+        assert_eq!(
+            markdown_to_telegram_html("## A **B** C"),
+            "<b>A <b>B</b> C</b>"
+        );
+    }
+
+    #[test]
+    fn hashtag_without_space_is_not_a_header() {
+        assert_eq!(markdown_to_telegram_html("#hashtag"), "#hashtag");
+    }
+
+    #[test]
+    fn bullets_become_dots() {
+        assert_eq!(
+            markdown_to_telegram_html("- one\n* two\n+ three"),
+            "• one\n• two\n• three"
+        );
+    }
+
+    #[test]
+    fn nested_bullet_keeps_indent() {
+        assert_eq!(markdown_to_telegram_html("  - sub"), "  • sub");
+    }
+
+    #[test]
+    fn blockquote_renders() {
+        assert_eq!(
+            markdown_to_telegram_html("> quoted"),
+            "<blockquote>quoted</blockquote>"
+        );
+    }
+
+    #[test]
+    fn horizontal_rule_renders() {
+        assert_eq!(markdown_to_telegram_html("---"), "──────────");
+        assert_eq!(markdown_to_telegram_html("***"), "──────────");
+    }
+
+    #[test]
+    fn header_inside_code_block_is_left_alone() {
+        let html = markdown_to_telegram_html("```\n## not a header\n```");
+        assert!(html.contains("<pre>## not a header</pre>"));
     }
 
     #[test]

@@ -79,9 +79,22 @@ RestrictSUIDSGID=true
 LockPersonality=true
 RestrictRealtime=true
 
-# Allow only syscalls from the standard service set.
-# Note: if WASM tool execution via Wasmtime (JIT) is enabled, verify that
-# @system-service includes the mmap/mprotect calls that Wasmtime needs.
+# ── Syscall + namespace policy ───────────────────────────────────────────────
+# The hardened defaults below assume the kernel is NOT running the bwrap-based
+# `script` / `shell-exec` tools. Two interactions to be aware of:
+#   * Wasmtime (JIT) WASM tools need mmap/mprotect — present in @system-service.
+#   * bwrap (bubblewrap) script tools (crates/agentos-tools/src/script_tool.rs
+#     runs `bwrap --unshare-all`, and bwrap is REQUIRED) call unshare /
+#     clone(CLONE_NEW*), mount, umount2, pivot_root and create user/mount/pid/
+#     net/ipc/uts/cgroup namespaces. These are BLOCKED by RestrictNamespaces=true
+#     AND by @system-service (which excludes @mount and unshare), so under these
+#     defaults every script/shell-exec tool call fails with EPERM.
+#
+# To run bwrap script tools under systemd, relax BOTH directives (validate on a
+# real host first — tracked as a release blocker in Phase 08/10):
+#     RestrictNamespaces=false
+#     SystemCallFilter=@system-service @mount @sandbox
+# Leave the hardened defaults if you sandbox via WASM/containers instead of bwrap.
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 
@@ -92,6 +105,7 @@ CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 # Prevent creating new namespaces (mount, network, user, etc.).
+# NOTE: this blocks bwrap script/shell-exec tools — see the syscall note above.
 RestrictNamespaces=true
 
 # Be explicit: only the main process sends sd_notify messages.

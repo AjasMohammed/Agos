@@ -58,3 +58,12 @@ graphify-out/*
 .venv*/
 
 .playwright-mcp/*
+
+# Stray build artifacts & one-off reports (release v1 baseline triage 2026-05-30)
+*.rlib
+agentos-deployment-readiness-report.html
+.codex
+.claude/*.lock
+
+# Obsidian planning vault — internal planning docs, not part of the published repo
+obsidian-vault/

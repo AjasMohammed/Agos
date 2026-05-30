@@ -15,6 +15,18 @@ use crate::service::KernelService;
 /// Receives Telegram Bot API update POSTs.  Verified via the
 /// `X-Telegram-Bot-Api-Secret-Token` header that Telegram sends when a
 /// `secret_token` was set in the `setWebhook` call.
+#[utoipa::path(
+    post,
+    path = "/api/v1/webhooks/telegram/{channel_id}",
+    tag = "webhooks",
+    operation_id = "webhooks_telegram",
+    params(("channel_id" = String, Path, description = "Channel ID")),
+    request_body(content = serde_json::Value, description = "Telegram Bot API update payload"),
+    responses(
+        (status = 200, description = "Webhook accepted", body = serde_json::Value),
+        (status = 401, description = "Invalid secret token", body = crate::error::ApiErrorBody)
+    )
+)]
 pub async fn telegram_webhook(
     State(svc): State<Arc<dyn KernelService>>,
     Path(channel_id): Path<String>,

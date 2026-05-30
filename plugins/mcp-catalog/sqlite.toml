@@ -1,0 +1,26 @@
+id = "sqlite"
+display_name = "SQLite"
+description = "Query, inspect, and modify a local SQLite database via MCP."
+trust_tier = "verified"
+homepage = "https://github.com/modelcontextprotocol/servers/tree/main/src/sqlite"
+
+[mcp]
+transport = "stdio"
+
+# Exercises the Python runtime path (the official SQLite server is Python).
+[install]
+strategy = "pip"
+package = "mcp-server-sqlite"
+runtime = "python"
+min_runtime_version = "3.10"
+args = ["--db-path", "{home}/.agentos/data/mcp-sqlite.db"]
+
+[auth]
+type = "none"
+
+[tools]
+default_risk_class = "readonly_external"
+
+[tools.overrides]
+write_query = "write_scoped"
+create_table = "write_scoped"

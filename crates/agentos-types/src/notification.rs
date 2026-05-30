@@ -38,6 +38,40 @@ pub struct UserMessage {
     /// For channels that support reply threading (Telegram message_id, email In-Reply-To).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_external_id: Option<String>,
+    /// Optional outbound media attachment (image/document). Channels that
+    /// support media render it natively (Telegram sendPhoto/sendDocument);
+    /// others fall back to appending the URL to the body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<MessageAttachment>,
+}
+
+/// An outbound media attachment carried by a [`UserMessage`].
+///
+/// Phase 1 supports URL-based attachments: the receiving channel fetches `url`
+/// directly (Telegram passes it to `sendPhoto`/`sendDocument`). Local-file
+/// (`file_id`) upload is a planned follow-up.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageAttachment {
+    /// Public URL the receiving channel fetches directly.
+    pub url: String,
+    /// Whether the channel treats this as an inline image or a document.
+    pub kind: AttachmentKind,
+    /// Optional download filename (documents).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    /// Optional caption shown with the media (markdown, rendered per-platform).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+}
+
+/// How a [`MessageAttachment`] should be presented by the channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    /// Inline image (Telegram `sendPhoto`).
+    Image,
+    /// Generic file/document (Telegram `sendDocument`).
+    Document,
 }
 
 /// Who produced the message.

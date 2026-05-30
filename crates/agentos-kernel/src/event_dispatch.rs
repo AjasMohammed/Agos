@@ -7,6 +7,37 @@ use std::time::Duration;
 
 use crate::kernel::Kernel;
 
+/// Map a kernel [`EventMessage`] to a coarse [`RealtimeEvent`] for WS/SSE fan-out.
+///
+/// The channel is derived from the event's category so control-panel clients can
+/// subscribe by domain (`tasks`, `agents`, `audit`, `schedules`, `system`, or the
+/// catch-all `events`). The event name is the variant name; `data` carries the
+/// type, severity, timestamp, and original payload.
+fn realtime_event_from(event: &EventMessage) -> RealtimeEvent {
+    let channel = match event.event_type.category() {
+        EventCategory::AgentLifecycle => "agents",
+        EventCategory::TaskLifecycle => "tasks",
+        EventCategory::SecurityEvents | EventCategory::ToolEvents => "audit",
+        EventCategory::ScheduleEvents => "schedules",
+        EventCategory::SystemHealth => "system",
+        EventCategory::MemoryEvents
+        | EventCategory::HardwareEvents
+        | EventCategory::AgentCommunication
+        | EventCategory::ExternalEvents => "events",
+    };
+    RealtimeEvent {
+        channel: channel.to_string(),
+        event: format!("{:?}", event.event_type),
+        data: serde_json::json!({
+            "event_id": event.id.to_string(),
+            "event_type": format!("{:?}", event.event_type),
+            "severity": format!("{:?}", event.severity),
+            "timestamp": event.timestamp.to_rfc3339(),
+            "payload": event.payload,
+        }),
+    }
+}
+
 /// Sign an event, write an audit entry, and send it through the event channel.
 ///
 /// This is the single authoritative implementation of event emission.  Both
@@ -390,6 +421,10 @@ impl Kernel {
     /// Called by the EventDispatcher supervised task.
     pub(crate) async fn process_event(self: &Arc<Self>, event: EventMessage) {
         crate::metrics::record_event_processed();
+
+        // Tee a coarse, lossy view of every event into the realtime broadcast for
+        // the control panel's WS/SSE layer. Send errors (no receivers) are ignored.
+        let _ = self.realtime_event_sender.send(realtime_event_from(&event));
 
         // Check chain depth for loop detection
         if event.chain_depth > self.event_bus.max_chain_depth() {

@@ -90,4 +90,25 @@ mod tests {
             ExecutorType::Privileged
         );
     }
+
+    /// Round-trip the shipped `tools/core/skill-create.toml` manifest. The
+    /// `skill-create` tool lets an agent author + install skills at runtime,
+    /// so its `risk_class` MUST resolve to `ControlPlane` for the approval
+    /// hook to gate every call. If `risk_class` is accidentally nested inside
+    /// `[manifest]`, serde silently defaults the top-level field to
+    /// `ReadonlyScoped` and the gate disappears — this test fails loudly.
+    #[test]
+    fn skill_create_manifest_parses_with_control_plane_risk_class() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/core/skill-create.toml");
+        let loaded = load_manifest(&path).expect("manifest must parse and verify");
+
+        assert_eq!(loaded.manifest.manifest.name, "skill-create");
+        assert_eq!(loaded.manifest.manifest.trust_tier, TrustTier::Core);
+        assert_eq!(
+            loaded.manifest.risk_class,
+            RiskClass::ControlPlane,
+            "skill-create risk_class MUST be top-level ControlPlane so the \
+             approval hook gates every skill-authoring call"
+        );
+    }
 }
