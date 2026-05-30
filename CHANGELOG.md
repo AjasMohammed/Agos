@@ -10,7 +10,7 @@ The distributed binary is `agentos` (crate `agentos-cli`); the version reported 
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-MM-DD
+## [1.0.0] - unreleased
 
 First production release. AgentOS graduates from "feature-complete + green
 internally" to a single, unified, broadly distributable v1.0.0 with signed
@@ -49,8 +49,8 @@ rollback process.
   (`.github/workflows/docs.yml`).
 - **Supply-chain security.** `cargo-audit` / `cargo-deny` CI gates (`deny.toml`),
   a CycloneDX SBOM (`bom.json`) attached to every release, and minisign-signed
-  release artifacts with the public verification key committed at
-  `packaging/signing/agentos-release.pub`.
+  release artifacts. From the first signed release, the public verification key is
+  published at `packaging/signing/agentos-release.pub`.
 - **Release governance.** Keep-a-changelog `CHANGELOG.md`, semver-from-1.0.0
   policy with signed annotated tags (see
   `obsidian-vault/plans/production-release-v1/VERSION-AND-TAGGING-POLICY.md`),
@@ -76,13 +76,14 @@ rollback process.
 
 ### Security
 
-- Minisign-signed release artifacts; the one-line installer and Homebrew formula
-  verify signatures before executing the downloaded binary (fail-closed).
+- Minisign-signed release artifacts (from the first signed release onward); the
+  one-line installer and Homebrew formula verify signatures before executing the
+  downloaded binary (fail-closed).
 - `cargo-audit` / `cargo-deny` CI gates enforce advisory and license policy.
 - CycloneDX SBOM published per release for dependency scanning.
 - `SECURITY.md` documents the trust boundaries (load-bearing vs. hardening), the
   vulnerability-reporting process, release verification, and the hardened-systemd
   bwrap caveat.
 
-[Unreleased]: https://github.com/agentos/agentos/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/agentos/agentos/releases/tag/v1.0.0
+[Unreleased]: https://github.com/AjasMohammed/Agos/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/AjasMohammed/Agos/releases/tag/v1.0.0

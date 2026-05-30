@@ -2,8 +2,9 @@
 
 Gateway mode runs AgentOS as a long-lived **messaging bot**. Instead of serving a web UI,
 `agentos gateway run` boots the kernel and connects every channel declared in the
-`[gateway]` config block (Telegram, Discord, Slack, Matrix, ntfy, webhook), then runs until
-`SIGTERM`. Inbound chat messages become agent tasks; replies flow back over the same channel.
+`[gateway]` config block (Telegram, Discord, Slack, ntfy, email, WhatsApp, webhook), then runs
+until `SIGTERM`. Inbound chat messages become agent tasks; replies flow back over the same
+channel.
 
 The boot and signal loop are shared with `agentos start`, so there is exactly one kernel-boot
 code path.
@@ -18,7 +19,7 @@ references a vault key via `credential_key`, which you seed with `agentos secret
 enabled = true
 
 [[gateway.channels]]
-kind = "telegram"                       # telegram | discord | slack | matrix | ntfy | webhook
+kind = "telegram"                       # telegram | discord | slack | ntfy | email | whatsapp | webhook
 display_name = "Ops Bot"
 credential_key = "telegram_bot_token"   # vault key holding the token
 active_agent = "assistant"              # default agent for inbound chat

@@ -27,7 +27,7 @@ This guide walks you through building, configuring, and running AgentOS from sou
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/agentos/agentos.git
+git clone https://github.com/AjasMohammed/Agos.git
 cd agos
 ```
 

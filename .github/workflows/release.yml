@@ -4,18 +4,34 @@ on:
     tags: ['v*']
 
 jobs:
+  quality:
+    name: Quality gate (fmt / clippy / deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+
   build:
+    needs: quality
     strategy:
       matrix:
         include:
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
             artifact: agentos-linux-amd64
             use_cross: false
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
             artifact: agentos-linux-arm64
-            use_cross: true            # cross supplies the aarch64 musl toolchain
+            use_cross: true            # cross supplies the aarch64 gnu toolchain + ort aarch64 linux-gnu libs
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact: agentos-darwin-amd64
@@ -30,9 +46,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Install musl tools (native linux)
-        if: contains(matrix.target, 'musl') && matrix.use_cross == false
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Install cross
         if: matrix.use_cross == true
         run: cargo install cross --git https://github.com/cross-rs/cross --locked
@@ -71,14 +84,40 @@ jobs:
           else
             echo "MINISIGN_SECRET_KEY not set — skipping signing (checksum only)."
           fi
-      - uses: actions/upload-artifact@v4
+      - name: Generate CycloneDX SBOM (linux-amd64 leg only)
+        if: matrix.artifact == 'agentos-linux-amd64'
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo cyclonedx --format json
+          # cargo-cyclonedx emits per-package bom files; gather the workspace
+          # root bom into a single bom.json shipped with every release.
+          if [ -f bom.json ]; then
+            :
+          else
+            root_bom=$(find . -name 'bom.json' -not -path './target/*' | head -n1)
+            cp "$root_bom" bom.json
+          fi
+      - name: Upload SBOM (linux-amd64 leg only)
+        if: matrix.artifact == 'agentos-linux-amd64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          if-no-files-found: error
+          path: bom.json
+      - name: Upload binary + checksum (required)
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          if-no-files-found: warn
+          if-no-files-found: error
           path: |
             ${{ matrix.artifact }}
             ${{ matrix.artifact }}.sha256
-            ${{ matrix.artifact }}.sig
+      - name: Upload signature (optional until signing is mandatory)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-sig
+          if-no-files-found: warn
+          path: ${{ matrix.artifact }}.sig
 
   docker:
     needs: build
@@ -99,8 +138,8 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/ajasmohammed/agos:latest
+            ghcr.io/ajasmohammed/agos:${{ github.ref_name }}
 
   release:
     needs: [build, docker]
@@ -111,8 +150,14 @@ jobs:
       - uses: actions/download-artifact@v4
       - uses: softprops/action-gh-release@v1
         with:
+          generate_release_notes: true
           files: |
             agentos-linux-amd64/*
             agentos-linux-arm64/*
             agentos-darwin-amd64/*
             agentos-darwin-arm64/*
+            agentos-linux-amd64-sig/*
+            agentos-linux-arm64-sig/*
+            agentos-darwin-amd64-sig/*
+            agentos-darwin-arm64-sig/*
+            sbom/bom.json

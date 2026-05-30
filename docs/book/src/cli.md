@@ -23,7 +23,7 @@ agentos [--config <path>] <command>
 |---------|-------------|
 | `agentos start [--vault-passphrase <p>]` | Boot the kernel. Prompts for the vault passphrase if omitted. |
 | `agentos gateway run` | Boot the kernel and connect every channel in `[gateway]` as a bot daemon. See [Gateway-first](./deploy/gateway.md). |
-| `agentos shutdown` | Gracefully shut down the running kernel. |
+| `agentos stop` | Gracefully shut down the running kernel. |
 | `agentos status` | System status: uptime, agents, tasks, tools, audit entries. |
 | `agentos healthz [--port <n>]` | Probe the health endpoint (used by the Docker `HEALTHCHECK`). |
 

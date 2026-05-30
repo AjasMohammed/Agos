@@ -84,6 +84,8 @@ db_path = "/var/lib/agentos/data/context_memory.db"
 [scratchpad]
 db_path = "/var/lib/agentos/data/scratchpad.db"
 
+# [api] applies to `agentos start`, not `web serve` (the container default);
+# under `web serve` this block is ignored.
 [api]
 enabled = true
 host = "0.0.0.0"
@@ -99,3 +101,19 @@ memory_warning_percent = 80.0
 disk_warning_percent = 85.0
 disk_critical_percent = 95.0
 gpu_vram_warning_percent = 90.0
+
+# Gateway ("run as a bot") — `agentos gateway run` boots the kernel and connects
+# every channel listed here. This is a TEMPLATE: uncomment and fill in so
+# docker-compose.gateway.yml has a starting point. Tokens are referenced by a
+# VAULT key (credential_key), never inline — seed with
+# `agentos secret set <key> <token>`.
+# [gateway]
+# enabled = false
+#
+# One [[gateway.channels]] table per bot. Example (uncomment + set credential_key):
+# [[gateway.channels]]
+# kind = "telegram"                  # telegram | ntfy | email | discord | slack | whatsapp | webhook
+# display_name = "Ops Bot"
+# credential_key = "telegram_bot_token"   # vault key holding the token
+# active_agent = "assistant"         # default agent for inbound chat
+# # external_id omitted for Telegram → auto-discovered from the first /start

@@ -9,28 +9,28 @@
 # published `*.sha256` artifacts.
 class Agentos < Formula
   desc "LLM-native operating system for AI agents"
-  homepage "https://github.com/agentos/agentos"
+  homepage "https://github.com/AjasMohammed/Agos"
   version "1.0.0"
   license "Apache-2.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/agentos/agentos/releases/download/v1.0.0/agentos-darwin-arm64"
+      url "https://github.com/AjasMohammed/Agos/releases/download/v1.0.0/agentos-darwin-arm64"
       sha256 "REPLACE_WITH_DARWIN_ARM64_SHA256"
     end
     on_intel do
-      url "https://github.com/agentos/agentos/releases/download/v1.0.0/agentos-darwin-amd64"
+      url "https://github.com/AjasMohammed/Agos/releases/download/v1.0.0/agentos-darwin-amd64"
       sha256 "REPLACE_WITH_DARWIN_AMD64_SHA256"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/agentos/agentos/releases/download/v1.0.0/agentos-linux-arm64"
+      url "https://github.com/AjasMohammed/Agos/releases/download/v1.0.0/agentos-linux-arm64"
       sha256 "REPLACE_WITH_LINUX_ARM64_SHA256"
     end
     on_intel do
-      url "https://github.com/agentos/agentos/releases/download/v1.0.0/agentos-linux-amd64"
+      url "https://github.com/AjasMohammed/Agos/releases/download/v1.0.0/agentos-linux-amd64"
       sha256 "REPLACE_WITH_LINUX_AMD64_SHA256"
     end
   end

@@ -55,23 +55,26 @@ instead. See [systemd deployment](./deploy/systemd.md).
 
 ## Verifying releases
 
-Release binaries are published on GitHub Releases. From v1.0.0, each artifact ships with a
-detached `minisign` signature, and the project's public key lives at
-`packaging/signing/agentos-release.pub`. To verify a download:
+Release binaries are published on GitHub Releases. Minisign signing is wired into the release
+pipeline: from the first signed release onward, each artifact ships with a detached `minisign`
+signature (`.sig`), and the release owner publishes the corresponding public key at tag time.
+Once that key is published (it will live at `packaging/signing/agentos-release.pub`), verify a
+download — when a `.sig` is present — with:
 
 ```bash
+# Run once the signed release and its public key are published:
 minisign -Vm agentos-<target> -P "$(cat packaging/signing/agentos-release.pub)"
 sha256sum -c agentos-<target>.sha256
 ```
 
 The [one-line installer](./quickstart.md) verifies the SHA-256 checksum (mandatory) and the
-minisign signature (when available) before executing the binary — it refuses to install on a
-verification failure. An **SBOM** (CycloneDX `bom.json`) is attached to every release for
-dependency scanning.
+minisign signature (when a `.sig` is available) before executing the binary — it refuses to
+install on a verification failure. An **SBOM** (CycloneDX `bom.json`) is attached to every
+GitHub release for dependency scanning.
 
 ## Reporting a vulnerability
 
 **Do not open a public GitHub issue for security vulnerabilities.** Send a report via
-[GitHub Security Advisories](https://github.com/agentos/agentos/security/advisories/new),
+[GitHub Security Advisories](https://github.com/AjasMohammed/Agos/security/advisories/new),
 including a description, reproduction steps, and the affected crate(s)/version(s). We aim to
 acknowledge within 48 hours and resolve critical issues within 7 days.

@@ -17,6 +17,14 @@ services:
     restart: unless-stopped
     command: ["gateway", "run"]
     read_only: true
+    # Hardened defaults: read_only root FS + no-new-privileges + cap_drop ALL on
+    # top of Docker's default seccomp profile. NOTE: bwrap-based script/shell-exec
+    # tools need user namespaces and extra syscalls and will fail with EPERM here.
+    # Enabling script tools requires an explicit relaxation (e.g.
+    # `security_opt: [seccomp=unconfined]`, drop `no-new-privileges:true`, and
+    # restore the caps bwrap needs), which weakens isolation — mirrors the
+    # deploy/agentos.service systemd hardening tradeoff. Leave hardened unless
+    # script execution is explicitly required by the gateway's channels.
     security_opt:
       - no-new-privileges:true
     cap_drop:

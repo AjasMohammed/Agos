@@ -10,7 +10,7 @@
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Send a report via [GitHub Security Advisories](https://github.com/agentos/agentos/security/advisories/new).
+Send a report via [GitHub Security Advisories](https://github.com/AjasMohammed/Agos/security/advisories/new).
 
 Include:
 - Description of the vulnerability
@@ -67,9 +67,9 @@ as documented in the unit file, or sandbox via containers/WASM instead.
 ## Verifying Releases
 
 Release binaries are published on GitHub Releases. Once signed releases are in
-place (v1.0.0), each artifact ships with a detached `minisign` signature and the
-project's public key is published in the repository (`packaging/signing/`). To
-verify a download:
+place (v1.0.0), each artifact will ship with a detached `minisign` signature and
+the project's public key will be published in the repository (`packaging/signing/`).
+To verify a download:
 
 ```bash
 # minisign (https://jedisct1.github.io/minisign/)

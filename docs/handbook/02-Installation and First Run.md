@@ -32,7 +32,7 @@ Clone the repository and build the entire workspace:
 
 ```bash
 # Clone
-git clone https://github.com/agentos/agentos.git
+git clone https://github.com/AjasMohammed/Agos.git
 cd agentos
 
 # Build all 28 workspace crates (debug mode)

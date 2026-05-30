@@ -1,6 +1,8 @@
 [kernel]
 max_concurrent_tasks = 8
-default_task_timeout_secs = 120
+# 10min ceiling for normal multi-step tasks; autonomous tasks use
+# [kernel.autonomous_mode] limits.
+default_task_timeout_secs = 600
 context_window_max_entries = 200
 context_window_token_budget = 16000
 health_port = 9091
@@ -9,6 +11,17 @@ state_db_path = "/var/lib/agentos/data/kernel_state.db"
 [kernel.tool_calls]
 allow_parallel = true
 max_parallel = 5
+
+# Explicit limits for production determinism (mirrors config/default.toml) rather
+# than relying on code defaults.
+[kernel.task_limits]
+max_iterations_low = 50
+max_iterations_medium = 200
+max_iterations_high = 1000
+
+[kernel.tool_execution]
+max_output_bytes = 262144    # 256 KiB
+default_timeout_seconds = 300
 
 [secrets]
 # systemd layout: the vault lives at /var/lib/agentos/vault/ (covered by the

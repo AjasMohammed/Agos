@@ -11,7 +11,7 @@ AgentOS exposes three observability surfaces, identical across every deploy mode
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /healthz` | Liveness — `{"status":"ok"}` once the kernel is up. |
+| `GET /healthz` | Liveness — `{"status":"ok","uptime_seconds":<n>}` once the kernel is up. |
 | `GET /readyz`  | Readiness — ok when subsystems are accepting work. |
 | `GET /metrics` | Prometheus text exposition (all `agentos_*` series). |
 

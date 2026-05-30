@@ -74,6 +74,9 @@ ollama_context_window = 16384
 
 [memory]
 model_cache_dir = "/home/pi/.agentos/models"
+# Pi/low-RAM: skip the ~23MB ONNX embedder; FTS5 lexical memory search still
+# works, only vector retrieval is a no-op.
+disable_embedder = true
 
 [memory.extraction]
 enabled = true

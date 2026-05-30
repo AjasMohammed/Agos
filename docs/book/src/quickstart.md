@@ -7,7 +7,7 @@ Get from zero to a running task in minutes. The binary is **`agentos`**.
 ### One-line installer (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/agentos/agentos/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/AjasMohammed/Agos/main/scripts/install.sh | bash
 ```
 
 The installer detects your OS/arch, downloads the matching prebuilt binary, **verifies the
@@ -30,7 +30,7 @@ Homebrew installs the same prebuilt, signed binary per architecture.
 ### From source (developer path)
 
 ```bash
-cargo install --git https://github.com/agentos/agentos --tag v1.0.0 agentos-cli
+cargo install --git https://github.com/AjasMohammed/Agos --tag v1.0.0 --locked agentos-cli
 ```
 
 Building from source requires the **Rust 1.91+** toolchain ([rustup.rs](https://rustup.rs)).

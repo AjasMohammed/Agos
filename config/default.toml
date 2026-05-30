@@ -381,6 +381,11 @@ config_writable = false
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 servers = []
 
+# NOT YET WIRED — keys in [runtime] are parsed but currently IGNORED by the
+# kernel. KernelConfig has no `runtime` field, so editing anything below has no
+# effect yet (the container allowed_images list is hardcoded in kernel.rs).
+# The block is retained to preserve design intent until the runtime backend is
+# wired up.
 [runtime]
 # Container runtime backend: "docker" (default) | "none" (disabled)
 backend = "docker"

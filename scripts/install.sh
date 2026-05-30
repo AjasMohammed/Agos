@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install.sh — one-line AgentOS installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/agentos/agentos/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/AjasMohammed/Agos/main/scripts/install.sh | bash
 #
 # Env overrides:
 #   AGENTOS_VERSION       release tag (default: latest), e.g. v1.0.0
@@ -12,7 +12,7 @@
 # Phase 08 signing is live; gracefully reported as skipped before then).
 set -euo pipefail
 
-REPO="agentos/agentos"
+REPO="AjasMohammed/Agos"
 VERSION="${AGENTOS_VERSION:-latest}"
 INSTALL_DIR="${AGENTOS_INSTALL_DIR:-$HOME/.local/bin}"
 PUBKEY_URL="https://raw.githubusercontent.com/${REPO}/main/packaging/signing/agentos-release.pub"
@@ -101,5 +101,5 @@ AgentOS installed. Next steps:
   agentos web serve        # start the web UI on http://127.0.0.1:8080
 
 On Linux, install bubblewrap for the shell-exec sandbox:  sudo apt install bubblewrap
-Docs: https://agentos.github.io/agentos
+Docs: https://ajasmohammed.github.io/Agos
 EOF

@@ -1,51 +1,24 @@
-# install.ps1 — AgentOS Windows installer (EARLY BETA).
+# install.ps1 — AgentOS Windows installer notice.
 #
-#   iwr -useb https://raw.githubusercontent.com/agentos/agentos/main/scripts/install.ps1 | iex
+#   iwr -useb https://raw.githubusercontent.com/AjasMohammed/Agos/main/scripts/install.ps1 | iex
 #
-# Native Windows is early-beta: seccomp sandboxing and most HAL hardware drivers
-# are Linux-only and are unavailable here. The SUPPORTED path is WSL2 +
-# scripts/install.sh. This installer is provided for convenience only.
+# Native Windows binaries are NOT published for v1.0.0. Seccomp sandboxing and
+# most HAL hardware drivers are Linux-only, so the SUPPORTED path on Windows is
+# WSL2 + scripts/install.sh. This script does not download anything; it just
+# points you at the supported installer and exits.
 $ErrorActionPreference = "Stop"
 
-Write-Host "AgentOS on native Windows is EARLY-BETA. WSL2 is the supported path." -ForegroundColor Yellow
-Write-Host "  (run scripts/install.sh inside WSL2 for the fully-tested experience)" -ForegroundColor Yellow
-
-$repo    = "agentos/agentos"
-$version = if ($env:AGENTOS_VERSION) { $env:AGENTOS_VERSION } else { "latest" }
-$asset   = "agentos-windows-amd64.exe"
-$dir     = "$env:LOCALAPPDATA\AgentOS\bin"
-$base    = if ($version -eq "latest") {
-    "https://github.com/$repo/releases/latest/download"
-} else {
-    "https://github.com/$repo/releases/download/$version"
-}
-
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
-$exe = "$dir\agentos.exe"
-$sha = "$env:TEMP\agentos.sha256"
-
-Write-Host "==> Downloading $asset ($version)"
-Invoke-WebRequest "$base/$asset"        -OutFile $exe
-Invoke-WebRequest "$base/$asset.sha256" -OutFile $sha
-
-# --- verify checksum ----------------------------------------------------------
-Write-Host "==> Verifying checksum"
-$expected = (Get-Content $sha).Split(" ")[0].Trim().ToLower()
-$actual   = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
-if ($expected -ne $actual) {
-    Remove-Item $exe -Force
-    throw "Checksum verification failed — refusing to install."
-}
-
-# --- add to user PATH ---------------------------------------------------------
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($userPath -notlike "*$dir*") {
-    [Environment]::SetEnvironmentVariable("Path", "$userPath;$dir", "User")
-    Write-Host "==> Added $dir to your user PATH (restart the shell to pick it up)."
-}
-
-Write-Host "==> Installed to $exe"
-& $exe --version
 Write-Host ""
-Write-Host "Next: agentos onboard  then  agentos web serve"
-Write-Host "Docs: https://agentos.github.io/agentos"
+Write-Host "AgentOS does not ship a native Windows binary yet." -ForegroundColor Yellow
+Write-Host "The supported path on Windows is WSL2 (Windows Subsystem for Linux)." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "To install:" -ForegroundColor Cyan
+Write-Host "  1. Install WSL2:  wsl --install"
+Write-Host "  2. Open your WSL2 (e.g. Ubuntu) shell."
+Write-Host "  3. Run the Linux installer:"
+Write-Host "       curl -fsSL https://raw.githubusercontent.com/AjasMohammed/Agos/main/scripts/install.sh | bash"
+Write-Host ""
+Write-Host "Docs: https://ajasmohammed.github.io/Agos"
+Write-Host ""
+
+exit 0

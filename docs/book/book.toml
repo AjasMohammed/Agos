@@ -6,8 +6,8 @@ src = "src"
 description = "LLM-native operating system for AI agents — docs, deployment, and reference."
 
 [output.html]
-git-repository-url = "https://github.com/agentos/agentos"
-edit-url-template = "https://github.com/agentos/agentos/edit/main/docs/book/{path}"
+git-repository-url = "https://github.com/AjasMohammed/Agos"
+edit-url-template = "https://github.com/AjasMohammed/Agos/edit/main/docs/book/{path}"
 default-theme = "navy"
 preferred-dark-theme = "navy"
 git-repository-icon = "fa-github"

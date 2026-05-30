@@ -1,6 +1,8 @@
 image:
-  repository: agentos/kernel
-  tag: latest
+  repository: ghcr.io/ajasmohammed/agos
+  # Empty falls back to the chart's appVersion (pins to a specific release
+  # instead of the mutable "latest" tag). Override only to deploy a different tag.
+  tag: ""
   pullPolicy: IfNotPresent
 
 replicaCount: 1

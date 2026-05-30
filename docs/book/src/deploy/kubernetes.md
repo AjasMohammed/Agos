@@ -20,7 +20,7 @@ helm install agentos deploy/helm/agentos \
 
 ## What the chart provisions
 
-- **Deployment** running the `agentos/kernel` image, with container ports `8080` (web/API)
+- **Deployment** running the `ghcr.io/ajasmohammed/agos` image, with container ports `8080` (web/API)
   and `9091` (health/metrics).
 - **PersistentVolumeClaim** — `persistence.enabled: true`, `10Gi`, `ReadWriteOnce` by
   default (set `persistence.storageClass` for your cluster).

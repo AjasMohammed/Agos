@@ -17,7 +17,7 @@ agentos --config config/production.toml start
 Read and write values without hand-editing TOML (comments/formatting are preserved):
 
 ```bash
-agentos config get llm.primary
+agentos config get ollama.default_model
 agentos config set logging.log_level debug
 agentos config list
 ```
