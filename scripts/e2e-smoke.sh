@@ -162,6 +162,36 @@ exists deploy/observability/grafana-dashboard-agentos.json   "Grafana dashboard"
 exists scripts/install.sh                              "curl|bash installer (sh)"
 exists scripts/install.ps1                             "Windows installer (ps1, beta)"
 exists packaging/homebrew/agentos.rb                   "Homebrew formula"
+exists LICENSE                                         "Apache-2.0 LICENSE"
+exists CHANGELOG.md                                    "CHANGELOG"
+exists SECURITY.md                                     "security policy"
+
+# ── 7b. Compose self-consistency: no host Docker socket by default ────────────
+section "[7b] Compose security self-consistency"
+# The default stack must NOT bind-mount the host Docker socket — doing so grants
+# any LLM-driven agent effective root on the host. An uncommented list entry
+# (line starting with '-', not '#') is the regression we guard against.
+for compose in docker-compose.yml docker-compose.gateway.yml; do
+  if [ -f "$compose" ]; then
+    if grep -qE '^[[:space:]]*-[[:space:]]*/var/run/docker\.sock' "$compose"; then
+      fail "$compose mounts host docker.sock by default (host-root escape)"
+    else
+      pass "$compose does not mount host docker.sock by default"
+    fi
+  fi
+done
+
+# Release build targets: linux musl was abandoned because ort/onnx ships no musl
+# binary and openssl-sys is unvendored (musl release builds fail). Guard against
+# a regression back to musl in the release workflow.
+RELEASE_YML=".github/workflows/release.yml"
+if [ -f "$RELEASE_YML" ]; then
+  if grep -qE 'unknown-linux-musl' "$RELEASE_YML"; then
+    fail "release.yml targets linux-musl (ort/openssl can't build on musl — use linux-gnu)"
+  else
+    pass "release.yml uses glibc/gnu linux targets (no musl)"
+  fi
+fi
 
 # ── 8. systemd unit syntax (best-effort) ──────────────────────────────────────
 section "[8] systemd unit syntax"
