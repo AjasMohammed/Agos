@@ -224,8 +224,10 @@ impl OpenAICore {
             );
             intent_by_tool.insert(tool_name.to_string(), intent_type);
 
-            let mut parameters =
-                tool_helpers::normalize_tool_input_schema(manifest.payload_schema.as_ref());
+            let mut parameters = tool_helpers::normalize_tool_input_schema_with_examples(
+                manifest.payload_schema.as_ref(),
+                &manifest.examples,
+            );
             let strict = tool_helpers::is_openai_strict_compatible_schema(&parameters);
             // OpenAI strict mode *requires* `additionalProperties: false` on
             // every object. Only close the schema when we actually emit

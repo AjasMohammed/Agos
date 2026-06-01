@@ -80,6 +80,13 @@ pub struct KernelConfig {
     /// User preference adaptation post-task proposer.
     #[serde(default)]
     pub user_adaptation: UserAdaptationConfig,
+    /// Structured user-profile store (proactive personalization L0/L1 source).
+    #[serde(default)]
+    pub user_profile: UserProfileConfig,
+    /// Proactive personalization — read-back into context (L0/L1), the
+    /// background interest model, and proactive recommendations (L2).
+    #[serde(default)]
+    pub personalization: PersonalizationConfig,
     /// Managed environment (`env-install`) policies and allowlists.
     /// Controls which packages agents may install into per-agent workspaces.
     #[serde(default)]
@@ -202,6 +209,179 @@ fn default_user_adaptation_max_proposals_per_task() -> usize {
 }
 fn default_user_adaptation_ttl_days() -> i64 {
     30
+}
+
+/// Structured user-profile store configuration (proactive personalization).
+///
+/// The profile store holds durable, categorized user preferences promoted from
+/// accepted proposals. `max_pinned` and `min_confidence` are *also* enforced as
+/// hard floors inside the store layer (see `user_profile_store`); the values
+/// here are the operator-facing knobs. Enabled by default — the store simply
+/// holds promoted prefs and is harmless empty; the *read-back into context*
+/// (Phase 2) is what carries a separate, default-off `personalization` gate.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UserProfileConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Optional override for the SQLite path; defaults to `{data_dir}/user_profile.db`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_path: Option<String>,
+    /// Maximum number of L0-pinned entries surfaced to context.
+    #[serde(default = "default_user_profile_max_pinned")]
+    pub max_pinned: i64,
+    /// Minimum confidence for an entry to be stored (operator-facing floor).
+    #[serde(default = "default_user_profile_min_confidence")]
+    pub min_confidence: f32,
+}
+
+impl Default for UserProfileConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            db_path: None,
+            max_pinned: default_user_profile_max_pinned(),
+            min_confidence: default_user_profile_min_confidence(),
+        }
+    }
+}
+
+fn default_user_profile_max_pinned() -> i64 {
+    8
+}
+fn default_user_profile_min_confidence() -> f32 {
+    0.30
+}
+
+/// Proactive personalization configuration (shared by Phases 2–6).
+///
+/// Tiered by token cost:
+/// - **L0** (read-back): the `enabled` master switch controls whether a compact
+///   pinned profile block is injected into agent context. `profile_pin_cap` and
+///   `profile_token_budget` bound its size.
+/// - **L2** (background): the interest model + recommendation engine run off the
+///   task path. `interest_*` fields tune the decaying interest aggregator;
+///   `proactive_*` fields gate and rate-limit recommendations.
+///
+/// `enabled` is OFF by default — turning it on is the opt-in for putting profile
+/// data into context. `proactive_enabled` is a *separate*, also-off-by-default
+/// switch for outbound recommendations.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PersonalizationConfig {
+    /// Master switch for read-back-into-context (L0/L1). Opt-in.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Max pinned entries surfaced in the L0 block.
+    #[serde(default = "default_profile_pin_cap")]
+    pub profile_pin_cap: usize,
+    /// Hard token budget for the rendered L0 block.
+    #[serde(default = "default_profile_token_budget")]
+    pub profile_token_budget: usize,
+
+    // --- L2: interest model (Phase 3) ---
+    /// Half-life (hours) for interest-score exponential decay.
+    #[serde(default = "default_interest_decay_half_life_hours")]
+    pub interest_decay_half_life_hours: f64,
+    /// Minimum decayed score below which an interest topic is pruned.
+    #[serde(default = "default_interest_min_score")]
+    pub interest_min_score: f64,
+    /// Trigger: aggregate after this many task completions.
+    #[serde(default = "default_interest_trigger_tasks")]
+    pub interest_aggregation_trigger_tasks: u64,
+    /// Trigger: aggregate after at least this many hours since the last cycle.
+    #[serde(default = "default_interest_trigger_hours")]
+    pub interest_aggregation_trigger_hours: f64,
+
+    // --- L2: proactive recommendations (Phase 4) ---
+    /// Separate opt-in for generating + delivering proactive recommendations.
+    #[serde(default)]
+    pub proactive_enabled: bool,
+    /// Maximum recommendations delivered per day.
+    #[serde(default = "default_max_recommendations_per_day")]
+    pub max_recommendations_per_day: u32,
+    /// Cooldown (hours) before an identical (deduped) recommendation may repeat.
+    #[serde(default = "default_recommendation_dedup_cooldown_hours")]
+    pub recommendation_dedup_cooldown_hours: f64,
+    /// Minimum confidence for a recommendation to be delivered.
+    #[serde(default = "default_recommendation_min_confidence")]
+    pub recommendation_min_confidence: f32,
+
+    // --- Phase 5: feedback loop ---
+    /// Exponential half-life (days) for profile pin_rank decay.
+    /// With 30d default an unused entry halves its rank every month.
+    #[serde(default = "default_pin_rank_decay_half_life_days")]
+    pub pin_rank_decay_half_life_days: f64,
+    /// Archive Active profile entries idle for longer than this many days.
+    #[serde(default = "default_profile_archive_idle_days")]
+    pub profile_archive_idle_days: i64,
+    /// Hours a dismissed recommendation's dedup_hash is suppressed (7d default).
+    #[serde(default = "default_dismiss_cooldown_hours")]
+    pub dismiss_cooldown_hours: i64,
+    /// Confidence boost when the user re-states an existing preference (f32, clamped to 1.0).
+    #[serde(default = "default_restate_confidence_boost")]
+    pub restate_confidence_boost: f32,
+}
+
+impl Default for PersonalizationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            profile_pin_cap: default_profile_pin_cap(),
+            profile_token_budget: default_profile_token_budget(),
+            interest_decay_half_life_hours: default_interest_decay_half_life_hours(),
+            interest_min_score: default_interest_min_score(),
+            interest_aggregation_trigger_tasks: default_interest_trigger_tasks(),
+            interest_aggregation_trigger_hours: default_interest_trigger_hours(),
+            proactive_enabled: false,
+            max_recommendations_per_day: default_max_recommendations_per_day(),
+            recommendation_dedup_cooldown_hours: default_recommendation_dedup_cooldown_hours(),
+            recommendation_min_confidence: default_recommendation_min_confidence(),
+            pin_rank_decay_half_life_days: default_pin_rank_decay_half_life_days(),
+            profile_archive_idle_days: default_profile_archive_idle_days(),
+            dismiss_cooldown_hours: default_dismiss_cooldown_hours(),
+            restate_confidence_boost: default_restate_confidence_boost(),
+        }
+    }
+}
+
+fn default_profile_pin_cap() -> usize {
+    8
+}
+fn default_profile_token_budget() -> usize {
+    300
+}
+fn default_interest_decay_half_life_hours() -> f64 {
+    // ~2 weeks: interests fade but aren't forgotten between sessions.
+    336.0
+}
+fn default_interest_min_score() -> f64 {
+    0.05
+}
+fn default_interest_trigger_tasks() -> u64 {
+    25
+}
+fn default_interest_trigger_hours() -> f64 {
+    24.0
+}
+fn default_max_recommendations_per_day() -> u32 {
+    3
+}
+fn default_recommendation_dedup_cooldown_hours() -> f64 {
+    168.0 // one week
+}
+fn default_recommendation_min_confidence() -> f32 {
+    0.5
+}
+fn default_pin_rank_decay_half_life_days() -> f64 {
+    30.0
+}
+fn default_profile_archive_idle_days() -> i64 {
+    60
+}
+fn default_dismiss_cooldown_hours() -> i64 {
+    168 // 7 days
+}
+fn default_restate_confidence_boost() -> f32 {
+    0.10
 }
 
 /// Chat-specific kernel configuration.
@@ -757,6 +937,53 @@ pub struct ToolsSettings {
     /// `host-package-install` tool configuration. Disabled by default.
     #[serde(default)]
     pub host_package: HostPackageSettings,
+    /// Tool-discovery (Tier-0 index) tuning.
+    #[serde(default)]
+    pub discovery: DiscoverySettings,
+}
+
+/// Tuning for the Tier-0 tool-discovery index (the compact per-turn `Tools`
+/// line). See `obsidian-vault/plans/tool-discovery-architecture`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DiscoverySettings {
+    /// Max usage-ranked tool names shown per category in the Tier-0 line.
+    #[serde(default = "default_l0_max_names")]
+    pub l0_max_names_per_category: usize,
+    /// Soft token budget for the Tier-0 line's names portion (≈4 chars/token);
+    /// categories beyond the budget render counts-only.
+    #[serde(default = "default_l0_max_tokens")]
+    pub l0_max_tokens: usize,
+    /// Scope the native tool array to task-relevant categories (Phase 3).
+    /// Default ON. Anything scoped out stays reachable via `search-tools`.
+    #[serde(default = "default_true")]
+    pub default_scoping: bool,
+    /// Task classifier: "heuristic" | "heuristic+semantic" | "llm".
+    /// Only "heuristic" is implemented today; others degrade to heuristic.
+    #[serde(default = "default_scoping_classifier")]
+    pub scoping_classifier: String,
+}
+
+fn default_l0_max_names() -> usize {
+    5
+}
+
+fn default_l0_max_tokens() -> usize {
+    200
+}
+
+fn default_scoping_classifier() -> String {
+    "heuristic".to_string()
+}
+
+impl Default for DiscoverySettings {
+    fn default() -> Self {
+        Self {
+            l0_max_names_per_category: default_l0_max_names(),
+            l0_max_tokens: default_l0_max_tokens(),
+            default_scoping: true,
+            scoping_classifier: default_scoping_classifier(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2251,6 +2478,32 @@ mod tests {
         assert!(!cfg.otel.enabled, "otel must default to disabled (opt-in)");
         assert_eq!(cfg.preflight.min_free_disk_mb, 512);
         assert!(cfg.preflight.check_db_writable);
+    }
+
+    #[test]
+    fn default_config_tools_discovery_parses() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/default.toml");
+        let content = std::fs::read_to_string(&path).expect("config/default.toml must exist");
+        let cfg: KernelConfig = toml::from_str(&content)
+            .expect("config/default.toml must parse with [tools.discovery]");
+        assert_eq!(cfg.tools.discovery.l0_max_names_per_category, 5);
+        assert_eq!(cfg.tools.discovery.l0_max_tokens, 200);
+    }
+
+    #[test]
+    fn discovery_settings_defaults_when_absent() {
+        // A [tools] block without [tools.discovery] must still parse (serde
+        // default), so existing deployments' configs keep working.
+        let toml_str = r#"
+core_tools_dir = "/t/c"
+user_tools_dir = "/t/u"
+data_dir = "/t/d"
+"#;
+        let tools: ToolsSettings =
+            toml::from_str(toml_str).expect("tools without discovery parses");
+        assert_eq!(tools.discovery.l0_max_names_per_category, 5);
+        assert_eq!(tools.discovery.l0_max_tokens, 200);
     }
 
     #[test]

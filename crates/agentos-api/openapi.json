@@ -9,6 +9,200 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/agent-chats": {
+      "get": {
+        "tags": [
+          "agent-chats"
+        ],
+        "summary": "`GET /api/v1/agent-chats` — List multi-agent conversations (most-recent first).",
+        "operationId": "agent_chats_list",
+        "responses": {
+          "200": {
+            "description": "List of conversations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListEnvelope_ApiConvoSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "agent-chats"
+        ],
+        "summary": "`POST /api/v1/agent-chats` — Create a conversation and start its orchestration\nloop in the background. Returns the created conversation; poll `GET {id}` for\nturns + status (`active` → `complete`/`stopped`/`error`).",
+        "operationId": "agent_chats_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateConvoRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Conversation created (running)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiConvoSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/agent-chats/{id}": {
+      "get": {
+        "tags": [
+          "agent-chats"
+        ],
+        "summary": "`GET /api/v1/agent-chats/{id}` — Get a conversation with its turn timeline.",
+        "operationId": "agent_chats_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conversation id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Conversation detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiConvoDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Conversation not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/agent-chats/{id}/stop": {
+      "post": {
+        "tags": [
+          "agent-chats"
+        ],
+        "summary": "`POST /api/v1/agent-chats/{id}/stop` — Stop a running conversation after its\ncurrent turn.",
+        "operationId": "agent_chats_stop",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conversation id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stop requested",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/api/v1/agents": {
       "get": {
         "tags": [
@@ -407,6 +601,257 @@
           },
           "404": {
             "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/agents/{name}/scratchpad": {
+      "get": {
+        "tags": [
+          "scratchpad"
+        ],
+        "summary": "`GET /api/v1/agents/{name}/scratchpad` — List an agent's scratchpad pages.",
+        "operationId": "scratchpad_list_agent",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent name / id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent scratchpad pages",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ScratchListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/agents/{name}/scratchpad/{page}": {
+      "get": {
+        "tags": [
+          "scratchpad"
+        ],
+        "summary": "`GET /api/v1/agents/{name}/scratchpad/{page}` — Read an agent's page.",
+        "operationId": "scratchpad_get_agent",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent name / id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "path",
+            "description": "Page title",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiScratchPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Page not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "scratchpad"
+        ],
+        "summary": "`PUT /api/v1/agents/{name}/scratchpad/{page}` — Create or overwrite a page.",
+        "operationId": "scratchpad_put_agent",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent name / id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "path",
+            "description": "Page title",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SavePageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiScratchPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "scratchpad"
+        ],
+        "summary": "`DELETE /api/v1/agents/{name}/scratchpad/{page}` — Delete a page.",
+        "operationId": "scratchpad_delete_agent",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent name / id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "path",
+            "description": "Page title",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Page not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1019,6 +1464,598 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/chat/sessions": {
+      "get": {
+        "tags": [
+          "chat-sessions"
+        ],
+        "summary": "`GET /api/v1/chat/sessions` — List chat sessions (most-recent first).",
+        "operationId": "chat_sessions_list",
+        "responses": {
+          "200": {
+            "description": "List of chat sessions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListEnvelope_ApiChatSessionSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "chat-sessions"
+        ],
+        "summary": "`POST /api/v1/chat/sessions` — Create a new chat session.",
+        "operationId": "chat_sessions_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateChatSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Created session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiChatSessionDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/chat/sessions/{id}": {
+      "get": {
+        "tags": [
+          "chat-sessions"
+        ],
+        "summary": "`GET /api/v1/chat/sessions/{id}` — Get a session with its message timeline.",
+        "operationId": "chat_sessions_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat session id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiChatSessionDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "chat-sessions"
+        ],
+        "summary": "`DELETE /api/v1/chat/sessions/{id}` — Delete a session and its messages.",
+        "operationId": "chat_sessions_delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat session id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "chat-sessions"
+        ],
+        "summary": "`PATCH /api/v1/chat/sessions/{id}` — Rename a session (or clear the title).",
+        "operationId": "chat_sessions_rename",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat session id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameChatSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Session renamed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/chat/sessions/{id}/export": {
+      "get": {
+        "tags": [
+          "chat-sessions"
+        ],
+        "summary": "`GET /api/v1/chat/sessions/{id}/export` — Export a session as JSON or markdown.",
+        "description": "Returns raw bytes (NOT the `{ data }` envelope) with a download-safe\n`Content-Type` and `Content-Disposition`. `?format=json` (default) or\n`?format=markdown`.",
+        "operationId": "chat_sessions_export",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat session id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "`\"json\"` (default) or `\"markdown\"`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exported session bytes",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/chat/sessions/{id}/fork": {
+      "post": {
+        "tags": [
+          "chat-sessions"
+        ],
+        "summary": "`POST /api/v1/chat/sessions/{id}/fork` — Fork a session into a new copy.",
+        "operationId": "chat_sessions_fork",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Source chat session id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForkChatSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Forked session id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ForkChatSessionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/chat/sessions/{id}/messages": {
+      "get": {
+        "tags": [
+          "chat-sessions"
+        ],
+        "summary": "`GET /api/v1/chat/sessions/{id}/messages` — List a session's messages.",
+        "operationId": "chat_sessions_messages",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat session id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session messages (oldest-first)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListEnvelope_ApiChatMessage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "chat-sessions"
+        ],
+        "summary": "`POST /api/v1/chat/sessions/{id}/messages` — send a user message and get the\nassistant reply (non-streaming). Both turns are persisted to the session.",
+        "operationId": "chat_sessions_send",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat session ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendChatMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Assistant reply",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiChatMessage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/chat/sessions/{id}/messages/stream": {
+      "post": {
+        "tags": [
+          "chat-sessions"
+        ],
+        "summary": "`POST /api/v1/chat/sessions/{id}/messages/stream` — send a user message and\nstream the assistant reply as Server-Sent Events (`thinking`/`chunk`/\n`tool_start`/`tool_result`/`done`/`error`). Both turns are persisted.",
+        "operationId": "chat_sessions_send_stream",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat session ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendChatMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream of chat events (text/event-stream)"
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1796,6 +2833,57 @@
         ]
       }
     },
+    "/api/v1/events/stream": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "`GET /api/v1/events/stream?channel=<name>` — SSE stream of realtime events.",
+        "description": "Each event is emitted as an SSE frame whose `event:` is the event name and\n`data:` is the JSON payload. The connection is kept alive with periodic\ncomments. Mirrors the WebSocket `subscribe` flow over a one-way stream.",
+        "operationId": "events_stream",
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "query",
+            "description": "Channel to subscribe to (`tasks`, `agents`, `audit`, `schedules`,\n`system`, or `events`). Subscribing requires the matching `<channel>:r`\nscope on the API key.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of realtime events (text/event-stream)"
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/api/v1/events/subscriptions": {
       "get": {
         "tags": [
@@ -1927,6 +3015,312 @@
           },
           "404": {
             "description": "Subscription not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/files": {
+      "get": {
+        "tags": [
+          "files"
+        ],
+        "summary": "`GET /api/v1/files` — List files for the authenticated principal.",
+        "operationId": "files_list",
+        "parameters": [
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Post-filter to files carrying this tag (FileStore has no native tag filter).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Fuzzy name search delegated to `FileStore::search_files`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "description": "Restrict to a scope (`\"global\"` or `\"session:{id}\"`). Omit for all scopes.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of files",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListEnvelope_ApiFileMeta"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "files"
+        ],
+        "summary": "`POST /api/v1/files` — Upload a file via `multipart/form-data`.",
+        "description": "Fields: `file` (required), `tags` (optional CSV-ish), `scope` (optional —\n`\"global\"` or `\"session:{uuid}\"`, defaults to `\"global\"`).",
+        "operationId": "files_upload",
+        "requestBody": {
+          "description": "Multipart form: file, tags?, scope?",
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Uploaded file metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiFileMeta"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/files/{id}": {
+      "get": {
+        "tags": [
+          "files"
+        ],
+        "summary": "`GET /api/v1/files/{id}` — Get a single file's metadata.",
+        "operationId": "files_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "File id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiFileMeta"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "File not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "files"
+        ],
+        "summary": "`DELETE /api/v1/files/{id}` — Remove a file record and its bytes from disk.",
+        "operationId": "files_delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "File id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "File not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/files/{id}/download": {
+      "get": {
+        "tags": [
+          "files"
+        ],
+        "summary": "`GET /api/v1/files/{id}/download` — Stream the raw file bytes.",
+        "description": "This route returns raw bytes (NOT the `{ data }` envelope) with a safe\n`Content-Type` (allowlisted via the kernel) and a header-safe\n`Content-Disposition`.",
+        "operationId": "files_download",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "File id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw file bytes",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "File not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -2235,6 +3629,186 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/marketplace": {
+      "get": {
+        "tags": [
+          "marketplace"
+        ],
+        "summary": "`GET /api/v1/marketplace?q=&type=` — Search the registry (empty list on failure).",
+        "operationId": "marketplace_search",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Free-text search query.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "description": "Optional artifact-type filter (e.g. `tool`, `plugin`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registry search results (verbatim registry JSON)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/marketplace/{name}": {
+      "get": {
+        "tags": [
+          "marketplace"
+        ],
+        "summary": "`GET /api/v1/marketplace/{name}` — Fetch a single registry item.",
+        "operationId": "marketplace_detail",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Registry item name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registry item detail (verbatim registry JSON)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or registry unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/marketplace/{name}/reviews": {
+      "post": {
+        "tags": [
+          "marketplace"
+        ],
+        "summary": "`POST /api/v1/marketplace/{name}/reviews` — Submit a review to the registry.",
+        "operationId": "marketplace_review",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Registry item name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Review submitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Registry unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -4235,6 +5809,219 @@
         ]
       }
     },
+    "/api/v1/scratchpad": {
+      "get": {
+        "tags": [
+          "scratchpad"
+        ],
+        "summary": "`GET /api/v1/scratchpad` — List pages in the global scratchpad.",
+        "operationId": "scratchpad_list_global",
+        "responses": {
+          "200": {
+            "description": "Global scratchpad pages",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ScratchListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/scratchpad/{page}": {
+      "get": {
+        "tags": [
+          "scratchpad"
+        ],
+        "summary": "`GET /api/v1/scratchpad/{page}` — Read a page from the global scratchpad.",
+        "operationId": "scratchpad_get_global",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "path",
+            "description": "Page title",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiScratchPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Page not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "scratchpad"
+        ],
+        "summary": "`PUT /api/v1/scratchpad/{page}` — Create or overwrite a global page.",
+        "operationId": "scratchpad_put_global",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "path",
+            "description": "Page title",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SavePageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiScratchPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "scratchpad"
+        ],
+        "summary": "`DELETE /api/v1/scratchpad/{page}` — Delete a global page.",
+        "operationId": "scratchpad_delete_global",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "path",
+            "description": "Page title",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Page not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/api/v1/secrets": {
       "get": {
         "tags": [
@@ -5759,6 +7546,150 @@
           }
         }
       },
+      "ApiChatMessage": {
+        "type": "object",
+        "description": "A single chat message in a session timeline.\n\nMaps from `ChatStore::get_messages()` → `ChatMessage`. Tool activity is\nsurfaced inline via the optional `tool_*` fields (the store joins\n`chat_tool_calls` onto the owning message); user/assistant rows leave them\n`None`. Note: per-message `tokens`/`cost`, multimodal `parts`, and the\nreasoning `thinking` trace are not persisted in `chat_messages` and are\ntherefore intentionally absent from this DTO.",
+        "required": [
+          "role",
+          "content",
+          "timestamp"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "Message text (or `Tool call: <name>` for tool rows)."
+          },
+          "role": {
+            "type": "string",
+            "description": "`\"user\"` | `\"assistant\"` | `\"tool\"`."
+          },
+          "timestamp": {
+            "type": "string",
+            "description": "RFC3339 message timestamp."
+          },
+          "tool_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Tool execution duration in milliseconds when `role == \"tool\"`.",
+            "minimum": 0
+          },
+          "tool_intent_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tool intent type (e.g. `\"query\"`, `\"execute\"`) when `role == \"tool\"`."
+          },
+          "tool_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tool name (populated when `role == \"tool\"`)."
+          },
+          "tool_payload_json": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tool input payload JSON string when `role == \"tool\"`."
+          },
+          "tool_result_json": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tool result payload JSON string when `role == \"tool\"`."
+          },
+          "tool_success": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Tool success flag when `role == \"tool\"`."
+          }
+        }
+      },
+      "ApiChatSessionDetail": {
+        "type": "object",
+        "description": "Detailed session view: header fields plus the full message timeline.",
+        "required": [
+          "id",
+          "agent_name",
+          "messages"
+        ],
+        "properties": {
+          "agent_name": {
+            "type": "string",
+            "description": "Agent the session is bound to."
+          },
+          "id": {
+            "type": "string",
+            "description": "Session id (UUID)."
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiChatMessage"
+            },
+            "description": "The session's messages, oldest-first."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional user-defined title."
+          }
+        }
+      },
+      "ApiChatSessionSummary": {
+        "type": "object",
+        "description": "Summary row for a chat session (list view).\n\nMaps from `ChatStore::list_sessions()` → `ChatSession`. `preview` comes from\n`ChatSession::last_preview` (last user/assistant message snippet).",
+        "required": [
+          "id",
+          "agent_name",
+          "message_count",
+          "updated_at"
+        ],
+        "properties": {
+          "agent_name": {
+            "type": "string",
+            "description": "Agent the session is bound to."
+          },
+          "id": {
+            "type": "string",
+            "description": "Session id (UUID)."
+          },
+          "message_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total number of messages in the session.",
+            "minimum": 0
+          },
+          "preview": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Last message preview, if any."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional user-defined title."
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "RFC3339 last-updated timestamp."
+          }
+        }
+      },
       "ApiCheckpointSummary": {
         "type": "object",
         "required": [
@@ -5890,6 +7821,111 @@
               "type": "string"
             },
             "description": "Granted scopes (from the stored credential)."
+          }
+        }
+      },
+      "ApiConvoDetail": {
+        "type": "object",
+        "description": "Detailed conversation view: header fields plus the ordered turn list.",
+        "required": [
+          "id",
+          "topic",
+          "participants",
+          "status",
+          "messages"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Conversation id (UUID)."
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiConvoTurn"
+            },
+            "description": "The conversation's turns, ordered by `turn_number`."
+          },
+          "participants": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ordered participant agent names."
+          },
+          "status": {
+            "type": "string",
+            "description": "`\"running\"` | `\"complete\"` | `\"stopped\"` | `\"error\"`."
+          },
+          "topic": {
+            "type": "string",
+            "description": "Conversation topic / seed prompt."
+          }
+        }
+      },
+      "ApiConvoSummary": {
+        "type": "object",
+        "description": "Summary row for a multi-agent conversation (list view).\n\nMaps from `ConvoStore::list_convos()` → `AgentConvo`.",
+        "required": [
+          "id",
+          "topic",
+          "participants",
+          "status",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Conversation id (UUID)."
+          },
+          "participants": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ordered participant agent names."
+          },
+          "status": {
+            "type": "string",
+            "description": "`\"running\"` | `\"complete\"` | `\"stopped\"` | `\"error\"`."
+          },
+          "topic": {
+            "type": "string",
+            "description": "Conversation topic / seed prompt."
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "RFC3339 last-updated timestamp."
+          }
+        }
+      },
+      "ApiConvoTurn": {
+        "type": "object",
+        "description": "A single turn within a conversation.\n\nMaps from `ConvoStore::get_turns()` → `ConvoTurn`.",
+        "required": [
+          "turn_number",
+          "agent_name",
+          "content",
+          "created_at"
+        ],
+        "properties": {
+          "agent_name": {
+            "type": "string",
+            "description": "Agent that produced this turn."
+          },
+          "content": {
+            "type": "string",
+            "description": "Turn content."
+          },
+          "created_at": {
+            "type": "string",
+            "description": "RFC3339 creation timestamp."
+          },
+          "turn_number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "1-based turn ordering within the conversation.",
+            "minimum": 0
           }
         }
       },
@@ -6033,6 +8069,59 @@
           "throttle": {
             "type": "string",
             "description": "Throttle policy (debug-rendered)."
+          }
+        }
+      },
+      "ApiFileMeta": {
+        "type": "object",
+        "description": "Metadata for a single uploaded file. Mirrors\n`agentos_kernel::file_store::UploadedFile` minus the on-disk path (never\nexposed to clients).",
+        "required": [
+          "id",
+          "name",
+          "original_name",
+          "mime",
+          "size",
+          "scope",
+          "tags",
+          "uploaded_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable file id (UUID). Used in download/get/delete routes."
+          },
+          "mime": {
+            "type": "string",
+            "description": "Stored MIME type."
+          },
+          "name": {
+            "type": "string",
+            "description": "Sanitized display name (used for @mention matching)."
+          },
+          "original_name": {
+            "type": "string",
+            "description": "Original filename as uploaded."
+          },
+          "scope": {
+            "type": "string",
+            "description": "`\"global\"` for ecosystem files, `\"session:{id}\"` for chat-scoped files."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Size in bytes.",
+            "minimum": 0
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Free-form tags attached at upload time."
+          },
+          "uploaded_at": {
+            "type": "string",
+            "description": "RFC3339 (or `YYYY-MM-DDTHH:MM:SSZ`) upload timestamp."
           }
         }
       },
@@ -6202,6 +8291,37 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "ApiPageSummary": {
+        "type": "object",
+        "description": "Lightweight scratchpad page summary. Mirrors `agentos_scratch::PageSummary`.",
+        "required": [
+          "id",
+          "title",
+          "tags",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Page id (UUID)."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tags attached to the page."
+          },
+          "title": {
+            "type": "string",
+            "description": "Page title (also the lookup key)."
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "RFC3339 last-updated timestamp."
           }
         }
       },
@@ -6568,6 +8688,60 @@
           "state": {
             "type": "string",
             "description": "One of `active` | `paused` | `disabled`."
+          }
+        }
+      },
+      "ApiScratchPage": {
+        "type": "object",
+        "description": "A full scratchpad page plus its backlinks. Mirrors `agentos_scratch::ScratchPage`\nwith the backlink summaries from `get_all_links`.",
+        "required": [
+          "id",
+          "agent_id",
+          "title",
+          "content",
+          "tags",
+          "created_at",
+          "updated_at",
+          "backlinks"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "description": "Owning agent id (the reserved `__global__` sentinel for global pages)."
+          },
+          "backlinks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiPageSummary"
+            },
+            "description": "Pages that link to this page (backlink graph)."
+          },
+          "content": {
+            "type": "string",
+            "description": "Markdown body."
+          },
+          "created_at": {
+            "type": "string",
+            "description": "RFC3339 creation timestamp."
+          },
+          "id": {
+            "type": "string",
+            "description": "Page id (UUID)."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tags attached to the page."
+          },
+          "title": {
+            "type": "string",
+            "description": "Page title."
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "RFC3339 last-updated timestamp."
           }
         }
       },
@@ -7094,6 +9268,61 @@
             "type": "number",
             "format": "double",
             "description": "Percentage of the daily tool-call budget consumed (0 when unbudgeted)."
+          }
+        }
+      },
+      "CreateChatSessionRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/v1/chat/sessions`.\n\n`first_message` is optional in the API contract, but the backing store only\nexposes `create_session_with_first_message`. When omitted, the session is\ncreated with an empty placeholder first message (see handler/kernel impl).",
+        "required": [
+          "agent_name"
+        ],
+        "properties": {
+          "agent_name": {
+            "type": "string",
+            "description": "Agent to bind the new session to."
+          },
+          "first_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional first user message. If omitted, an empty placeholder is stored."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional initial title (currently informational — the store sets title to\nNULL on create; rename via PATCH to set it)."
+          }
+        }
+      },
+      "CreateConvoRequest": {
+        "type": "object",
+        "description": "Request body for creating + running a new multi-agent conversation.",
+        "required": [
+          "topic",
+          "participants"
+        ],
+        "properties": {
+          "max_turns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Number of turns to run (clamped to 2..=50; default 8).",
+            "minimum": 0
+          },
+          "participants": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "topic": {
+            "type": "string"
           }
         }
       },
@@ -7660,6 +9889,124 @@
           }
         }
       },
+      "Envelope_ApiChatMessage": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A single chat message in a session timeline.\n\nMaps from `ChatStore::get_messages()` → `ChatMessage`. Tool activity is\nsurfaced inline via the optional `tool_*` fields (the store joins\n`chat_tool_calls` onto the owning message); user/assistant rows leave them\n`None`. Note: per-message `tokens`/`cost`, multimodal `parts`, and the\nreasoning `thinking` trace are not persisted in `chat_messages` and are\ntherefore intentionally absent from this DTO.",
+            "required": [
+              "role",
+              "content",
+              "timestamp"
+            ],
+            "properties": {
+              "content": {
+                "type": "string",
+                "description": "Message text (or `Tool call: <name>` for tool rows)."
+              },
+              "role": {
+                "type": "string",
+                "description": "`\"user\"` | `\"assistant\"` | `\"tool\"`."
+              },
+              "timestamp": {
+                "type": "string",
+                "description": "RFC3339 message timestamp."
+              },
+              "tool_duration_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Tool execution duration in milliseconds when `role == \"tool\"`.",
+                "minimum": 0
+              },
+              "tool_intent_type": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Tool intent type (e.g. `\"query\"`, `\"execute\"`) when `role == \"tool\"`."
+              },
+              "tool_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Tool name (populated when `role == \"tool\"`)."
+              },
+              "tool_payload_json": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Tool input payload JSON string when `role == \"tool\"`."
+              },
+              "tool_result_json": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Tool result payload JSON string when `role == \"tool\"`."
+              },
+              "tool_success": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "Tool success flag when `role == \"tool\"`."
+              }
+            }
+          }
+        }
+      },
+      "Envelope_ApiChatSessionDetail": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Detailed session view: header fields plus the full message timeline.",
+            "required": [
+              "id",
+              "agent_name",
+              "messages"
+            ],
+            "properties": {
+              "agent_name": {
+                "type": "string",
+                "description": "Agent the session is bound to."
+              },
+              "id": {
+                "type": "string",
+                "description": "Session id (UUID)."
+              },
+              "messages": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ApiChatMessage"
+                },
+                "description": "The session's messages, oldest-first."
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Optional user-defined title."
+              }
+            }
+          }
+        }
+      },
       "Envelope_ApiConnectorDetail": {
         "type": "object",
         "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
@@ -7724,6 +10071,99 @@
               },
               "version": {
                 "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "Envelope_ApiConvoDetail": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Detailed conversation view: header fields plus the ordered turn list.",
+            "required": [
+              "id",
+              "topic",
+              "participants",
+              "status",
+              "messages"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Conversation id (UUID)."
+              },
+              "messages": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ApiConvoTurn"
+                },
+                "description": "The conversation's turns, ordered by `turn_number`."
+              },
+              "participants": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Ordered participant agent names."
+              },
+              "status": {
+                "type": "string",
+                "description": "`\"running\"` | `\"complete\"` | `\"stopped\"` | `\"error\"`."
+              },
+              "topic": {
+                "type": "string",
+                "description": "Conversation topic / seed prompt."
+              }
+            }
+          }
+        }
+      },
+      "Envelope_ApiConvoSummary": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Summary row for a multi-agent conversation (list view).\n\nMaps from `ConvoStore::list_convos()` → `AgentConvo`.",
+            "required": [
+              "id",
+              "topic",
+              "participants",
+              "status",
+              "updated_at"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Conversation id (UUID)."
+              },
+              "participants": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Ordered participant agent names."
+              },
+              "status": {
+                "type": "string",
+                "description": "`\"running\"` | `\"complete\"` | `\"stopped\"` | `\"error\"`."
+              },
+              "topic": {
+                "type": "string",
+                "description": "Conversation topic / seed prompt."
+              },
+              "updated_at": {
+                "type": "string",
+                "description": "RFC3339 last-updated timestamp."
               }
             }
           }
@@ -7864,6 +10304,68 @@
               "throttle": {
                 "type": "string",
                 "description": "Throttle policy (debug-rendered)."
+              }
+            }
+          }
+        }
+      },
+      "Envelope_ApiFileMeta": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Metadata for a single uploaded file. Mirrors\n`agentos_kernel::file_store::UploadedFile` minus the on-disk path (never\nexposed to clients).",
+            "required": [
+              "id",
+              "name",
+              "original_name",
+              "mime",
+              "size",
+              "scope",
+              "tags",
+              "uploaded_at"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Stable file id (UUID). Used in download/get/delete routes."
+              },
+              "mime": {
+                "type": "string",
+                "description": "Stored MIME type."
+              },
+              "name": {
+                "type": "string",
+                "description": "Sanitized display name (used for @mention matching)."
+              },
+              "original_name": {
+                "type": "string",
+                "description": "Original filename as uploaded."
+              },
+              "scope": {
+                "type": "string",
+                "description": "`\"global\"` for ecosystem files, `\"session:{id}\"` for chat-scoped files."
+              },
+              "size": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Size in bytes.",
+                "minimum": 0
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Free-form tags attached at upload time."
+              },
+              "uploaded_at": {
+                "type": "string",
+                "description": "RFC3339 (or `YYYY-MM-DDTHH:MM:SSZ`) upload timestamp."
               }
             }
           }
@@ -8095,6 +10597,69 @@
               "state": {
                 "type": "string",
                 "description": "One of `active` | `paused` | `disabled`."
+              }
+            }
+          }
+        }
+      },
+      "Envelope_ApiScratchPage": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A full scratchpad page plus its backlinks. Mirrors `agentos_scratch::ScratchPage`\nwith the backlink summaries from `get_all_links`.",
+            "required": [
+              "id",
+              "agent_id",
+              "title",
+              "content",
+              "tags",
+              "created_at",
+              "updated_at",
+              "backlinks"
+            ],
+            "properties": {
+              "agent_id": {
+                "type": "string",
+                "description": "Owning agent id (the reserved `__global__` sentinel for global pages)."
+              },
+              "backlinks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ApiPageSummary"
+                },
+                "description": "Pages that link to this page (backlink graph)."
+              },
+              "content": {
+                "type": "string",
+                "description": "Markdown body."
+              },
+              "created_at": {
+                "type": "string",
+                "description": "RFC3339 creation timestamp."
+              },
+              "id": {
+                "type": "string",
+                "description": "Page id (UUID)."
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Tags attached to the page."
+              },
+              "title": {
+                "type": "string",
+                "description": "Page title."
+              },
+              "updated_at": {
+                "type": "string",
+                "description": "RFC3339 last-updated timestamp."
               }
             }
           }
@@ -8548,6 +11113,28 @@
           }
         }
       },
+      "Envelope_ForkChatSessionResponse": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response body for a successful fork.",
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Id of the newly created forked session."
+              }
+            }
+          }
+        }
+      },
       "Envelope_HalInfo": {
         "type": "object",
         "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
@@ -8736,6 +11323,31 @@
                 "type": "integer",
                 "format": "int64",
                 "minimum": 0
+              }
+            }
+          }
+        }
+      },
+      "Envelope_ScratchListResponse": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response wrapper for scratchpad list endpoints.",
+            "required": [
+              "pages"
+            ],
+            "properties": {
+              "pages": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ApiPageSummary"
+                },
+                "description": "Page summaries for the scratchpad."
               }
             }
           }
@@ -10100,6 +12712,32 @@
           }
         }
       },
+      "ForkChatSessionRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/v1/chat/sessions/{id}/fork`.",
+        "properties": {
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional title for the forked copy. When omitted, the store derives\n`\"<source title> (fork)\"`."
+          }
+        }
+      },
+      "ForkChatSessionResponse": {
+        "type": "object",
+        "description": "Response body for a successful fork.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Id of the newly created forked session."
+          }
+        }
+      },
       "HalDevice": {
         "type": "object",
         "description": "A registered HAL device and its per-agent access policy.",
@@ -10213,6 +12851,278 @@
               "type": "string"
             },
             "description": "Permission scopes granted to the key."
+          }
+        }
+      },
+      "ListEnvelope_ApiChatMessage": {
+        "type": "object",
+        "description": "Success envelope for list endpoints that report pagination metadata.\n\nWraps the records under `data` and a [`Meta`] block under `meta`, i.e.\n`{ \"data\": [...], \"meta\": { \"total\": N } }`.",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A single chat message in a session timeline.\n\nMaps from `ChatStore::get_messages()` → `ChatMessage`. Tool activity is\nsurfaced inline via the optional `tool_*` fields (the store joins\n`chat_tool_calls` onto the owning message); user/assistant rows leave them\n`None`. Note: per-message `tokens`/`cost`, multimodal `parts`, and the\nreasoning `thinking` trace are not persisted in `chat_messages` and are\ntherefore intentionally absent from this DTO.",
+              "required": [
+                "role",
+                "content",
+                "timestamp"
+              ],
+              "properties": {
+                "content": {
+                  "type": "string",
+                  "description": "Message text (or `Tool call: <name>` for tool rows)."
+                },
+                "role": {
+                  "type": "string",
+                  "description": "`\"user\"` | `\"assistant\"` | `\"tool\"`."
+                },
+                "timestamp": {
+                  "type": "string",
+                  "description": "RFC3339 message timestamp."
+                },
+                "tool_duration_ms": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "Tool execution duration in milliseconds when `role == \"tool\"`.",
+                  "minimum": 0
+                },
+                "tool_intent_type": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Tool intent type (e.g. `\"query\"`, `\"execute\"`) when `role == \"tool\"`."
+                },
+                "tool_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Tool name (populated when `role == \"tool\"`)."
+                },
+                "tool_payload_json": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Tool input payload JSON string when `role == \"tool\"`."
+                },
+                "tool_result_json": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Tool result payload JSON string when `role == \"tool\"`."
+                },
+                "tool_success": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ],
+                  "description": "Tool success flag when `role == \"tool\"`."
+                }
+              }
+            },
+            "description": "The page of records."
+          },
+          "meta": {
+            "$ref": "#/components/schemas/Meta",
+            "description": "Pagination metadata."
+          }
+        }
+      },
+      "ListEnvelope_ApiChatSessionSummary": {
+        "type": "object",
+        "description": "Success envelope for list endpoints that report pagination metadata.\n\nWraps the records under `data` and a [`Meta`] block under `meta`, i.e.\n`{ \"data\": [...], \"meta\": { \"total\": N } }`.",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Summary row for a chat session (list view).\n\nMaps from `ChatStore::list_sessions()` → `ChatSession`. `preview` comes from\n`ChatSession::last_preview` (last user/assistant message snippet).",
+              "required": [
+                "id",
+                "agent_name",
+                "message_count",
+                "updated_at"
+              ],
+              "properties": {
+                "agent_name": {
+                  "type": "string",
+                  "description": "Agent the session is bound to."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "Session id (UUID)."
+                },
+                "message_count": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Total number of messages in the session.",
+                  "minimum": 0
+                },
+                "preview": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Last message preview, if any."
+                },
+                "title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Optional user-defined title."
+                },
+                "updated_at": {
+                  "type": "string",
+                  "description": "RFC3339 last-updated timestamp."
+                }
+              }
+            },
+            "description": "The page of records."
+          },
+          "meta": {
+            "$ref": "#/components/schemas/Meta",
+            "description": "Pagination metadata."
+          }
+        }
+      },
+      "ListEnvelope_ApiConvoSummary": {
+        "type": "object",
+        "description": "Success envelope for list endpoints that report pagination metadata.\n\nWraps the records under `data` and a [`Meta`] block under `meta`, i.e.\n`{ \"data\": [...], \"meta\": { \"total\": N } }`.",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Summary row for a multi-agent conversation (list view).\n\nMaps from `ConvoStore::list_convos()` → `AgentConvo`.",
+              "required": [
+                "id",
+                "topic",
+                "participants",
+                "status",
+                "updated_at"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "Conversation id (UUID)."
+                },
+                "participants": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Ordered participant agent names."
+                },
+                "status": {
+                  "type": "string",
+                  "description": "`\"running\"` | `\"complete\"` | `\"stopped\"` | `\"error\"`."
+                },
+                "topic": {
+                  "type": "string",
+                  "description": "Conversation topic / seed prompt."
+                },
+                "updated_at": {
+                  "type": "string",
+                  "description": "RFC3339 last-updated timestamp."
+                }
+              }
+            },
+            "description": "The page of records."
+          },
+          "meta": {
+            "$ref": "#/components/schemas/Meta",
+            "description": "Pagination metadata."
+          }
+        }
+      },
+      "ListEnvelope_ApiFileMeta": {
+        "type": "object",
+        "description": "Success envelope for list endpoints that report pagination metadata.\n\nWraps the records under `data` and a [`Meta`] block under `meta`, i.e.\n`{ \"data\": [...], \"meta\": { \"total\": N } }`.",
+        "required": [
+          "data",
+          "meta"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Metadata for a single uploaded file. Mirrors\n`agentos_kernel::file_store::UploadedFile` minus the on-disk path (never\nexposed to clients).",
+              "required": [
+                "id",
+                "name",
+                "original_name",
+                "mime",
+                "size",
+                "scope",
+                "tags",
+                "uploaded_at"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "Stable file id (UUID). Used in download/get/delete routes."
+                },
+                "mime": {
+                  "type": "string",
+                  "description": "Stored MIME type."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Sanitized display name (used for @mention matching)."
+                },
+                "original_name": {
+                  "type": "string",
+                  "description": "Original filename as uploaded."
+                },
+                "scope": {
+                  "type": "string",
+                  "description": "`\"global\"` for ecosystem files, `\"session:{id}\"` for chat-scoped files."
+                },
+                "size": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Size in bytes.",
+                  "minimum": 0
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Free-form tags attached at upload time."
+                },
+                "uploaded_at": {
+                  "type": "string",
+                  "description": "RFC3339 (or `YYYY-MM-DDTHH:MM:SSZ`) upload timestamp."
+                }
+              }
+            },
+            "description": "The page of records."
+          },
+          "meta": {
+            "$ref": "#/components/schemas/Meta",
+            "description": "Pagination metadata."
           }
         }
       },
@@ -10643,6 +13553,19 @@
           }
         }
       },
+      "RenameChatSessionRequest": {
+        "type": "object",
+        "description": "Request body for `PATCH /api/v1/chat/sessions/{id}` (rename).\n\n`title = null` clears the title.",
+        "properties": {
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New title, or `null` to clear it."
+          }
+        }
+      },
       "ResolveEscalationRequest": {
         "type": "object",
         "description": "Request body for `POST /api/v1/escalations/{id}/resolve`.",
@@ -10819,6 +13742,26 @@
           }
         }
       },
+      "SavePageRequest": {
+        "type": "object",
+        "description": "Request body for `PUT /api/v1/scratchpad/{page}` (and the per-agent variant).",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "Markdown body to write."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tags to attach (defaults to empty)."
+          }
+        }
+      },
       "SavePipelineRequest": {
         "type": "object",
         "required": [
@@ -10844,6 +13787,34 @@
             "description": "Full workflow definition (nodes, connections, settings). Opaque to the API."
           },
           "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ScratchListResponse": {
+        "type": "object",
+        "description": "Response wrapper for scratchpad list endpoints.",
+        "required": [
+          "pages"
+        ],
+        "properties": {
+          "pages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiPageSummary"
+            },
+            "description": "Page summaries for the scratchpad."
+          }
+        }
+      },
+      "SendChatMessageRequest": {
+        "type": "object",
+        "description": "Request body for sending a user message to a session (non-streaming).",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
             "type": "string"
           }
         }
@@ -10876,6 +13847,30 @@
           },
           "value": {
             "type": "string"
+          }
+        }
+      },
+      "SubmitReviewRequest": {
+        "type": "object",
+        "description": "Request body for submitting a marketplace review.",
+        "required": [
+          "rating",
+          "comment",
+          "author_key"
+        ],
+        "properties": {
+          "author_key": {
+            "type": "string",
+            "description": "Public key id of the reviewer (non-secret)."
+          },
+          "comment": {
+            "type": "string"
+          },
+          "rating": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Rating, 1–5.",
+            "minimum": 0
           }
         }
       },
@@ -11083,6 +14078,14 @@
       "description": "OpenAI-compatible chat completions"
     },
     {
+      "name": "chat-sessions",
+      "description": "Persisted chat-session management (list, create, rename, fork, export, messages)"
+    },
+    {
+      "name": "agent-chats",
+      "description": "Multi-agent conversation history (read-only)"
+    },
+    {
       "name": "webhooks",
       "description": "Inbound channel webhooks"
     },
@@ -11137,6 +14140,18 @@
     {
       "name": "events",
       "description": "Event subscriptions and emission"
+    },
+    {
+      "name": "marketplace",
+      "description": "Tool registry proxy (search, detail, reviews)"
+    },
+    {
+      "name": "files",
+      "description": "Uploaded file storage"
+    },
+    {
+      "name": "scratchpad",
+      "description": "Agent + global scratchpad pages"
     }
   ]
 }

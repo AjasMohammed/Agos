@@ -192,6 +192,7 @@ impl Kernel {
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
             tool_categories: effective_tool_categories,
+            disable_tool_scoping: false,
         };
 
         self.scheduler.enqueue(child_task).await;
@@ -389,6 +390,7 @@ mod tests {
             thinking_level: Default::default(),
             spawner_agent_id: None,
             tool_categories: None,
+            disable_tool_scoping: false,
         }
     }
 

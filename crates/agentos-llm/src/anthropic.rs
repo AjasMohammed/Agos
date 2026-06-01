@@ -257,7 +257,9 @@ impl AnthropicCore {
                 "description": manifest.manifest.description,
                 // Anthropic Messages API requires `input_schema` (NOT `payload_schema`).
                 // Using the wrong key causes 400 errors or silent schemaless tool definitions.
-                "input_schema": tool_helpers::normalize_tool_input_schema(manifest.payload_schema.as_ref()),
+                // Examples embedded inside input_schema via JSON-Schema "examples" keyword
+                // — survives the Anthropic API unchanged (sibling keys would 400).
+                "input_schema": tool_helpers::normalize_tool_input_schema_with_examples(manifest.payload_schema.as_ref(), &manifest.examples),
             }));
         }
 

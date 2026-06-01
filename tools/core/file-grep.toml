@@ -64,3 +64,9 @@ gpu           = false
 max_memory_mb = 128
 max_cpu_ms    = 30000
 syscalls      = []
+
+[[examples]]
+description = "Search for TODO comments in Rust files"
+[examples.payload]
+pattern = "TODO"
+path = "src"

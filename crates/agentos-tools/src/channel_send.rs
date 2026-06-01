@@ -72,16 +72,31 @@ impl AgentTool for ChannelSendTool {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
-        if image_url.is_some() && document_url.is_some() {
+        // A stored-file attachment by id (kernel resolves bytes and uploads
+        // directly — no public URL needed). Telegram-only today.
+        let file_id = payload
+            .get("file_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        let url_sources = [
+            image_url.is_some(),
+            document_url.is_some(),
+            file_id.is_some(),
+        ];
+        if url_sources.iter().filter(|s| **s).count() > 1 {
             return Err(AgentOSError::SchemaValidation(
-                "channel-send: provide either 'image_url' or 'document_url', not both".into(),
+                "channel-send: provide only one of 'image_url', 'document_url', or 'file_id'"
+                    .into(),
             ));
         }
 
-        // A message must carry something: text, an image, or a document.
-        if text.is_empty() && image_url.is_none() && document_url.is_none() {
+        // A message must carry something: text, an image, a document, or a file_id.
+        if text.is_empty() && image_url.is_none() && document_url.is_none() && file_id.is_none() {
             return Err(AgentOSError::SchemaValidation(
-                "channel-send requires non-empty 'text', or an 'image_url'/'document_url'".into(),
+                "channel-send requires non-empty 'text', or an 'image_url'/'document_url'/'file_id'"
+                    .into(),
             ));
         }
 
@@ -108,6 +123,7 @@ impl AgentTool for ChannelSendTool {
             "thread_id": thread_id,
             "image_url": image_url,
             "document_url": document_url,
+            "file_id": file_id,
             "caption": caption,
             "filename": filename,
         }))

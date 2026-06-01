@@ -55,3 +55,8 @@ gpu           = false
 max_memory_mb = 512
 max_cpu_ms    = 5000
 syscalls      = []
+
+[[examples]]
+description = "Store a user preference fact"
+[examples.payload]
+content = "User prefers metric units for measurements"

@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod catalog;
+pub mod claude_code;
 pub mod custom;
 pub mod fallback;
 pub mod gemini;
@@ -15,6 +16,7 @@ pub mod types;
 
 pub use anthropic::AnthropicCore;
 pub use catalog::{CatalogEntry, ProviderCatalog};
+pub use claude_code::ClaudeCodeCore;
 pub use custom::CustomCore;
 pub use fallback::FallbackAdapter;
 pub use gemini::GeminiCore;

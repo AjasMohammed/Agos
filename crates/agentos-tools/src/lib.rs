@@ -97,6 +97,7 @@ pub mod task_list;
 pub mod task_spawn_async;
 pub mod task_status;
 pub mod think;
+pub mod tool_search_index;
 pub mod traits;
 pub mod usb_storage;
 pub mod user_file_reader;

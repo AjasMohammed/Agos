@@ -47,12 +47,14 @@ pub struct UserMessage {
 
 /// An outbound media attachment carried by a [`UserMessage`].
 ///
-/// Phase 1 supports URL-based attachments: the receiving channel fetches `url`
-/// directly (Telegram passes it to `sendPhoto`/`sendDocument`). Local-file
-/// (`file_id`) upload is a planned follow-up.
+/// Two sources: a public `url` the channel fetches directly (Telegram passes it
+/// to `sendPhoto`/`sendDocument`), or `inline` bytes uploaded via multipart
+/// (resolved kernel-side from a stored `file_id`). When `inline` is set, `url`
+/// is ignored. Inline upload is Telegram-only today; URL works on all channels.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MessageAttachment {
-    /// Public URL the receiving channel fetches directly.
+    /// Public URL the receiving channel fetches directly (empty when `inline`).
+    #[serde(default)]
     pub url: String,
     /// Whether the channel treats this as an inline image or a document.
     pub kind: AttachmentKind,
@@ -62,6 +64,19 @@ pub struct MessageAttachment {
     /// Optional caption shown with the media (markdown, rendered per-platform).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caption: Option<String>,
+    /// Inline bytes (base64) to upload directly instead of fetching `url` —
+    /// resolved kernel-side from a `file_id`. Telegram uploads via multipart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline: Option<InlineAttachment>,
+}
+
+/// Inline media bytes (base64-encoded) for direct multipart upload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InlineAttachment {
+    /// Detected MIME type.
+    pub mime: String,
+    /// Base64-encoded file bytes.
+    pub data_base64: String,
 }
 
 /// How a [`MessageAttachment`] should be presented by the channel.

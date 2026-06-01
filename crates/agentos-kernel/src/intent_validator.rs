@@ -422,6 +422,7 @@ mod tests {
             thinking_level: Default::default(),
             spawner_agent_id: None,
             tool_categories: None,
+            disable_tool_scoping: false,
         }
     }
 

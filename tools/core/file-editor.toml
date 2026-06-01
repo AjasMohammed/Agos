@@ -50,3 +50,11 @@ gpu           = false
 max_memory_mb = 64
 max_cpu_ms    = 5000
 syscalls      = []
+
+[[examples]]
+description = "Replace a specific string in a file"
+[examples.payload]
+path = "config.toml"
+[[examples.payload.edits]]
+old_text = "host = \"localhost\""
+new_text = "host = \"0.0.0.0\""

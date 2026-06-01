@@ -272,49 +272,106 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
                 AttachmentKind::Image => ("sendPhoto", "photo"),
                 AttachmentKind::Document => ("sendDocument", "document"),
             };
-            let mut payload = json!({ "chat_id": &chat_id });
-            payload[field] = json!(att.url);
+            let media_url = self.api_url(method);
+
             // Telegram caps captions at 1024 chars. Render markdown → HTML, but
             // only use it when the rendered form still fits; HTML entity/tag
             // expansion can push a 1024-char source over the limit, so fall back
             // to the plain (un-rendered) caption rather than risk MESSAGE_TOO_LONG.
-            if let Some(cap) = &att.caption {
-                let plain_cap: String = cap.chars().take(1024).collect();
-                let html_cap =
-                    agentos_channels::telegram_format::markdown_to_telegram_html(&plain_cap);
-                if html_cap.chars().count() <= 1024 {
-                    payload["caption"] = json!(html_cap);
-                    payload["parse_mode"] = json!("HTML");
-                } else {
-                    payload["caption"] = json!(plain_cap);
-                }
-            }
-            if let Some(rid) = reply_to {
-                payload["reply_to_message_id"] = json!(rid);
-            }
-            let media_url = self.api_url(method);
-            if let Err(e) = telegram_post_json_with_retry(&self.client, &media_url, &payload).await
-            {
-                let es = format!("{e}");
-                // Only retry as plain text on an actual entity-parse failure; a
-                // generic 400 (bad/unreachable URL, unsupported type) would just
-                // fail again, so surface it directly.
-                if payload.get("parse_mode").is_some() && es.contains("can't parse entities") {
-                    tracing::warn!(error = %e, "Telegram media caption HTML parse failed; resending caption as plain");
-                    let plain_cap: String = att
-                        .caption
-                        .as_deref()
-                        .unwrap_or_default()
-                        .chars()
-                        .take(1024)
-                        .collect();
-                    payload["caption"] = json!(plain_cap);
-                    if let Some(obj) = payload.as_object_mut() {
-                        obj.remove("parse_mode");
+            let (plain_caption, html_caption) = match &att.caption {
+                Some(cap) => {
+                    let plain: String = cap.chars().take(1024).collect();
+                    let html = agentos_channels::telegram_format::markdown_to_telegram_html(&plain);
+                    if html.chars().count() <= 1024 {
+                        (plain, Some(html))
+                    } else {
+                        (plain, None)
                     }
-                    telegram_post_json_with_retry(&self.client, &media_url, &payload).await?;
+                }
+                None => (String::new(), None),
+            };
+
+            if let Some(inline) = &att.inline {
+                // Inline bytes (resolved from a file_id): multipart upload.
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(inline.data_base64.as_bytes())
+                    .map_err(|_| DeliveryError("inline attachment: invalid base64".into()))?;
+                let fname = att.filename.clone().unwrap_or_else(|| match att.kind {
+                    AttachmentKind::Image => "image".to_string(),
+                    AttachmentKind::Document => "file".to_string(),
+                });
+                let mime = if inline.mime.is_empty() {
+                    "application/octet-stream"
                 } else {
-                    return Err(e);
+                    &inline.mime
+                };
+                let part = reqwest::multipart::Part::bytes(bytes)
+                    .file_name(fname)
+                    .mime_str(mime)
+                    .map_err(|_| DeliveryError("inline attachment: invalid mime".into()))?;
+                let mut form = reqwest::multipart::Form::new()
+                    .text("chat_id", chat_id.clone())
+                    .part(field.to_string(), part);
+                if !plain_caption.is_empty() {
+                    if let Some(html) = &html_caption {
+                        form = form
+                            .text("caption", html.clone())
+                            .text("parse_mode", "HTML");
+                    } else {
+                        form = form.text("caption", plain_caption.clone());
+                    }
+                }
+                if let Some(rid) = reply_to {
+                    form = form.text("reply_to_message_id", rid.to_string());
+                }
+                let resp = self
+                    .client
+                    .post(&media_url)
+                    .multipart(form)
+                    .send()
+                    .await
+                    .map_err(|_| {
+                        DeliveryError("Telegram media upload failed (details redacted)".into())
+                    })?;
+                if !resp.status().is_success() {
+                    return Err(DeliveryError(format!(
+                        "Telegram media upload HTTP {}",
+                        resp.status().as_u16()
+                    )));
+                }
+            } else {
+                // URL path: Telegram fetches the URL itself.
+                let mut payload = json!({ "chat_id": &chat_id });
+                payload[field] = json!(att.url);
+                if !plain_caption.is_empty() {
+                    if let Some(html) = &html_caption {
+                        payload["caption"] = json!(html);
+                        payload["parse_mode"] = json!("HTML");
+                    } else {
+                        payload["caption"] = json!(plain_caption);
+                    }
+                }
+                if let Some(rid) = reply_to {
+                    payload["reply_to_message_id"] = json!(rid);
+                }
+                if let Err(e) =
+                    telegram_post_json_with_retry(&self.client, &media_url, &payload).await
+                {
+                    let es = format!("{e}");
+                    // Only retry as plain text on an actual entity-parse failure; a
+                    // generic 400 (bad/unreachable URL, unsupported type) would just
+                    // fail again, so surface it directly.
+                    if payload.get("parse_mode").is_some() && es.contains("can't parse entities") {
+                        tracing::warn!(error = %e, "Telegram media caption HTML parse failed; resending caption as plain");
+                        payload["caption"] = json!(plain_caption);
+                        if let Some(obj) = payload.as_object_mut() {
+                            obj.remove("parse_mode");
+                        }
+                        telegram_post_json_with_retry(&self.client, &media_url, &payload).await?;
+                    } else {
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -803,6 +860,7 @@ pub fn extract_inbound_message(
                     received_at: Utc::now(),
                     raw: serde_json::to_value(msg).unwrap_or_default(),
                     media_file_ids: Vec::new(),
+                    pending_media: Vec::new(),
                 });
             }
         }
@@ -827,6 +885,7 @@ pub fn extract_inbound_message(
                     received_at: Utc::now(),
                     raw: serde_json::to_value(cq).unwrap_or_default(),
                     media_file_ids: Vec::new(),
+                    pending_media: Vec::new(),
                 });
             }
         }

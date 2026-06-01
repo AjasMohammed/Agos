@@ -608,6 +608,7 @@ pub async fn resume(
         skip_checkpoint: payload.task.skip_checkpoint,
         thinking_level: payload.task.thinking_level,
         tool_categories: payload.task.tool_categories,
+        disable_tool_scoping: false,
     };
 
     let _ = state

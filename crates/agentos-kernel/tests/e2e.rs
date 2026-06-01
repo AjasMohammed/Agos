@@ -38,3 +38,6 @@ mod approval_modes_e2e;
 
 #[path = "e2e/event_trigger_e2e.rs"]
 mod event_trigger_e2e;
+
+#[path = "e2e/personalization.rs"]
+mod personalization;

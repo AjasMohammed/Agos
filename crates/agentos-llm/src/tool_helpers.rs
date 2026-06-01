@@ -138,6 +138,28 @@ pub fn normalize_tool_input_schema(input_schema: Option<&Value>) -> Value {
     schema
 }
 
+/// Like [`normalize_tool_input_schema`] but also injects the manifest's worked
+/// examples into the JSON-Schema `"examples"` keyword inside the returned
+/// object. This keeps the examples inside `input_schema`/`parameters` (where
+/// every provider passes them through verbatim) instead of adding a sibling
+/// `"examples"` key to the tool definition — the Anthropic API would 400 on
+/// a sibling key.
+///
+/// Passes `&[]` for the common case of tools without examples.
+pub fn normalize_tool_input_schema_with_examples(
+    input_schema: Option<&Value>,
+    examples: &[agentos_types::tool::PayloadExample],
+) -> Value {
+    let mut schema = normalize_tool_input_schema(input_schema);
+    if !examples.is_empty() {
+        if let Some(obj) = schema.as_object_mut() {
+            let arr: Vec<Value> = examples.iter().map(|e| e.payload.clone()).collect();
+            obj.insert("examples".to_string(), Value::Array(arr));
+        }
+    }
+    schema
+}
+
 /// Ollama's upstream tool-schema validator rejects object schemas that omit
 /// `properties` with `"None is not of type 'object'"`. Walk the schema and
 /// inject an empty `properties: {}` on every `type: "object"` node that lacks
@@ -718,5 +740,49 @@ mod tests {
     fn test_validate_payload_object_none() {
         let result = validate_payload_object("tool", "test", None);
         assert_eq!(result, json!({}));
+    }
+
+    // ── Phase-5: examples injected inside input_schema ──────────────────────
+
+    #[test]
+    fn examples_land_inside_input_schema_not_as_sibling() {
+        use agentos_types::tool::PayloadExample;
+        let schema = json!({"type": "object", "properties": {"path": {"type": "string"}}});
+        let examples = vec![PayloadExample {
+            description: Some("Read a file".into()),
+            payload: json!({"path": "config.toml"}),
+        }];
+        let result = normalize_tool_input_schema_with_examples(Some(&schema), &examples);
+        // Examples must be INSIDE input_schema, not a sibling key.
+        assert!(
+            result.get("examples").is_some(),
+            "examples must be inside input_schema"
+        );
+        assert_eq!(result["examples"][0], json!({"path": "config.toml"}));
+    }
+
+    #[test]
+    fn empty_examples_does_not_add_key() {
+        let schema = json!({"type": "object", "properties": {}});
+        let result = normalize_tool_input_schema_with_examples(Some(&schema), &[]);
+        // No spurious "examples" key when there are no examples.
+        assert!(result.get("examples").is_none());
+    }
+
+    #[test]
+    fn normalize_with_examples_still_sanitizes_schema() {
+        use agentos_types::tool::PayloadExample;
+        // Null-property schemas should still be sanitized (existing behaviour preserved).
+        let schema = json!({"type": "object", "properties": {"x": null}});
+        let examples = vec![PayloadExample {
+            description: None,
+            payload: json!({"x": "val"}),
+        }];
+        let result = normalize_tool_input_schema_with_examples(Some(&schema), &examples);
+        assert_eq!(
+            result["properties"]["x"]["type"], "string",
+            "null property sanitized"
+        );
+        assert!(result.get("examples").is_some());
     }
 }

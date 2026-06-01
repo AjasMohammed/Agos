@@ -60,3 +60,13 @@ use_for = [
 ]
 prefer_over = []
 related_tools = ["process-manager", "network-sockets", "system-mounts", "system-services"]
+
+[[examples]]
+description = "List files in the current directory"
+[examples.payload]
+command = "ls -la"
+
+[[examples]]
+description = "Check disk usage"
+[examples.payload]
+command = "df -h"

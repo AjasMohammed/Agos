@@ -67,6 +67,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             crl_path: None,
             workspace: Default::default(),
             host_package: Default::default(),
+            discovery: Default::default(),
         },
         bus: BusSettings {
             socket_path: temp_dir
@@ -108,5 +109,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         gateway: Default::default(),
         scheduler: Default::default(),
         transcription: Default::default(),
+        user_profile: Default::default(),
+        personalization: Default::default(),
     }
 }

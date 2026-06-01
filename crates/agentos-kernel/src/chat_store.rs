@@ -1,4 +1,4 @@
-use agentos_kernel::kernel::ChatToolCallRecord;
+use crate::kernel::ChatToolCallRecord;
 use rusqlite::{params, Connection};
 use std::path::Path;
 use std::sync::Mutex;
@@ -17,6 +17,9 @@ pub struct ChatSession {
     pub updated_at: String,
     /// Last message preview (populated by `list_sessions`).
     pub last_preview: Option<String>,
+    /// Number of messages in the session (populated by `list_sessions`; `0` from
+    /// `get_session`, whose detail view carries the full message list instead).
+    pub message_count: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +355,7 @@ impl ChatStore {
                 title: row.get(2)?,
                 updated_at: row.get(3)?,
                 last_preview: None,
+                message_count: 0,
             }))
         } else {
             Ok(None)
@@ -364,7 +368,9 @@ impl ChatStore {
             "SELECT s.id, s.agent_name, s.title, s.updated_at,
                     (SELECT content FROM chat_messages
                      WHERE session_id = s.id AND role IN ('user', 'assistant')
-                     ORDER BY id DESC LIMIT 1) AS last_msg
+                     ORDER BY id DESC LIMIT 1) AS last_msg,
+                    (SELECT COUNT(*) FROM chat_messages
+                     WHERE session_id = s.id) AS msg_count
              FROM chat_sessions s
              ORDER BY s.updated_at DESC
              LIMIT 100",
@@ -376,6 +382,7 @@ impl ChatStore {
                 title: row.get(2)?,
                 updated_at: row.get(3)?,
                 last_preview: row.get(4)?,
+                message_count: row.get(5)?,
             })
         })?;
         rows.collect()

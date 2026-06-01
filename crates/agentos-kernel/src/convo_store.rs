@@ -192,10 +192,15 @@ impl ConvoStore {
     pub fn set_status(&self, convo_id: &str, status: &str) -> Result<(), rusqlite::Error> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE agent_convos SET status = ?1, updated_at = ?2 WHERE id = ?3",
             params![status, now, convo_id],
         )?;
+        // Surface a missing convo to callers that care (e.g. the user-facing stop
+        // handler returns 404); internal status writes ignore the result.
+        if changed == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
         Ok(())
     }
 }

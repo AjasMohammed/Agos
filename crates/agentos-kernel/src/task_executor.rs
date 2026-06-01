@@ -125,7 +125,7 @@ impl Kernel {
                 payload.get("page").and_then(|v| v.as_u64()),
             ),
             "search-tools" => ("L1", Some("search".to_string()), None, None),
-            "describe-tool" | "tool-info" => ("L2", Some("tool-detail".to_string()), None, None),
+            "describe-tool" => ("L2", Some("tool-detail".to_string()), None, None),
             "agent-manual" => {
                 let section = payload
                     .get("section")
@@ -2209,10 +2209,34 @@ impl Kernel {
         let mut last_retrieval_query_hash: Option<u64> =
             Some(Self::hash_query(&task.original_prompt));
 
+        // Category scope for the native tool array (Phase 3 — tool-discovery).
+        // Computed ONCE here and fixed for the task lifetime (DD4): the scoped
+        // array is cached as a unit at the Anthropic tools breakpoint, so it must
+        // not change mid-task. Explicit `task.tool_categories` wins; otherwise the
+        // classifier picks categories when `default_scoping` is on and the task
+        // hasn't opted out. `None` = no restriction (legacy / opt-out). Anything
+        // scoped out stays reachable via semantic `search-tools` (full registry).
+        let tool_scope: Option<Vec<String>> = if task.tool_categories.is_some() {
+            task.tool_categories.clone()
+        } else if self.config.tools.discovery.default_scoping && !task.disable_tool_scoping {
+            // The default HeuristicClassifier ignores `known_categories`, so skip
+            // the registry scan (`category_counts`) it would not use. A future
+            // semantic/LLM classifier gathers what it needs inside its own impl.
+            Some(
+                self.tool_classifier
+                    .classify(&task.original_prompt, &[])
+                    .await,
+            )
+        } else {
+            None
+        };
+
         // Build the structured tool manifest list once per task so adapters that
         // support native function calling (e.g. OpenAI) can receive schema metadata.
         let llm_tool_manifests: Vec<ToolManifest> = {
             let registry = self.tool_registry.read().await;
+            // The capability-token allowlist is the HARD security boundary (base
+            // set); the category scope is a SOFT filter applied within it.
             let mut manifests = if task.capability_token.allowed_tools.is_empty() {
                 registry
                     .list_all()
@@ -2226,6 +2250,7 @@ impl Kernel {
                     .filter_map(|tool_id| registry.get_by_id(tool_id).map(|t| t.manifest.clone()))
                     .collect::<Vec<_>>()
             };
+            manifests.retain(|m| crate::tool_scoping::manifest_in_scope(m, tool_scope.as_deref()));
             manifests.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
             manifests
         };
@@ -2240,6 +2265,119 @@ impl Kernel {
         let mut tool_call_count: u32 = 0;
         let mut completed_iterations: u32 = 0;
         let mut consecutive_push_failures: u32 = 0;
+
+        // L0 user-profile read-back (Proactive Personalization, Phase 2).
+        //
+        // Render the highest-value pinned profile facts once per task and fold the
+        // resulting block into the System segment at the compile site below, so it
+        // lands inside the Anthropic prompt-cached prefix (the cache breakpoint
+        // anchors on the Tools block, so everything in `system_prompt` is cached).
+        //
+        // The render is version-gated via the pre-wired `user_profile_l0_cache`:
+        // for a stable store version the block text is byte-identical across tasks,
+        // yielding a steady-state cache hit. The whole path is gated behind
+        // `personalization.enabled`; when disabled we touch neither the store nor
+        // the cache (zero overhead). Personalization must never fail the task, so
+        // any store error logs a warning and proceeds with no profile block.
+        let profile_block: Option<String> = if self.config.personalization.enabled {
+            match self.user_profile_store.version().await {
+                Ok(version) => {
+                    // Read the version-gated cache in a tight scope: lock the std
+                    // Mutex, copy out what we need, and drop the guard before any
+                    // `.await` (never hold a std Mutex guard across an await point).
+                    let cached_block: Option<String> = match self.user_profile_l0_cache.lock() {
+                        Ok(guard) => guard
+                            .as_ref()
+                            .filter(|(v, _)| *v == version)
+                            .map(|(_, block)| block.clone()),
+                        // Recover from a poisoned lock: treat as a cache miss rather
+                        // than panicking on the inference path.
+                        Err(poisoned) => poisoned
+                            .into_inner()
+                            .as_ref()
+                            .filter(|(v, _)| *v == version)
+                            .map(|(_, block)| block.clone()),
+                    };
+
+                    if let Some(block) = cached_block {
+                        // Cache hit: reuse the byte-identical block (anchors the
+                        // prompt-cache hit). Usage is recorded on the render (miss)
+                        // path — the selected entry set is fixed per version — so we
+                        // skip `touch` here to keep the hot path cheap.
+                        Some(block)
+                    } else {
+                        // Cache miss: re-select pinned entries and render.
+                        match self.user_profile_store.list_pinned().await {
+                            Ok(mut entries) => {
+                                // `list_pinned` is already capped, but re-enforce the
+                                // configured pin cap defensively (fail-closed).
+                                let cap = self.config.personalization.profile_pin_cap;
+                                if entries.len() > cap {
+                                    entries.truncate(cap);
+                                }
+                                let cpt = self.context_compiler.budget().chars_per_token;
+                                let token_budget = self.config.personalization.profile_token_budget;
+                                let rendered = crate::context_compiler::render_user_profile_block(
+                                    &entries,
+                                    token_budget,
+                                    cpt,
+                                );
+
+                                // Memoize against the store version so the next task
+                                // reuses byte-identical text (cache hit).
+                                if let Some(ref block) = rendered {
+                                    match self.user_profile_l0_cache.lock() {
+                                        Ok(mut guard) => {
+                                            *guard = Some((version, block.clone()));
+                                        }
+                                        Err(poisoned) => {
+                                            *poisoned.into_inner() = Some((version, block.clone()));
+                                        }
+                                    }
+
+                                    // Feedback for Phase 5: record that these entries
+                                    // reached the model. Fire-and-forget so SQLite I/O
+                                    // never delays the inference path.
+                                    let store = self.user_profile_store.clone();
+                                    let used_ids: Vec<String> =
+                                        entries.iter().map(|e| e.id.to_string()).collect();
+                                    tokio::spawn(async move {
+                                        for id in used_ids {
+                                            if let Err(e) = store.touch(&id).await {
+                                                tracing::debug!(
+                                                    profile_entry_id = %id,
+                                                    error = %e,
+                                                    "Failed to touch profile entry usage (non-fatal)"
+                                                );
+                                            }
+                                        }
+                                    });
+                                }
+                                rendered
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    task_id = %task.id,
+                                    error = %e,
+                                    "Failed to list pinned profile entries — proceeding without profile block"
+                                );
+                                None
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        error = %e,
+                        "Failed to read user-profile store version — proceeding without profile block"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let mut knowledge_blocks: Vec<String> = Vec::new();
         let mut refresh_knowledge_blocks = true;
         let mut context_warning_emitted = false;
@@ -2554,11 +2692,43 @@ impl Kernel {
             // list-tools and search-tools so old paginated results don't stack up.
             scrub_meta_tool_results(&mut history);
 
-            // Compile the optimized context window
+            // Compile the optimized context window. When a profile block is
+            // present, fold it into the front of the System segment so it sits in
+            // the stable, prompt-cached prefix (ahead of the Tools-block cache
+            // breakpoint). Identical text every turn → cache hit.
+            //
+            // M1 guard: pre-clip the base system_prompt to leave room for the
+            // profile block inside the System-category token budget. Without this,
+            // on small-context models the compiler clips the system_prompt TAIL
+            // (safety/response-format instructions) instead of the profile block
+            // when the combined string exceeds the System budget.
+            let system_prompt_for_compile = match profile_block.as_ref() {
+                Some(block) => {
+                    let cpt = self.context_compiler.budget().chars_per_token;
+                    let system_budget = self
+                        .context_compiler
+                        .budget()
+                        .tokens_for(agentos_types::ContextCategory::System);
+                    // Characters consumed by the profile block + separator.
+                    let block_chars = block.chars().count() + 2; // +2 for "\n\n"
+                    let available_chars = (system_budget as f32 * cpt) as usize;
+                    let prompt_chars = available_chars.saturating_sub(block_chars);
+                    // Clip the base prompt at a char boundary so the profile
+                    // block never evicts system-prompt safety instructions.
+                    let clipped_prompt: String = system_prompt
+                        .char_indices()
+                        .nth(prompt_chars)
+                        .map(|(byte_idx, _)| &system_prompt[..byte_idx])
+                        .unwrap_or(system_prompt.as_str())
+                        .to_string();
+                    format!("{block}\n\n{clipped_prompt}")
+                }
+                None => system_prompt.clone(),
+            };
             let mut compiled_context =
                 self.context_compiler
                     .compile(crate::context_compiler::CompilationInputs {
-                        system_prompt: system_prompt.clone(),
+                        system_prompt: system_prompt_for_compile,
                         tool_descriptions: tools_desc.clone(),
                         agent_directory: agent_directory.clone(),
                         knowledge_blocks: knowledge_blocks.clone(),
@@ -6171,6 +6341,7 @@ mod tests {
             thinking_level: Default::default(),
             spawner_agent_id: None,
             tool_categories: None,
+            disable_tool_scoping: false,
         }
     }
 

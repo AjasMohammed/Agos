@@ -154,7 +154,6 @@ pub const META_TOOL_NAMES: &[&str] = &[
     "describe-tool",
     "list-tools",
     "tool-detail",
-    "tool-info",
 ];
 
 /// Default tool inventory exposed inline to the LLM in the chat (webui) flow.

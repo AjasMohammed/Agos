@@ -15,6 +15,7 @@ pub mod intent;
 pub mod notification;
 pub mod path;
 pub mod plugin;
+pub mod profile;
 pub mod registry_query;
 pub mod role;
 pub mod schedule;
@@ -56,11 +57,12 @@ pub use intent::{
     SubscriptionDuration, UnsubscribePayload,
 };
 pub use notification::{
-    AttachmentKind, DeliveryChannel, DeliveryStatus, InteractionRequest, MessageAttachment,
-    NotificationPriority, NotificationSource, TaskOutcome, UserMessage, UserMessageKind,
-    UserResponse,
+    AttachmentKind, DeliveryChannel, DeliveryStatus, InlineAttachment, InteractionRequest,
+    MessageAttachment, NotificationPriority, NotificationSource, TaskOutcome, UserMessage,
+    UserMessageKind, UserResponse,
 };
 pub use plugin::{ChannelDeclaration, PluginManifest};
+pub use profile::{ProfileCategory, ProfileEntry, ProfileEntryStatus, ProfilePatch, ProfileSource};
 pub use registry_query::{
     AgentRegistryQuery, AgentRegistrySnapshot, AgentSummary, CapabilityDescriptorSummary,
     CapabilityDispatchRequest, CapabilityDispatcher, CapabilityRegistryQuery,

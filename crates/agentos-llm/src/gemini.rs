@@ -217,7 +217,7 @@ impl GeminiCore {
             function_declarations.push(json!({
                 "name": tool_name,
                 "description": manifest.manifest.description,
-                "parameters": tool_helpers::normalize_tool_input_schema(manifest.payload_schema.as_ref()),
+                "parameters": tool_helpers::normalize_tool_input_schema_with_examples(manifest.payload_schema.as_ref(), &manifest.examples),
             }));
         }
 

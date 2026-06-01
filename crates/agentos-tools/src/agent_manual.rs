@@ -73,7 +73,7 @@ pub fn install_section_embeddings(embedder: Arc<Embedder>) {
     });
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }

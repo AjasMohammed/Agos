@@ -40,3 +40,8 @@ gpu           = false
 max_memory_mb = 32
 max_cpu_ms    = 15000
 syscalls      = []
+
+[[examples]]
+description = "Search for recent news about a topic"
+[examples.payload]
+query = "Rust programming language 2026"

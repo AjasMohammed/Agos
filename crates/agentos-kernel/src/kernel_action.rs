@@ -214,6 +214,12 @@ pub(crate) enum KernelAction {
         thread_id: Option<String>,
         /// Optional media attachment (image/document by URL).
         attachment: Option<MessageAttachment>,
+        /// Stored file id to resolve to bytes and upload directly (Telegram
+        /// multipart). Mutually exclusive with a URL `attachment`.
+        file_id: Option<String>,
+        /// Caption/filename applied to the resolved `file_id` attachment.
+        caption: Option<String>,
+        filename: Option<String>,
     },
     AgentInboxList {
         limit: u32,
@@ -430,30 +436,36 @@ impl KernelAction {
                 };
                 let image_url = str_field("image_url");
                 let document_url = str_field("document_url");
+                let file_id = str_field("file_id");
                 let caption = str_field("caption");
                 let filename = str_field("filename");
 
-                // Build the attachment (image takes priority; mutual exclusion
-                // is enforced in ChannelSendTool::execute).
+                // Build the URL attachment (image takes priority; mutual exclusion
+                // is enforced in ChannelSendTool::execute). A `file_id` is resolved
+                // to bytes later in execute_channel_send (it needs the kernel).
                 let attachment = match (image_url, document_url) {
                     (Some(url), _) => Some(MessageAttachment {
                         url,
                         kind: AttachmentKind::Image,
                         filename: filename.clone(),
                         caption: caption.clone(),
+                        inline: None,
                     }),
                     (None, Some(url)) => Some(MessageAttachment {
                         url,
                         kind: AttachmentKind::Document,
                         filename: filename.clone(),
                         caption: caption.clone(),
+                        inline: None,
                     }),
                     (None, None) => None,
                 };
 
-                if channel.trim().is_empty() || (text.is_empty() && attachment.is_none()) {
+                if channel.trim().is_empty()
+                    || (text.is_empty() && attachment.is_none() && file_id.is_none())
+                {
                     tracing::warn!(
-                        "Dropping channel_send: channel must be non-empty and a message needs text or an attachment"
+                        "Dropping channel_send: channel must be non-empty and a message needs text, an attachment, or a file_id"
                     );
                     return None;
                 }
@@ -467,6 +479,9 @@ impl KernelAction {
                     text: text.to_string(),
                     thread_id,
                     attachment,
+                    file_id,
+                    caption,
+                    filename,
                 })
             }
             "ask_user" => {
@@ -1560,9 +1575,15 @@ impl Kernel {
                 text,
                 thread_id,
                 attachment,
+                file_id,
+                caption,
+                filename,
             } => {
-                self.execute_channel_send(task, channel, text, thread_id, attachment, trace_id)
-                    .await
+                self.execute_channel_send(
+                    task, channel, text, thread_id, attachment, file_id, caption, filename,
+                    trace_id,
+                )
+                .await
             }
         };
 
@@ -2746,6 +2767,7 @@ impl Kernel {
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
             tool_categories: None,
+            disable_tool_scoping: false,
         };
 
         self.scheduler.register_external(child_task.clone()).await;
@@ -4438,16 +4460,70 @@ impl Kernel {
     /// kind drives which transport handles the send. On miss, the error
     /// payload includes `available_channels` so the agent can self-correct
     /// in one shot.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_channel_send(
         &self,
         task: &AgentTask,
         channel: String,
         text: String,
         thread_id: Option<String>,
-        attachment: Option<MessageAttachment>,
+        mut attachment: Option<MessageAttachment>,
+        file_id: Option<String>,
+        caption: Option<String>,
+        filename: Option<String>,
         trace_id: TraceID,
     ) -> KernelActionResult {
         use agentos_types::ChannelKind;
+
+        // Resolve a stored `file_id` to inline bytes via the image resolver
+        // (the web FileStore impl). Builds an inline attachment uploaded directly
+        // by the Telegram adapter. Errors are surfaced to the agent.
+        if let Some(fid) = file_id {
+            let resolver = self
+                .image_resolver
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let fid_for_blocking = fid.clone();
+            let resolved = tokio::task::spawn_blocking(move || {
+                let bytes = resolver.resolve_base64(&fid_for_blocking);
+                let name = resolver.resolve_filename(&fid_for_blocking);
+                (bytes, name)
+            })
+            .await;
+            match resolved {
+                Ok((Ok((mime, data_base64)), resolved_name)) => {
+                    let kind = if mime.starts_with("image/") {
+                        AttachmentKind::Image
+                    } else {
+                        AttachmentKind::Document
+                    };
+                    attachment = Some(MessageAttachment {
+                        url: String::new(),
+                        kind,
+                        filename: filename.or(resolved_name),
+                        caption,
+                        inline: Some(agentos_types::InlineAttachment { mime, data_base64 }),
+                    });
+                }
+                Ok((Err(e), _)) => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!("Could not resolve file_id '{fid}': {e}"),
+                        }),
+                    };
+                }
+                Err(_) => {
+                    return KernelActionResult {
+                        success: false,
+                        result: serde_json::json!({
+                            "error": format!("file_id '{fid}' resolution task failed"),
+                        }),
+                    };
+                }
+            }
+        }
 
         // Defense-in-depth permission check.
         if !task
@@ -4565,23 +4641,6 @@ impl Kernel {
         let target_name = target.display_name.clone();
         let target_kind = target.kind.clone();
 
-        // Media attachments are only honored by the Telegram delivery path today.
-        // Fail closed for other kinds rather than reporting a false "delivered"
-        // while silently dropping the attachment.
-        if attachment.is_some() && !matches!(target_kind, ChannelKind::Telegram) {
-            return KernelActionResult {
-                success: false,
-                result: serde_json::json!({
-                    "error": format!(
-                        "Media attachments are currently only supported on Telegram channels, not {}",
-                        target_kind
-                    ),
-                    "channel_id": target_id.to_string(),
-                    "kind": target_kind.to_string(),
-                }),
-            };
-        }
-
         let max_chars = match &target_kind {
             ChannelKind::Discord => 2_000,
             ChannelKind::Slack => 40_000,
@@ -4605,6 +4664,27 @@ impl Kernel {
                         .unwrap_or_else(|| task.agent_id.to_string())
                 };
                 let subject_line: String = format!("[{agent_name}]").chars().take(80).collect();
+                // Telegram renders the attachment natively (sendPhoto/sendDocument).
+                // Ntfy/Email have no native media handling, so fold the URL (and
+                // caption) into the body rather than silently dropping it.
+                let (msg_body, msg_attachment) = if matches!(target_kind, ChannelKind::Telegram) {
+                    (send_text.clone(), attachment.clone())
+                } else if let Some(att) = &attachment {
+                    let mut b = send_text.clone();
+                    if let Some(cap) = att.caption.as_deref().filter(|c| !c.is_empty()) {
+                        if !b.is_empty() {
+                            b.push('\n');
+                        }
+                        b.push_str(cap);
+                    }
+                    if !b.is_empty() {
+                        b.push('\n');
+                    }
+                    b.push_str(&att.url);
+                    (b, None)
+                } else {
+                    (send_text.clone(), None)
+                };
                 let msg = UserMessage {
                     id: NotificationID::new(),
                     from: NotificationSource::Agent(task.agent_id),
@@ -4613,7 +4693,7 @@ impl Kernel {
                     kind: UserMessageKind::Notification,
                     priority: NotificationPriority::Info,
                     subject: subject_line,
-                    body: send_text.clone(),
+                    body: msg_body,
                     interaction: None,
                     delivery_status: HashMap::new(),
                     response: None,
@@ -4622,16 +4702,47 @@ impl Kernel {
                     read: false,
                     thread_id: thread_id.clone().or_else(|| Some(task.id.to_string())),
                     reply_to_external_id: thread_id.clone(),
-                    attachment: attachment.clone(),
+                    attachment: msg_attachment,
                 };
                 self.notification_router
                     .deliver_to_channel(msg, &target_id.to_string())
                     .await
             }
             _ => {
+                use agentos_channels::types::MessageContent;
+                use agentos_types::AttachmentKind;
+                // Map the optional attachment into typed channel content. The
+                // attachment is URL-based, so adapters either render it natively
+                // or fall back to delivering the URL in text (auto-embeds on
+                // Slack/Discord). When both text and media are present, send a
+                // Mixed payload so neither is lost.
+                let content = match &attachment {
+                    Some(att) => {
+                        let media = match att.kind {
+                            AttachmentKind::Image => MessageContent::Image {
+                                url: att.url.clone(),
+                                alt: att.caption.clone(),
+                            },
+                            AttachmentKind::Document => MessageContent::File {
+                                url: att.url.clone(),
+                                filename: att.filename.clone().unwrap_or_else(|| "file".into()),
+                                mime: String::new(),
+                            },
+                        };
+                        if send_text.is_empty() {
+                            media
+                        } else {
+                            MessageContent::Mixed(vec![
+                                MessageContent::Text(send_text.clone()),
+                                media,
+                            ])
+                        }
+                    }
+                    None => MessageContent::Text(send_text.clone()),
+                };
                 let outbound = agentos_channels::types::OutboundMessage {
                     channel_instance_id: target_id.to_string(),
-                    content: agentos_channels::types::MessageContent::Text(send_text.clone()),
+                    content,
                     thread_id: thread_id.clone(),
                 };
                 self.channel_manager

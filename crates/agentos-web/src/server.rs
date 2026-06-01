@@ -23,22 +23,14 @@ impl WebServer {
     ) -> Result<Self, anyhow::Error> {
         let templates = Arc::new(build_template_engine()?);
 
-        let chat_db_path = kernel.data_dir().join("chat.db");
-        let chat_store = Arc::new(
-            crate::chat_store::ChatStore::open(&chat_db_path)
-                .map_err(|e| anyhow::anyhow!("Failed to open chat store: {}", e))?,
-        );
+        // Chat + convo stores now live on the kernel (shared with the REST API);
+        // reuse those instances rather than opening second connections.
+        let chat_store = kernel.chat_store.clone();
+        let convo_store = kernel.convo_store.clone();
 
-        let convo_db_path = kernel.data_dir().join("agent_convos.db");
-        let convo_store = Arc::new(
-            crate::convo_store::ConvoStore::open(&convo_db_path)
-                .map_err(|e| anyhow::anyhow!("Failed to open convo store: {}", e))?,
-        );
-
-        let file_store = Arc::new(
-            crate::file_store::FileStore::open(kernel.data_dir())
-                .map_err(|e| anyhow::anyhow!("Failed to open file store: {}", e))?,
-        );
+        // FileStore now lives on the kernel (shared with the REST API); reuse that
+        // instance rather than opening a second connection to the same DB.
+        let file_store = kernel.file_store.clone();
 
         let resolver: Arc<dyn agentos_llm::ImageResolver> =
             match crate::handlers::files::FileStoreImageResolver::new(Arc::clone(&file_store)) {

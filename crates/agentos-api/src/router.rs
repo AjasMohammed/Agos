@@ -8,6 +8,7 @@
 //! 5. Security headers
 //! 6. Bearer auth (on protected routes only)
 
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, Method, Request};
 use axum::middleware::Next;
 use axum::response::Response;
@@ -23,9 +24,10 @@ use tower_http::trace::TraceLayer;
 
 use crate::api_key::ApiKeyStore;
 use crate::handlers::{
-    agents, audit, auth, channels, chat, config, connectors, costs, dashboard, doctor, escalations,
-    events, identity, keys, logs, mcp, notifications, pipelines, plugins, prefs, roles, schedules,
-    secrets, system, system_info, tasks, tools, webhooks, webhooks_admin, workflows,
+    agent_chats, agents, audit, auth, channels, chat, chat_sessions, config, connectors, costs,
+    dashboard, doctor, escalations, events, files, identity, keys, logs, marketplace, mcp,
+    notifications, pipelines, plugins, prefs, roles, schedules, scratchpad, secrets, sse, system,
+    system_info, tasks, tools, webhooks, webhooks_admin, workflows,
 };
 use crate::service::KernelService;
 use crate::ws;
@@ -111,6 +113,37 @@ pub fn build_router(
         .route("/api/v1/hal", get(system_info::hal))
         // OpenAI-compatible chat
         .route("/api/v1/chat/completions", post(chat::completions))
+        // Chat sessions (persisted; read/manage — sending is via /chat/completions)
+        .route(
+            "/api/v1/chat/sessions",
+            get(chat_sessions::list).post(chat_sessions::create),
+        )
+        .route(
+            "/api/v1/chat/sessions/{id}",
+            get(chat_sessions::get)
+                .patch(chat_sessions::rename)
+                .delete(chat_sessions::delete),
+        )
+        .route("/api/v1/chat/sessions/{id}/fork", post(chat_sessions::fork))
+        .route(
+            "/api/v1/chat/sessions/{id}/messages",
+            get(chat_sessions::messages).post(chat_sessions::send),
+        )
+        .route(
+            "/api/v1/chat/sessions/{id}/messages/stream",
+            post(chat_sessions::send_stream),
+        )
+        .route(
+            "/api/v1/chat/sessions/{id}/export",
+            get(chat_sessions::export),
+        )
+        // Agent conversations (multi-agent convos)
+        .route(
+            "/api/v1/agent-chats",
+            get(agent_chats::list).post(agent_chats::create),
+        )
+        .route("/api/v1/agent-chats/{id}", get(agent_chats::get))
+        .route("/api/v1/agent-chats/{id}/stop", post(agent_chats::stop))
         // Agents
         .route("/api/v1/agents", get(agents::list).post(agents::connect))
         .route(
@@ -128,6 +161,28 @@ pub fn build_router(
         .route(
             "/api/v1/agents/{name}/permissions/revoke",
             post(agents::revoke_permission),
+        )
+        // Files (upload+list share /api/v1/files; added separately with a larger body limit)
+        .route("/api/v1/files/{id}/download", get(files::download))
+        .route("/api/v1/files/{id}", get(files::get).delete(files::delete))
+        // Scratchpad — global
+        .route("/api/v1/scratchpad", get(scratchpad::list_global))
+        .route(
+            "/api/v1/scratchpad/{page}",
+            get(scratchpad::get_global)
+                .put(scratchpad::put_global)
+                .delete(scratchpad::delete_global),
+        )
+        // Scratchpad — per-agent
+        .route(
+            "/api/v1/agents/{name}/scratchpad",
+            get(scratchpad::list_agent),
+        )
+        .route(
+            "/api/v1/agents/{name}/scratchpad/{page}",
+            get(scratchpad::get_agent)
+                .put(scratchpad::put_agent)
+                .delete(scratchpad::delete_agent),
         )
         // Tasks
         .route("/api/v1/tasks", get(tasks::list))
@@ -259,6 +314,15 @@ pub fn build_router(
             delete(events::delete_subscription),
         )
         .route("/api/v1/events/emit", post(events::emit))
+        // Realtime SSE stream (alternative to the WebSocket endpoint)
+        .route("/api/v1/events/stream", get(sse::events_stream))
+        // Marketplace (proxy to external registry)
+        .route("/api/v1/marketplace", get(marketplace::search))
+        .route("/api/v1/marketplace/{name}", get(marketplace::detail))
+        .route(
+            "/api/v1/marketplace/{name}/reviews",
+            post(marketplace::review),
+        )
         // Webhook endpoint management
         .route(
             "/api/v1/webhooks",
@@ -279,6 +343,16 @@ pub fn build_router(
     } else {
         protected_routes
     };
+
+    // Files upload+list share `/api/v1/files`; this route alone gets a raised body
+    // limit (100 MiB + 1 MiB form slack) so large uploads aren't rejected by the
+    // default 2 MiB cap (other routes keep the default).
+    let protected_routes = protected_routes.route(
+        "/api/v1/files",
+        get(files::list)
+            .post(files::upload)
+            .layer(DefaultBodyLimit::max(100 * 1024 * 1024 + 1024 * 1024)),
+    );
 
     // Apply auth middleware to all protected routes.
     let protected_routes = protected_routes

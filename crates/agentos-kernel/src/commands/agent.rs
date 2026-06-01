@@ -2,8 +2,8 @@ use crate::event_bus::default_subscriptions_for_role;
 use crate::kernel::Kernel;
 use agentos_bus::KernelResponse;
 use agentos_llm::{
-    AnthropicCore, CustomCore, FallbackAdapter, GeminiCore, HealthStatus, LLMCore, OllamaCore,
-    OpenAICore,
+    AnthropicCore, ClaudeCodeCore, CustomCore, FallbackAdapter, GeminiCore, HealthStatus, LLMCore,
+    OllamaCore, OpenAICore,
 };
 use agentos_types::*;
 use secrecy::SecretString;
@@ -245,6 +245,12 @@ impl Kernel {
                 ))
             }
             LLMProvider::Custom(custom_name) => {
+                // Claude Code subprocess backend: runs the local `claude` CLI on
+                // the user's subscription (no API key). Intercept before the
+                // catalog/HTTP path since it is not an OpenAI-compatible endpoint.
+                if custom_name == "claude-code" || custom_name == "claude-cli" {
+                    return Ok((Arc::new(ClaudeCodeCore::new(model.to_string())), None));
+                }
                 // Check the provider catalog first for known providers.
                 let catalog_entry_opt = self
                     .provider_catalog
@@ -918,6 +924,7 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         thinking_level: ThinkingLevel::Off,
                         spawner_agent_id: None,
                         tool_categories: None,
+                        disable_tool_scoping: false,
                     };
                     self.scheduler.enqueue(onboarding_task).await;
                     onboarding_task_id_opt = Some(onboarding_task_id);

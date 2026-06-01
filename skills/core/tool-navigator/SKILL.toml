@@ -1,0 +1,26 @@
+[skill]
+name = "tool-navigator"
+version = "0.1.0"
+description = "Discovers the right tool for a job by browsing the paginated agent manual, searching the tool inventory by capability, and fetching full tool schemas before invoking"
+author = "agentos-core"
+trust_tier = "core"
+
+[triggers]
+events = ["tool_not_found", "capability_lookup_requested"]
+
+[agent]
+system_prompt_file = "prompt.md"
+roles = ["tool-navigator"]
+default_provider = "anthropic"
+default_model = "claude-haiku-4-5"
+
+[tools]
+required = ["agent-manual", "search-tools", "describe-tool"]
+optional = ["list-tools", "tool-result-page"]
+
+[permissions]
+required = []
+
+[budget]
+max_cost_per_run = 0.10
+max_tokens_per_run = 15000

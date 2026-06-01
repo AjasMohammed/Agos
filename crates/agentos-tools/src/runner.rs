@@ -95,6 +95,12 @@ pub struct ToolRunner {
     file_lock_registry: Arc<FileLockRegistry>,
     /// Tools registered at runtime (e.g. via `agentos mcp attach`).
     dynamic_tools: std::sync::RwLock<HashMap<String, Arc<dyn AgentTool>>>,
+    /// Monotonic counter bumped on every dynamic registration or removal.
+    /// `&self` callers use an atomic so no lock is needed. Consumers detect
+    /// stale cached state cheaply. Ordering with the map contents is provided
+    /// by `dynamic_tools`'s own RwLock, not by this atomic — always take the
+    /// read lock before reading the revision if you need a consistent snapshot.
+    dynamic_revision: std::sync::atomic::AtomicU64,
 }
 
 impl ToolRunner {
@@ -110,6 +116,7 @@ impl ToolRunner {
             tools: HashMap::new(),
             file_lock_registry: Arc::new(FileLockRegistry::new()),
             dynamic_tools: std::sync::RwLock::new(HashMap::new()),
+            dynamic_revision: std::sync::atomic::AtomicU64::new(0),
         };
 
         // Initialize shared memory stores
@@ -149,6 +156,7 @@ impl ToolRunner {
             tools: HashMap::new(),
             file_lock_registry: Arc::new(FileLockRegistry::new()),
             dynamic_tools: std::sync::RwLock::new(HashMap::new()),
+            dynamic_revision: std::sync::atomic::AtomicU64::new(0),
         };
         runner.register_memory_tools(semantic, episodic, procedural);
         runner
@@ -311,15 +319,30 @@ impl ToolRunner {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(name, Arc::from(tool));
+        self.dynamic_revision
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Remove a dynamically registered tool by name. Returns `true` if removed.
     pub fn unregister_dynamic(&self, name: &str) -> bool {
-        self.dynamic_tools
+        let removed = self
+            .dynamic_tools
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .remove(name)
-            .is_some()
+            .is_some();
+        if removed {
+            self.dynamic_revision
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        removed
+    }
+
+    /// Monotonic counter bumped on every `register_dynamic`/`unregister_dynamic`.
+    /// Callers can detect stale state without holding any lock.
+    pub fn dynamic_revision(&self) -> u64 {
+        self.dynamic_revision
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Register scratchpad tools with a shared `ScratchpadStore`.
@@ -441,13 +464,17 @@ impl ToolRunner {
         )));
     }
 
-    /// Register the search-tools tool with a shared tool catalogue.
+    /// Register the search-tools tool with a shared tool catalogue and a shared
+    /// embedder for semantic ranking. Pass a no-op embedder to force the
+    /// substring-only fallback.
     pub fn register_search_tools(
         &mut self,
         tool_summaries: crate::agent_manual::SharedToolSummaries,
+        embedder: Arc<Embedder>,
     ) {
         self.register(Box::new(crate::search_tools::SearchToolsTool::new(
             tool_summaries,
+            embedder,
         )));
     }
 
@@ -660,5 +687,53 @@ impl ToolRunner {
             .unwrap_or_else(|e| e.into_inner())
             .get(tool_name)
             .map(|t| t.required_permissions())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct NoopTool(String);
+
+    #[async_trait]
+    impl crate::traits::AgentTool for NoopTool {
+        fn name(&self) -> &str {
+            &self.0
+        }
+        fn required_permissions(&self) -> Vec<(String, agentos_types::PermissionOp)> {
+            vec![]
+        }
+        async fn execute(
+            &self,
+            _payload: serde_json::Value,
+            _ctx: crate::traits::ToolExecutionContext,
+        ) -> Result<serde_json::Value, agentos_types::AgentOSError> {
+            Ok(serde_json::json!({}))
+        }
+    }
+
+    #[test]
+    fn dynamic_revision_bumps_on_register_and_unregister() {
+        // Build a ToolRunner without touching the file system or embedding model.
+        let runner = ToolRunner {
+            tools: std::collections::HashMap::new(),
+            file_lock_registry: Arc::new(crate::file_lock::FileLockRegistry::new()),
+            dynamic_tools: std::sync::RwLock::new(std::collections::HashMap::new()),
+            dynamic_revision: std::sync::atomic::AtomicU64::new(0),
+        };
+        assert_eq!(runner.dynamic_revision(), 0);
+        runner.register_dynamic(Box::new(NoopTool("dyn-a".into())));
+        assert_eq!(runner.dynamic_revision(), 1);
+        runner.register_dynamic(Box::new(NoopTool("dyn-b".into())));
+        assert_eq!(runner.dynamic_revision(), 2);
+        let removed = runner.unregister_dynamic("dyn-a");
+        assert!(removed);
+        assert_eq!(runner.dynamic_revision(), 3);
+        // Removing a non-existent name doesn't bump.
+        let not_removed = runner.unregister_dynamic("nonexistent");
+        assert!(!not_removed);
+        assert_eq!(runner.dynamic_revision(), 3);
     }
 }

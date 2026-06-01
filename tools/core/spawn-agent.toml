@@ -49,3 +49,9 @@ gpu           = false
 max_memory_mb = 16
 max_cpu_ms    = 1000
 syscalls      = []
+
+[[examples]]
+description = "Spawn a sub-agent to handle a specific task"
+[examples.payload]
+agent = "researcher"
+prompt = "Summarise recent developments in LLM tooling"

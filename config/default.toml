@@ -85,6 +85,17 @@ core_tools_dir = "/tmp/agentos/tools/core"
 user_tools_dir = "/tmp/agentos/tools/user"
 data_dir = "/tmp/agentos/data"
 
+[tools.discovery]
+# Tier-0 tool index shown in every system prompt: category counts plus this many
+# usage-ranked tool names per category, soft-capped by l0_max_tokens.
+l0_max_names_per_category = 5
+l0_max_tokens = 200
+# Scope the native tool array to task-relevant categories (frontier models).
+# Anything scoped out is still reachable via search-tools. Set false to always
+# send every tool. classifier: "heuristic" (default) | "heuristic+semantic" | "llm".
+default_scoping = true
+scoping_classifier = "heuristic"
+
 [tools.workspace]
 # Additional directories the agent can access beyond data_dir.
 # Each entry must be an absolute path pointing to a project or shared directory.
@@ -418,6 +429,66 @@ max_proposals_per_task = 3
 # Pending proposals older than this are auto-expired (status='expired',
 # history preserved) by the TimeoutChecker sweep.
 proposal_ttl_days = 30
+
+[user_profile]
+# Structured user-profile store (proactive personalization). Accepted
+# preference proposals are promoted here as durable, categorized entries that
+# later phases read for L0 (pinned, in-context) and L1 (retrieved) tiers.
+# The store itself is enabled by default (harmless when empty); the separate
+# read-back-into-context gate is default-off (see the personalization plan).
+enabled = true
+# Optional SQLite path override; defaults to {data_dir}/user_profile.db.
+# db_path = "/var/lib/agentos/user_profile.db"
+# Maximum L0-pinned entries surfaced to agent context.
+max_pinned = 8
+# Minimum confidence (0.0..1.0) for an entry to be stored.
+min_confidence = 0.30
+
+[personalization]
+# Proactive personalization. Tiered by token cost:
+#   L0 (read-back): inject a small, prompt-cached profile block into agent
+#                   context. Costs ~20 tok/turn steady-state (cache read).
+#   L2 (background): interest model + proactive recommendations — ZERO
+#                    task-context tokens (run off the task path).
+#
+# Master switch for putting profile data INTO agent context. Opt-in (off by
+# default): the profile store still collects accepted prefs, but nothing is
+# injected into tasks until this is true.
+enabled = false
+# L0 block bounds (also hard-capped in code at 8 / token budget).
+profile_pin_cap = 8
+profile_token_budget = 300
+
+# --- Interest model (background, decaying) ---
+# Half-life in hours for interest-score decay (~2 weeks).
+interest_decay_half_life_hours = 336.0
+# Prune interest topics whose decayed score falls below this.
+interest_min_score = 0.05
+# Aggregate after this many task completions...
+interest_aggregation_trigger_tasks = 25
+# ...or after this many hours, whichever comes first.
+interest_aggregation_trigger_hours = 24.0
+
+# --- Proactive recommendations (separate opt-in) ---
+# Generate + deliver proactive tips. Off by default even when `enabled` is true.
+proactive_enabled = false
+# Daily delivery cap.
+max_recommendations_per_day = 3
+# Hours before an identical (deduped) recommendation may repeat.
+recommendation_dedup_cooldown_hours = 168.0
+# Minimum confidence for a recommendation to be delivered.
+recommendation_min_confidence = 0.5
+
+# --- Feedback loop (Phase 5) ---
+# Exponential half-life (days) for profile pin_rank decay. After one half-life
+# an unused entry's rank halves toward 0 (= higher L0 priority after boost).
+pin_rank_decay_half_life_days = 30.0
+# Archive Active profile entries idle for longer than this many days.
+profile_archive_idle_days = 60
+# Hours a dismissed recommendation's dedup_hash is suppressed (7d = 168h).
+dismiss_cooldown_hours = 168
+# Confidence bump when the user re-states an existing preference (clamped to 1.0).
+restate_confidence_boost = 0.10
 
 # IoT: MQTT broker connection (requires `mqtt` feature)
 # Uncomment to enable MQTT driver for IoT sensor/actuator communication.

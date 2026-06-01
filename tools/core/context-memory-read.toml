@@ -26,3 +26,8 @@ fs_write      = false
 gpu           = false
 max_memory_mb = 64
 max_cpu_ms    = 5000
+
+[[examples]]
+description = "Read the current context memory for this agent"
+[examples.payload]
+agent_id = "default"

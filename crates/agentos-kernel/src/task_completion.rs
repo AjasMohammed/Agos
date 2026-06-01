@@ -249,6 +249,18 @@ impl Kernel {
                     _ = consolidation.on_task_completed() => {}
                 }
             });
+
+            // Proactive personalization — interest-model count trigger (Phase 3).
+            // `on_task_completed` self-gates on `personalization.enabled`, so this
+            // is a cheap no-op when the feature is off. Zero task-context cost.
+            let interest = self.interest_model.clone();
+            let interest_token = self.cancellation_token.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = interest_token.cancelled() => {}
+                    _ = interest.on_task_completed() => {}
+                }
+            });
         } else {
             tracing::info!(
                 task_id = %task.id,

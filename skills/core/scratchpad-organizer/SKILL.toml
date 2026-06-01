@@ -1,0 +1,26 @@
+[skill]
+name = "scratchpad-organizer"
+version = "0.1.0"
+description = "Maintains a wikilinked working-memory knowledge graph on the agent scratchpad — capturing notes, linking related pages, and traversing backlinks to stay oriented during long tasks"
+author = "agentos-core"
+trust_tier = "core"
+
+[triggers]
+events = ["task_received", "note_requested"]
+
+[agent]
+system_prompt_file = "prompt.md"
+roles = ["scratchpad-organizer"]
+default_provider = "anthropic"
+default_model = "claude-haiku-4-5"
+
+[tools]
+required = ["scratch-write", "scratch-read", "scratch-search"]
+optional = ["scratch-links", "scratch-graph", "scratch-delete"]
+
+[permissions]
+required = ["scratchpad:r", "scratchpad:w"]
+
+[budget]
+max_cost_per_run = 0.15
+max_tokens_per_run = 20000

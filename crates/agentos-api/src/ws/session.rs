@@ -16,6 +16,9 @@ const MAX_SUBSCRIPTIONS: usize = 64;
 /// Per-connection state for a WebSocket client.
 pub struct WsSession {
     subscriptions: HashMap<String, String>, // sub_id → channel
+    /// Per-connection unique prefix so subscription IDs never collide with those
+    /// of another connection in the process-wide broadcaster map.
+    connection_id: String,
     next_sub_id: u64,
     outbound_tx: mpsc::Sender<ServerFrame>,
     /// Scopes of the API key that authenticated this connection (e.g. `"audit:r"`,
@@ -27,6 +30,7 @@ impl WsSession {
     pub fn new(outbound_tx: mpsc::Sender<ServerFrame>, permissions: Vec<String>) -> Self {
         Self {
             subscriptions: HashMap::new(),
+            connection_id: uuid::Uuid::new_v4().to_string(),
             next_sub_id: 0,
             outbound_tx,
             permissions,
@@ -220,7 +224,9 @@ impl WsSession {
     }
 
     fn alloc_sub_id(&mut self) -> String {
-        let id = format!("sub_{}", self.next_sub_id);
+        // Prefix with the per-connection id so two connections' counters can
+        // never produce the same key in the shared broadcaster map.
+        let id = format!("{}:{}", self.connection_id, self.next_sub_id);
         self.next_sub_id += 1;
         id
     }
@@ -228,7 +234,8 @@ impl WsSession {
 
 /// The read scope required to subscribe to `channel`. The base (before any
 /// `:id` suffix) maps to a `<resource>:r` scope; `agent-chat` maps to `chat`.
-fn channel_required_scope(channel: &str) -> String {
+/// Shared by the WS subscribe path and the SSE handler so both gate identically.
+pub(crate) fn channel_required_scope(channel: &str) -> String {
     let base = channel.split(':').next().unwrap_or(channel);
     let resource = match base {
         "agent-chat" => "chat",
@@ -254,4 +261,37 @@ fn permissions_grant(permissions: &[String], required: &str) -> bool {
         let op = p.split(':').nth(1).unwrap_or("r");
         (res == req_res || res == "*") && op.contains(req_op)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sub_ids_do_not_collide_across_connections() {
+        let (tx_a, _ra) = mpsc::channel(4);
+        let (tx_b, _rb) = mpsc::channel(4);
+        let mut a = WsSession::new(tx_a, vec![]);
+        let mut b = WsSession::new(tx_b, vec![]);
+        // Two connections both start their counter at 0; the per-connection UUID
+        // prefix is what keeps their sub_ids distinct in the shared broadcaster map.
+        let a0 = a.alloc_sub_id();
+        let b0 = b.alloc_sub_id();
+        assert_ne!(a0, b0, "sub_ids from distinct connections must not collide");
+        assert!(a0.starts_with(&a.connection_id));
+        assert!(b0.starts_with(&b.connection_id));
+        // And they remain unique as each connection allocates more.
+        assert_ne!(a.alloc_sub_id(), b.alloc_sub_id());
+    }
+
+    #[test]
+    fn channel_scope_mapping_matches_ws_and_sse() {
+        assert_eq!(channel_required_scope("audit"), "audit:r");
+        assert_eq!(channel_required_scope("tasks"), "tasks:r");
+        // agent-chat is gated on the `chat` resource…
+        assert_eq!(channel_required_scope("agent-chat"), "chat:r");
+        // …and a parameterized channel uses its base resource, not the id.
+        assert_eq!(channel_required_scope("chat:abc-123"), "chat:r");
+        assert_eq!(channel_required_scope("agent-chat:xyz"), "chat:r");
+    }
 }

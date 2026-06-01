@@ -22,10 +22,13 @@ pub mod mcp;
 pub mod notifications;
 pub mod onboard;
 pub mod perm;
+pub mod personalization;
 pub mod pipeline;
 pub mod plugin;
 pub mod prefs;
+pub mod profile;
 pub mod provider;
+pub mod recommendations;
 pub mod resource;
 pub mod role;
 pub mod schedule;
@@ -48,6 +51,7 @@ pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow
         Commands::Secret { command } => secret::handle(client, command).await,
         Commands::Perm { command } => perm::handle(client, command).await,
         Commands::Prefs { command } => prefs::handle(client, command).await,
+        Commands::Profile { command } => profile::handle(client, command).await,
         Commands::Status => status::handle(client).await,
         Commands::Audit { command } => audit::handle(client, command).await,
         Commands::Role { command } => role::handle(client, command).await,
@@ -71,6 +75,8 @@ pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow
         Commands::Plugin { command } => plugin::handle(client, command).await,
         Commands::Workspace { command } => workspace::handle(client, command).await,
         Commands::Approval { command } => approval::handle(client, command).await,
+        Commands::Recommendations { command } => recommendations::handle(client, command).await,
+        Commands::Personalization { command } => personalization::handle(client, command).await,
         _ => unreachable!(),
     }
 }

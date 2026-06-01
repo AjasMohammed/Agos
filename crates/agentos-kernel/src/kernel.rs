@@ -655,6 +655,32 @@ pub struct Kernel {
     pub memory_blocks: Arc<crate::memory_blocks::MemoryBlockStore>,
     pub context_memory_store: Arc<crate::context_memory_store::ContextMemoryStore>,
     pub scratchpad_store: Arc<agentos_scratch::ScratchpadStore>,
+    /// SQLite-backed store for uploaded/inbound files. Owned by the kernel so
+    /// both the web UI and the REST API (`KernelService`) share one instance;
+    /// also backs the `AttachmentSink` for inbound channel media.
+    pub file_store: Arc<crate::file_store::FileStore>,
+    /// SQLite-backed chat-session store (shared by the web UI + REST API).
+    pub chat_store: Arc<crate::chat_store::ChatStore>,
+    /// SQLite-backed agent-to-agent conversation store (shared by web + API).
+    pub convo_store: Arc<crate::convo_store::ConvoStore>,
+    /// SQLite-backed user-profile/preference store.
+    pub user_profile_store: Arc<crate::user_profile_store::UserProfileStore>,
+    /// Version-gated cache of the rendered L0 `## User Profile` block (Phase 2).
+    /// Holds `(profile_store_version, rendered_block)`. The read-back path reuses
+    /// the cached string while the profile version is unchanged, keeping the
+    /// prompt-cached prefix byte-identical across iterations. Invalidated
+    /// automatically when any profile mutation bumps the store version.
+    pub user_profile_l0_cache: std::sync::Mutex<Option<(u64, String)>>,
+    /// Background interest aggregator (Phase 3). Decays behavioral signals into
+    /// `user_interests.db`; zero task-context cost (driven only by the periodic
+    /// tick + `on_task_completed`). Consumed by the Phase 4 recommendation engine.
+    pub interest_model: Arc<crate::interest_model::InterestModel>,
+    /// Proactive recommendation engine (Phase 4). Generates + delivers out-of-loop
+    /// tips from the interest model; zero task-context cost.
+    pub recommendation_engine: Arc<crate::recommendation_engine::RecommendationEngine>,
+    /// Feedback-loop processor (Phase 5). Applies accept/dismiss/restate signals to
+    /// the interest model and profile store; also runs the hourly decay/archival sweep.
+    pub feedback_processor: Arc<crate::personalization_feedback::FeedbackProcessor>,
     pub skill_registry: Arc<RwLock<agentos_skills::SkillRegistry>>,
     pub schedule_manager: Arc<ScheduleManager>,
     pub background_pool: Arc<BackgroundPool>,
@@ -666,6 +692,8 @@ pub struct Kernel {
     pub escalation_manager: Arc<crate::escalation::EscalationManager>,
     pub cost_tracker: Arc<crate::cost_tracker::CostTracker>,
     pub risk_classifier: Arc<crate::risk_classifier::RiskClassifier>,
+    /// Classifies a task prompt into tool categories for native-array scoping (Phase 3).
+    pub tool_classifier: Arc<dyn crate::tool_scoping::TaskToolClassifier>,
     pub identity_manager: Arc<crate::identity::IdentityManager>,
     pub injection_scanner: Arc<crate::injection_scanner::InjectionScanner>,
     pub resource_arbiter: Arc<crate::resource_arbiter::ResourceArbiter>,
@@ -3605,6 +3633,10 @@ impl Kernel {
         if !shared_embedder.is_noop() {
             agentos_tools::agent_manual::install_section_embeddings(Arc::clone(&shared_embedder));
         }
+        // Clone a handle for semantic `search-tools` before `shared_embedder` is
+        // moved into the procedural store below. A no-op embedder is carried
+        // through unchanged — search-tools then falls back to substring scoring.
+        let tool_search_embedder = Arc::clone(&shared_embedder);
         let episodic_memory = Arc::new(agentos_memory::EpisodicStore::open(&data_dir)?);
         let semantic_memory = Arc::new(agentos_memory::SemanticStore::open_with_embedder(
             &data_dir,
@@ -3617,6 +3649,33 @@ impl Kernel {
         let scratchpad_store = Arc::new(
             agentos_scratch::ScratchpadStore::new(&data_dir.join("scratchpad.db"))
                 .map_err(|e| anyhow::anyhow!("Scratchpad store init failed: {}", e))?,
+        );
+        let file_store = Arc::new(
+            crate::file_store::FileStore::open(&data_dir)
+                .map_err(|e| anyhow::anyhow!("File store init failed: {}", e))?,
+        );
+        let chat_store = Arc::new(
+            crate::chat_store::ChatStore::open(&data_dir.join("chat.db"))
+                .map_err(|e| anyhow::anyhow!("Chat store init failed: {}", e))?,
+        );
+        let convo_store = Arc::new(
+            crate::convo_store::ConvoStore::open(&data_dir.join("agent_convos.db"))
+                .map_err(|e| anyhow::anyhow!("Convo store init failed: {}", e))?,
+        );
+        let user_profile_db_path = config
+            .user_profile
+            .db_path
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("user_profile.db"));
+        let user_profile_store = Arc::new(
+            crate::user_profile_store::UserProfileStore::open_with_limits(
+                user_profile_db_path,
+                config.user_profile.min_confidence,
+                config.user_profile.max_pinned,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("User profile store init failed: {}", e))?,
         );
         let mut tool_runner = ToolRunner::new_with_shared_memory(
             semantic_memory.clone(),
@@ -3779,7 +3838,10 @@ impl Kernel {
             );
             tool_runner.register_list_tools(std::sync::Arc::clone(&tool_summaries_shared));
             tool_runner.register_describe_tool(std::sync::Arc::clone(&tool_summaries_shared));
-            tool_runner.register_search_tools(std::sync::Arc::clone(&tool_summaries_shared));
+            tool_runner.register_search_tools(
+                std::sync::Arc::clone(&tool_summaries_shared),
+                tool_search_embedder,
+            );
             tool_runner.register_skill_prompt(std::sync::Arc::clone(&installed_skills_shared));
             // `skill-create` writes the manifest + prompt under
             // `config.skills.user_skills_dir` and asks the kernel installer
@@ -3802,6 +3864,26 @@ impl Kernel {
             crate::tool_usage_store::ToolUsageStore::open(&data_dir.join("agent_tool_usage.db"))
                 .map_err(|e| anyhow::anyhow!("ToolUsageStore init failed: {}", e))?,
         );
+
+        // Proactive personalization — background interest aggregator (Phase 3).
+        // Opens its own SQLite store; the model is harmless when disabled (gated
+        // on `personalization.enabled`). Zero task-context cost.
+        let user_interests_store = Arc::new(
+            crate::user_interests_store::UserInterestsStore::open(
+                data_dir.join("user_interests.db"),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("UserInterestsStore init failed: {}", e))?,
+        );
+        // Clone the interests store before moving it into the InterestModel so
+        // the FeedbackProcessor (Phase 5) can also hold a handle.
+        let user_interests_store_for_feedback = Arc::clone(&user_interests_store);
+        let interest_model = Arc::new(crate::interest_model::InterestModel::new(
+            user_interests_store,
+            episodic_memory.clone(),
+            tool_usage.clone(),
+            &config.personalization,
+        ));
 
         // Create hook registry early so it can be shared with the plugin registry.
         let hook_registry_arc = crate::hooks::HookRegistry::new();
@@ -4796,6 +4878,62 @@ impl Kernel {
             50,
         ));
 
+        // Task tool classifier for native-array category scoping (Phase 3).
+        // Only the zero-cost heuristic is implemented today; "heuristic+semantic"
+        // / "llm" degrade to heuristic with a log until those land.
+        let tool_classifier: Arc<dyn crate::tool_scoping::TaskToolClassifier> = {
+            let mode = config.tools.discovery.scoping_classifier.clone();
+            if mode != "heuristic" {
+                tracing::info!(
+                    classifier = %mode,
+                    "scoping_classifier not yet implemented; using heuristic"
+                );
+            }
+            Arc::new(crate::tool_scoping::HeuristicClassifier)
+        };
+
+        // Proactive recommendation engine (Phase 4). Opens its own SQLite store;
+        // the engine is harmless when disabled (both proactive_enabled gates are off
+        // by default). Zero task-context cost — only driven by the periodic tick.
+        let recommendations_db_path = data_dir.join("recommendations.db");
+        let recommendations_store = Arc::new(
+            match crate::recommendations_store::RecommendationsStore::open(recommendations_db_path)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to open recommendations.db — falling back to in-memory");
+                    crate::recommendations_store::RecommendationsStore::open_in_memory()
+                        .await
+                        .map_err(|e2| {
+                            anyhow::anyhow!("RecommendationsStore in-memory fallback failed: {e2}")
+                        })?
+                }
+            },
+        );
+        let recommendation_engine =
+            Arc::new(crate::recommendation_engine::RecommendationEngine::new(
+                recommendations_store,
+                interest_model.clone(),
+                user_profile_store.clone(),
+                notification_router.clone(),
+                &config.personalization,
+            ));
+
+        // Phase 5: feedback loop processor — applies accept/dismiss/restate
+        // signals and runs the hourly profile decay/archival sweep.
+        let feedback_processor = Arc::new(crate::personalization_feedback::FeedbackProcessor::new(
+            Arc::clone(&user_profile_store),
+            user_interests_store_for_feedback,
+            Arc::clone(&audit),
+            crate::personalization_feedback::PersonalizationFeedbackConfig {
+                pin_rank_decay_half_life_days: config.personalization.pin_rank_decay_half_life_days,
+                profile_archive_idle_days: config.personalization.profile_archive_idle_days,
+                dismiss_cooldown_hours: config.personalization.dismiss_cooldown_hours,
+                restate_confidence_boost: config.personalization.restate_confidence_boost,
+            },
+        ));
+
         let audit_for_dispatcher = Arc::clone(&audit);
         let kernel = Kernel {
             config,
@@ -4830,6 +4968,14 @@ impl Kernel {
             memory_blocks,
             context_memory_store,
             scratchpad_store: scratchpad_store.clone(),
+            file_store: file_store.clone(),
+            chat_store: chat_store.clone(),
+            convo_store: convo_store.clone(),
+            user_profile_store,
+            user_profile_l0_cache: std::sync::Mutex::new(None),
+            interest_model,
+            recommendation_engine,
+            feedback_processor,
             skill_registry,
             schedule_manager,
             background_pool,
@@ -4841,6 +4987,7 @@ impl Kernel {
             escalation_manager,
             cost_tracker,
             risk_classifier: Arc::new(crate::risk_classifier::RiskClassifier::new()),
+            tool_classifier,
             identity_manager,
             injection_scanner: Arc::new(crate::injection_scanner::InjectionScanner::new()),
             resource_arbiter: {
@@ -5786,6 +5933,7 @@ mod preflight_tests {
                 crl_path: None,
                 workspace: crate::config::WorkspaceConfig::default(),
                 host_package: crate::config::HostPackageSettings::default(),
+                discovery: Default::default(),
             },
             bus: BusSettings {
                 socket_path: "/tmp/test.sock".to_string(),
@@ -5821,6 +5969,8 @@ mod preflight_tests {
             gateway: Default::default(),
             scheduler: Default::default(),
             transcription: Default::default(),
+            user_profile: Default::default(),
+            personalization: Default::default(),
         }
     }
 
@@ -6041,6 +6191,7 @@ mod vault_bootstrap_tests {
                 crl_path: None,
                 workspace: WorkspaceConfig::default(),
                 host_package: crate::config::HostPackageSettings::default(),
+                discovery: Default::default(),
             },
             bus: BusSettings {
                 socket_path: root
@@ -6076,6 +6227,8 @@ mod vault_bootstrap_tests {
             gateway: Default::default(),
             scheduler: Default::default(),
             transcription: Default::default(),
+            user_profile: Default::default(),
+            personalization: Default::default(),
         }
     }
 

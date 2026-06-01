@@ -3,7 +3,7 @@
 //! Each test boots a real kernel into a temp directory, calls KernelService
 //! methods directly on the `Kernel`, and asserts expected behaviour.
 
-use agentos_api::types::{AuditFilter, TaskFilter};
+use agentos_api::types::{AuditFilter, CreateChatSessionRequest, TaskFilter};
 use agentos_api::KernelService;
 use agentos_kernel::config::{
     AuditSettings, BusSettings, HealthMonitorConfig, KernelConfig, KernelSettings, LlmSettings,
@@ -79,6 +79,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             crl_path: None,
             workspace: agentos_kernel::config::WorkspaceConfig::default(),
             host_package: agentos_kernel::config::HostPackageSettings::default(),
+            discovery: Default::default(),
         },
         bus: BusSettings {
             socket_path: temp_dir
@@ -120,6 +121,8 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         gateway: Default::default(),
         scheduler: Default::default(),
         transcription: Default::default(),
+        user_profile: Default::default(),
+        personalization: Default::default(),
     }
 }
 
@@ -707,4 +710,269 @@ async fn http_cors_preflight_allows_configured_origin() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert_eq!(allow_origin, "http://localhost:5173");
+}
+
+// ── Conversational surface (Phase 02) ───────────────────────────────────────
+// These exercise the store-backed CRUD/fork/export paths and the convo
+// validation/lifecycle, all without LLM inference (deterministic).
+
+fn new_session_req(agent: &str, first: &str) -> CreateChatSessionRequest {
+    CreateChatSessionRequest {
+        agent_name: agent.to_string(),
+        title: None,
+        first_message: Some(first.to_string()),
+    }
+}
+
+/// create → list reports message_count; messages carry `timestamp`; rename + delete.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_session_crud_count_and_timestamp() {
+    let (kernel, _tmp) = boot_test_kernel().await;
+
+    let detail = kernel
+        .create_chat_session(new_session_req("alpha", "hello world"))
+        .await
+        .expect("create session");
+    assert_eq!(detail.agent_name, "alpha");
+    assert_eq!(detail.messages.len(), 1, "first_message persisted");
+
+    // list → exactly one summary, message_count == 1 (the fix), preview present.
+    let summaries = kernel.list_chat_sessions().await.expect("list sessions");
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(
+        summaries[0].message_count, 1,
+        "message_count must reflect rows"
+    );
+    assert_eq!(summaries[0].agent_name, "alpha");
+
+    // messages expose the renamed `timestamp` field, non-empty.
+    let msgs = kernel
+        .get_chat_messages(&detail.id)
+        .await
+        .expect("messages");
+    assert_eq!(msgs[0].role, "user");
+    assert_eq!(msgs[0].content, "hello world");
+    assert!(!msgs[0].timestamp.is_empty(), "timestamp populated");
+
+    // rename then read back.
+    kernel
+        .rename_chat_session(&detail.id, Some("Renamed".into()))
+        .await
+        .expect("rename");
+    let after = kernel.get_chat_session(&detail.id).await.expect("get");
+    assert_eq!(after.title.as_deref(), Some("Renamed"));
+
+    // delete → gone.
+    kernel
+        .delete_chat_session(&detail.id)
+        .await
+        .expect("delete");
+    assert!(kernel.list_chat_sessions().await.unwrap().is_empty());
+    kernel.shutdown();
+}
+
+/// fork copies the prefix history into a new session and leaves the source intact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_fork_copies_prefix_history() {
+    let (kernel, _tmp) = boot_test_kernel().await;
+    let src = kernel
+        .create_chat_session(new_session_req("alpha", "seed message"))
+        .await
+        .expect("create");
+
+    let fork_id = kernel.fork_chat_session(&src.id, None).await.expect("fork");
+    assert_ne!(fork_id, src.id, "fork is a distinct session");
+
+    let forked_msgs = kernel.get_chat_messages(&fork_id).await.expect("fork msgs");
+    assert!(
+        forked_msgs.iter().any(|m| m.content == "seed message"),
+        "fork must copy prefix history"
+    );
+    // Source is untouched.
+    assert!(kernel.get_chat_session(&src.id).await.is_ok());
+    kernel.shutdown();
+}
+
+/// export returns the message text in both markdown and json forms.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_export_contains_messages() {
+    let (kernel, _tmp) = boot_test_kernel().await;
+    let s = kernel
+        .create_chat_session(new_session_req("alpha", "exported line"))
+        .await
+        .expect("create");
+
+    let (md_bytes, md_ct, md_name) = kernel
+        .export_chat_session(&s.id, "markdown")
+        .await
+        .expect("md");
+    assert!(!md_name.is_empty());
+    assert!(md_ct.contains("markdown") || md_ct.contains("text"));
+    assert!(String::from_utf8_lossy(&md_bytes).contains("exported line"));
+
+    let (json_bytes, json_ct, _) = kernel
+        .export_chat_session(&s.id, "json")
+        .await
+        .expect("json");
+    assert!(json_ct.contains("json"));
+    let parsed: serde_json::Value = serde_json::from_slice(&json_bytes).expect("valid json export");
+    assert!(parsed.to_string().contains("exported line"));
+    kernel.shutdown();
+}
+
+/// Agent-chat validates participant bounds (2–8), reports `running`, and 404s a
+/// stop on an unknown convo.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn agent_chat_bounds_status_and_stop_404() {
+    let (kernel, _tmp) = boot_test_kernel().await;
+
+    // < 2 participants → 400.
+    assert!(matches!(
+        kernel
+            .create_agent_chat("t".into(), vec!["solo".into()], 3)
+            .await,
+        Err(agentos_api::ApiError::BadRequest(_))
+    ));
+    // > 8 participants → 400.
+    let many: Vec<String> = (0..9).map(|i| format!("a{i}")).collect();
+    assert!(matches!(
+        kernel.create_agent_chat("t".into(), many, 3).await,
+        Err(agentos_api::ApiError::BadRequest(_))
+    ));
+
+    // Valid → created with status "running" (matches the store).
+    let convo = kernel
+        .create_agent_chat("t".into(), vec!["a".into(), "b".into()], 3)
+        .await
+        .expect("create convo");
+    assert_eq!(convo.status, "running");
+
+    // Stop a real convo succeeds; stop an unknown convo → NotFound.
+    kernel.stop_agent_chat(&convo.id).await.expect("stop ok");
+    assert!(matches!(
+        kernel.stop_agent_chat("does-not-exist").await,
+        Err(agentos_api::ApiError::NotFound(_))
+    ));
+    kernel.shutdown();
+}
+
+// ── Files & content surface (Phase 06) ──────────────────────────────────────
+
+/// upload → list (+ tag filter) → get → download (verbatim bytes + allowed MIME)
+/// → delete (then 404).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn file_upload_list_download_roundtrip() {
+    let (kernel, _tmp) = boot_test_kernel().await;
+    let owner = "alice";
+    let png = vec![0x89u8, b'P', b'N', b'G', 1, 2, 3, 4];
+
+    let meta = kernel
+        .upload_file(
+            owner,
+            "pic.png",
+            "image/png",
+            "global",
+            &["holiday".into()],
+            png.clone(),
+        )
+        .await
+        .expect("upload");
+    assert_eq!(meta.mime, "image/png");
+    assert_eq!(meta.size, png.len() as u64);
+
+    // Tag filter: matching tag returns it, non-matching returns empty.
+    let hit = kernel
+        .list_files(owner, None, Some("holiday"), None)
+        .await
+        .unwrap();
+    assert!(hit.iter().any(|f| f.id == meta.id), "tag filter must match");
+    let miss = kernel
+        .list_files(owner, None, Some("nope"), None)
+        .await
+        .unwrap();
+    assert!(
+        !miss.iter().any(|f| f.id == meta.id),
+        "non-matching tag excludes"
+    );
+
+    // Download returns the allowlisted MIME (png) and the exact bytes.
+    let (ct, name, bytes) = kernel
+        .download_file(owner, &meta.id)
+        .await
+        .expect("download");
+    assert_eq!(ct, "image/png");
+    assert_eq!(name, "pic.png");
+    assert_eq!(bytes, png);
+
+    // get then delete then 404.
+    assert!(kernel.get_file(owner, &meta.id).await.is_ok());
+    kernel.delete_file(owner, &meta.id).await.expect("delete");
+    assert!(matches!(
+        kernel.get_file(owner, &meta.id).await,
+        Err(agentos_api::ApiError::NotFound(_))
+    ));
+    kernel.shutdown();
+}
+
+/// SVG is never served with its declared (script-capable) type on download.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn file_svg_download_is_neutralized() {
+    let (kernel, _tmp) = boot_test_kernel().await;
+    let owner = "alice";
+    let meta = kernel
+        .upload_file(
+            owner,
+            "x.svg",
+            "image/svg+xml",
+            "global",
+            &[],
+            b"<svg/>".to_vec(),
+        )
+        .await
+        .expect("upload svg");
+    let (ct, _, _) = kernel
+        .download_file(owner, &meta.id)
+        .await
+        .expect("download");
+    assert_eq!(
+        ct, "application/octet-stream",
+        "svg must be neutralized to octet-stream"
+    );
+    kernel.shutdown();
+}
+
+/// A file uploaded by one owner is invisible to another (owner-principal scoping).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn file_owner_isolation() {
+    let (kernel, _tmp) = boot_test_kernel().await;
+    let meta = kernel
+        .upload_file(
+            "alice",
+            "secret.txt",
+            "text/plain",
+            "global",
+            &[],
+            b"top secret".to_vec(),
+        )
+        .await
+        .expect("upload");
+
+    // Bob cannot get or list alice's file.
+    assert!(matches!(
+        kernel.get_file("bob", &meta.id).await,
+        Err(agentos_api::ApiError::NotFound(_))
+    ));
+    let bob_list = kernel.list_files("bob", None, None, None).await.unwrap();
+    assert!(
+        !bob_list.iter().any(|f| f.id == meta.id),
+        "bob must not see alice's file"
+    );
+    kernel.shutdown();
 }

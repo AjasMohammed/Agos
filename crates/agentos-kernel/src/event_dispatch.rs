@@ -12,9 +12,11 @@ use crate::kernel::Kernel;
 /// The channel is derived from the event's category so control-panel clients can
 /// subscribe by domain (`tasks`, `agents`, `audit`, `schedules`, `system`, or the
 /// catch-all `events`). The event name is the variant name; `data` carries the
-/// type, severity, timestamp, and original payload.
+/// type, severity, and timestamp — plus the payload for non-sensitive categories
+/// (security/tool payloads are withheld; see below).
 fn realtime_event_from(event: &EventMessage) -> RealtimeEvent {
-    let channel = match event.event_type.category() {
+    let category = event.event_type.category();
+    let channel = match category {
         EventCategory::AgentLifecycle => "agents",
         EventCategory::TaskLifecycle => "tasks",
         EventCategory::SecurityEvents | EventCategory::ToolEvents => "audit",
@@ -25,16 +27,29 @@ fn realtime_event_from(event: &EventMessage) -> RealtimeEvent {
         | EventCategory::AgentCommunication
         | EventCategory::ExternalEvents => "events",
     };
+    // Security/tool event payloads may embed secret names or raw tool arguments
+    // (which can carry tokens). Do NOT broadcast those raw payloads to every
+    // `audit:r` subscriber — forward only the non-sensitive envelope. The full
+    // payload remains in the signed, access-controlled audit log.
+    let include_payload = !matches!(
+        category,
+        EventCategory::SecurityEvents | EventCategory::ToolEvents
+    );
+    let mut data = serde_json::json!({
+        "event_id": event.id.to_string(),
+        "event_type": format!("{:?}", event.event_type),
+        "severity": format!("{:?}", event.severity),
+        "timestamp": event.timestamp.to_rfc3339(),
+    });
+    if include_payload {
+        if let Some(obj) = data.as_object_mut() {
+            obj.insert("payload".to_string(), event.payload.clone());
+        }
+    }
     RealtimeEvent {
         channel: channel.to_string(),
         event: format!("{:?}", event.event_type),
-        data: serde_json::json!({
-            "event_id": event.id.to_string(),
-            "event_type": format!("{:?}", event.event_type),
-            "severity": format!("{:?}", event.severity),
-            "timestamp": event.timestamp.to_rfc3339(),
-            "payload": event.payload,
-        }),
+        data,
     }
 }
 
@@ -640,6 +655,7 @@ impl Kernel {
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
             tool_categories: None,
+            disable_tool_scoping: false,
         };
 
         self.scheduler.enqueue(task).await;

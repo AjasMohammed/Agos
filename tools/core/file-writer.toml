@@ -64,3 +64,9 @@ prefer_over = [
   "file-edit when you intend to overwrite the entire file",
 ]
 related_tools = ["file-reader", "file-edit"]
+
+[[examples]]
+description = "Write text content to a new file"
+[examples.payload]
+path = "notes.txt"
+content = "Meeting notes from 2026-06-01"

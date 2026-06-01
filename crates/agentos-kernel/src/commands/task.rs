@@ -124,6 +124,7 @@ impl Kernel {
             thinking_level: effective_thinking_level,
             spawner_agent_id: None,
             tool_categories: None,
+            disable_tool_scoping: false,
         };
 
         self.scheduler.register_external(task.clone()).await;
@@ -407,6 +408,7 @@ impl Kernel {
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
             tool_categories: None,
+            disable_tool_scoping: false,
         };
 
         // Check for circular dependencies before enqueuing
@@ -551,6 +553,7 @@ impl Kernel {
             spawner_agent_id: Some(spawner_task.agent_id),
             // Sub-agents inherit parent's allowlist (no widening allowed in this path).
             tool_categories: spawner_task.tool_categories.clone(),
+            disable_tool_scoping: false,
         };
 
         let _ = self.scheduler.enqueue(child_task.clone()).await;
@@ -713,6 +716,7 @@ impl Kernel {
             thinking_level: payload.task.thinking_level,
             spawner_agent_id: payload.task.spawner_agent_id,
             tool_categories: payload.task.tool_categories,
+            disable_tool_scoping: false,
         };
 
         // 6. Restore context window from checkpoint.

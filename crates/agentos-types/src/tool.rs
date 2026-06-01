@@ -216,11 +216,22 @@ pub struct ToolInfo {
     /// Defaults to `Community` if omitted.
     #[serde(default)]
     pub trust_tier: TrustTier,
-    /// Searchable tags for marketplace discovery (e.g. ["github", "code-review"]).
+    /// Marketplace-discovery / MCP-server bucketing tags (e.g. ["github",
+    /// "code-review"]; MCP tools register `["mcp", <server>]`). **Not a filter.**
+    ///
+    /// Tag-field contract (three distinct roles — do not conflate):
+    /// - `ToolInfo.tags` (this field): free-form marketplace + MCP-server
+    ///   bucketing. Load-bearing for category inference (`infer_tool_category`
+    ///   buckets `mcp` from here) and the public registry — keep readable.
+    /// - [`ToolInfo::capability_tags`]: free-text phrases for semantic search.
+    /// - [`ToolManifest::tags`]: the controlled `MANIFEST_TAG_TAXONOMY_V1`
+    ///   taxonomy (read/write/exec/network/fs/meta) used for filtering + scoping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
-    /// Semantic capability tags for agent discoverability.
-    /// Embedded alongside the description for intent-based tool search.
+    /// Free-text capability phrases for intent-based / semantic tool search
+    /// (e.g. ["download webpage", "fetch url"]). Embedded alongside the
+    /// description in the semantic tool index. **Never used for filtering** —
+    /// that is [`ToolManifest::tags`]. See the tag contract on [`ToolInfo::tags`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capability_tags: Vec<String>,
     /// Tool-selector partition (e.g. fs, network). Empty when uncategorized.

@@ -51,6 +51,11 @@ pub struct AgentTask {
     /// Set by `--no-checkpoint` CLI flag for ephemeral one-shot tasks.
     #[serde(default)]
     pub skip_checkpoint: bool,
+    /// When true, the native tool array is NOT category-scoped for this task —
+    /// every tool's schema is sent. For autonomous/orchestrator tasks that
+    /// genuinely need the full toolset. See tool-discovery-architecture Phase 3.
+    #[serde(default)]
+    pub disable_tool_scoping: bool,
     /// Requested extended-thinking level for this task.
     /// Translates to `InferenceOptions::thinking_budget_tokens` at execution time.
     #[serde(default)]
@@ -186,6 +191,7 @@ impl Default for AgentTask {
             spawn_depth: 0,
             spawner_agent_id: None,
             tool_categories: None,
+            disable_tool_scoping: false,
             is_team_coordinator: false,
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,

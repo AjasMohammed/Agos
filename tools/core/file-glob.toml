@@ -37,3 +37,8 @@ gpu           = false
 max_memory_mb = 32
 max_cpu_ms    = 10000
 syscalls      = []
+
+[[examples]]
+description = "Find all Rust source files recursively"
+[examples.payload]
+pattern = "**/*.rs"

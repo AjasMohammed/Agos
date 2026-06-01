@@ -63,3 +63,4 @@ define_id!(WebhookEndpointID);
 define_id!(FileID);
 define_id!(AgentInboxEntryID);
 define_id!(AgentMessageEntryID);
+define_id!(ProfileEntryID);

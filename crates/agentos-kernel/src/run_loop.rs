@@ -18,6 +18,8 @@ enum TaskKind {
     ArbiterNotificationListener,
     HealthMonitor,
     Consolidation,
+    InterestAggregator,
+    RecommendationEngine,
     ChannelInboundListener,
 }
 
@@ -35,6 +37,8 @@ impl std::fmt::Display for TaskKind {
             TaskKind::ArbiterNotificationListener => write!(f, "ArbiterNotificationListener"),
             TaskKind::HealthMonitor => write!(f, "HealthMonitor"),
             TaskKind::Consolidation => write!(f, "Consolidation"),
+            TaskKind::InterestAggregator => write!(f, "InterestAggregator"),
+            TaskKind::RecommendationEngine => write!(f, "RecommendationEngine"),
             TaskKind::ChannelInboundListener => write!(f, "ChannelInboundListener"),
         }
     }
@@ -715,6 +719,47 @@ impl Kernel {
                                         );
                                     }
 
+                                    // Phase 5: decay pin_rank + archive stale profile
+                                    // entries. Cadence-gated to ~hourly so the 10s loop
+                                    // doesn't do decay work on every tick.
+                                    if kernel.config.personalization.enabled
+                                        && kernel.feedback_processor.should_run_decay()
+                                    {
+                                        let fp = Arc::clone(&kernel.feedback_processor);
+                                        tokio::spawn(async move {
+                                            if let Err(e) = fp.decay_and_archive().await {
+                                                tracing::warn!(
+                                                    error = %e,
+                                                    "personalization decay/archive failed"
+                                                );
+                                            }
+                                        });
+                                    }
+
+                                    // Prune recommendations older than 30 days.
+                                    if kernel.config.personalization.enabled {
+                                        let rec_store = kernel.recommendation_engine.store().clone();
+                                        let cutoff = chrono::Utc::now().timestamp()
+                                            - (30 * 24 * 3600);
+                                        tokio::spawn(async move {
+                                            match rec_store.prune_older_than(cutoff).await {
+                                                Ok(0) => {}
+                                                Ok(n) => {
+                                                    tracing::info!(
+                                                        pruned = n,
+                                                        "Pruned {n} old recommendations"
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        error = %e,
+                                                        "Recommendation pruning failed"
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    }
+
                                     // Prune old audit log entries if a rotation limit is set
                                     let max_entries = kernel.config.audit.max_audit_entries;
                                     if max_entries > 0 {
@@ -897,6 +942,75 @@ impl Kernel {
                     TaskKind::Consolidation
                 })
             }
+            TaskKind::InterestAggregator => {
+                // Proactive personalization — periodic interest aggregation
+                // (Phase 3). Covers idle periods; the per-completion count
+                // trigger in task_completion fires sooner on bursts. Non-critical:
+                // its failure must never shut down the kernel.
+                let token = kernel.cancellation_token.clone();
+                let model = kernel.interest_model.clone();
+                join_set.spawn(async move {
+                    // If personalization is disabled, idle until shutdown.
+                    if !model.is_enabled() {
+                        token.cancelled().await;
+                        return TaskKind::InterestAggregator;
+                    }
+                    // Defer the first tick a full period so boot finishes first
+                    // (interval_at also avoids a spurious tick on restart).
+                    let start = tokio::time::Instant::now() + Duration::from_secs(1800);
+                    let mut interval = tokio::time::interval_at(start, Duration::from_secs(1800));
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tokio::select! {
+                            _ = token.cancelled() => break,
+                            _ = interval.tick() => {
+                                if let Err(e) = model.run_cycle().await {
+                                    tracing::warn!(error = %e, "Interest aggregation cycle failed");
+                                }
+                            }
+                        }
+                    }
+                    TaskKind::InterestAggregator
+                })
+            }
+            TaskKind::RecommendationEngine => {
+                // Proactive recommendation engine (Phase 4). Periodic 1-hour tick
+                // so the engine can deliver tips during idle periods. The engine's
+                // own opt-in gate + rate-limit early-returns make frequent retries
+                // harmless. Non-critical: failure must never shut down the kernel.
+                let token = kernel.cancellation_token.clone();
+                let engine = kernel.recommendation_engine.clone();
+                join_set.spawn(async move {
+                    // If the base personalization flag is off, idle until shutdown.
+                    if !engine.is_enabled() {
+                        token.cancelled().await;
+                        return TaskKind::RecommendationEngine;
+                    }
+                    // Defer the first tick a full period so boot finishes first.
+                    let start = tokio::time::Instant::now() + Duration::from_secs(3600);
+                    let mut interval = tokio::time::interval_at(start, Duration::from_secs(3600));
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tokio::select! {
+                            _ = token.cancelled() => break,
+                            _ = interval.tick() => {
+                                match engine.run_cycle().await {
+                                    Ok(true) => {
+                                        tracing::info!("RecommendationEngine: proactive tip delivered");
+                                    }
+                                    Ok(false) => {
+                                        tracing::debug!("RecommendationEngine: cycle skipped");
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "RecommendationEngine cycle failed");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    TaskKind::RecommendationEngine
+                })
+            }
             TaskKind::ChannelInboundListener => {
                 let token = kernel.cancellation_token.clone();
                 join_set.spawn(async move {
@@ -923,6 +1037,30 @@ impl Kernel {
                                                 continue;
                                             }
                                         };
+                                        // Extract any media URLs from the channel's
+                                        // content so the InboundRouter can download +
+                                        // store them (SSRF-guarded). Empty until the
+                                        // per-adapter inbound parsing emits Image/File.
+                                        let mut pending_media: Vec<crate::notification_router::InboundMediaUrl> =
+                                            Vec::new();
+                                        for url in inbound.content.image_urls() {
+                                            pending_media.push(
+                                                crate::notification_router::InboundMediaUrl {
+                                                    url,
+                                                    filename: None,
+                                                    mime: None,
+                                                },
+                                            );
+                                        }
+                                        for (url, filename, mime) in inbound.content.files() {
+                                            pending_media.push(
+                                                crate::notification_router::InboundMediaUrl {
+                                                    url,
+                                                    filename: Some(filename),
+                                                    mime: Some(mime),
+                                                },
+                                            );
+                                        }
                                         let routed = crate::notification_router::InboundMessage {
                                             channel: agentos_types::DeliveryChannel::custom(inbound.channel_type.clone()),
                                             channel_instance_id,
@@ -932,6 +1070,7 @@ impl Kernel {
                                             received_at: inbound.timestamp,
                                             raw: inbound.raw,
                                             media_file_ids: Vec::new(),
+                                            pending_media,
                                         };
                                         if kernel.inbound_tx.send(routed).await.is_err() {
                                             tracing::warn!("Inbound router channel closed; dropping channel-manager message");
@@ -997,6 +1136,8 @@ impl Kernel {
             TaskKind::ArbiterNotificationListener,
             TaskKind::HealthMonitor,
             TaskKind::Consolidation,
+            TaskKind::InterestAggregator,
+            TaskKind::RecommendationEngine,
             TaskKind::ChannelInboundListener,
         ];
 
@@ -2109,6 +2250,29 @@ impl Kernel {
                 self.cmd_user_prefs_reject(proposal_id).await
             }
             KernelCommand::UserPrefsStats => self.cmd_user_prefs_stats().await,
+            KernelCommand::ProfileList { limit } => self.cmd_profile_list(limit).await,
+            KernelCommand::ProfileShow { id } => self.cmd_profile_show(id).await,
+            KernelCommand::ProfileEdit {
+                id,
+                value,
+                confidence,
+                category,
+            } => self.cmd_profile_edit(id, value, confidence, category).await,
+            KernelCommand::ProfileForget { id } => self.cmd_profile_forget(id).await,
+
+            // Proactive recommendations (Phase 4 / Phase 5 feedback)
+            KernelCommand::RecommendationList { limit } => {
+                self.cmd_recommendation_list(limit).await
+            }
+            KernelCommand::RecommendationAccept { id } => self.cmd_recommendation_accept(id).await,
+            KernelCommand::RecommendationDismiss { id } => {
+                self.cmd_recommendation_dismiss(id).await
+            }
+
+            // Proactive personalization governance (Phase 6)
+            KernelCommand::PersonalizationGovernance { action } => {
+                self.cmd_personalization(action).await
+            }
 
             KernelCommand::ScratchListPages { agent_id } => {
                 self.cmd_scratch_list_pages(agent_id).await

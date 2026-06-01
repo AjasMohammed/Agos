@@ -17,8 +17,8 @@ use crate::handlers::{
     a2a, agent_convo, agent_detail, agents, audit, channels, chat, config_page, connectors, costs,
     dashboard, doctor, escalations, events, events_log, files, hal_page, identity_page, logs,
     management, manual_page, marketplace, mcp_page, notifications, oauth, observability,
-    pipeline_ui, pipelines, plugins, prefs, resources_page, roles, schedules, scratchpad, secrets,
-    tasks, teams, tools, webhooks, webhooks_page,
+    pipeline_ui, pipelines, plugins, prefs, profile, resources_page, roles, schedules, scratchpad,
+    secrets, tasks, teams, tools, webhooks, webhooks_page,
 };
 use crate::state::AppState;
 
@@ -405,6 +405,9 @@ pub fn build_router(
         .route("/prefs", axum::routing::get(prefs::list))
         .route("/prefs/accept", axum::routing::post(prefs::accept))
         .route("/prefs/reject", axum::routing::post(prefs::reject))
+        .route("/profile", axum::routing::get(profile::list))
+        .route("/profile/forget", axum::routing::post(profile::forget))
+        .route("/profile/edit", axum::routing::post(profile::edit))
         .route(
             "/escalations/{id}/resolve",
             axum::routing::post(escalations::resolve),

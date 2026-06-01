@@ -53,6 +53,21 @@ pub struct InboundMessage {
     /// `ContentPart::Image::FileRef` so vision-capable agents can see them.
     /// Empty for non-image media and channels without media support.
     pub media_file_ids: Vec<(String, String)>,
+    /// Remote media URLs extracted from a non-Telegram channel's inbound content
+    /// (e.g. Discord CDN attachments), to be downloaded + stored by the
+    /// InboundRouter under an SSRF guard. Empty for Telegram (which downloads via
+    /// `getFile`) and channels whose adapters don't yet emit inbound media.
+    pub pending_media: Vec<InboundMediaUrl>,
+}
+
+/// A remote media URL awaiting download + storage by the InboundRouter.
+#[derive(Debug, Clone)]
+pub struct InboundMediaUrl {
+    pub url: String,
+    /// Original filename, if the platform provided one.
+    pub filename: Option<String>,
+    /// Platform-declared MIME, if any (the downloader sniffs/falls back otherwise).
+    pub mime: Option<String>,
 }
 
 /// Pluggable delivery channel adapter.

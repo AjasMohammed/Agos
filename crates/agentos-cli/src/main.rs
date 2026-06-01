@@ -41,7 +41,8 @@ use commands::{
     channel::ChannelCommands, cost::CostCommands, escalation::EscalationCommands,
     event::EventCommands, hal::HalCommands, identity::IdentityCommands, init::InitTemplate,
     log::LogCommands, mcp::McpCommands, notifications::NotificationCommands, perm::PermCommands,
-    pipeline::PipelineCommands, prefs::PrefsCommands, provider::ProviderCommands,
+    personalization::PersonalizationCommands, pipeline::PipelineCommands, prefs::PrefsCommands,
+    profile::ProfileCommands, provider::ProviderCommands, recommendations::RecommendationsCommands,
     resource::ResourceCommands, role::RoleCommands, schedule::ScheduleCommands,
     scratchpad::ScratchpadCommands, secret::SecretCommands, skill::SkillCommands,
     snapshot::SnapshotCommands, task::TaskCommands, team::TeamCommands, tool::ToolCommands,
@@ -108,6 +109,24 @@ pub enum Commands {
     Prefs {
         #[command(subcommand)]
         command: PrefsCommands,
+    },
+
+    /// Manage learned user-profile facts
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommands,
+    },
+
+    /// View and respond to proactive recommendations (accept or dismiss)
+    Recommendations {
+        #[command(subcommand)]
+        command: RecommendationsCommands,
+    },
+
+    /// Manage personalization data — status, export, and right-to-forget
+    Personalization {
+        #[command(subcommand)]
+        command: PersonalizationCommands,
     },
 
     /// Manage OS roles

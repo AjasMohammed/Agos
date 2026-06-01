@@ -503,6 +503,7 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
     )?;
     env.add_template("mcp_page.html", include_str!("templates/mcp_page.html"))?;
     env.add_template("prefs.html", include_str!("templates/prefs.html"))?;
+    env.add_template("profile.html", include_str!("templates/profile.html"))?;
     env.add_template(
         "webhooks_page.html",
         include_str!("templates/webhooks_page.html"),

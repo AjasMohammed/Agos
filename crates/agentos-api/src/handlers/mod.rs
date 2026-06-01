@@ -4,11 +4,13 @@
 //! delegates to the [`KernelService`] trait. Errors are returned as [`ApiError`]
 //! which implements `IntoResponse`.
 
+pub mod agent_chats;
 pub mod agents;
 pub mod audit;
 pub mod auth;
 pub mod channels;
 pub mod chat;
+pub mod chat_sessions;
 pub mod config;
 pub mod connectors;
 pub mod costs;
@@ -16,9 +18,11 @@ pub mod dashboard;
 pub mod doctor;
 pub mod escalations;
 pub mod events;
+pub mod files;
 pub mod identity;
 pub mod keys;
 pub mod logs;
+pub mod marketplace;
 pub mod mcp;
 pub mod notifications;
 pub mod pipelines;
@@ -26,7 +30,9 @@ pub mod plugins;
 pub mod prefs;
 pub mod roles;
 pub mod schedules;
+pub mod scratchpad;
 pub mod secrets;
+pub mod sse;
 pub mod system;
 pub mod system_info;
 pub mod tasks;

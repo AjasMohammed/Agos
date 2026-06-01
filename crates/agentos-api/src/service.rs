@@ -313,4 +313,135 @@ pub trait KernelService: Send + Sync {
     async fn delete_webhook(&self, id: &str) -> Result<(), ApiError>;
 
     async fn get_agent_identity(&self, name: &str) -> Result<ApiAgentIdentity, ApiError>;
+
+    // ── Files (Phase 06) ──────────────────────────────────────────────────────
+
+    async fn upload_file(
+        &self,
+        owner: &str,
+        original_name: &str,
+        mime: &str,
+        scope: &str,
+        tags: &[String],
+        bytes: Vec<u8>,
+    ) -> Result<ApiFileMeta, ApiError>;
+
+    async fn list_files(
+        &self,
+        owner: &str,
+        scope: Option<&str>,
+        tag: Option<&str>,
+        q: Option<&str>,
+    ) -> Result<Vec<ApiFileMeta>, ApiError>;
+
+    async fn get_file(&self, owner: &str, id: &str) -> Result<ApiFileMeta, ApiError>;
+
+    /// Returns `(mime, original_name, bytes)` with a download-safe MIME.
+    async fn download_file(
+        &self,
+        owner: &str,
+        id: &str,
+    ) -> Result<(String, String, Vec<u8>), ApiError>;
+
+    async fn delete_file(&self, owner: &str, id: &str) -> Result<(), ApiError>;
+
+    // ── Scratchpad (Phase 06) ─────────────────────────────────────────────────
+
+    async fn get_scratchpad(&self, agent_id: &str) -> Result<Vec<ApiPageSummary>, ApiError>;
+
+    async fn get_scratchpad_page(
+        &self,
+        agent_id: &str,
+        title: &str,
+    ) -> Result<ApiScratchPage, ApiError>;
+
+    async fn save_scratchpad_page(
+        &self,
+        agent_id: &str,
+        title: &str,
+        content: String,
+        tags: Vec<String>,
+    ) -> Result<ApiScratchPage, ApiError>;
+
+    async fn delete_scratchpad_page(&self, agent_id: &str, title: &str) -> Result<(), ApiError>;
+
+    // ── Chat sessions (Phase 02 Conversational) ──────────────────────────────
+
+    async fn list_chat_sessions(&self) -> Result<Vec<ApiChatSessionSummary>, ApiError>;
+
+    async fn create_chat_session(
+        &self,
+        req: CreateChatSessionRequest,
+    ) -> Result<ApiChatSessionDetail, ApiError>;
+
+    async fn get_chat_session(&self, id: &str) -> Result<ApiChatSessionDetail, ApiError>;
+
+    async fn rename_chat_session(&self, id: &str, title: Option<String>) -> Result<(), ApiError>;
+
+    async fn delete_chat_session(&self, id: &str) -> Result<(), ApiError>;
+
+    async fn fork_chat_session(&self, id: &str, title: Option<String>) -> Result<String, ApiError>;
+
+    /// Returns `(bytes, content_type, filename)` for a downloadable export.
+    async fn export_chat_session(
+        &self,
+        id: &str,
+        format: &str,
+    ) -> Result<(Vec<u8>, String, String), ApiError>;
+
+    async fn get_chat_messages(&self, id: &str) -> Result<Vec<ApiChatMessage>, ApiError>;
+
+    /// Send a user message to a session, run inference, persist both turns, and
+    /// return the assistant reply (non-streaming).
+    async fn send_chat_message(
+        &self,
+        session_id: &str,
+        text: String,
+    ) -> Result<ApiChatMessage, ApiError>;
+
+    /// Streaming variant of [`Self::send_chat_message`]: forwards
+    /// `ChatStreamEvent`s (token chunks, tool events, done) to `out_tx` as they
+    /// arrive, persisting both the user and assistant turns. The channel is
+    /// closed when inference completes.
+    async fn stream_chat_message(
+        &self,
+        session_id: &str,
+        text: String,
+        out_tx: mpsc::Sender<ChatStreamEvent>,
+    ) -> Result<(), ApiError>;
+
+    // ── Agent conversations (multi-agent convos, read-only) ──────────────────
+
+    async fn list_convos(&self) -> Result<Vec<ApiConvoSummary>, ApiError>;
+
+    async fn get_convo(&self, id: &str) -> Result<ApiConvoDetail, ApiError>;
+
+    /// Create a multi-agent conversation record and return its summary. The
+    /// orchestration loop is started separately via [`Self::run_agent_chat`].
+    async fn create_agent_chat(
+        &self,
+        topic: String,
+        participants: Vec<String>,
+        max_turns: u32,
+    ) -> Result<ApiConvoSummary, ApiError>;
+
+    /// Run the turn-by-turn orchestration loop for a conversation to completion
+    /// (each participant responds in round-robin order). Intended to be spawned
+    /// as a background task; persists each turn and the final status.
+    async fn run_agent_chat(
+        &self,
+        id: &str,
+        topic: String,
+        participants: Vec<String>,
+        max_turns: u32,
+    );
+
+    /// Request a running conversation to stop after its current turn.
+    async fn stop_agent_chat(&self, id: &str) -> Result<(), ApiError>;
+
+    // ── Realtime (Phase 08) ───────────────────────────────────────────────────
+
+    /// Subscribe to the kernel's coarse realtime event broadcast (for SSE fan-out).
+    /// The same stream feeds the WebSocket relay.
+    fn subscribe_realtime(&self) -> tokio::sync::broadcast::Receiver<agentos_types::RealtimeEvent>;
 }

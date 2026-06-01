@@ -120,20 +120,24 @@ impl InboundRouter {
         }
     }
 
-    /// Best-effort: if an inbound Telegram message carries media, download it
-    /// (using the channel's vaulted bot token), persist it via the attachment
-    /// sink, and append a stored-file reference to `msg.text`. Any failure
-    /// (no token, download error, no sink configured) is logged and skipped —
-    /// the descriptive media note added at parse time still reaches the agent.
+    /// Dispatch inbound media enrichment by channel: Telegram downloads via
+    /// `getFile` (bot token); other channels download the platform-provided URLs
+    /// extracted into `pending_media` (SSRF-guarded). Both store via the sink and
+    /// surface images to the vision path.
     async fn enrich_inbound_media(&self, msg: &mut InboundMessage) {
+        if msg.channel == DeliveryChannel::custom(DeliveryChannel::TELEGRAM) {
+            self.enrich_telegram_media(msg).await;
+        } else if !msg.pending_media.is_empty() {
+            self.enrich_remote_media(msg).await;
+        }
+    }
+
+    async fn enrich_telegram_media(&self, msg: &mut InboundMessage) {
         use crate::adapters::telegram::{
             download_telegram_file, ext_for_mime, telegram_media_ref, TelegramMessage,
             TELEGRAM_MAX_DOWNLOAD_BYTES,
         };
 
-        if msg.channel != DeliveryChannel::custom(DeliveryChannel::TELEGRAM) {
-            return;
-        }
         // `raw` holds the serialized TelegramMessage for message updates; for
         // callback queries it won't deserialize, so this returns early.
         let tg: TelegramMessage = match serde_json::from_value(msg.raw.clone()) {
@@ -218,13 +222,110 @@ impl InboundRouter {
             }
         }
 
+        self.store_media(msg, &name, &mime, bytes, &media.kind_label)
+            .await;
+    }
+
+    /// Download + store remote media URLs (Discord CDN, etc.) extracted into
+    /// `pending_media`, under an SSRF guard. Each entry is best-effort.
+    async fn enrich_remote_media(&self, msg: &mut InboundMessage) {
+        use crate::adapters::telegram::ext_for_mime;
+        use crate::media_download::MediaAuth;
+        /// Cap on remote media downloaded per inbound message — bounds the
+        /// sequential work done on the shared inbound loop within the 20s enrich
+        /// budget (mirrors the multimodal "5 images/turn" cap). Fully off-loop
+        /// enrichment is the planned follow-up for higher volumes.
+        const MAX_INBOUND_MEDIA_PER_MSG: usize = 5;
+
+        // Resolve, for auth-requiring kinds, the channel's bot token plus the
+        // single host suffix the token may be sent to (never leaked elsewhere):
+        //   - Slack: static `slack.com`.
+        //   - Mattermost/Matrix: the channel's own `server_url` host (dynamic,
+        //     self-hosted), so the token only ever reaches that server.
+        let auth_token: Option<(String, String)> = match self
+            .channel_registry
+            .get_by_id(&msg.channel_instance_id)
+            .await
+        {
+            Ok(Some(ch)) if !ch.credential_key.is_empty() => {
+                let suffix: Option<String> = match &ch.kind {
+                    ChannelKind::Slack => Some("slack.com".to_string()),
+                    // WhatsApp media temp URLs live on Meta's CDN (lookaside.fbsbx.com)
+                    // and need the Graph access token to download.
+                    ChannelKind::WhatsApp => Some("fbsbx.com".to_string()),
+                    ChannelKind::Custom(k) if k == "mattermost" || k == "matrix" => ch
+                        .server_url
+                        .as_deref()
+                        .and_then(|u| reqwest::Url::parse(u).ok())
+                        .and_then(|u| u.host_str().map(String::from)),
+                    _ => None,
+                };
+                match suffix {
+                    Some(s) => self
+                        .vault
+                        .get(&ch.credential_key)
+                        .await
+                        .ok()
+                        .map(|t| (t.as_str().to_string(), s)),
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+
+        // Take ownership of the list so we can mutate `msg` while iterating.
+        let pending = std::mem::take(&mut msg.pending_media);
+        for m in pending.into_iter().take(MAX_INBOUND_MEDIA_PER_MSG) {
+            let auth = auth_token.as_ref().map(|(tok, suffix)| MediaAuth {
+                bearer: tok,
+                trusted_host_suffix: suffix,
+            });
+            match crate::media_download::download_remote_media(
+                &m.url,
+                crate::media_download::MAX_REMOTE_MEDIA_BYTES,
+                auth,
+            )
+            .await
+            {
+                Ok((bytes, sniffed_mime)) => {
+                    let mime = m
+                        .mime
+                        .clone()
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or(sniffed_mime);
+                    let name = m
+                        .filename
+                        .clone()
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or_else(|| format!("attachment.{}", ext_for_mime(&mime)));
+                    self.store_media(msg, &name, &mime, bytes, "attachment")
+                        .await;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "inbound remote media download failed");
+                }
+            }
+        }
+    }
+
+    /// Store downloaded media via the attachment sink, audit it, and surface it
+    /// to the agent — images as `media_file_ids` (→ vision), other files as a
+    /// stored-id text note. Best-effort: a declining sink is logged at debug.
+    async fn store_media(
+        &self,
+        msg: &mut InboundMessage,
+        name: &str,
+        mime: &str,
+        bytes: Vec<u8>,
+        media_kind: &str,
+    ) {
         let sink = self
             .attachment_sink
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let byte_len = bytes.len();
-        match sink.store(&name, &mime, bytes).await {
+        match sink.store(name, mime, bytes).await {
             Ok(file_id) => {
                 // Audit: external bytes were downloaded and persisted to disk.
                 let _ = self.audit.append(AuditEntry {
@@ -241,7 +342,7 @@ impl InboundRouter {
                         "name": name,
                         "mime": mime,
                         "bytes": byte_len,
-                        "media_kind": media.kind_label,
+                        "media_kind": media_kind,
                     }),
                     severity: AuditSeverity::Info,
                     reversible: false,
@@ -251,7 +352,7 @@ impl InboundRouter {
                     // Carried into the chat context as a ContentPart::Image so
                     // vision-capable agents see it (adapter resolves the FileRef;
                     // non-vision agents get an automatic text stub).
-                    msg.media_file_ids.push((file_id, mime.clone()));
+                    msg.media_file_ids.push((file_id, mime.to_string()));
                 } else {
                     // Non-image files have no vision path yet — note the stored id
                     // so the agent can reference it.

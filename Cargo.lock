@@ -92,6 +92,7 @@ dependencies = [
  "agentos-kernel",
  "agentos-llm",
  "agentos-pipeline",
+ "agentos-scratch",
  "agentos-types",
  "agentos-vault",
  "async-trait",
@@ -121,6 +122,7 @@ dependencies = [
  "tower-http",
  "tower_governor",
  "tracing",
+ "ureq",
  "utoipa",
  "uuid",
  "zeroize",
@@ -341,6 +343,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.8",
+ "base64 0.22.1",
  "chrono",
  "criterion",
  "cron",
@@ -7133,6 +7136,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

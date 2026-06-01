@@ -339,6 +339,16 @@ pub enum AuditEventType {
     /// TimeoutChecker sweep after exceeding the TTL.
     ProposalExpired,
 
+    // Proactive personalization — structured user profile
+    /// Emitted when an accepted proposal (or explicit edit) inserts a new
+    /// structured profile entry into `user_profile.db`.
+    ProfileEntryAdded,
+    /// Emitted when an existing profile entry is updated (value/confidence/
+    /// category/pin/status) or refreshed via promotion of a re-accepted pref.
+    ProfileEntryUpdated,
+    /// Emitted when a profile entry is forgotten (hard-deleted).
+    ProfileEntryRemoved,
+
     // User filesystem grants
     /// Emitted when an operator grants a host directory to one agent or
     /// globally. Payload: `path`, `agent_id` (or `null` for global), `mode`
@@ -346,6 +356,25 @@ pub enum AuditEventType {
     WorkspaceGranted,
     /// Emitted when an operator revokes a previously-granted host directory.
     WorkspaceRevoked,
+
+    // Proactive personalization — feedback loop (Phase 5)
+    /// A personalization signal raised an interest weight, profile pin_rank,
+    /// or restated-preference confidence.
+    PersonalizationReinforced,
+    /// A personalization signal lowered an interest weight (e.g. dismissal),
+    /// or the decay pass reduced a profile pin_rank.
+    PersonalizationDecayed,
+    /// A stale profile entry was archived out of the L0 pinned block.
+    PersonalizationArchived,
+
+    // Proactive personalization — governance (Phase 6)
+    /// Emitted when the operator runs `agentos personalization export`.
+    /// Payload includes counts per store and the export size (bytes).
+    PersonalizationDataExported,
+    /// Emitted when the operator runs `agentos personalization forget`.
+    /// Payload includes per-store cleared counts and a `partial` flag when
+    /// one or more stores could not be fully cleared.
+    PersonalizationDataForgotten,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 /// Messages sent over the bus. This is the top-level envelope.
+// BusMessage is a transport envelope created and consumed at Unix-socket boundaries
+// (never stored in a hot collection), so the size difference between variants is
+// immaterial. Suppress the lint rather than boxing the payload behind an Arc.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BusMessage {
     /// CLI/tool sends an intent to the kernel
@@ -667,6 +671,52 @@ pub enum KernelCommand {
     },
     UserPrefsStats,
 
+    // Structured user profile (proactive personalization)
+    /// List active profile entries (pin_rank ASC, updated_at DESC).
+    ProfileList {
+        #[serde(default = "default_user_prefs_limit")]
+        limit: u32,
+    },
+    /// Show a single profile entry by id.
+    ProfileShow {
+        id: String,
+    },
+    /// Edit a profile entry's value/confidence/category in place.
+    ProfileEdit {
+        id: String,
+        #[serde(default)]
+        value: Option<String>,
+        #[serde(default)]
+        confidence: Option<f32>,
+        #[serde(default)]
+        category: Option<String>,
+    },
+    /// Forget (hard-delete) a profile entry.
+    ProfileForget {
+        id: String,
+    },
+
+    // Proactive recommendations (Phase 4 / Phase 5 feedback)
+    /// List recommendations (delivered + pending; newest first).
+    RecommendationList {
+        #[serde(default = "default_user_prefs_limit")]
+        limit: u32,
+    },
+    /// Mark a recommendation as accepted and apply the interest-weight boost.
+    RecommendationAccept {
+        id: String,
+    },
+    /// Mark a recommendation as dismissed and apply the interest-weight penalty.
+    RecommendationDismiss {
+        id: String,
+    },
+
+    // Proactive personalization — governance (Phase 6)
+    /// Status / export / forget for the personalization subsystem.
+    PersonalizationGovernance {
+        action: PersonalizationAction,
+    },
+
     // Skills management
     /// Install a skill from a directory containing SKILL.toml + prompt.
     SkillInstall {
@@ -863,6 +913,18 @@ impl KernelCommand {
             _ => None,
         }
     }
+}
+
+/// Action discriminant for `KernelCommand::PersonalizationGovernance`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PersonalizationAction {
+    /// Return enabled flags, row counts per store, and retention windows.
+    Status,
+    /// Dump all data from all three stores as a single JSON document.
+    Export,
+    /// Atomically wipe all personalization data (profile, interests, recommendations,
+    /// and accepted-preference context-memory entries).
+    Forget,
 }
 
 /// Responses from kernel to CLI.

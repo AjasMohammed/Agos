@@ -28,6 +28,7 @@ pub mod pipeline_ui;
 pub mod pipelines;
 pub mod plugins;
 pub mod prefs;
+pub mod profile;
 pub mod resources_page;
 pub mod roles;
 pub mod schedules;

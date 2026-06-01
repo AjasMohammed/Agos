@@ -58,3 +58,11 @@ use_for = [
 ]
 prefer_over = ["shell-exec for cat/ls — typed errors and pagination"]
 related_tools = ["file-writer", "file-edit", "directory-list"]
+
+[[examples]]
+description = "Read the first 100 lines of a config file"
+[examples.payload]
+path = "config.toml"
+mode = "read"
+limit = 100
+offset = 0

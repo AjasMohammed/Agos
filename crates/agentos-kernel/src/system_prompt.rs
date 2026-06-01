@@ -252,16 +252,32 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
     );
 
     // ── Self-discovery ───────────────────────────────────────────
-    prompt.push_str(
-        "\n\n## Self-Discovery\n\
-         - `agent-self` \u{2014} your permissions, active tasks, capabilities, budget.\n\
-         - `agent-manual` \u{2014} 26 documentation sections. Use {\"section\": \"index\"} for the full directory. \
-         Key: tools, capabilities, scheduling, permissions, memory, coordination, events, commands, errors.\n\
-         - `agent-list` \u{2014} peer agents and their status.\n\
-         - `list-tools(category=<name>|tag=<tag>|page=N)` \u{2014} paginated tool catalogue.\n\
-         - `search-tools(query=...)` \u{2014} keyword/tag search over all tools (use when L0 counts don't tell you which tool fits).\n\
-         - `describe-tool(name=...)` \u{2014} full schema + example for a specific tool.",
-    );
+    // Native-tool-calling providers already hold the scoped tool schemas;
+    // compress the dedicated self-discovery block to one line so we don't
+    // burn tokens repeating the protocol they don't need.
+    // Non-native / small-model providers keep the full block (they rely on it).
+    // Note: `native_tool_calling` is a PROTOCOL proxy, not a capability proxy —
+    // small models on OpenAI-compat endpoints report native=true too. We only
+    // compact the *dedicated* block here; the anti-refusal guidance in Feasibility,
+    // Grounding, and Live Information is left intact for all providers.
+    if ctx.native_tool_calling {
+        prompt.push_str(
+            "\n\n## Self-Discovery\n\
+             Tools not in your current list: `search-tools(query=...)` \u{2192} `describe-tool(name=...)`.\n\
+             `agent-self` \u{2014} permissions/budget. `agent-list` \u{2014} peer agents.",
+        );
+    } else {
+        prompt.push_str(
+            "\n\n## Self-Discovery\n\
+             - `agent-self` \u{2014} your permissions, active tasks, capabilities, budget.\n\
+             - `agent-manual` \u{2014} 26 documentation sections. Use {\"section\": \"index\"} for the full directory. \
+             Key: tools, capabilities, scheduling, permissions, memory, coordination, events, commands, errors.\n\
+             - `agent-list` \u{2014} peer agents and their status.\n\
+             - `list-tools(category=<name>|tag=<tag>|page=N)` \u{2014} paginated tool catalogue.\n\
+             - `search-tools(query=...)` \u{2014} keyword/tag search over all tools (use when L0 counts don't tell you which tool fits).\n\
+             - `describe-tool(name=...)` \u{2014} full schema + example for a specific tool.",
+        );
+    }
 
     // ── Live information & refusal policy ────────────────────────
     // Concrete instantiation of the Task Feasibility rule for the common
@@ -605,6 +621,112 @@ mod tests {
         });
         assert!(!prompt.contains("## Tools"));
         assert!(!prompt.contains("Call tools with JSON blocks"));
+    }
+
+    // ── Phase-5: prompt-slim tests ─────────────────────────────────────────────
+
+    fn native_prompt() -> String {
+        build_system_prompt(&SystemPromptContext {
+            agent_name: "agent".into(),
+            agent_description: String::new(),
+            agent_roles: vec![],
+            custom_instructions: None,
+            sub_agent: None,
+            enforce_final_tag: false,
+            timezone: String::new(),
+            connected_channels: vec![],
+            native_tool_calling: true,
+        })
+    }
+
+    #[test]
+    fn test_native_self_discovery_compacted_to_single_line() {
+        let p = native_prompt();
+        // The dedicated Self-Discovery block is compacted to ≤2 lines on native,
+        // not the full 6-line block.
+        let block_start = p
+            .find("## Self-Discovery")
+            .expect("Self-Discovery section missing");
+        let block = &p[block_start..];
+        let next_section = block[2..].find("## ").map(|i| i + 2).unwrap_or(block.len());
+        let self_disc_block = &block[..next_section];
+        let lines: Vec<&str> = self_disc_block.lines().filter(|l| !l.is_empty()).collect();
+        assert!(
+            lines.len() <= 3,
+            "native Self-Discovery block should be ≤3 lines, got {}: {:?}",
+            lines.len(),
+            lines
+        );
+    }
+
+    #[test]
+    fn test_non_native_self_discovery_has_full_block() {
+        let p = default_prompt(); // native_tool_calling: false
+        assert!(
+            p.contains("list-tools"),
+            "non-native keeps list-tools reference"
+        );
+        assert!(
+            p.contains("agent-manual"),
+            "non-native keeps agent-manual reference"
+        );
+        assert!(
+            p.contains("describe-tool"),
+            "non-native keeps describe-tool reference"
+        );
+    }
+
+    #[test]
+    fn test_native_prompt_smaller_than_non_native() {
+        let native = native_prompt().len();
+        let non_native = default_prompt().len();
+        assert!(
+            native < non_native,
+            "native prompt ({native}) should be smaller than non-native ({non_native})"
+        );
+    }
+
+    #[test]
+    fn test_discovery_prose_budget() {
+        // The Self-Discovery block is compacted on the native path; the anti-refusal
+        // mentions in Feasibility/Grounding/Live-Info/Escalation are kept on BOTH.
+        // So the total `search-tools` count is the same — what we assert is that
+        // (a) the native Self-Discovery block is materially shorter than the non-native
+        //     one (fewer lines, not just fewer chars), and
+        // (b) the non-native prompt keeps the full block (≥5 search-tools mentions total).
+        let native = native_prompt();
+        let non_native = default_prompt();
+
+        // Self-Discovery block is shorter on native.
+        let native_sd = {
+            let start = native
+                .find("## Self-Discovery")
+                .expect("Self-Discovery in native");
+            let tail = &native[start..];
+            let end = tail[2..].find("## ").map(|i| i + 2).unwrap_or(tail.len());
+            tail[..end].to_string()
+        };
+        let non_native_sd = {
+            let start = non_native
+                .find("## Self-Discovery")
+                .expect("Self-Discovery in non-native");
+            let tail = &non_native[start..];
+            let end = tail[2..].find("## ").map(|i| i + 2).unwrap_or(tail.len());
+            tail[..end].to_string()
+        };
+        assert!(
+            native_sd.len() < non_native_sd.len(),
+            "native Self-Discovery block ({} chars) should be shorter than non-native ({} chars)",
+            native_sd.len(),
+            non_native_sd.len()
+        );
+
+        // non-native keeps all blocks — ≥5 search-tools mentions total.
+        let non_native_count = non_native.matches("search-tools").count();
+        assert!(
+            non_native_count >= 5,
+            "non-native prompt: expected ≥5 search-tools mentions, got {non_native_count}"
+        );
     }
 
     #[test]

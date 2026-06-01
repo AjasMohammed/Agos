@@ -42,3 +42,9 @@ gpu           = false
 max_memory_mb = 16
 max_cpu_ms    = 5000
 syscalls      = []
+
+[[examples]]
+description = "Send a message to a connected Slack channel"
+[examples.payload]
+channel = "general"
+text = "Build completed successfully"
