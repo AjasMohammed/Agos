@@ -100,15 +100,7 @@ impl UserInterestsStore {
             let conn = Connection::open(&path)
                 .with_context(|| format!("open user_interests.db at {}", path.display()))?;
             conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS interest_topics (
-                    topic           TEXT PRIMARY KEY,
-                    signal_type     TEXT NOT NULL,
-                    weight          REAL NOT NULL,
-                    last_reinforced TEXT NOT NULL,
-                    half_life_hours REAL NOT NULL
-                );",
-            )?;
+            conn.execute_batch(Self::DDL_TABLE_ONLY)?;
             Ok(conn)
         })
         .await
@@ -117,6 +109,97 @@ impl UserInterestsStore {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// Open a transient in-memory store (used when `personalization.enabled = false`
+    /// so no DB files are created on disk for a feature the operator has opted out of).
+    ///
+    /// Runs the DDL inside `spawn_blocking` so it respects the codebase's invariant
+    /// that SQLite I/O never runs directly on the Tokio async executor thread.
+    pub async fn open_in_memory() -> anyhow::Result<Self> {
+        let conn = tokio::task::spawn_blocking(|| -> anyhow::Result<Connection> {
+            let conn = Connection::open_in_memory().context("open user_interests in-memory")?;
+            conn.execute_batch(Self::DDL_TABLE_ONLY)
+                .context("user_interests in-memory DDL")?;
+            Ok(conn)
+        })
+        .await
+        .context("spawn_blocking open user_interests in-memory")??;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    /// DDL run via `execute_batch` in both `open()` and `open_in_memory()`.
+    /// Does NOT include the WAL pragma — that is set separately in the file-backed
+    /// path (WAL mode is silently ignored for :memory: connections anyway).
+    const DDL_TABLE_ONLY: &'static str = "
+        CREATE TABLE IF NOT EXISTS interest_topics (
+            topic           TEXT PRIMARY KEY,
+            signal_type     TEXT NOT NULL,
+            weight          REAL NOT NULL,
+            last_reinforced TEXT NOT NULL,
+            half_life_hours REAL NOT NULL
+        );
+    ";
+
+    /// Exact row count from `interest_topics` (all rows, regardless of decay).
+    /// Used by `personalization status` for an accurate count without loading and
+    /// decaying every row the way `top_interests(u32::MAX)` would.
+    pub async fn count_topics(&self) -> anyhow::Result<usize> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            let guard = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
+            let n: i64 =
+                guard.query_row("SELECT COUNT(*) FROM interest_topics", [], |r| r.get(0))?;
+            Ok(n as usize)
+        })
+        .await
+        .context("spawn_blocking count interest_topics")?
+    }
+
+    /// Load ALL rows as raw (undecayed) signals — used by `personalization export`
+    /// so the dump is complete regardless of decay state.
+    pub async fn load_all_raw(&self) -> anyhow::Result<Vec<InterestTopic>> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<InterestTopic>> {
+            let guard = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
+            let mut stmt = guard.prepare(
+                "SELECT topic, signal_type, weight, last_reinforced, half_life_hours
+                 FROM interest_topics ORDER BY topic",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, f64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, f64>(4)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (topic, sig_str, weight, last_str, hl) = row?;
+                let signal_type = SignalType::parse(&sig_str).unwrap_or(SignalType::TaskTopic);
+                let last_reinforced = chrono::DateTime::parse_from_rfc3339(&last_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+                out.push(InterestTopic {
+                    topic,
+                    signal_type,
+                    weight,
+                    last_reinforced,
+                    half_life_hours: hl,
+                });
+            }
+            Ok(out)
+        })
+        .await
+        .context("spawn_blocking load_all_raw interest_topics")?
     }
 
     /// Reinforce a topic: decay the existing weight to `now` first, then add `delta`.

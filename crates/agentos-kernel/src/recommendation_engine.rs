@@ -14,6 +14,7 @@
 //! (the default), so it is safe to construct at every kernel boot.
 
 use crate::recommendations_store::{Recommendation, RecommendationKind, RecommendationsStore};
+use agentos_audit::{AuditEntry, AuditEventType, AuditSeverity};
 use agentos_types::{
     NotificationID, NotificationPriority, NotificationSource, TraceID, UserMessage, UserMessageKind,
 };
@@ -34,6 +35,7 @@ pub struct RecommendationEngine {
     #[allow(dead_code)]
     profile: Arc<crate::user_profile_store::UserProfileStore>,
     notification_router: Arc<crate::notification_router::NotificationRouter>,
+    audit: Arc<agentos_audit::AuditLog>,
     enabled: bool,
     proactive_enabled: bool,
     max_per_day: u32,
@@ -52,6 +54,7 @@ impl RecommendationEngine {
         interests: Arc<crate::interest_model::InterestModel>,
         profile: Arc<crate::user_profile_store::UserProfileStore>,
         notification_router: Arc<crate::notification_router::NotificationRouter>,
+        audit: Arc<agentos_audit::AuditLog>,
         config: &crate::config::PersonalizationConfig,
     ) -> Self {
         Self {
@@ -59,6 +62,7 @@ impl RecommendationEngine {
             interests,
             profile,
             notification_router,
+            audit,
             enabled: config.enabled,
             proactive_enabled: config.proactive_enabled,
             max_per_day: config.max_recommendations_per_day,
@@ -66,6 +70,24 @@ impl RecommendationEngine {
             min_confidence: config.recommendation_min_confidence as f64,
             cycle_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// Append an audit entry (fire-and-forget — never fail a cycle over logging).
+    fn audit_event(&self, event_type: AuditEventType, details: serde_json::Value) {
+        self.audit
+            .append(AuditEntry {
+                timestamp: Utc::now(),
+                trace_id: agentos_types::TraceID::new(),
+                event_type,
+                agent_id: None,
+                task_id: None,
+                tool_id: None,
+                details,
+                severity: AuditSeverity::Info,
+                reversible: false,
+                rollback_ref: None,
+            })
+            .ok();
     }
 
     /// Returns true when at least the base personalization flag is on (used by
@@ -105,6 +127,10 @@ impl RecommendationEngine {
                 delivered_today,
                 max_per_day = self.max_per_day,
                 "RecommendationEngine: daily rate-limit reached"
+            );
+            self.audit_event(
+                AuditEventType::RecommendationSkipped,
+                serde_json::json!({"reason": "rate_limit", "delivered_today": delivered_today}),
             );
             return Ok(false);
         }
@@ -158,6 +184,10 @@ impl RecommendationEngine {
                 dedup_hash,
                 "RecommendationEngine: recommendation on cooldown — skipping"
             );
+            self.audit_event(
+                AuditEventType::RecommendationSkipped,
+                serde_json::json!({"reason": "dedup_cooldown", "dedup_hash": dedup_hash}),
+            );
             return Ok(false);
         }
 
@@ -179,8 +209,16 @@ impl RecommendationEngine {
         if !inserted {
             // Dedup collision at insert time (race between is_on_cooldown and insert).
             tracing::debug!("RecommendationEngine: dedup collision on insert — skipping");
+            self.audit_event(
+                AuditEventType::RecommendationSkipped,
+                serde_json::json!({"reason": "dedup_insert_collision", "dedup_hash": rec.dedup_hash}),
+            );
             return Ok(false);
         }
+        self.audit_event(
+            AuditEventType::RecommendationGenerated,
+            serde_json::json!({"id": rec.id, "topics": basis_topics, "confidence": confidence}),
+        );
 
         // ── 9. Out-of-loop delivery ───────────────────────────────────────────
         let msg = UserMessage {
@@ -204,15 +242,20 @@ impl RecommendationEngine {
         };
 
         // ── 10. Deliver, then mark only on success ───────────────────────────
-        // Do NOT mark delivered on failure: burning the dedup slot and daily
-        // rate-limit quota for a tip the user never received would permanently
-        // silence the engine (especially with max_per_day = 1).
+        // On failure, DELETE the pending row so its dedup_hash slot is freed.
+        // Leaving a 'pending' row would silently block re-attempts for the full
+        // cooldown window (is_on_cooldown has no status filter, so 'pending'
+        // suppresses the same tip just as effectively as 'delivered').
         if let Err(e) = self.notification_router.deliver(msg).await {
             tracing::warn!(
                 error = %e,
                 id = rec.id,
-                "RecommendationEngine: delivery failed — skipping mark_delivered"
+                "RecommendationEngine: delivery failed — rolling back pending row"
             );
+            // Best-effort rollback — log but don't surface store errors.
+            if let Err(re) = self.store.delete_by_id(&rec.id).await {
+                tracing::warn!(error = %re, id = rec.id, "RecommendationEngine: rollback failed");
+            }
             return Ok(false);
         }
 
@@ -220,10 +263,10 @@ impl RecommendationEngine {
             .mark_delivered(&rec.id, Utc::now().timestamp())
             .await?;
 
-        tracing::info!(
-            id = %rec.id,
-            topics = ?topics,
-            "RecommendationEngine: proactive tip delivered"
+        tracing::info!(id = %rec.id, topics = ?topics, "RecommendationEngine: proactive tip delivered");
+        self.audit_event(
+            AuditEventType::RecommendationDelivered,
+            serde_json::json!({"id": rec.id, "topics": basis_topics}),
         );
 
         Ok(true)
@@ -322,14 +365,14 @@ mod tests {
         );
         let router = Arc::new(crate::notification_router::NotificationRouter::new(
             Arc::clone(&inbox),
-            audit,
+            Arc::clone(&audit),
         ));
 
         // Leak tempdir so SQLite files remain alive for the test duration.
         Box::leak(Box::new(dir));
 
         let engine =
-            RecommendationEngine::new(store, interest_model, profile_store, router, config);
+            RecommendationEngine::new(store, interest_model, profile_store, router, audit, config);
         (engine, inbox, interests_store)
     }
 

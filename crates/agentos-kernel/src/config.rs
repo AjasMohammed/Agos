@@ -70,6 +70,9 @@ pub struct KernelConfig {
     /// REST API server configuration.
     #[serde(default)]
     pub api: ApiSettings,
+    /// Web UI server configuration (auth token source).
+    #[serde(default)]
+    pub web: WebConfig,
     /// User-selectable approval mode for tool calls. Controls when the
     /// kernel auto-approves vs. escalates a tool call for human review.
     #[serde(default)]
@@ -1880,6 +1883,25 @@ impl Default for ApiSettings {
             config_writable: false,
         }
     }
+}
+
+/// `[web]` config block. Controls the Web UI authentication token.
+///
+/// The token is resolved at server startup in this precedence order:
+/// 1. `$AGENTOS_WEB_TOKEN` environment variable (best for systemd/Docker —
+///    never persisted to disk).
+/// 2. `auth_token` set here in config.
+/// 3. A token generated once and persisted to `{data_dir}/web_token` (mode
+///    `0600`) on first boot, then reused on every subsequent restart.
+///
+/// This makes the token *stable across restarts* instead of regenerating a
+/// fresh random token on every boot.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WebConfig {
+    /// Stable Web UI auth token. When unset (or empty), the server falls back
+    /// to `$AGENTOS_WEB_TOKEN`, then to a persisted `{data_dir}/web_token` file.
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 /// `[approval]` config block. Controls when the kernel auto-approves vs.

@@ -103,6 +103,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         approval: Default::default(),
         context: Default::default(),
         api: Default::default(),
+        web: Default::default(),
         chat: Default::default(),
         user_adaptation: Default::default(),
         env: Default::default(),

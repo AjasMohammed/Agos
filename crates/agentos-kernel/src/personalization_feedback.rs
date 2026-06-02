@@ -176,7 +176,13 @@ impl FeedbackProcessor {
         // in-memory sort on very active kernels).
         let entries = self.profile.list(1000).await?;
 
-        for e in entries {
+        // Collect updates in-memory first, then apply in ONE batched transaction
+        // via `apply_decay_batch` — avoids O(N) sequential spawn_blocking round-trips
+        // that individual edit() calls would require (up to 2000 for 1000 entries).
+        let mut decays: Vec<(String, i64)> = Vec::new();
+        let mut archives: Vec<String> = Vec::new();
+
+        for e in &entries {
             // Compute days since last use. Use `last_used` when present; fall back
             // to `created_at` (NOT `updated_at`) so that decay edits on this entry
             // do not reset the idle clock — `edit()` always bumps `updated_at`, so
@@ -194,23 +200,7 @@ impl FeedbackProcessor {
                 let factor = 0.5_f64.powf(elapsed_days / half_life_days);
                 let decayed = ((e.pin_rank as f64) * factor).round() as i64;
                 if decayed != e.pin_rank {
-                    let _ = self
-                        .profile
-                        .edit(
-                            &e.id.to_string(),
-                            ProfilePatch {
-                                pin_rank: Some(decayed),
-                                ..Default::default()
-                            },
-                        )
-                        .await;
-                    self.audit_event(
-                        AuditEventType::PersonalizationDecayed,
-                        format!(
-                            "profile entry {} pin_rank decay {}->{} ({elapsed_days:.1}d elapsed)",
-                            e.id, e.pin_rank, decayed
-                        ),
-                    );
+                    decays.push((e.id.to_string(), decayed));
                 }
             }
 
@@ -218,21 +208,32 @@ impl FeedbackProcessor {
             //    including never-pinned ones — idle unpinned prefs should also expire).
             if elapsed_days >= idle_threshold_days as f64 && e.status == ProfileEntryStatus::Active
             {
-                let _ = self
-                    .profile
-                    .edit(
-                        &e.id.to_string(),
-                        ProfilePatch {
-                            status: Some(ProfileEntryStatus::Archived),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
+                archives.push(e.id.to_string());
+            }
+        }
+
+        // Single batched write: one mutex-hold, one transaction for all updates.
+        if let Err(e) = self.profile.apply_decay_batch(&decays, &archives).await {
+            tracing::warn!(error = %e, "personalization decay batch failed (non-fatal)");
+        }
+
+        // Emit audit events after the batch (no DB lock held).
+        for (entry_id, decayed) in &decays {
+            if let Some(e) = entries.iter().find(|e| e.id.to_string() == *entry_id) {
                 self.audit_event(
-                    AuditEventType::PersonalizationArchived,
-                    format!("profile entry {} idle {elapsed_days:.0}d -> Archived", e.id),
+                    AuditEventType::PersonalizationDecayed,
+                    format!(
+                        "profile entry {entry_id} pin_rank decay {}->{decayed}",
+                        e.pin_rank
+                    ),
                 );
             }
+        }
+        for entry_id in &archives {
+            self.audit_event(
+                AuditEventType::PersonalizationArchived,
+                format!("profile entry {entry_id} archived (idle threshold reached)"),
+            );
         }
 
         Ok(())
@@ -310,6 +311,10 @@ impl FeedbackProcessor {
                 return Ok(()); // not in the pinned set — boost is a no-op
             }
             let new_rank = (e.pin_rank - 1).max(0);
+            if new_rank == e.pin_rank {
+                // Already at maximum priority (rank 0) — no write or audit needed.
+                return Ok(());
+            }
             self.profile
                 .edit(
                     entry_id,

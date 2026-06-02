@@ -114,6 +114,11 @@ pub fn build_router(
             "/api/v1/webhooks/telegram/{channel_id}",
             axum::routing::post(agentos_api::handlers::webhooks::telegram_webhook),
         )
+        .route(
+            "/api/v1/webhooks/whatsapp/{channel_id}",
+            axum::routing::get(agentos_api::handlers::webhooks::whatsapp_webhook_verify)
+                .post(agentos_api::handlers::webhooks::whatsapp_webhook),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
         .with_state(state.service.clone());
 

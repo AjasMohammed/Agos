@@ -112,6 +112,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         otel: OtelConfig::default(),
         approval: Default::default(),
         api: Default::default(),
+        web: Default::default(),
         chat: Default::default(),
         user_adaptation: Default::default(),
         env: Default::default(),

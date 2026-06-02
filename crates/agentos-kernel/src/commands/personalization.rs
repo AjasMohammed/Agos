@@ -32,16 +32,12 @@ impl Kernel {
     async fn cmd_personalization_status(&self) -> KernelResponse {
         let cfg = &self.config.personalization;
 
-        // Profile row count.
-        let profile_rows = self
-            .user_profile_store
-            .list(u32::MAX)
-            .await
-            .map(|v| v.len())
-            .unwrap_or(0);
+        // Profile active row count — single COUNT(*) rather than fetching all rows.
+        let profile_rows = self.user_profile_store.count_active().await.unwrap_or(0);
 
-        // Interest row count (approximate via top_interests with a very high cap).
-        let interest_rows = self.interest_model.top_interests(u32::MAX).await.len();
+        // Interest row count — use COUNT(*) so zero-/negative-decayed rows are
+        // included; top_interests() would silently drop them (W7 fix).
+        let interest_rows = self.interest_model.count_interests().await.unwrap_or(0);
 
         // Recommendation row count.
         let recommendation_rows = self
@@ -91,7 +87,13 @@ impl Kernel {
             .await
             .unwrap_or_default();
 
-        let interest_entries = self.interest_model.top_interests(u32::MAX).await;
+        // Use load_all_raw so zero-/negative-decayed rows are included in the
+        // export — a complete dump, not a filtered view (W7 fix).
+        let interest_entries = self
+            .interest_model
+            .load_all_interests()
+            .await
+            .unwrap_or_default();
 
         let recommendation_entries = self
             .recommendation_engine

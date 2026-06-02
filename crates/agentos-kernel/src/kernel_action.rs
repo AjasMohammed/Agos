@@ -439,26 +439,54 @@ impl KernelAction {
                 let file_id = str_field("file_id");
                 let caption = str_field("caption");
                 let filename = str_field("filename");
+                // Album of image URLs (Telegram sendMediaGroup): 2–10 items.
+                let image_urls: Vec<String> = value["image_urls"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
-                // Build the URL attachment (image takes priority; mutual exclusion
-                // is enforced in ChannelSendTool::execute). A `file_id` is resolved
-                // to bytes later in execute_channel_send (it needs the kernel).
-                let attachment = match (image_url, document_url) {
-                    (Some(url), _) => Some(MessageAttachment {
-                        url,
+                // Build the URL attachment. Priority: image album → image → document.
+                // A `file_id` is resolved to bytes later in execute_channel_send.
+                let attachment = if image_urls.len() > 1 {
+                    let mut it = image_urls.into_iter();
+                    let first = it.next().unwrap();
+                    Some(MessageAttachment {
+                        url: first,
                         kind: AttachmentKind::Image,
                         filename: filename.clone(),
                         caption: caption.clone(),
                         inline: None,
-                    }),
-                    (None, Some(url)) => Some(MessageAttachment {
-                        url,
-                        kind: AttachmentKind::Document,
-                        filename: filename.clone(),
-                        caption: caption.clone(),
-                        inline: None,
-                    }),
-                    (None, None) => None,
+                        group_urls: it.collect(),
+                    })
+                } else {
+                    match (
+                        image_url.or_else(|| image_urls.into_iter().next()),
+                        document_url,
+                    ) {
+                        (Some(url), _) => Some(MessageAttachment {
+                            url,
+                            kind: AttachmentKind::Image,
+                            filename: filename.clone(),
+                            caption: caption.clone(),
+                            inline: None,
+                            group_urls: Vec::new(),
+                        }),
+                        (None, Some(url)) => Some(MessageAttachment {
+                            url,
+                            kind: AttachmentKind::Document,
+                            filename: filename.clone(),
+                            caption: caption.clone(),
+                            inline: None,
+                            group_urls: Vec::new(),
+                        }),
+                        (None, None) => None,
+                    }
                 };
 
                 if channel.trim().is_empty()
@@ -4504,6 +4532,7 @@ impl Kernel {
                         filename: filename.or(resolved_name),
                         caption,
                         inline: Some(agentos_types::InlineAttachment { mime, data_base64 }),
+                        group_urls: Vec::new(),
                     });
                 }
                 Ok((Err(e), _)) => {
@@ -4681,6 +4710,11 @@ impl Kernel {
                         b.push('\n');
                     }
                     b.push_str(&att.url);
+                    // Album: fold the remaining image URLs in too (no native album).
+                    for extra in &att.group_urls {
+                        b.push('\n');
+                        b.push_str(extra);
+                    }
                     (b, None)
                 } else {
                     (send_text.clone(), None)
@@ -4717,6 +4751,25 @@ impl Kernel {
                 // Slack/Discord). When both text and media are present, send a
                 // Mixed payload so neither is lost.
                 let content = match &attachment {
+                    // Image album (group_urls): deliver every URL — non-Telegram
+                    // channels have no native album, so emit each as an Image part.
+                    Some(att) if !att.group_urls.is_empty() => {
+                        let mut parts = Vec::new();
+                        if !send_text.is_empty() {
+                            parts.push(MessageContent::Text(send_text.clone()));
+                        }
+                        parts.push(MessageContent::Image {
+                            url: att.url.clone(),
+                            alt: att.caption.clone(),
+                        });
+                        for u in &att.group_urls {
+                            parts.push(MessageContent::Image {
+                                url: u.clone(),
+                                alt: None,
+                            });
+                        }
+                        MessageContent::Mixed(parts)
+                    }
                     Some(att) => {
                         let media = match att.kind {
                             AttachmentKind::Image => MessageContent::Image {

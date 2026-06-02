@@ -379,6 +379,17 @@ refresh_enabled = false
 # default; enable only on trusted control-plane deployments.
 config_writable = false
 
+[web]
+# Web UI authentication. The login token is resolved at startup in this order:
+#   1. $AGENTOS_WEB_TOKEN environment variable (best for systemd/Docker — never
+#      written to disk).
+#   2. auth_token set here.
+#   3. A token generated once on first boot and persisted to {data_dir}/web_token
+#      (mode 0600), then reused on every restart.
+# This makes the token stable across restarts instead of regenerating each boot.
+# Prefer an env-substituted value over committing a secret here.
+# auth_token = "change-me"
+
 [mcp]
 # List of MCP servers to connect at kernel boot.
 # Each entry spawns a child process via stdio JSON-RPC.

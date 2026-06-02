@@ -18,8 +18,11 @@ const MAX_TRANSCRIPT_ENTRIES: usize = 256;
 /// Maximum chars stored per user message or assistant answer in transcript history.
 /// Prevents a single large exchange from consuming unbounded heap.
 const MAX_MSG_CHARS: usize = 2_000;
-/// Per-call inference timeout for channel chat.
-const CHANNEL_CHAT_TIMEOUT_SECS: u64 = 60;
+/// Per-call inference timeout for channel chat. Sized to accommodate slower
+/// backends (e.g. the Claude Code subprocess adapter, which spawns a process
+/// and re-sends the full context per turn). Leaner context (see the claude-code
+/// adapter's capped window) keeps most replies well under this.
+const CHANNEL_CHAT_TIMEOUT_SECS: u64 = 180;
 
 type TranscriptKey = (ChannelInstanceID, String);
 

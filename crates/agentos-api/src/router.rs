@@ -85,6 +85,11 @@ pub fn build_router(
         .route(
             "/api/v1/webhooks/telegram/{channel_id}",
             post(webhooks::telegram_webhook),
+        )
+        // WhatsApp webhook — public; GET verify handshake + POST HMAC-verified.
+        .route(
+            "/api/v1/webhooks/whatsapp/{channel_id}",
+            get(webhooks::whatsapp_webhook_verify).post(webhooks::whatsapp_webhook),
         );
 
     // Interactive Scalar docs UI. Gated by the `docs_enabled` arg (`[api] docs_enabled`)

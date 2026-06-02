@@ -127,8 +127,97 @@ impl InboundRouter {
     async fn enrich_inbound_media(&self, msg: &mut InboundMessage) {
         if msg.channel == DeliveryChannel::custom(DeliveryChannel::TELEGRAM) {
             self.enrich_telegram_media(msg).await;
+        } else if msg.channel == DeliveryChannel::custom(DeliveryChannel::WHATSAPP) {
+            self.enrich_whatsapp_media(msg).await;
         } else if !msg.pending_media.is_empty() {
             self.enrich_remote_media(msg).await;
+        }
+    }
+
+    /// WhatsApp media: resolve each media `id` → temporary CDN URL via the Graph
+    /// API (step 1, authenticated), then download the bytes (step 2, SSRF-guarded,
+    /// token gated to `fbsbx.com`). Best-effort per attachment.
+    async fn enrich_whatsapp_media(&self, msg: &mut InboundMessage) {
+        use crate::adapters::telegram::ext_for_mime;
+        use crate::adapters::whatsapp::whatsapp_media_refs;
+        use crate::media_download::MediaAuth;
+
+        let refs = whatsapp_media_refs(&msg.raw);
+        if refs.is_empty() {
+            return;
+        }
+        let credential_key = match self
+            .channel_registry
+            .get_by_id(&msg.channel_instance_id)
+            .await
+        {
+            Ok(Some(ch)) => ch.credential_key,
+            _ => return,
+        };
+        if credential_key.is_empty() {
+            return;
+        }
+        let token = match self.vault.get(&credential_key).await {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+
+        // Dedicated no-redirect client for the token-bearing Graph call, so a
+        // redirect can never carry the access token off graph.facebook.com.
+        let graph_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| self.http_client.clone());
+
+        for r in refs.into_iter().take(5) {
+            // Step 1: media id → temporary URL (Graph API, Bearer token).
+            let meta_url = format!("https://graph.facebook.com/v18.0/{}", r.media_id);
+            let temp_url = match graph_client
+                .get(&meta_url)
+                .bearer_auth(token.as_str())
+                .send()
+                .await
+            {
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Ok(v) => v["url"].as_str().map(String::from),
+                    Err(_) => None,
+                },
+                Err(_) => None,
+            };
+            let Some(temp_url) = temp_url else {
+                tracing::warn!(media_id = %r.media_id, "WhatsApp media id resolution failed");
+                continue;
+            };
+            // Step 2: download bytes, token gated to Meta's CDN host.
+            let auth = MediaAuth {
+                bearer: token.as_str(),
+                trusted_host_suffix: "fbsbx.com",
+            };
+            match crate::media_download::download_remote_media(
+                &temp_url,
+                crate::media_download::MAX_REMOTE_MEDIA_BYTES,
+                Some(auth),
+            )
+            .await
+            {
+                Ok((bytes, sniffed)) => {
+                    let mime = if r.mime.trim().is_empty() {
+                        sniffed
+                    } else {
+                        r.mime.clone()
+                    };
+                    let name = if r.filename.trim().is_empty() {
+                        format!("whatsapp-{}.{}", r.kind, ext_for_mime(&mime))
+                    } else {
+                        r.filename.clone()
+                    };
+                    self.store_media(msg, &name, &mime, bytes, &r.kind).await;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "WhatsApp media download failed");
+                }
+            }
         }
     }
 

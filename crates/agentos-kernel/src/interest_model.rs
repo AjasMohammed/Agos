@@ -186,6 +186,20 @@ impl InterestModel {
     pub async fn clear_interests(&self) -> anyhow::Result<usize> {
         self.store.clear_all().await
     }
+
+    /// Exact row count for `personalization status` — includes rows with zero
+    /// or negative decayed scores that `top_interests` would silently drop.
+    pub async fn count_interests(&self) -> anyhow::Result<usize> {
+        self.store.count_topics().await
+    }
+
+    /// Full raw dump for `personalization export` — returns all rows regardless
+    /// of decay state so the export is complete.
+    pub async fn load_all_interests(
+        &self,
+    ) -> anyhow::Result<Vec<crate::user_interests_store::InterestTopic>> {
+        self.store.load_all_raw().await
+    }
 }
 
 /// A small English stop-word set — enough to drop obvious filler from task summaries.

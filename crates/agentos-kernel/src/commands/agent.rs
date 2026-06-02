@@ -249,7 +249,13 @@ impl Kernel {
                 // the user's subscription (no API key). Intercept before the
                 // catalog/HTTP path since it is not an OpenAI-compatible endpoint.
                 if custom_name == "claude-code" || custom_name == "claude-cli" {
-                    return Ok((Arc::new(ClaudeCodeCore::new(model.to_string())), None));
+                    return Ok((
+                        Arc::new(
+                            ClaudeCodeCore::new(model.to_string())
+                                .with_image_resolver(image_resolver.clone()),
+                        ),
+                        None,
+                    ));
                 }
                 // Check the provider catalog first for known providers.
                 let catalog_entry_opt = self
@@ -324,6 +330,42 @@ impl Kernel {
                 }
             }
         }
+    }
+
+    /// Stand up a per-agent Claude MCP tool gateway: build a
+    /// [`KernelMcpExecutor`] bound to this agent's real capability context,
+    /// start the localhost MCP HTTP server, and return the path to the
+    /// generated MCP config file (passed to `ClaudeCodeCore::with_mcp_config`).
+    async fn start_claude_mcp_gateway_for_agent(
+        &self,
+        agent_id: AgentID,
+        permissions: PermissionSet,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        use crate::claude_mcp_gateway::{start_claude_mcp_gateway, KernelMcpExecutor};
+
+        let workspace_paths = self.workspace_paths_for_agent(&agent_id);
+        let executor = Arc::new(KernelMcpExecutor::new(
+            Arc::clone(&self.tool_runner),
+            Arc::clone(&self.agent_registry),
+            Arc::clone(&self.capability_registry),
+            Arc::clone(&self.capability_dispatcher),
+            Arc::clone(&self.hal),
+            self.zone_table.clone(),
+            self.data_dir.clone(),
+            self.cancellation_token.clone(),
+            agent_id,
+            permissions,
+            workspace_paths,
+        )) as Arc<dyn agentos_mcp::McpToolExecutor>;
+
+        let gateway = start_claude_mcp_gateway(
+            executor,
+            &self.data_dir,
+            agent_id,
+            self.cancellation_token.child_token(),
+        )
+        .await?;
+        Ok(gateway.config_path)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -666,6 +708,49 @@ impl Kernel {
         let agent_id = profile.id;
         let agent_name = profile.name.clone();
         let agent_model = profile.model.clone();
+
+        // For the `claude-code`/`claude-cli` subprocess backend, stand up a
+        // per-agent localhost MCP tool gateway and rebuild the adapter with its
+        // config so the `claude` subprocess can call AgentOS tools natively.
+        // This is done here (not in `build_llm_adapter`) because the gateway
+        // needs the agent's real `agent_id` and `PermissionSet`, which only
+        // exist after registration. Tool calls flow through `ToolRunner` with
+        // the agent's REAL permission set — capability enforcement is preserved.
+        let llm_adapter = if matches!(
+            &profile.provider,
+            LLMProvider::Custom(name) if name == "claude-code" || name == "claude-cli"
+        ) {
+            match self
+                .start_claude_mcp_gateway_for_agent(agent_id, profile.permissions.clone())
+                .await
+            {
+                Ok(config_path) => {
+                    let image_resolver = self
+                        .image_resolver
+                        .read()
+                        .expect("image_resolver lock poisoned")
+                        .clone();
+                    Arc::new(
+                        ClaudeCodeCore::new(agent_model.clone())
+                            .with_image_resolver(image_resolver)
+                            .with_mcp_config(config_path),
+                    ) as Arc<dyn LLMCore>
+                }
+                Err(e) => {
+                    // Non-fatal: fall back to the plain adapter (no native tool
+                    // gateway). The agent still works via the markdown tool
+                    // envelope; we just lose native MCP tool calling.
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        error = %e,
+                        "Failed to start Claude MCP tool gateway; using plain claude-code adapter"
+                    );
+                    llm_adapter
+                }
+            }
+        } else {
+            llm_adapter
+        };
 
         {
             let mut active = self.active_llms.write().await;

@@ -132,16 +132,104 @@ impl WebServer {
     }
 
     fn make_auth_token(&self) -> AuthToken {
-        let token = generate_auth_token();
-        // Write to stderr so the token is not captured by stdout log aggregators.
+        let (token, source) = self.resolve_auth_token();
         eprintln!("=== AgentOS Web UI ===");
-        eprintln!("Auth token: {}", token.as_str());
-        eprintln!(
-            "Open http://{}/login and paste the token above to access the UI.",
-            self.bind_addr
-        );
+        match source {
+            // Only print the secret when we just generated it (first boot). On
+            // normal restarts the token is stable, so we never reprint it —
+            // this keeps the token out of logs on every restart.
+            TokenSource::GeneratedAndPersisted(ref path) => {
+                eprintln!("Generated a new Web UI auth token (no env/config token set).");
+                eprintln!("Auth token: {}", token.as_str());
+                eprintln!("Persisted to {} (mode 0600) — reused on restart.", path);
+                eprintln!(
+                    "Open http://{}/login and paste the token above to access the UI.",
+                    self.bind_addr
+                );
+            }
+            TokenSource::Env => {
+                eprintln!("Web UI auth token loaded from $AGENTOS_WEB_TOKEN.");
+                eprintln!("Open http://{}/login to access the UI.", self.bind_addr);
+            }
+            TokenSource::Config => {
+                eprintln!("Web UI auth token loaded from [web].auth_token config.");
+                eprintln!("Open http://{}/login to access the UI.", self.bind_addr);
+            }
+            TokenSource::PersistedFile(ref path) => {
+                eprintln!("Web UI auth token loaded from {path}.");
+                eprintln!("Open http://{}/login to access the UI.", self.bind_addr);
+            }
+        }
         AuthToken(Arc::new(token))
     }
+
+    /// Resolves the Web UI auth token from, in precedence order:
+    /// 1. `$AGENTOS_WEB_TOKEN`
+    /// 2. `[web].auth_token` in config
+    /// 3. A token persisted to `{data_dir}/web_token` (generated on first boot)
+    ///
+    /// The token is *stable across restarts* — only the first-boot generation
+    /// path produces a fresh value.
+    fn resolve_auth_token(&self) -> (zeroize::Zeroizing<String>, TokenSource) {
+        // 1. Environment variable — never persisted, ideal for systemd/Docker.
+        if let Ok(env_token) = std::env::var("AGENTOS_WEB_TOKEN") {
+            let trimmed = env_token.trim();
+            if !trimmed.is_empty() {
+                return (
+                    zeroize::Zeroizing::new(trimmed.to_string()),
+                    TokenSource::Env,
+                );
+            }
+        }
+
+        // 2. Explicit config value.
+        if let Some(cfg_token) = self.state.kernel.config.web.auth_token.as_deref() {
+            let trimmed = cfg_token.trim();
+            if !trimmed.is_empty() {
+                return (
+                    zeroize::Zeroizing::new(trimmed.to_string()),
+                    TokenSource::Config,
+                );
+            }
+        }
+
+        // 3. Persisted file in the kernel data dir.
+        let path = self.state.kernel.data_dir().join("web_token");
+        let path_display = path.display().to_string();
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            let trimmed = existing.trim();
+            if !trimmed.is_empty() {
+                return (
+                    zeroize::Zeroizing::new(trimmed.to_string()),
+                    TokenSource::PersistedFile(path_display),
+                );
+            }
+        }
+
+        // First boot (or unreadable/empty file): generate and persist.
+        let token = generate_auth_token();
+        match persist_token(&path, token.as_str()) {
+            Ok(()) => (token, TokenSource::GeneratedAndPersisted(path_display)),
+            Err(e) => {
+                // Could not persist — fall back to an ephemeral token for this
+                // run and warn loudly. The token still works until restart.
+                tracing::warn!(
+                    error = %e,
+                    path = %path_display,
+                    "Could not persist Web UI auth token; using an ephemeral token for this run"
+                );
+                (token, TokenSource::GeneratedAndPersisted(path_display))
+            }
+        }
+    }
+}
+
+/// Where the resolved auth token came from — drives the startup banner.
+enum TokenSource {
+    Env,
+    Config,
+    PersistedFile(String),
+    GeneratedAndPersisted(String),
 }
 
 /// Generates a 32-byte cryptographically random token, returned as `Zeroizing<String>`
@@ -151,4 +239,56 @@ fn generate_auth_token() -> zeroize::Zeroizing<String> {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     zeroize::Zeroizing::new(hex::encode(bytes))
+}
+
+/// Writes the token to `path`, restricting permissions to `0600` on Unix so
+/// only the owner can read the secret.
+fn persist_token(path: &std::path::Path, token: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, token)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_token_is_64_hex_chars() {
+        let token = generate_auth_token();
+        assert_eq!(token.len(), 64, "32 random bytes => 64 hex chars");
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+        // Two generations should not collide.
+        assert_ne!(token.as_str(), generate_auth_token().as_str());
+    }
+
+    #[test]
+    fn persist_token_writes_value_and_creates_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("web_token");
+        persist_token(&path, "deadbeef").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "deadbeef");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persist_token_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("web_token");
+        persist_token(&path, "secret").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "token file must be owner read/write only"
+        );
+    }
 }

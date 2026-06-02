@@ -68,6 +68,11 @@ pub struct MessageAttachment {
     /// resolved kernel-side from a `file_id`. Telegram uploads via multipart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline: Option<InlineAttachment>,
+    /// Additional media URLs of the same `kind` forming a multi-item album
+    /// (Telegram `sendMediaGroup`). `url` is the first item; these are the rest
+    /// (2–10 total). Empty for single attachments. URL-based only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_urls: Vec<String>,
 }
 
 /// Inline media bytes (base64-encoded) for direct multipart upload.
@@ -196,6 +201,7 @@ impl DeliveryChannel {
     pub const TELEGRAM: &'static str = "telegram";
     pub const NTFY: &'static str = "ntfy";
     pub const EMAIL: &'static str = "email";
+    pub const WHATSAPP: &'static str = "whatsapp";
 
     pub fn cli() -> Self {
         Self(Self::CLI.to_string())

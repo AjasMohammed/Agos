@@ -35,9 +35,12 @@ fn all_core_skills_load() {
         loaded, subdir_count,
         "every skill dir under skills/core must load (loaded {loaded} of {subdir_count})"
     );
+    // Floor guard against an empty/under-discovered directory — not the exact
+    // count, so adding or removing a bundled skill doesn't churn this test. The
+    // 5 ecosystem skills are pinned by name in `ecosystem_skills_present_*`.
     assert!(
-        loaded >= 13,
-        "expected the full bundled skill set, got {loaded}"
+        loaded >= 5,
+        "skills/core looks under-discovered (loaded only {loaded})"
     );
 }
 

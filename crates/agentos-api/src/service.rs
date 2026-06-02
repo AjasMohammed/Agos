@@ -164,6 +164,18 @@ pub trait KernelService: Send + Sync {
         message: agentos_kernel::notification_router::InboundMessage,
     ) -> Result<(), ApiError>;
 
+    /// Verify a WhatsApp Cloud API `X-Hub-Signature-256` over the raw body using
+    /// the channel's app secret (vault `{credential_key}.app_secret`).
+    async fn verify_whatsapp_signature(
+        &self,
+        channel_id: &str,
+        body: &[u8],
+        signature: &str,
+    ) -> Result<bool, ApiError>;
+
+    /// The WhatsApp webhook GET verify-token for a channel, if configured.
+    async fn whatsapp_verify_token(&self, channel_id: &str) -> Result<Option<String>, ApiError>;
+
     // ── Control-plane auth (React control panel) ─────────────────────────────
 
     /// Verify an operator login credential (constant-time) against the configured

@@ -367,6 +367,17 @@ pub enum AuditEventType {
     /// A stale profile entry was archived out of the L0 pinned block.
     PersonalizationArchived,
 
+    // Proactive personalization — recommendation engine (Phase 4)
+    /// Emitted when a proactive tip is generated and persisted to
+    /// `recommendations.db` before delivery. Payload: id, topics, confidence.
+    RecommendationGenerated,
+    /// Emitted when a generated tip is successfully delivered via the
+    /// notification router. Payload: id, delivery_channel.
+    RecommendationDelivered,
+    /// Emitted when a cycle is skipped before persisting anything (rate-limit,
+    /// dedup, confidence floor, no signal). Payload: reason, dedup_hash (opt).
+    RecommendationSkipped,
+
     // Proactive personalization — governance (Phase 6)
     /// Emitted when the operator runs `agentos personalization export`.
     /// Payload includes counts per store and the export size (bytes).

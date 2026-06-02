@@ -97,7 +97,10 @@ pub struct Recommendation {
     /// 0.0 ..= 1.0
     pub confidence: f64,
     pub status: RecommendationStatus,
-    /// FNV-1a hash of `kind + content` (first 16 hex chars). Used for dedup.
+    /// SHA-256 hash of `kind + "\n" + content.to_lowercase()`, first 8 bytes
+    /// encoded as 16 hex chars. Used for dedup — production upgrades that had
+    /// prior FNV-1a hashes stored should clear the table or let prune sweep
+    /// remove them (old hashes will no longer match, causing one-time re-delivery).
     pub dedup_hash: String,
     /// Unix epoch seconds (UTC).
     pub created_at: i64,
@@ -108,18 +111,21 @@ pub struct Recommendation {
 }
 
 impl Recommendation {
-    /// Compute an FNV-1a content-hash (first 16 hex chars) from `kind + content`.
+    /// Compute a SHA-256 content-hash (first 16 hex chars) from `kind + content`.
     ///
-    /// Using FNV-1a avoids adding a cryptographic-hash dependency for a
-    /// non-security-critical dedup key.
+    /// Using SHA-256 (already a workspace dependency via `sha2`) rather than
+    /// a hand-rolled FNV-1a gives 2^64 collision resistance on the truncated
+    /// output vs. 2^32 for FNV-1a, making accidental suppression of distinct
+    /// recommendations negligible. The `sha2` crate is in scope for
+    /// `agentos-kernel` via its workspace dep.
     pub fn compute_dedup_hash(kind: RecommendationKind, content: &str) -> String {
+        use sha2::{Digest, Sha256};
         let input = format!("{}\n{}", kind.as_str(), content.to_lowercase());
-        let mut hash: u64 = 14_695_981_039_346_656_037;
-        for byte in input.bytes() {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(1_099_511_628_211);
-        }
-        format!("{:016x}", hash)
+        let digest = Sha256::digest(input.as_bytes());
+        // Take the first 8 bytes (64 bits) as a hex string — matches the previous
+        // 16-char width so existing stored hashes keep the same format length.
+        let bytes: [u8; 8] = digest[..8].try_into().expect("sha256 output >= 8 bytes");
+        format!("{:016x}", u64::from_be_bytes(bytes))
     }
 }
 
@@ -264,6 +270,24 @@ impl RecommendationsStore {
         })
         .await
         .context("spawn_blocking prune_older_than")?
+    }
+
+    /// Delete a single row by id. Returns true if a row was removed.
+    ///
+    /// Used to roll back a pending recommendation row when delivery fails so the
+    /// dedup slot is not silently consumed for the full cooldown window.
+    pub async fn delete_by_id(&self, id: &str) -> anyhow::Result<bool> {
+        let conn = Arc::clone(&self.conn);
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            let guard = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
+            let n = guard.execute("DELETE FROM recommendations WHERE id = ?1", params![id])?;
+            Ok(n > 0)
+        })
+        .await
+        .context("spawn_blocking delete_by_id recommendation")?
     }
 
     /// Delete **all** rows. Returns the count of deleted rows (right-to-forget).

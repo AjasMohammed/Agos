@@ -1652,6 +1652,19 @@ impl KernelService for Kernel {
             .map_err(|_| ApiError::Internal("Inbound message channel closed".into()))
     }
 
+    async fn verify_whatsapp_signature(
+        &self,
+        channel_id: &str,
+        body: &[u8],
+        signature: &str,
+    ) -> Result<bool, ApiError> {
+        Ok(Kernel::whatsapp_verify_signature(self, channel_id, body, signature).await)
+    }
+
+    async fn whatsapp_verify_token(&self, channel_id: &str) -> Result<Option<String>, ApiError> {
+        Ok(Kernel::whatsapp_verify_token(self, channel_id).await)
+    }
+
     // ── Control-plane auth ───────────────────────────────────────────────────
 
     async fn verify_operator_credential(&self, credential: &str) -> CredentialCheck {

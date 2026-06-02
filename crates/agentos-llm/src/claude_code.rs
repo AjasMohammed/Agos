@@ -5,28 +5,52 @@
 //! AgentOS agent can run on a Claude Code / Claude.ai subscription with **no
 //! Anthropic API key**.
 //!
-//! Built-in Claude Code tools are disabled (`--allowed-tools ""`), so the model
-//! does not start its own nested agent loop — it just reasons and emits AgentOS
-//! tool-call JSON as text. `supports_native_tool_calling()` returns `false`, so
-//! the kernel injects the `## Tools` JSON instructions into the system prompt
-//! and recovers tool calls from `InferenceResult.text` (the same path as the
-//! Ollama adapter).
+//! Built-in Claude Code tools are denied via `--disallowed-tools` (an empty
+//! `--allowed-tools` does NOT restrict in the default permission mode), so the
+//! model cannot touch the host outside AgentOS.
+//!
+//! Tool calling has two modes:
+//! - **MCP mode** (when [`Self::with_mcp_config`] is set): the subprocess gets a
+//!   `--mcp-config` pointing at a kernel-hosted MCP server exposing the 4 AgentOS
+//!   meta-tools (`mcp__agentos__{search,describe,list,invoke}_tool`). Claude calls
+//!   them as native `tool_use` *inside* the subprocess; the kernel gateway runs
+//!   each through `ToolRunner` (full capability/audit/sandbox) and returns the
+//!   result, so the subprocess loops internally and returns a final answer.
+//!   `supports_native_tool_calling()` returns `true`, so the kernel omits the
+//!   `## Tools` JSON-envelope block and sees one self-contained turn (no
+//!   per-iteration `InferenceResult.tool_calls`).
+//! - **Fallback / envelope mode** (no MCP config): `supports_native_tool_calling()`
+//!   returns `false`; the kernel injects the `## Tools` JSON instructions and
+//!   recovers tool calls from `InferenceResult.text` (same path as Ollama).
+//!
+//! Streaming is supported via `--output-format stream-json` (token-level
+//! `InferenceEvent`s). Image input is supported by writing images to a temp dir
+//! and enabling the `Read` tool scoped to that dir — the only way the CLI
+//! accepts images (inline base64 is ignored). When images are present, `Read`
+//! is therefore enabled for that one call (scoped via `--add-dir` + cwd).
 //!
 //! # Cost
 //! Inference consumes the user's **Claude Code subscription quota / rate
 //! limits**, not metered API credits. A subprocess is spawned per inference
-//! step, so latency is higher than a direct HTTP API call. v1 is non-streaming.
+//! step, so latency is higher than a direct HTTP API call.
 
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use base64::Engine;
 use serde::Deserialize;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 
+use crate::media::{ImageResolver, NoopImageResolver};
 use crate::traits::LLMCore;
-use crate::types::{HealthStatus, InferenceResult, ModelCapabilities, StopReason, TokenUsage};
-use agentos_types::{AgentOSError, ContextRole, ContextWindow};
+use crate::types::{
+    HealthStatus, InferenceEvent, InferenceResult, ModelCapabilities, StopReason, TokenUsage,
+};
+use agentos_types::{AgentOSError, ContentPart, ContextRole, ContextWindow, ToolManifest};
 
 /// Default model when none (or "default") is specified. Matches the `claude`
 /// CLI's own default tier.
@@ -34,8 +58,49 @@ const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 /// Per-inference subprocess timeout. Generous because the CLI does its own
 /// startup + context-cache work before responding.
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
-const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
+/// Effective context window we advertise. Claude's real window is 200k, but
+/// AgentOS sizes its per-task context budget (and thus how much memory/retrieved
+/// context it injects) to this number — and the *entire* prompt is re-sent to a
+/// fresh subprocess on every turn. Reporting 200k makes AgentOS flood ~160k
+/// tokens per call (40–80s latency, channel timeouts). We cap the effective
+/// window to keep prompts lean; override with `with_context_window` for tasks
+/// that genuinely need more. Compaction/overflow track this value too.
+const DEFAULT_CONTEXT_WINDOW: u64 = 64_000;
 const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_000;
+
+/// Every built-in Claude Code tool. We deny all of these so the subprocess
+/// cannot act outside AgentOS (no host file/shell/network access via Claude's
+/// own tools). NOTE: `--allowed-tools` is *additive* and does not restrict in
+/// the default permission mode — `--disallowed-tools` is the only flag that
+/// actually blocks. Keep this list current with `claude`'s built-in toolset.
+const CLAUDE_BUILTIN_TOOLS: &[&str] = &[
+    "Task",
+    "AskUserQuestion",
+    "Bash",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "Edit",
+    "EnterPlanMode",
+    "EnterWorktree",
+    "ExitPlanMode",
+    "ExitWorktree",
+    "Monitor",
+    "NotebookEdit",
+    "PushNotification",
+    "Read",
+    "RemoteTrigger",
+    "ScheduleWakeup",
+    "Skill",
+    "TaskOutput",
+    "TaskStop",
+    "TodoWrite",
+    "ToolSearch",
+    "WebFetch",
+    "WebSearch",
+    "Workflow",
+    "Write",
+];
 
 /// LLM adapter that delegates inference to the local `claude` CLI.
 pub struct ClaudeCodeCore {
@@ -46,6 +111,11 @@ pub struct ClaudeCodeCore {
     /// Per-call subprocess timeout.
     timeout: Duration,
     capabilities: ModelCapabilities,
+    /// Resolves `ImageSource` (incl. web-upload `FileRef`) to base64 for vision.
+    image_resolver: Arc<dyn ImageResolver>,
+    /// When set, attached to the subprocess via `--mcp-config` so it exposes the
+    /// 4 AgentOS meta-tools as native MCP tools (see [`Self::with_mcp_config`]).
+    mcp_config_path: Option<std::path::PathBuf>,
 }
 
 impl ClaudeCodeCore {
@@ -62,15 +132,19 @@ impl ClaudeCodeCore {
             binary: "claude".to_string(),
             model,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            image_resolver: Arc::new(NoopImageResolver),
+            mcp_config_path: None,
             capabilities: ModelCapabilities {
                 context_window_tokens: DEFAULT_CONTEXT_WINDOW,
-                supports_images: false,
+                // Images are passed to the CLI as temp files + the Read tool
+                // (inline base64 isn't honored by the CLI). See prepare_invocation.
+                supports_images: true,
                 // We deliberately use AgentOS's JSON-in-markdown tool path, not
                 // a native tool API — see module docs.
                 supports_tool_calling: false,
                 supports_json_mode: false,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-                supports_streaming: false,
+                supports_streaming: true,
                 supports_parallel_tools: false,
                 supports_prompt_caching: false,
                 supports_thinking: false,
@@ -88,6 +162,28 @@ impl ClaudeCodeCore {
     /// Override the per-inference subprocess timeout.
     pub fn with_timeout_secs(mut self, secs: u64) -> Self {
         self.timeout = Duration::from_secs(secs);
+        self
+    }
+
+    /// Inject the image resolver used to turn `ImageSource` into base64 for vision.
+    pub fn with_image_resolver(mut self, resolver: Arc<dyn ImageResolver>) -> Self {
+        self.image_resolver = resolver;
+        self
+    }
+
+    /// Attach an MCP config file so the subprocess exposes the 4 AgentOS
+    /// meta-tools (search/describe/list/invoke) as native tools. When set,
+    /// `supports_native_tool_calling()` returns true and the built-in tools stay denied.
+    pub fn with_mcp_config(mut self, path: std::path::PathBuf) -> Self {
+        self.mcp_config_path = Some(path);
+        self
+    }
+
+    /// Override the effective context window (see [`DEFAULT_CONTEXT_WINDOW`]).
+    /// Larger values let AgentOS inject more context per call but make every
+    /// re-sent subprocess prompt heavier.
+    pub fn with_context_window(mut self, tokens: u64) -> Self {
+        self.capabilities.context_window_tokens = tokens;
         self
     }
 
@@ -188,41 +284,231 @@ impl ClaudeCodeCore {
             cached_tokens: usage.cache_read_input_tokens,
         })
     }
-}
 
-#[async_trait]
-impl LLMCore for ClaudeCodeCore {
-    fn supports_native_tool_calling(&self) -> bool {
-        false
+    /// Build the shared `claude -p` invocation (binary, prompt, model, system
+    /// prompt, piped I/O). Callers append the `--output-format` they want.
+    ///
+    /// With no images, all built-in tools are disabled so Claude is a pure
+    /// reasoning core. When `image_dir` is set, the `Read` tool is enabled and
+    /// scoped to that dir (via `--add-dir` + working directory) so Claude can
+    /// load the attached image files — the only way the CLI accepts images.
+    fn base_command(
+        &self,
+        prompt: &str,
+        system: &str,
+        image_dir: Option<&std::path::Path>,
+    ) -> Command {
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("-p").arg(prompt).arg("--model").arg(&self.model);
+        // Deny every built-in tool so Claude is a pure reasoning core that can
+        // only emit AgentOS tool-call JSON — never touching the host outside
+        // AgentOS's capability/audit/sandbox layer. `--allowed-tools` is additive
+        // and does NOT restrict in the default permission mode, so the denylist
+        // is the only thing that actually blocks. When images are present we keep
+        // `Read` available (scoped via --add-dir + cwd) so Claude can load the
+        // image files — the only way the CLI accepts images.
+        cmd.arg("--disallowed-tools");
+        for tool in CLAUDE_BUILTIN_TOOLS {
+            if image_dir.is_some() && *tool == "Read" {
+                continue;
+            }
+            cmd.arg(tool);
+        }
+        if let Some(dir) = image_dir {
+            cmd.arg("--add-dir").arg(dir).current_dir(dir);
+        }
+        // When an MCP config is attached, expose the 4 AgentOS meta-tools as
+        // native MCP tools. The built-in denylist above still applies, so only
+        // these `mcp__agentos__*` tools are allowed alongside the denied built-ins.
+        if let Some(path) = &self.mcp_config_path {
+            cmd.arg("--mcp-config").arg(path);
+            cmd.arg("--allowed-tools")
+                .arg("mcp__agentos__search_tools")
+                .arg("mcp__agentos__describe_tool")
+                .arg("mcp__agentos__list_tools")
+                .arg("mcp__agentos__invoke_tool");
+        }
+        if !system.is_empty() {
+            cmd.arg("--system-prompt").arg(system);
+        }
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        cmd
     }
 
-    async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
+    /// Flatten the context to a `(system, prompt)` pair and, if the context
+    /// carries images, write them to a fresh temp dir and append file
+    /// references to the prompt. The returned `TempDir` must be kept alive
+    /// until the subprocess exits (it is cleaned up on drop).
+    fn prepare_invocation(
+        &self,
+        context: &ContextWindow,
+    ) -> Result<(String, String, Option<tempfile::TempDir>), AgentOSError> {
         let (system, convo) = Self::flatten_context(context);
-        // `claude -p` requires a non-empty prompt; fall back to a nudge.
-        let prompt = if convo.is_empty() {
+        let mut prompt = if convo.is_empty() {
             "Continue.".to_string()
         } else {
             convo
         };
 
-        let mut cmd = Command::new(&self.binary);
-        cmd.arg("-p")
-            .arg(&prompt)
-            .arg("--output-format")
-            .arg("json")
-            .arg("--model")
-            .arg(&self.model)
-            // Disable every built-in tool so Claude acts as a pure reasoning
-            // core and emits AgentOS tool-call JSON instead of running its own
-            // tool loop.
-            .arg("--allowed-tools")
-            .arg("");
-        if !system.is_empty() {
-            cmd.arg("--system-prompt").arg(&system);
+        // Resolve any images to base64 (same helper the Ollama adapter uses).
+        let mut images: Vec<(String, String)> = Vec::new();
+        for entry in context.active_entries() {
+            for part in &entry.parts {
+                if let ContentPart::Image { mime, source } = part {
+                    match crate::media::resolve_image_to_base64(mime, source, &self.image_resolver)
+                    {
+                        Ok((m, b64)) => images.push((m, b64)),
+                        Err(e) => prompt.push_str(&format!("\n\n[image could not be loaded: {e}]")),
+                    }
+                }
+            }
         }
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        if images.is_empty() {
+            return Ok((system, prompt, None));
+        }
+
+        let dir = tempfile::tempdir()
+            .map_err(|e| self.err(format!("failed to create temp dir for images: {e}")))?;
+        let mut names = Vec::new();
+        for (i, (mime, b64)) in images.iter().enumerate() {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| self.err(format!("invalid image base64: {e}")))?;
+            let ext = match mime.rsplit('/').next().unwrap_or("png") {
+                "jpeg" => "jpg",
+                other => other,
+            };
+            let name = format!("image_{}.{}", i + 1, ext);
+            std::fs::write(dir.path().join(&name), &bytes)
+                .map_err(|e| self.err(format!("failed to write image temp file: {e}")))?;
+            names.push(name);
+        }
+        prompt.push_str(&format!(
+            "\n\n[{} image file(s) attached in the current directory: {}. \
+             Use the Read tool to view them.]",
+            names.len(),
+            names.join(", ")
+        ));
+        Ok((system, prompt, Some(dir)))
+    }
+
+    /// Stream a response by parsing `--output-format stream-json`: forward each
+    /// text delta as an [`InferenceEvent::Token`], then the final result object
+    /// as [`InferenceEvent::Done`]. On failure, emits [`InferenceEvent::Error`].
+    async fn run_streaming(
+        &self,
+        context: &ContextWindow,
+        tx: mpsc::Sender<InferenceEvent>,
+    ) -> Result<(), AgentOSError> {
+        // `_image_dir` keeps temp image files alive until the subprocess exits.
+        let (system, prompt, _image_dir) = self.prepare_invocation(context)?;
+
+        let mut cmd = self.base_command(&prompt, &system, _image_dir.as_ref().map(|d| d.path()));
+        // stream-json in print mode requires --verbose; --include-partial-messages
+        // surfaces token-level content_block_delta events.
+        cmd.arg("--output-format")
+            .arg("stream-json")
+            .arg("--verbose")
+            .arg("--include-partial-messages");
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| self.err(format!("failed to spawn '{}': {e}", self.binary)))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| self.err("failed to capture claude CLI stdout"))?;
+        let mut reader = BufReader::new(stdout).lines();
+        let start = Instant::now();
+
+        let outcome = tokio::time::timeout(self.timeout, async {
+            let mut final_result: Option<InferenceResult> = None;
+            while let Some(line) = reader
+                .next_line()
+                .await
+                .map_err(|e| self.err(format!("error reading claude CLI stream: {e}")))?
+            {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let v: serde_json::Value = match serde_json::from_str(trimmed) {
+                    Ok(v) => v,
+                    Err(_) => continue, // ignore any non-JSON noise
+                };
+                match v.get("type").and_then(|t| t.as_str()) {
+                    Some("stream_event") => {
+                        if let Some(text) = v
+                            .get("event")
+                            .filter(|e| {
+                                e.get("type").and_then(|t| t.as_str())
+                                    == Some("content_block_delta")
+                            })
+                            .and_then(|e| e.get("delta"))
+                            .filter(|d| {
+                                d.get("type").and_then(|t| t.as_str()) == Some("text_delta")
+                            })
+                            .and_then(|d| d.get("text"))
+                            .and_then(|t| t.as_str())
+                        {
+                            if !text.is_empty() {
+                                let _ = tx.send(InferenceEvent::Token(text.to_string())).await;
+                            }
+                        }
+                    }
+                    Some("result") => {
+                        // The result object matches the non-streaming shape.
+                        final_result =
+                            Some(self.parse_cli_json(trimmed, start.elapsed().as_millis() as u64)?);
+                    }
+                    _ => {}
+                }
+            }
+            final_result.ok_or_else(|| self.err("claude CLI stream ended without a result event"))
+        })
+        .await
+        .map_err(|_| {
+            self.err(format!(
+                "claude CLI timed out after {}s",
+                self.timeout.as_secs()
+            ))
+        })?;
+
+        match outcome {
+            Ok(result) => {
+                let _ = tx.send(InferenceEvent::Done(result)).await;
+                let _ = child.wait().await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = child.start_kill();
+                let _ = tx.send(InferenceEvent::Error(e.to_string())).await;
+                Err(e)
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl LLMCore for ClaudeCodeCore {
+    /// Native (MCP) tool-calling is active only when an MCP config is attached
+    /// via [`ClaudeCodeCore::with_mcp_config`] — the subprocess then exposes the
+    /// 4 AgentOS meta-tools as native `mcp__agentos__*` tools. Otherwise this is
+    /// `false` and the kernel falls back to the JSON-in-markdown envelope path
+    /// (tool instructions injected into the system prompt, tool calls recovered
+    /// from `InferenceResult.text`).
+    fn supports_native_tool_calling(&self) -> bool {
+        self.mcp_config_path.is_some()
+    }
+
+    async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
+        // `_image_dir` keeps the temp image files alive until the call returns.
+        let (system, prompt, _image_dir) = self.prepare_invocation(context)?;
+
+        let mut cmd = self.base_command(&prompt, &system, _image_dir.as_ref().map(|d| d.path()));
+        cmd.arg("--output-format").arg("json");
 
         let start = Instant::now();
         let output = tokio::time::timeout(self.timeout, cmd.output())
@@ -246,6 +532,25 @@ impl LLMCore for ClaudeCodeCore {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         self.parse_cli_json(&stdout, start.elapsed().as_millis() as u64)
+    }
+
+    async fn infer_stream(
+        &self,
+        context: &ContextWindow,
+        tx: mpsc::Sender<InferenceEvent>,
+    ) -> Result<(), AgentOSError> {
+        self.run_streaming(context, tx).await
+    }
+
+    async fn infer_stream_with_tools(
+        &self,
+        context: &ContextWindow,
+        _tools: &[ToolManifest],
+        tx: mpsc::Sender<InferenceEvent>,
+    ) -> Result<(), AgentOSError> {
+        // Tools are described in the system prompt (non-native path), so the
+        // structured list is unused — stream exactly as `infer_stream`.
+        self.run_streaming(context, tx).await
     }
 
     fn capabilities(&self) -> &ModelCapabilities {
@@ -412,5 +717,98 @@ mod tests {
             ClaudeCodeCore::new("default").provider_name(),
             "claude-code"
         );
+    }
+
+    #[test]
+    fn supports_images_and_streaming() {
+        let caps = ClaudeCodeCore::new("default").capabilities().clone();
+        assert!(caps.supports_images);
+        assert!(caps.supports_streaming);
+    }
+
+    #[test]
+    fn prepare_invocation_no_images_returns_none() {
+        let core = ClaudeCodeCore::new("default");
+        let mut ctx = ContextWindow::new(10_000);
+        ctx.push(entry(ContextRole::User, "hello"));
+        let (_system, prompt, dir) = core.prepare_invocation(&ctx).unwrap();
+        assert!(dir.is_none());
+        assert!(prompt.contains("hello"));
+    }
+
+    #[test]
+    fn prepare_invocation_writes_image_and_references_it() {
+        let core = ClaudeCodeCore::new("default");
+        let mut ctx = ContextWindow::new(10_000);
+        // 1x1 PNG.
+        let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgAAIAAAUAAen63NgAAAAASUVORK5CYII=";
+        let mut e = entry(ContextRole::User, "what is in this image?");
+        e.parts.push(ContentPart::Image {
+            mime: "image/png".to_string(),
+            source: agentos_types::ImageSource::Base64 {
+                data: b64.to_string(),
+            },
+        });
+        ctx.push(e);
+        let (_system, prompt, dir) = core.prepare_invocation(&ctx).expect("prepare ok");
+        let dir = dir.expect("temp image dir created");
+        assert!(dir.path().join("image_1.png").exists());
+        assert!(prompt.contains("image_1.png"));
+        assert!(prompt.contains("Read tool"));
+    }
+
+    fn cmd_args(cmd: &Command) -> Vec<String> {
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn base_command_denies_all_builtins_without_images() {
+        let core = ClaudeCodeCore::new("default");
+        let args = cmd_args(&core.base_command("hi", "", None));
+        assert!(args.iter().any(|a| a == "--disallowed-tools"));
+        // No additive allowlist (it doesn't restrict in the default mode).
+        assert!(!args.iter().any(|a| a == "--allowed-tools"));
+        // Host-touching tools must be denied, including Read when no images.
+        for t in ["Write", "Bash", "Read", "Edit", "WebFetch"] {
+            assert!(args.iter().any(|a| a == t), "expected {t} in denylist");
+        }
+    }
+
+    #[test]
+    fn base_command_keeps_read_only_for_images() {
+        let core = ClaudeCodeCore::new("default");
+        let args = cmd_args(&core.base_command("hi", "", Some(std::path::Path::new("/tmp"))));
+        assert!(args.iter().any(|a| a == "--disallowed-tools"));
+        assert!(args.iter().any(|a| a == "--add-dir"));
+        // Read stays available for image loading; everything else stays denied.
+        assert!(!args.iter().any(|a| a == "Read"));
+        assert!(args.iter().any(|a| a == "Write"));
+        assert!(args.iter().any(|a| a == "Bash"));
+    }
+
+    #[test]
+    fn base_command_with_mcp_config_adds_flags() {
+        use std::path::PathBuf;
+        let core = ClaudeCodeCore::new("default").with_mcp_config(PathBuf::from("/tmp/x.json"));
+        let args = cmd_args(&core.base_command("hi", "", None));
+        // MCP config + the 4 allowed meta-tools are present.
+        assert!(args.iter().any(|a| a == "--mcp-config"));
+        assert!(args.iter().any(|a| a == "/tmp/x.json"));
+        assert!(args.iter().any(|a| a == "mcp__agentos__invoke_tool"));
+        // Built-ins remain denied.
+        assert!(args.iter().any(|a| a == "--disallowed-tools"));
+        assert!(args.iter().any(|a| a == "Write"));
+    }
+
+    #[test]
+    fn supports_native_reflects_mcp_config() {
+        use std::path::PathBuf;
+        assert!(!ClaudeCodeCore::new("default").supports_native_tool_calling());
+        assert!(ClaudeCodeCore::new("default")
+            .with_mcp_config(PathBuf::from("/tmp/x.json"))
+            .supports_native_tool_calling());
     }
 }

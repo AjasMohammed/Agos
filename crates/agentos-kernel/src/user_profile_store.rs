@@ -212,6 +212,24 @@ impl UserProfileStore {
         .context("spawn_blocking upsert profile entry")?
     }
 
+    /// Count of active profile entries (cheaper than `list` for status display).
+    pub async fn count_active(&self) -> anyhow::Result<usize> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            let guard = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
+            let n: i64 = guard.query_row(
+                "SELECT COUNT(*) FROM profile_entries WHERE status = 'active'",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(n as usize)
+        })
+        .await
+        .context("spawn_blocking count_active profile entries")?
+    }
+
     /// Active entries ordered by pin_rank ASC, updated_at DESC.
     pub async fn list(&self, limit: u32) -> anyhow::Result<Vec<ProfileEntry>> {
         let conn = Arc::clone(&self.conn);
@@ -392,6 +410,53 @@ impl UserProfileStore {
         })
         .await
         .context("spawn_blocking forget profile entry")?
+    }
+
+    /// Apply decay and archival updates from the hourly sweep in a **single
+    /// transaction**, avoiding the O(N) sequential `spawn_blocking` round-trips
+    /// that individual `edit()` calls would require.
+    ///
+    /// `decays` is a slice of `(id, new_pin_rank)` pairs for entries whose rank
+    /// has changed. `archives` is a slice of ids to set to `status='archived'`.
+    /// Both sets are applied together before `bump_version`; the lock is held
+    /// for the duration of the transaction only.
+    pub async fn apply_decay_batch(
+        &self,
+        decays: &[(String, i64)],
+        archives: &[String],
+    ) -> anyhow::Result<()> {
+        if decays.is_empty() && archives.is_empty() {
+            return Ok(());
+        }
+        let conn = Arc::clone(&self.conn);
+        let decays = decays.to_vec();
+        let archives = archives.to_vec();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let guard = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
+            let tx = guard.unchecked_transaction()?;
+            let now = chrono::Utc::now().to_rfc3339();
+            for (id, new_rank) in &decays {
+                tx.execute(
+                    "UPDATE profile_entries SET pin_rank = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![new_rank, now, id],
+                )?;
+            }
+            for id in &archives {
+                tx.execute(
+                    "UPDATE profile_entries SET status = 'archived', updated_at = ?1 WHERE id = ?2",
+                    rusqlite::params![now, id],
+                )?;
+            }
+            if !decays.is_empty() || !archives.is_empty() {
+                bump_version(&tx)?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .context("spawn_blocking apply_decay_batch")?
     }
 
     /// Delete every profile entry (right-to-forget, Phase 6). Returns the number

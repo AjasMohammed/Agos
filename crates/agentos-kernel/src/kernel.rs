@@ -1344,6 +1344,48 @@ impl Kernel {
             .unwrap_or_else(|e| e.into_inner()) = sink;
     }
 
+    /// Resolve a channel's vaulted secret stored under `{credential_key}.{suffix}`.
+    /// Used for the WhatsApp webhook app-secret / verify-token (vault convention,
+    /// so no `RegisteredChannel`/connect-flow changes are needed).
+    async fn channel_aux_secret(&self, channel_id: &str, suffix: &str) -> Option<String> {
+        let cid: ChannelInstanceID = channel_id.parse().ok()?;
+        let cred = match self.channel_registry.get_by_id(&cid).await {
+            Ok(Some(ch)) => ch.credential_key,
+            _ => return None,
+        };
+        if cred.is_empty() {
+            return None;
+        }
+        self.vault
+            .get(&format!("{cred}.{suffix}"))
+            .await
+            .ok()
+            .map(|s| s.as_str().to_string())
+    }
+
+    /// Verify a WhatsApp webhook `X-Hub-Signature-256` against the app secret in
+    /// the vault (`{credential_key}.app_secret`). Fail-closed if absent.
+    pub async fn whatsapp_verify_signature(
+        &self,
+        channel_id: &str,
+        body: &[u8],
+        signature: &str,
+    ) -> bool {
+        match self.channel_aux_secret(channel_id, "app_secret").await {
+            Some(secret) => agentos_channels::whatsapp::verify_whatsapp_signature(
+                secret.as_bytes(),
+                body,
+                signature,
+            ),
+            None => false,
+        }
+    }
+
+    /// The WhatsApp webhook GET verify-token (`{credential_key}.verify_token`).
+    pub async fn whatsapp_verify_token(&self, channel_id: &str) -> Option<String> {
+        self.channel_aux_secret(channel_id, "verify_token").await
+    }
+
     fn merge_chat_user_parts(
         new_message: &str,
         user_parts: Option<Vec<agentos_types::ContentPart>>,
@@ -3866,15 +3908,20 @@ impl Kernel {
         );
 
         // Proactive personalization — background interest aggregator (Phase 3).
-        // Opens its own SQLite store; the model is harmless when disabled (gated
-        // on `personalization.enabled`). Zero task-context cost.
-        let user_interests_store = Arc::new(
+        // When `personalization.enabled` is false we use an in-memory store so
+        // no `user_interests.db` file is created on disk (Phase 6 invariant:
+        // no personalization DB files when the operator has opted out).
+        let user_interests_store = Arc::new(if config.personalization.enabled {
             crate::user_interests_store::UserInterestsStore::open(
                 data_dir.join("user_interests.db"),
             )
             .await
-            .map_err(|e| anyhow::anyhow!("UserInterestsStore init failed: {}", e))?,
-        );
+            .map_err(|e| anyhow::anyhow!("UserInterestsStore init failed: {}", e))?
+        } else {
+            crate::user_interests_store::UserInterestsStore::open_in_memory()
+                .await
+                .map_err(|e| anyhow::anyhow!("UserInterestsStore in-memory init failed: {}", e))?
+        });
         // Clone the interests store before moving it into the InterestModel so
         // the FeedbackProcessor (Phase 5) can also hold a handle.
         let user_interests_store_for_feedback = Arc::clone(&user_interests_store);
@@ -4892,13 +4939,13 @@ impl Kernel {
             Arc::new(crate::tool_scoping::HeuristicClassifier)
         };
 
-        // Proactive recommendation engine (Phase 4). Opens its own SQLite store;
-        // the engine is harmless when disabled (both proactive_enabled gates are off
-        // by default). Zero task-context cost — only driven by the periodic tick.
-        let recommendations_db_path = data_dir.join("recommendations.db");
-        let recommendations_store = Arc::new(
-            match crate::recommendations_store::RecommendationsStore::open(recommendations_db_path)
-                .await
+        // Proactive recommendation engine (Phase 4). When disabled, use an in-memory
+        // store so no `recommendations.db` file is created (Phase 6 invariant).
+        let recommendations_store = Arc::new(if config.personalization.enabled {
+            match crate::recommendations_store::RecommendationsStore::open(
+                data_dir.join("recommendations.db"),
+            )
+            .await
             {
                 Ok(s) => s,
                 Err(e) => {
@@ -4909,14 +4956,19 @@ impl Kernel {
                             anyhow::anyhow!("RecommendationsStore in-memory fallback failed: {e2}")
                         })?
                 }
-            },
-        );
+            }
+        } else {
+            crate::recommendations_store::RecommendationsStore::open_in_memory()
+                .await
+                .map_err(|e| anyhow::anyhow!("RecommendationsStore in-memory init failed: {e}"))?
+        });
         let recommendation_engine =
             Arc::new(crate::recommendation_engine::RecommendationEngine::new(
                 recommendations_store,
                 interest_model.clone(),
                 user_profile_store.clone(),
                 notification_router.clone(),
+                audit.clone(),
                 &config.personalization,
             ));
 
@@ -5963,6 +6015,7 @@ mod preflight_tests {
             otel: OtelConfig::default(),
             approval: Default::default(),
             api: Default::default(),
+            web: Default::default(),
             chat: Default::default(),
             user_adaptation: Default::default(),
             env: Default::default(),
@@ -6221,6 +6274,7 @@ mod vault_bootstrap_tests {
             otel: OtelConfig::default(),
             approval: Default::default(),
             api: Default::default(),
+            web: Default::default(),
             chat: Default::default(),
             user_adaptation: Default::default(),
             env: Default::default(),

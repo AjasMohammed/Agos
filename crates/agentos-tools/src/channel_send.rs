@@ -80,22 +80,46 @@ impl AgentTool for ChannelSendTool {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
+        // An album of image URLs (Telegram sendMediaGroup): 2–10 items.
+        let image_urls: Vec<String> = payload
+            .get("image_urls")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if image_urls.len() > 10 {
+            return Err(AgentOSError::SchemaValidation(
+                "channel-send: 'image_urls' album supports at most 10 items".into(),
+            ));
+        }
+
         let url_sources = [
             image_url.is_some(),
             document_url.is_some(),
             file_id.is_some(),
+            !image_urls.is_empty(),
         ];
         if url_sources.iter().filter(|s| **s).count() > 1 {
             return Err(AgentOSError::SchemaValidation(
-                "channel-send: provide only one of 'image_url', 'document_url', or 'file_id'"
+                "channel-send: provide only one of 'image_url', 'document_url', 'file_id', or 'image_urls'"
                     .into(),
             ));
         }
 
-        // A message must carry something: text, an image, a document, or a file_id.
-        if text.is_empty() && image_url.is_none() && document_url.is_none() && file_id.is_none() {
+        // A message must carry something: text or a media source.
+        if text.is_empty()
+            && image_url.is_none()
+            && document_url.is_none()
+            && file_id.is_none()
+            && image_urls.is_empty()
+        {
             return Err(AgentOSError::SchemaValidation(
-                "channel-send requires non-empty 'text', or an 'image_url'/'document_url'/'file_id'"
+                "channel-send requires non-empty 'text', or an 'image_url'/'document_url'/'file_id'/'image_urls'"
                     .into(),
             ));
         }
@@ -124,6 +148,7 @@ impl AgentTool for ChannelSendTool {
             "image_url": image_url,
             "document_url": document_url,
             "file_id": file_id,
+            "image_urls": image_urls,
             "caption": caption,
             "filename": filename,
         }))

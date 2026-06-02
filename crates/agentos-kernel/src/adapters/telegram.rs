@@ -291,7 +291,36 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
                 None => (String::new(), None),
             };
 
-            if let Some(inline) = &att.inline {
+            if !att.group_urls.is_empty() {
+                // Album of image URLs via sendMediaGroup (2–10 items). The caption
+                // attaches to the first item and shows as the album caption.
+                let mut all = Vec::with_capacity(att.group_urls.len() + 1);
+                all.push(att.url.clone());
+                all.extend(att.group_urls.iter().cloned());
+                let media: Vec<Value> = all
+                    .iter()
+                    .take(10)
+                    .enumerate()
+                    .map(|(i, u)| {
+                        let mut item = json!({ "type": "photo", "media": u });
+                        if i == 0 && !plain_caption.is_empty() {
+                            if let Some(html) = &html_caption {
+                                item["caption"] = json!(html);
+                                item["parse_mode"] = json!("HTML");
+                            } else {
+                                item["caption"] = json!(plain_caption);
+                            }
+                        }
+                        item
+                    })
+                    .collect();
+                let mut payload = json!({ "chat_id": &chat_id, "media": media });
+                if let Some(rid) = reply_to {
+                    payload["reply_to_message_id"] = json!(rid);
+                }
+                let group_url = self.api_url("sendMediaGroup");
+                telegram_post_json_with_retry(&self.client, &group_url, &payload).await?;
+            } else if let Some(inline) = &att.inline {
                 // Inline bytes (resolved from a file_id): multipart upload.
                 use base64::Engine;
                 let bytes = base64::engine::general_purpose::STANDARD
