@@ -63,11 +63,10 @@ async fn wait_for_approval_resolution(
 }
 use tracing::Instrument;
 
-/// Soft threshold (seconds) after which a long-running LLM inference is
-/// escalated to the user instead of being killed outright. The previous
-/// hard timeout sat here; with the user-gate in place the inference is
-/// allowed to keep running while we ask the user whether to abort.
-const LLM_INFERENCE_TIMEOUT_SECS: u64 = 120;
+// Soft threshold (seconds) after which a long-running LLM inference is
+// escalated to the user instead of being killed outright is now per-adapter:
+// `LLMCore::inference_watchdog_secs()` (default 120; claude-code MCP returns a
+// larger value since one infer call runs a whole tool loop).
 
 /// Time (seconds) we wait for the user to respond to a long-running
 /// inference escalation before defaulting to abort. Kept short so a
@@ -76,8 +75,8 @@ const LLM_INFERENCE_USER_GRACE_SECS: u64 = 60;
 
 /// Maximum number of times the user can extend a single inference
 /// before we force-abort. Upper bound on total wall-clock per inference is
-/// `(MAX_EXTENSIONS + 1) * LLM_INFERENCE_TIMEOUT_SECS + MAX_EXTENSIONS * LLM_INFERENCE_USER_GRACE_SECS`
-/// — with the defaults that's 4*120 + 3*60 = 660s ≈ 11 min, since the
+/// `(MAX_EXTENSIONS + 1) * watchdog_secs + MAX_EXTENSIONS * LLM_INFERENCE_USER_GRACE_SECS`
+/// (where `watchdog_secs` is the adapter's `inference_watchdog_secs()`), since the
 /// inference keeps running while we wait for the user during each grace window.
 const LLM_INFERENCE_MAX_EXTENSIONS: u32 = 3;
 
@@ -2965,6 +2964,10 @@ impl Kernel {
                 // available without re-borrowing through `infer_fut`.
                 let provider_name = current_llm.provider_name().to_string();
                 let model_name = current_llm.model_name().to_string();
+                // Per-adapter watchdog threshold: adapters whose single infer
+                // call runs a whole internal tool loop (e.g. claude-code MCP)
+                // report a larger value than the global default.
+                let watchdog_secs = current_llm.inference_watchdog_secs();
                 let infer_fut = current_llm.infer_with_options(
                     &compiled_context,
                     tools_for_inference,
@@ -2974,8 +2977,7 @@ impl Kernel {
                 let inference_start = std::time::Instant::now();
                 let mut extensions_used: u32 = 0;
                 loop {
-                    let threshold_sleep =
-                        tokio::time::sleep(Duration::from_secs(LLM_INFERENCE_TIMEOUT_SECS));
+                    let threshold_sleep = tokio::time::sleep(Duration::from_secs(watchdog_secs));
                     tokio::pin!(threshold_sleep);
 
                     let step = tokio::select! {

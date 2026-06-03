@@ -503,6 +503,14 @@ impl LLMCore for ClaudeCodeCore {
         self.mcp_config_path.is_some()
     }
 
+    fn inference_watchdog_secs(&self) -> u64 {
+        // One claude-code inference spawns a subprocess and, in MCP mode, runs
+        // the agent's entire tool loop (discover → invoke → reason → repeat)
+        // before returning — legitimately minutes. Use a generous watchdog so
+        // the kernel doesn't abort real work at the 120s default.
+        300
+    }
+
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
         // `_image_dir` keeps the temp image files alive until the call returns.
         let (system, prompt, _image_dir) = self.prepare_invocation(context)?;
