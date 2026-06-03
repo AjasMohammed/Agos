@@ -18,7 +18,7 @@ use axum::{Json, Router};
 const MAX_BODY_BYTES: usize = 256 * 1024;
 
 use crate::server::{McpAuthValidator, McpServer, McpToolExecutor};
-use crate::types::JsonRpcRequest;
+use crate::types::{JsonRpcRequest, JsonRpcResponse};
 
 // ── App state ─────────────────────────────────────────────────────────────────
 
@@ -66,7 +66,12 @@ async fn handle_health() -> impl IntoResponse {
 async fn handle_mcp_request(
     State(state): State<McpHttpState>,
     headers: HeaderMap,
-    Json(req): Json<JsonRpcRequest>,
+    // Accept the raw JSON value first: JSON-RPC *notifications* (e.g.
+    // `notifications/initialized`, sent by MCP clients during the Streamable
+    // HTTP handshake) carry no `id`, so a typed `Json<JsonRpcRequest>` extractor
+    // would 422 them and break the connection. Mirror the stdio path: 202 a
+    // notification, only typed-dispatch a request with an `id`.
+    Json(value): Json<serde_json::Value>,
 ) -> Response {
     // Extract Bearer token from Authorization header
     let token = headers
@@ -85,6 +90,28 @@ async fn handle_mcp_request(
         )
             .into_response();
     }
+
+    // Notifications (no `id`) require no response — acknowledge with 202.
+    if value.get("id").is_none() {
+        return StatusCode::ACCEPTED.into_response();
+    }
+
+    // Typed-dispatch a request. A malformed request body becomes a JSON-RPC
+    // parse error rather than an HTTP 422 (so clients see a protocol-level error).
+    let req: JsonRpcRequest = match serde_json::from_value(value) {
+        Ok(r) => r,
+        Err(e) => {
+            let resp =
+                JsonRpcResponse::err(serde_json::Value::Null, -32700, format!("Parse error: {e}"));
+            let body = serde_json::to_string(&resp).unwrap_or_default();
+            return (
+                StatusCode::OK,
+                [("content-type", "application/json")],
+                body,
+            )
+                .into_response();
+        }
+    };
 
     // Dispatch to MCP handler
     let resp = state.server.handle_request(req).await;

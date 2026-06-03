@@ -353,6 +353,7 @@ impl Kernel {
             self.zone_table.clone(),
             self.data_dir.clone(),
             self.cancellation_token.clone(),
+            Arc::clone(&self.hook_registry),
             agent_id,
             permissions,
             workspace_paths,

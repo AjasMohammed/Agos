@@ -36,6 +36,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent_registry::AgentRegistry;
 use crate::capability_dispatch::KernelCapabilityDispatcher;
 use crate::capability_registry::CapabilityRegistry;
+use crate::hooks::HookRegistry;
 use crate::kernel::AgentWorkspacePaths;
 use crate::managed_storage::ZoneTable;
 use agentos_hal::HardwareAbstractionLayer;
@@ -56,6 +57,10 @@ pub struct KernelMcpExecutor {
     zone_table: ZoneTable,
     data_dir: PathBuf,
     cancellation_token: CancellationToken,
+    /// Kernel's hook registry — fired around every gateway tool call so MCP
+    /// tool invocations are audited (`AuditHook`) and gated (`ApprovalHook`)
+    /// exactly like chat/task tool calls.
+    hook_registry: Arc<HookRegistry>,
 
     agent_id: AgentID,
     /// The agent's REAL permission set — never broaden.
@@ -78,6 +83,7 @@ impl KernelMcpExecutor {
         zone_table: ZoneTable,
         data_dir: PathBuf,
         cancellation_token: CancellationToken,
+        hook_registry: Arc<HookRegistry>,
         agent_id: AgentID,
         permissions: PermissionSet,
         workspace_paths: AgentWorkspacePaths,
@@ -91,10 +97,65 @@ impl KernelMcpExecutor {
             zone_table,
             data_dir,
             cancellation_token,
+            hook_registry,
             agent_id,
             permissions,
             workspace_paths,
         }
+    }
+
+    /// Execute `tool_name` with `payload`, firing the kernel's `ToolPre`/
+    /// `ToolPost` hooks around the call so the invocation is audited and
+    /// approval-gated like the chat/task paths.
+    ///
+    /// Fail-closed: if a `ToolPre` hook returns `Abort` (a hard denial, or an
+    /// approval-pending escalation), the tool is refused at the gateway. The
+    /// async approval-wait dance from `task_executor` is intentionally NOT
+    /// implemented here — a denied or pending tool is simply rejected.
+    async fn execute_with_hooks(
+        &self,
+        tool_name: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let task_id = TaskID::new();
+
+        // Fire ToolPre — abort if any hook denies the call.
+        let pre_result = self
+            .hook_registry
+            .fire(&agentos_types::HookEvent::ToolPre {
+                task_id,
+                agent_id: self.agent_id,
+                tool_name: tool_name.to_string(),
+                input_json: serde_json::to_string(&payload).unwrap_or_default(),
+            })
+            .await;
+        if let agentos_types::HookResult::Abort(reason) = pre_result {
+            return Err(format!("tool '{tool_name}' denied by policy: {reason}"));
+        }
+
+        let tool_start = std::time::Instant::now();
+        let result = self
+            .tool_runner
+            .execute(tool_name, payload, self.build_ctx().await)
+            .await;
+        let duration_ms = tool_start.elapsed().as_millis() as u64;
+
+        // Fire ToolPost — informational, always fires regardless of result.
+        let output_json = match &result {
+            Ok(v) => serde_json::to_string(v).unwrap_or_default(),
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        };
+        self.hook_registry
+            .fire(&agentos_types::HookEvent::ToolPost {
+                task_id,
+                agent_id: self.agent_id,
+                tool_name: tool_name.to_string(),
+                output_json,
+                duration_ms,
+            })
+            .await;
+
+        result.map_err(|e| e.to_string())
     }
 
     /// Build a fresh per-call [`ToolExecutionContext`], mirroring the chat path
@@ -232,21 +293,9 @@ impl McpToolExecutor for KernelMcpExecutor {
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         match name {
-            "search_tools" => self
-                .tool_runner
-                .execute("search-tools", args, self.build_ctx().await)
-                .await
-                .map_err(|e| e.to_string()),
-            "describe_tool" => self
-                .tool_runner
-                .execute("describe-tool", args, self.build_ctx().await)
-                .await
-                .map_err(|e| e.to_string()),
-            "list_tools" => self
-                .tool_runner
-                .execute("list-tools", args, self.build_ctx().await)
-                .await
-                .map_err(|e| e.to_string()),
+            "search_tools" => self.execute_with_hooks("search-tools", args).await,
+            "describe_tool" => self.execute_with_hooks("describe-tool", args).await,
+            "list_tools" => self.execute_with_hooks("list-tools", args).await,
             "invoke_tool" => {
                 let tool_name = args
                     .get("name")
@@ -260,10 +309,7 @@ impl McpToolExecutor for KernelMcpExecutor {
                         return Err("invoke_tool: 'payload' must be a JSON object".into());
                     }
                 };
-                self.tool_runner
-                    .execute(&tool_name, payload, self.build_ctx().await)
-                    .await
-                    .map_err(|e| e.to_string())
+                self.execute_with_hooks(&tool_name, payload).await
             }
             other => Err(format!("Unknown MCP tool: {other}")),
         }
