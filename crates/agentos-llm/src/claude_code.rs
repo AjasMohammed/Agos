@@ -48,7 +48,8 @@ use tokio::sync::mpsc;
 use crate::media::{ImageResolver, NoopImageResolver};
 use crate::traits::LLMCore;
 use crate::types::{
-    HealthStatus, InferenceEvent, InferenceResult, ModelCapabilities, StopReason, TokenUsage,
+    HealthStatus, InferenceCost, InferenceEvent, InferenceResult, ModelCapabilities, StopReason,
+    TokenUsage,
 };
 use agentos_types::{AgentOSError, ContentPart, ContextRole, ContextWindow, ToolManifest};
 
@@ -280,7 +281,18 @@ impl ClaudeCodeCore {
             tool_calls: Vec::new(),
             uncertainty: None,
             stop_reason,
-            cost: None,
+            // The CLI reports `total_cost_usd` (the API-EQUIVALENT cost; the
+            // agent actually runs on the subscription). We surface it as the
+            // inference cost so AgentOS's budget governance (warning / pause /
+            // hard-limit in cost_tracker) accounts for and can cap claude-code
+            // spend — otherwise its cost is invisible and runaway loops go
+            // unbudgeted. Per-direction split isn't provided, so input/output
+            // are 0 and the total carries the value.
+            cost: parsed.total_cost_usd.map(|total| InferenceCost {
+                input_cost_usd: 0.0,
+                output_cost_usd: 0.0,
+                total_cost_usd: total,
+            }),
             cached_tokens: usage.cache_read_input_tokens,
         })
     }
@@ -613,6 +625,10 @@ struct ClaudeCliResult {
     duration_ms: Option<u64>,
     #[serde(default)]
     usage: Option<ClaudeCliUsage>,
+    /// API-equivalent cost the CLI computed for this turn (USD). Used to feed
+    /// AgentOS budget governance; not literal subscription billing.
+    #[serde(default)]
+    total_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -691,6 +707,26 @@ mod tests {
         let core = ClaudeCodeCore::new("default");
         let json = r#"{"is_error":false,"result":"x"}"#;
         assert_eq!(core.parse_cli_json(json, 555).unwrap().duration_ms, 555);
+    }
+
+    #[test]
+    fn parse_populates_cost_for_budget_governance() {
+        let core = ClaudeCodeCore::new("default");
+        // With total_cost_usd → cost is surfaced so the budget tracker sees it.
+        let r = core
+            .parse_cli_json(
+                r#"{"is_error":false,"result":"x","total_cost_usd":0.0425}"#,
+                0,
+            )
+            .unwrap();
+        let cost = r.cost.expect("cost populated from total_cost_usd");
+        assert!((cost.total_cost_usd - 0.0425).abs() < 1e-9);
+        // Without it → None (no fabricated cost).
+        assert!(core
+            .parse_cli_json(r#"{"is_error":false,"result":"x"}"#, 0)
+            .unwrap()
+            .cost
+            .is_none());
     }
 
     #[test]
