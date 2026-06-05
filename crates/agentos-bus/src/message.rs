@@ -549,6 +549,17 @@ pub enum KernelCommand {
     TestChannel {
         channel_id: String,
     },
+    /// List approved senders and pending requests in the DM pairing allowlist.
+    ListPairings,
+    /// Approve a pending pairing code, allowlisting the sender that requested it.
+    ApprovePairing {
+        code: String,
+    },
+    /// Revoke an approved sender from a channel's DM allowlist.
+    RevokePairing {
+        channel_id: String,
+        sender_id: String,
+    },
     // Plugin management
     /// List all discovered plugins with their status.
     ListPlugins,
@@ -999,6 +1010,11 @@ pub enum KernelResponse {
 
     // Channel management (Phase 6)
     ChannelList(Vec<agentos_types::RegisteredChannel>),
+    /// DM pairing allowlist snapshot: approved senders + pending requests.
+    PairingList {
+        approved: Vec<PairingEntry>,
+        pending: Vec<PendingPairingEntry>,
+    },
 
     // MCP server health
     McpServerStatusList(Vec<McpServerStatus>),
@@ -1079,6 +1095,27 @@ pub enum KernelResponse {
     },
     /// List of active learned approval policy entries.
     ApprovalPolicyList(Vec<serde_json::Value>),
+}
+
+/// An approved sender on a channel's DM allowlist (transport DTO).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairingEntry {
+    pub channel_id: String,
+    pub sender_id: String,
+    /// RFC 3339 timestamp of when the sender was approved.
+    pub approved_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// A pending (unapproved) pairing request (transport DTO). The pairing code is
+/// intentionally omitted — approval requires the sender to relay it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingPairingEntry {
+    pub channel_id: String,
+    pub sender_id: String,
+    /// RFC 3339 timestamp of when the pending code expires.
+    pub expires_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

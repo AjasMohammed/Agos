@@ -75,6 +75,7 @@ pub mod risk_classifier;
 pub mod router;
 pub mod rpc_manager;
 pub mod run_loop;
+pub mod runtime_resolver;
 pub mod schedule_action_policy;
 pub mod schedule_manager;
 pub mod schedule_persistence;

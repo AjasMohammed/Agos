@@ -104,12 +104,7 @@ async fn handle_mcp_request(
             let resp =
                 JsonRpcResponse::err(serde_json::Value::Null, -32700, format!("Parse error: {e}"));
             let body = serde_json::to_string(&resp).unwrap_or_default();
-            return (
-                StatusCode::OK,
-                [("content-type", "application/json")],
-                body,
-            )
-                .into_response();
+            return (StatusCode::OK, [("content-type", "application/json")], body).into_response();
         }
     };
 

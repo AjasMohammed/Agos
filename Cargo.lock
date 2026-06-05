@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-agent-tester"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-kernel",
  "agentos-llm",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-api"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-audit",
  "agentos-bus",
@@ -130,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-audit"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-types",
  "chrono",
@@ -146,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-bus"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-audit",
  "agentos-capability",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-capability"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-types",
  "agentos-vault",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-channels"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-http",
  "agentos-types",
@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-api",
  "agentos-audit",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-connectors"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-audit",
  "agentos-types",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-hal"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-types",
  "async-trait",
@@ -311,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-http"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "reqwest 0.12.28",
  "thiserror 2.0.18",
@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-kernel"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-audit",
  "agentos-bus",
@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-llm"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-types",
  "async-trait",
@@ -407,7 +407,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-mcp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-audit",
  "agentos-tools",
@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-memory"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-types",
  "anyhow",
@@ -447,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-pipeline"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-types",
  "async-trait",
@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-registry"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-tools",
  "agentos-types",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-runtime"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-types",
  "async-trait",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-sandbox"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-types",
  "libc",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-scratch"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "regex",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-sdk"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-sdk-macros",
  "agentos-tools",
@@ -556,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-sdk-macros"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -565,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-skills"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-types",
  "serde",
@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-storage"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "rusqlite",
  "tempfile",
@@ -589,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-tools"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-audit",
  "agentos-bus",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-types"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-vault"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aes-gcm",
  "agentos-audit",
@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-wasm"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-tools",
  "agentos-types",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "agentos-web"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "agentos-api",
  "agentos-audit",

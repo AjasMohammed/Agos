@@ -31,6 +31,9 @@ pub enum AgentOSError {
     #[error("MCP catalog entry not found: {0}")]
     CatalogEntryNotFound(String),
 
+    #[error("Runtime '{name}' >= {min_version} not found on this host")]
+    RuntimeNotFound { name: String, min_version: String },
+
     #[error("Kernel error: {reason}")]
     KernelError { reason: String },
 
@@ -174,6 +177,7 @@ impl AgentOSError {
             Self::KernelShutdown => "KernelShutdown",
             Self::CatalogParse(_) => "CatalogParse",
             Self::CatalogEntryNotFound(_) => "CatalogEntryNotFound",
+            Self::RuntimeNotFound { .. } => "RuntimeNotFound",
             Self::KernelError { .. } => "KernelError",
             Self::PermissionDenied { .. } => "PermissionDenied",
             Self::InvalidToken { .. } => "InvalidToken",

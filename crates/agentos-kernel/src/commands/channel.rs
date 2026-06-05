@@ -454,6 +454,74 @@ impl Kernel {
         }
     }
 
+    /// List the DM pairing allowlist: approved senders + pending requests.
+    pub(crate) async fn cmd_list_pairings(&self) -> KernelResponse {
+        let approved = self
+            .pairing_manager
+            .list_approved()
+            .await
+            .into_iter()
+            .map(|s| agentos_bus::PairingEntry {
+                channel_id: s.channel_id,
+                sender_id: s.sender_id,
+                approved_at: s.approved_at.to_rfc3339(),
+                label: s.label,
+            })
+            .collect();
+        let pending = self
+            .pairing_manager
+            .list_pending()
+            .await
+            .into_iter()
+            .map(|p| agentos_bus::PendingPairingEntry {
+                channel_id: p.channel_id,
+                sender_id: p.sender_id,
+                expires_at: p.expires_at.to_rfc3339(),
+            })
+            .collect();
+        KernelResponse::PairingList { approved, pending }
+    }
+
+    /// Approve a pending pairing code, allowlisting the sender.
+    pub(crate) async fn cmd_approve_pairing(&self, code: String) -> KernelResponse {
+        // Normalize to match the `/pair` parser, which upper-cases codes.
+        match self
+            .pairing_manager
+            .approve_code(&code.trim().to_uppercase())
+            .await
+        {
+            Ok(sender) => KernelResponse::Success {
+                data: Some(serde_json::json!({
+                    "message": "Pairing approved",
+                    "channel_id": sender.channel_id,
+                    "sender_id": sender.sender_id,
+                })),
+            },
+            Err(e) => KernelResponse::Error { message: e },
+        }
+    }
+
+    /// Revoke an approved sender from a channel's DM allowlist.
+    pub(crate) async fn cmd_revoke_pairing(
+        &self,
+        channel_id: String,
+        sender_id: String,
+    ) -> KernelResponse {
+        if self.pairing_manager.revoke(&channel_id, &sender_id).await {
+            KernelResponse::Success {
+                data: Some(serde_json::json!({
+                    "message": "Pairing revoked",
+                    "channel_id": channel_id,
+                    "sender_id": sender_id,
+                })),
+            }
+        } else {
+            KernelResponse::Error {
+                message: format!("No approved sender '{sender_id}' on channel '{channel_id}'"),
+            }
+        }
+    }
+
     /// Build a `DeliveryAdapter` for the given channel kind.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn build_channel_adapter(

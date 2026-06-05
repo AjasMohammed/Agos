@@ -2164,6 +2164,12 @@ impl Kernel {
             }
             KernelCommand::ListChannels => self.cmd_list_channels().await,
             KernelCommand::TestChannel { channel_id } => self.cmd_test_channel(channel_id).await,
+            KernelCommand::ListPairings => self.cmd_list_pairings().await,
+            KernelCommand::ApprovePairing { code } => self.cmd_approve_pairing(code).await,
+            KernelCommand::RevokePairing {
+                channel_id,
+                sender_id,
+            } => self.cmd_revoke_pairing(channel_id, sender_id).await,
             KernelCommand::ListPlugins => self.cmd_list_plugins().await,
             KernelCommand::EnablePlugin { plugin_id } => self.cmd_enable_plugin(plugin_id).await,
             KernelCommand::DisablePlugin { plugin_id } => self.cmd_disable_plugin(plugin_id).await,

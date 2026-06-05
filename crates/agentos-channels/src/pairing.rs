@@ -34,6 +34,16 @@ struct PendingPairing {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Public snapshot of a pending pairing request. The 6-char code is
+/// intentionally omitted — approval requires the sender to relay the code they
+/// received, so it is never surfaced to operators via introspection.
+#[derive(Debug, Clone)]
+pub struct PendingPairingInfo {
+    pub channel_id: String,
+    pub sender_id: String,
+    pub expires_at: DateTime<Utc>,
+}
+
 /// Manages the DM pairing allowlist across all channels.
 ///
 /// Unknown senders receive a one-time pairing code; approved senders are
@@ -127,6 +137,22 @@ impl PairingManager {
         self.allowed.read().await.clone()
     }
 
+    /// List pending (unapproved, unexpired) pairing requests. Codes are omitted.
+    pub async fn list_pending(&self) -> Vec<PendingPairingInfo> {
+        let now = Utc::now();
+        self.pending
+            .read()
+            .await
+            .values()
+            .filter(|p| p.expires_at > now)
+            .map(|p| PendingPairingInfo {
+                channel_id: p.channel_id.clone(),
+                sender_id: p.sender_id.clone(),
+                expires_at: p.expires_at,
+            })
+            .collect()
+    }
+
     /// Revoke an approved sender.
     pub async fn revoke(&self, channel_id: &str, sender_id: &str) -> bool {
         let mut allowed = self.allowed.write().await;
@@ -209,6 +235,20 @@ mod tests {
         pm.approve_code(&code).await.unwrap();
         // Second use should fail.
         assert!(pm.approve_code(&code).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_pending_tracks_unapproved() {
+        let pm = PairingManager::new();
+        let code = pm.generate_code("telegram", "user42").await;
+        let pending = pm.list_pending().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].sender_id, "user42");
+        assert_eq!(pending[0].channel_id, "telegram");
+
+        // Approving removes it from pending.
+        pm.approve_code(&code).await.unwrap();
+        assert!(pm.list_pending().await.is_empty());
     }
 
     #[tokio::test]

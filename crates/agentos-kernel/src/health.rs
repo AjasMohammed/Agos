@@ -8,6 +8,18 @@ use std::sync::Arc;
 struct HealthResponse {
     status: &'static str,
     uptime_seconds: u64,
+    /// Per-channel health, populated when running as a gateway with channels
+    /// connected. Empty (and omitted) for non-gateway deployments.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    channels: Vec<ChannelHealthEntry>,
+}
+
+#[derive(Serialize)]
+struct ChannelHealthEntry {
+    channel: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -23,9 +35,31 @@ async fn healthz(State(kernel): State<Arc<Kernel>>) -> Json<HealthResponse> {
     let uptime = (chrono::Utc::now() - kernel.started_at)
         .num_seconds()
         .max(0) as u64;
+
+    let mut channels: Vec<ChannelHealthEntry> = kernel
+        .channel_manager
+        .health()
+        .await
+        .into_iter()
+        .map(|(channel, health)| {
+            let (status, detail) = match health {
+                agentos_channels::ChannelHealth::Connected => ("ok", None),
+                agentos_channels::ChannelHealth::Degraded(msg) => ("degraded", Some(msg)),
+                agentos_channels::ChannelHealth::Disconnected(msg) => ("down", Some(msg)),
+            };
+            ChannelHealthEntry {
+                channel,
+                status,
+                detail,
+            }
+        })
+        .collect();
+    channels.sort_by(|a, b| a.channel.cmp(&b.channel));
+
     Json(HealthResponse {
         status: "ok",
         uptime_seconds: uptime,
+        channels,
     })
 }
 

@@ -21,7 +21,7 @@ reqwest = { workspace = true, features = ["json", "rustls-tls", "stream", "multi
 futures-util = "0.3"
 csv = "1.3.1"
 rusqlite = { workspace = true, features = ["bundled", "vtab"] }
-agentos-vault = { version = "0.1.0", path = "../agentos-vault" }
+agentos-vault = { version = "1.0.0", path = "../agentos-vault" }
 base64.workspace = true
 agentos-memory = { path = "../agentos-memory" }
 agentos-scratch = { path = "../agentos-scratch" }

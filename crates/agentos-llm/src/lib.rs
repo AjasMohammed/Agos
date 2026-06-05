@@ -9,6 +9,7 @@ pub mod mock;
 pub mod ollama;
 pub mod openai;
 pub mod retry;
+pub mod session;
 pub mod streaming_helpers;
 pub mod tool_helpers;
 pub mod traits;
@@ -25,6 +26,7 @@ pub use mock::{MockCallMethod, MockCallRecord, MockLLMCore, MockResponse};
 pub use ollama::OllamaCore;
 pub use openai::OpenAICore;
 pub use retry::{CircuitBreaker, RetryPolicy};
+pub use session::{ClaudeSessionLookup, SessionState};
 pub use traits::LLMCore;
 pub use types::{
     calculate_inference_cost, default_pricing_table, parse_uncertainty, HealthStatus,
