@@ -16,6 +16,7 @@ pub mod channel_chat_bridge;
 pub mod chat_store;
 pub mod checkpoint_store;
 pub mod claude_mcp_gateway;
+pub mod claude_session_store;
 pub mod commands;
 pub mod config;
 pub mod config_watcher;

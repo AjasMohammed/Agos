@@ -46,12 +46,15 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::media::{ImageResolver, NoopImageResolver};
+use crate::session::SessionState;
 use crate::traits::LLMCore;
 use crate::types::{
     HealthStatus, InferenceCost, InferenceEvent, InferenceResult, ModelCapabilities, StopReason,
     TokenUsage,
 };
-use agentos_types::{AgentOSError, ContentPart, ContextRole, ContextWindow, ToolManifest};
+use agentos_types::{
+    AgentOSError, ContentPart, ContextEntry, ContextRole, ContextWindow, ToolManifest,
+};
 
 /// Default model when none (or "default") is specified. Matches the `claude`
 /// CLI's own default tier.
@@ -117,6 +120,11 @@ pub struct ClaudeCodeCore {
     /// When set, attached to the subprocess via `--mcp-config` so it exposes the
     /// 4 AgentOS meta-tools as native MCP tools (see [`Self::with_mcp_config`]).
     mcp_config_path: Option<std::path::PathBuf>,
+    /// Opt-in session resume. When set, the adapter keys a CLI session by the
+    /// `ContextWindow` id and uses `--resume` to send only the delta turn instead
+    /// of replaying the full context. `None` (default) ⇒ stateless, byte-identical
+    /// to the non-resume path. The session is a cache only (see [`crate::session`]).
+    resume_store: Option<Arc<dyn crate::session::ClaudeSessionLookup>>,
 }
 
 impl ClaudeCodeCore {
@@ -135,6 +143,7 @@ impl ClaudeCodeCore {
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             image_resolver: Arc::new(NoopImageResolver),
             mcp_config_path: None,
+            resume_store: None,
             capabilities: ModelCapabilities {
                 context_window_tokens: DEFAULT_CONTEXT_WINDOW,
                 // Images are passed to the CLI as temp files + the Read tool
@@ -169,6 +178,17 @@ impl ClaudeCodeCore {
     /// Inject the image resolver used to turn `ImageSource` into base64 for vision.
     pub fn with_image_resolver(mut self, resolver: Arc<dyn ImageResolver>) -> Self {
         self.image_resolver = resolver;
+        self
+    }
+
+    /// Enable opt-in session resume (see [`crate::session::ClaudeSessionLookup`]).
+    /// When set, the adapter sends only the delta turn with `--resume`; when
+    /// unset (default) the adapter is fully stateless.
+    pub fn with_resume_store(
+        mut self,
+        store: Arc<dyn crate::session::ClaudeSessionLookup>,
+    ) -> Self {
+        self.resume_store = Some(store);
         self
     }
 
@@ -230,13 +250,52 @@ impl ClaudeCodeCore {
         (system.trim().to_string(), convo.trim().to_string())
     }
 
+    /// Flatten a slice of context entries into a single role-marked prompt
+    /// string. Used for the resume **delta** turn: on `--resume` the CLI session
+    /// already holds the prior conversation + system prompt, so we send only the
+    /// new entries (no separate `--system-prompt`).
+    fn flatten_delta(entries: &[&ContextEntry]) -> String {
+        let mut convo = String::new();
+        for entry in entries {
+            let marker = match entry.role {
+                ContextRole::System => "## System",
+                ContextRole::User => "## User",
+                ContextRole::Assistant => "## Assistant",
+                ContextRole::ToolResult => "## Tool Result",
+            };
+            convo.push_str("\n\n");
+            convo.push_str(marker);
+            convo.push('\n');
+            convo.push_str(&entry.text());
+        }
+        convo.trim().to_string()
+    }
+
+    /// Look up an existing resume session for this context window, if resume is
+    /// enabled. `None` ⇒ stateless full-context send.
+    async fn lookup_resume(&self, context: &ContextWindow) -> Option<SessionState> {
+        let store = self.resume_store.as_ref()?;
+        store.lookup(&context.id.to_string()).await
+    }
+
+    /// Record the (possibly new) CLI session id + high-water mark after a turn,
+    /// so the next turn can resume and send only the delta. Best-effort.
+    async fn record_resume(&self, context: &ContextWindow, session_id: &str, entry_count: usize) {
+        if let Some(store) = self.resume_store.as_ref() {
+            store
+                .record(&context.id.to_string(), session_id, entry_count)
+                .await;
+        }
+    }
+
     /// Parse the `--output-format json` payload from the CLI into an
-    /// [`InferenceResult`]. Pure (no I/O) so it is unit-testable.
+    /// [`InferenceResult`] plus the CLI `session_id` (for resume). Pure (no I/O)
+    /// so it is unit-testable.
     fn parse_cli_json(
         &self,
         stdout: &str,
         fallback_duration_ms: u64,
-    ) -> Result<InferenceResult, AgentOSError> {
+    ) -> Result<(InferenceResult, Option<String>), AgentOSError> {
         let parsed: ClaudeCliResult = serde_json::from_str(stdout.trim())
             .map_err(|e| self.err(format!("invalid JSON from claude CLI: {e}")))?;
 
@@ -269,7 +328,7 @@ impl ClaudeCodeCore {
             Some(other) => StopReason::Other(other.to_string()),
         };
 
-        Ok(InferenceResult {
+        let result = InferenceResult {
             text,
             tokens_used: TokenUsage {
                 prompt_tokens,
@@ -294,7 +353,8 @@ impl ClaudeCodeCore {
                 total_cost_usd: total,
             }),
             cached_tokens: usage.cache_read_input_tokens,
-        })
+        };
+        Ok((result, parsed.session_id))
     }
 
     /// Build the shared `claude -p` invocation (binary, prompt, model, system
@@ -309,9 +369,15 @@ impl ClaudeCodeCore {
         prompt: &str,
         system: &str,
         image_dir: Option<&std::path::Path>,
+        resume_session_id: Option<&str>,
     ) -> Command {
         let mut cmd = Command::new(&self.binary);
         cmd.arg("-p").arg(prompt).arg("--model").arg(&self.model);
+        // Opt-in resume: continue the prior CLI session and send only the delta
+        // turn (the caller passes the delta as `prompt` and an empty `system`).
+        if let Some(sid) = resume_session_id {
+            cmd.arg("--resume").arg(sid);
+        }
         // Deny every built-in tool so Claude is a pure reasoning core that can
         // only emit AgentOS tool-call JSON — never touching the host outside
         // AgentOS's capability/audit/sandbox layer. `--allowed-tools` is additive
@@ -356,17 +422,32 @@ impl ClaudeCodeCore {
     fn prepare_invocation(
         &self,
         context: &ContextWindow,
-    ) -> Result<(String, String, Option<tempfile::TempDir>), AgentOSError> {
-        let (system, convo) = Self::flatten_context(context);
+        resume: Option<&SessionState>,
+    ) -> Result<(String, String, Option<tempfile::TempDir>, usize), AgentOSError> {
+        let all = context.active_entries();
+        let entry_count = all.len();
+        // On resume, send only the delta (entries appended since the last turn)
+        // and NO system prompt (the CLI session already holds it). Otherwise send
+        // the full flattened context. A stale high-water mark (> current len, e.g.
+        // after compaction shrank the window) falls back to a full send.
+        let resuming = resume.is_some_and(|s| s.last_sent_entry_count <= entry_count);
+        let (system, convo, payload_entries): (String, String, Vec<&ContextEntry>) = if resuming {
+            let hwm = resume.unwrap().last_sent_entry_count;
+            let delta: Vec<&ContextEntry> = all[hwm..].to_vec();
+            (String::new(), Self::flatten_delta(&delta), delta)
+        } else {
+            let (sys, convo) = Self::flatten_context(context);
+            (sys, convo, all.clone())
+        };
         let mut prompt = if convo.is_empty() {
             "Continue.".to_string()
         } else {
             convo
         };
 
-        // Resolve any images to base64 (same helper the Ollama adapter uses).
+        // Resolve images from the entries we're actually sending this turn.
         let mut images: Vec<(String, String)> = Vec::new();
-        for entry in context.active_entries() {
+        for entry in &payload_entries {
             for part in &entry.parts {
                 if let ContentPart::Image { mime, source } = part {
                     match crate::media::resolve_image_to_base64(mime, source, &self.image_resolver)
@@ -378,7 +459,7 @@ impl ClaudeCodeCore {
             }
         }
         if images.is_empty() {
-            return Ok((system, prompt, None));
+            return Ok((system, prompt, None, entry_count));
         }
 
         let dir = tempfile::tempdir()
@@ -403,7 +484,7 @@ impl ClaudeCodeCore {
             names.len(),
             names.join(", ")
         ));
-        Ok((system, prompt, Some(dir)))
+        Ok((system, prompt, Some(dir), entry_count))
     }
 
     /// Stream a response by parsing `--output-format stream-json`: forward each
@@ -414,10 +495,17 @@ impl ClaudeCodeCore {
         context: &ContextWindow,
         tx: mpsc::Sender<InferenceEvent>,
     ) -> Result<(), AgentOSError> {
+        let resume = self.lookup_resume(context).await;
         // `_image_dir` keeps temp image files alive until the subprocess exits.
-        let (system, prompt, _image_dir) = self.prepare_invocation(context)?;
+        let (system, prompt, _image_dir, entry_count) =
+            self.prepare_invocation(context, resume.as_ref())?;
 
-        let mut cmd = self.base_command(&prompt, &system, _image_dir.as_ref().map(|d| d.path()));
+        let mut cmd = self.base_command(
+            &prompt,
+            &system,
+            _image_dir.as_ref().map(|d| d.path()),
+            resume.as_ref().map(|s| s.session_id.as_str()),
+        );
         // stream-json in print mode requires --verbose; --include-partial-messages
         // surfaces token-level content_block_delta events.
         cmd.arg("--output-format")
@@ -437,6 +525,7 @@ impl ClaudeCodeCore {
 
         let outcome = tokio::time::timeout(self.timeout, async {
             let mut final_result: Option<InferenceResult> = None;
+            let mut final_session_id: Option<String> = None;
             while let Some(line) = reader
                 .next_line()
                 .await
@@ -472,13 +561,17 @@ impl ClaudeCodeCore {
                     }
                     Some("result") => {
                         // The result object matches the non-streaming shape.
-                        final_result =
-                            Some(self.parse_cli_json(trimmed, start.elapsed().as_millis() as u64)?);
+                        let (res, sid) =
+                            self.parse_cli_json(trimmed, start.elapsed().as_millis() as u64)?;
+                        final_session_id = sid;
+                        final_result = Some(res);
                     }
                     _ => {}
                 }
             }
-            final_result.ok_or_else(|| self.err("claude CLI stream ended without a result event"))
+            let res = final_result
+                .ok_or_else(|| self.err("claude CLI stream ended without a result event"))?;
+            Ok::<_, AgentOSError>((res, final_session_id))
         })
         .await
         .map_err(|_| {
@@ -489,7 +582,10 @@ impl ClaudeCodeCore {
         })?;
 
         match outcome {
-            Ok(result) => {
+            Ok((result, session_id)) => {
+                if let Some(sid) = session_id {
+                    self.record_resume(context, &sid, entry_count).await;
+                }
                 let _ = tx.send(InferenceEvent::Done(result)).await;
                 let _ = child.wait().await;
                 Ok(())
@@ -524,10 +620,17 @@ impl LLMCore for ClaudeCodeCore {
     }
 
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
+        let resume = self.lookup_resume(context).await;
         // `_image_dir` keeps the temp image files alive until the call returns.
-        let (system, prompt, _image_dir) = self.prepare_invocation(context)?;
+        let (system, prompt, _image_dir, entry_count) =
+            self.prepare_invocation(context, resume.as_ref())?;
 
-        let mut cmd = self.base_command(&prompt, &system, _image_dir.as_ref().map(|d| d.path()));
+        let mut cmd = self.base_command(
+            &prompt,
+            &system,
+            _image_dir.as_ref().map(|d| d.path()),
+            resume.as_ref().map(|s| s.session_id.as_str()),
+        );
         cmd.arg("--output-format").arg("json");
 
         let start = Instant::now();
@@ -551,7 +654,12 @@ impl LLMCore for ClaudeCodeCore {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        self.parse_cli_json(&stdout, start.elapsed().as_millis() as u64)
+        let (result, session_id) =
+            self.parse_cli_json(&stdout, start.elapsed().as_millis() as u64)?;
+        if let Some(sid) = session_id {
+            self.record_resume(context, &sid, entry_count).await;
+        }
+        Ok(result)
     }
 
     async fn infer_stream(
@@ -629,6 +737,9 @@ struct ClaudeCliResult {
     /// AgentOS budget governance; not literal subscription billing.
     #[serde(default)]
     total_cost_usd: Option<f64>,
+    /// CLI session id, used for opt-in `--resume` (see [`crate::session`]).
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -661,7 +772,7 @@ mod tests {
             "usage":{"input_tokens":3,"output_tokens":4,
                      "cache_read_input_tokens":100,"cache_creation_input_tokens":20}
         }"#;
-        let r = core.parse_cli_json(json, 0).expect("parse ok");
+        let (r, _sid) = core.parse_cli_json(json, 0).expect("parse ok");
         assert_eq!(r.text, "hello world");
         assert_eq!(r.stop_reason, StopReason::EndTurn);
         assert_eq!(r.tokens_used.prompt_tokens, 123); // 3 + 100 + 20
@@ -693,11 +804,12 @@ mod tests {
         assert_eq!(
             core.parse_cli_json(&mk("max_tokens"), 0)
                 .unwrap()
+                .0
                 .stop_reason,
             StopReason::MaxTokens
         );
         assert_eq!(
-            core.parse_cli_json(&mk("weird"), 0).unwrap().stop_reason,
+            core.parse_cli_json(&mk("weird"), 0).unwrap().0.stop_reason,
             StopReason::Other("weird".to_string())
         );
     }
@@ -706,14 +818,14 @@ mod tests {
     fn parse_missing_duration_uses_fallback() {
         let core = ClaudeCodeCore::new("default");
         let json = r#"{"is_error":false,"result":"x"}"#;
-        assert_eq!(core.parse_cli_json(json, 555).unwrap().duration_ms, 555);
+        assert_eq!(core.parse_cli_json(json, 555).unwrap().0.duration_ms, 555);
     }
 
     #[test]
     fn parse_populates_cost_for_budget_governance() {
         let core = ClaudeCodeCore::new("default");
         // With total_cost_usd → cost is surfaced so the budget tracker sees it.
-        let r = core
+        let (r, _sid) = core
             .parse_cli_json(
                 r#"{"is_error":false,"result":"x","total_cost_usd":0.0425}"#,
                 0,
@@ -725,8 +837,61 @@ mod tests {
         assert!(core
             .parse_cli_json(r#"{"is_error":false,"result":"x"}"#, 0)
             .unwrap()
+            .0
             .cost
             .is_none());
+    }
+
+    #[test]
+    fn parse_captures_session_id() {
+        let core = ClaudeCodeCore::new("default");
+        let (_r, sid) = core
+            .parse_cli_json(
+                r#"{"is_error":false,"result":"x","session_id":"abc123"}"#,
+                0,
+            )
+            .unwrap();
+        assert_eq!(sid.as_deref(), Some("abc123"));
+        let (_r2, sid2) = core
+            .parse_cli_json(r#"{"is_error":false,"result":"x"}"#, 0)
+            .unwrap();
+        assert!(sid2.is_none());
+    }
+
+    #[test]
+    fn base_command_adds_resume_when_session_present() {
+        let core = ClaudeCodeCore::new("default");
+        let args = cmd_args(&core.base_command("delta", "", None, Some("sess-1")));
+        assert!(args.iter().any(|a| a == "--resume"));
+        assert!(args.iter().any(|a| a == "sess-1"));
+    }
+
+    #[test]
+    fn base_command_omits_resume_when_none() {
+        let core = ClaudeCodeCore::new("default");
+        let args = cmd_args(&core.base_command("full", "sys", None, None));
+        assert!(!args.iter().any(|a| a == "--resume"));
+    }
+
+    #[test]
+    fn prepare_invocation_resume_sends_only_delta() {
+        let core = ClaudeCodeCore::new("default");
+        let mut ctx = ContextWindow::new(10_000);
+        ctx.push(entry(ContextRole::System, "SYS"));
+        ctx.push(entry(ContextRole::User, "first"));
+        ctx.push(entry(ContextRole::Assistant, "reply"));
+        ctx.push(entry(ContextRole::User, "second"));
+        // 4 active entries; resume high-water-mark = 3 ⇒ only entry[3] is sent.
+        let resume = SessionState {
+            session_id: "s".into(),
+            last_sent_entry_count: 3,
+        };
+        let (system, prompt, _dir, n) = core.prepare_invocation(&ctx, Some(&resume)).unwrap();
+        assert_eq!(n, 4);
+        assert!(system.is_empty(), "no system prompt is re-sent on resume");
+        assert!(prompt.contains("second"));
+        assert!(!prompt.contains("first"));
+        assert!(!prompt.contains("SYS"));
     }
 
     #[test]
@@ -775,7 +940,7 @@ mod tests {
         let core = ClaudeCodeCore::new("default");
         let mut ctx = ContextWindow::new(10_000);
         ctx.push(entry(ContextRole::User, "hello"));
-        let (_system, prompt, dir) = core.prepare_invocation(&ctx).unwrap();
+        let (_system, prompt, dir, _n) = core.prepare_invocation(&ctx, None).unwrap();
         assert!(dir.is_none());
         assert!(prompt.contains("hello"));
     }
@@ -794,7 +959,7 @@ mod tests {
             },
         });
         ctx.push(e);
-        let (_system, prompt, dir) = core.prepare_invocation(&ctx).expect("prepare ok");
+        let (_system, prompt, dir, _n) = core.prepare_invocation(&ctx, None).expect("prepare ok");
         let dir = dir.expect("temp image dir created");
         assert!(dir.path().join("image_1.png").exists());
         assert!(prompt.contains("image_1.png"));
@@ -811,7 +976,7 @@ mod tests {
     #[test]
     fn base_command_denies_all_builtins_without_images() {
         let core = ClaudeCodeCore::new("default");
-        let args = cmd_args(&core.base_command("hi", "", None));
+        let args = cmd_args(&core.base_command("hi", "", None, None));
         assert!(args.iter().any(|a| a == "--disallowed-tools"));
         // No additive allowlist (it doesn't restrict in the default mode).
         assert!(!args.iter().any(|a| a == "--allowed-tools"));
@@ -824,7 +989,7 @@ mod tests {
     #[test]
     fn base_command_keeps_read_only_for_images() {
         let core = ClaudeCodeCore::new("default");
-        let args = cmd_args(&core.base_command("hi", "", Some(std::path::Path::new("/tmp"))));
+        let args = cmd_args(&core.base_command("hi", "", Some(std::path::Path::new("/tmp")), None));
         assert!(args.iter().any(|a| a == "--disallowed-tools"));
         assert!(args.iter().any(|a| a == "--add-dir"));
         // Read stays available for image loading; everything else stays denied.
@@ -837,7 +1002,7 @@ mod tests {
     fn base_command_with_mcp_config_adds_flags() {
         use std::path::PathBuf;
         let core = ClaudeCodeCore::new("default").with_mcp_config(PathBuf::from("/tmp/x.json"));
-        let args = cmd_args(&core.base_command("hi", "", None));
+        let args = cmd_args(&core.base_command("hi", "", None, None));
         // MCP config + the 4 allowed meta-tools are present.
         assert!(args.iter().any(|a| a == "--mcp-config"));
         assert!(args.iter().any(|a| a == "/tmp/x.json"));
