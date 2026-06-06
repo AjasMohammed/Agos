@@ -5465,6 +5465,15 @@ impl Kernel {
             );
         }
 
+        // Drop any cached claude-code resume session for this task. The session is
+        // keyed by the task id (the context's stable `resume_key`); once the task
+        // is done the CLI session is dead, so deleting prevents unbounded row
+        // growth and a stale lookup on task-id reuse. Best-effort (pure cache).
+        if let Some(lookup) = &self.claude_session_lookup {
+            use agentos_llm::ClaudeSessionLookup as _;
+            lookup.invalidate(&task.id.to_string()).await;
+        }
+
         // Fire TaskEnd hook (informational — result already computed).
         self.hook_registry
             .fire(&agentos_types::HookEvent::TaskEnd {

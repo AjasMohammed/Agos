@@ -191,6 +191,12 @@ max_tokens = 8192
 # Context window size passed to Ollama as num_ctx. Many modern models support 32K+.
 # Set to match your model's actual context size (e.g. 131072 for llama3.1:8b-instruct-q8_0).
 ollama_context_window = 32768
+# Opt-in: let the `claude-code` adapter --resume the prior CLI session and send
+# only the new turn's delta instead of replaying the full flattened context each
+# call (lower latency/cost on long tasks). Off by default. Safe to enable: every
+# resume is guarded by a prefix fingerprint that falls back to a full send on any
+# divergence, and the cached session is deleted on task completion.
+claude_code_resume = false
 # Optional provider fallback chain applied to every agent's primary adapter.
 # When the primary provider errors (including mid-stream), the kernel fails over
 # to these in order. Empty by default. Useful when the primary is a flaky free

@@ -699,6 +699,11 @@ pub struct Kernel {
     pub resource_arbiter: Arc<crate::resource_arbiter::ResourceArbiter>,
     pub checkpoint_store: Arc<crate::checkpoint_store::CheckpointStore>,
     pub workspace_grants: Arc<crate::workspace_grant_store::WorkspaceGrantRegistry>,
+    /// Opt-in claude-code session-resume cache (`[llm] claude_code_resume`).
+    /// `None` when resume is disabled (the default) — the adapter then sends the
+    /// full flattened context every turn. The store is a pure cache: deleted on
+    /// task completion, and every resume is fingerprint-guarded.
+    pub claude_session_lookup: Option<Arc<crate::claude_session_store::KernelClaudeSessionLookup>>,
     /// Active approval-mode resolver. Populated during boot after the
     /// `ApprovalHook` is registered; `None` only during the narrow window
     /// between Kernel struct construction and hook registration. The CLI
@@ -4562,6 +4567,31 @@ impl Kernel {
                 .map_err(|e| anyhow::anyhow!("CheckpointStore init failed: {e}"))?,
         );
 
+        // Opt-in claude-code session-resume cache. Only built when enabled, so the
+        // default path never opens the DB. A failure to open degrades gracefully
+        // to an in-memory cache (resume still works within the process) rather than
+        // aborting boot — the session is a cache, never a source of truth.
+        let claude_session_lookup = if config.llm.claude_code_resume {
+            let store = match crate::claude_session_store::ClaudeSessionStore::open(
+                &data_dir.join("claude_session.db"),
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "claude_session.db open failed; using in-memory resume cache"
+                    );
+                    crate::claude_session_store::ClaudeSessionStore::in_memory()
+                        .map_err(|e| anyhow::anyhow!("in-memory claude session store init: {e}"))?
+                }
+            };
+            Some(Arc::new(
+                crate::claude_session_store::KernelClaudeSessionLookup::new(Arc::new(store)),
+            ))
+        } else {
+            None
+        };
+
         // User filesystem grants: durable, runtime-mutable list of host directories
         // each agent (or all agents) may read/write/exec inside. Populated from
         // CLI/web/bus; legacy `tools.workspace.allowed_paths` are imported once below.
@@ -5049,6 +5079,7 @@ impl Kernel {
             },
             checkpoint_store,
             workspace_grants,
+            claude_session_lookup,
             approval_mode_resolver: None,
             approval_policy_matcher: None,
             mcp_attachment_store,

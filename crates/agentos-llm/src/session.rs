@@ -6,10 +6,13 @@
 //! on this small [`ClaudeSessionLookup`] trait; the kernel provides the concrete
 //! implementation wrapping its SQLite-backed `ClaudeSessionStore`.
 //!
-//! The session is keyed by `ContextID` (one context window is created per task),
-//! and is treated strictly as a **cache**: it is invalidated on context
-//! compaction and deleted on task completion, so the kernel never cedes
-//! authority over conversation state.
+//! The session is keyed by the context's stable `resume_key` (set by the kernel
+//! to the TaskID — NOT the ephemeral compiled `ContextID`, which is regenerated
+//! every turn), and is treated strictly as a **cache**: it is invalidated on
+//! context compaction and deleted on task completion, so the kernel never cedes
+//! authority over conversation state. A delta turn is only sent when a prefix
+//! fingerprint confirms the CLI session still matches the current context;
+//! otherwise the adapter falls back to a full send + fresh session.
 
 use async_trait::async_trait;
 

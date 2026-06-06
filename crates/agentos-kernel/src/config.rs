@@ -1217,6 +1217,13 @@ pub struct LlmSettings {
     /// agent.
     #[serde(default)]
     pub fallback_models: Vec<FallbackModelConfig>,
+    /// Opt-in: let the `claude-code` adapter `--resume` the prior CLI session and
+    /// send only the new turn's delta instead of replaying the full flattened
+    /// context each call. Off by default. Safe to toggle: a prefix fingerprint
+    /// guards every resume and falls back to a full send on any divergence, and
+    /// the stored session is a pure cache (deleted on task completion).
+    #[serde(default)]
+    pub claude_code_resume: bool,
 }
 
 /// One entry in `llm.fallback_models`. Mirrors the `--provider`/`--model`
@@ -1243,6 +1250,7 @@ impl Default for LlmSettings {
             max_tokens: default_llm_max_tokens(),
             ollama_context_window: default_ollama_context_window(),
             fallback_models: Vec::new(),
+            claude_code_resume: false,
         }
     }
 }

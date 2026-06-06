@@ -249,13 +249,14 @@ impl Kernel {
                 // the user's subscription (no API key). Intercept before the
                 // catalog/HTTP path since it is not an OpenAI-compatible endpoint.
                 if custom_name == "claude-code" || custom_name == "claude-cli" {
-                    return Ok((
-                        Arc::new(
-                            ClaudeCodeCore::new(model.to_string())
-                                .with_image_resolver(image_resolver.clone()),
-                        ),
-                        None,
-                    ));
+                    let mut core = ClaudeCodeCore::new(model.to_string())
+                        .with_image_resolver(image_resolver.clone());
+                    if let Some(lookup) = &self.claude_session_lookup {
+                        core = core.with_resume_store(
+                            lookup.clone() as Arc<dyn agentos_llm::ClaudeSessionLookup>
+                        );
+                    }
+                    return Ok((Arc::new(core), None));
                 }
                 // Check the provider catalog first for known providers.
                 let catalog_entry_opt = self
@@ -731,11 +732,15 @@ impl Kernel {
                         .read()
                         .expect("image_resolver lock poisoned")
                         .clone();
-                    Arc::new(
-                        ClaudeCodeCore::new(agent_model.clone())
-                            .with_image_resolver(image_resolver)
-                            .with_mcp_config(config_path),
-                    ) as Arc<dyn LLMCore>
+                    let mut core = ClaudeCodeCore::new(agent_model.clone())
+                        .with_image_resolver(image_resolver)
+                        .with_mcp_config(config_path);
+                    if let Some(lookup) = &self.claude_session_lookup {
+                        core = core.with_resume_store(
+                            lookup.clone() as Arc<dyn agentos_llm::ClaudeSessionLookup>
+                        );
+                    }
+                    Arc::new(core) as Arc<dyn LLMCore>
                 }
                 Err(e) => {
                     // Non-fatal: fall back to the plain adapter (no native tool

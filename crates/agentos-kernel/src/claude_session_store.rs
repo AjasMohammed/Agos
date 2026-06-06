@@ -1,4 +1,6 @@
-//! SQLite-backed store for `claude` CLI session ids, keyed by `ContextID`.
+//! SQLite-backed store for `claude` CLI session ids, keyed by the context's
+//! stable `resume_key` (the TaskID set by the kernel — NOT the ephemeral
+//! compiled `ContextID`, which is regenerated every turn).
 //!
 //! Backs the opt-in `--resume` mode of the claude-code adapter (see
 //! `agentos_llm::session`). The stored session is treated strictly as a
@@ -130,6 +132,29 @@ impl ClaudeSessionStore {
         .map_err(|e| AgentOSError::StorageError(format!("spawn_blocking join: {e}")))?
     }
 
+    /// Delete sessions whose `updated_at` is older than `max_age`. Returns the
+    /// number of rows removed. Run periodically by the `TimeoutChecker` so the
+    /// cache doesn't grow without bound from tasks that fail and are never
+    /// resumed (the success path deletes eagerly via `delete`).
+    pub async fn prune_older_than(&self, max_age: chrono::Duration) -> Result<usize, AgentOSError> {
+        let conn = Arc::clone(&self.conn);
+        let cutoff = (Utc::now() - max_age).to_rfc3339();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn
+                .lock()
+                .map_err(|e| AgentOSError::StorageError(format!("lock poisoned: {e}")))?;
+            let n = guard
+                .execute(
+                    "DELETE FROM claude_sessions WHERE updated_at < ?1",
+                    params![cutoff],
+                )
+                .map_err(|e| AgentOSError::StorageError(format!("prune claude_session: {e}")))?;
+            Ok(n)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("spawn_blocking join: {e}")))?
+    }
+
     /// Delete the stored session for a context. Returns whether a row was removed.
     pub async fn delete(&self, context_id: &str) -> Result<bool, AgentOSError> {
         let conn = Arc::clone(&self.conn);
@@ -162,6 +187,12 @@ pub struct KernelClaudeSessionLookup {
 impl KernelClaudeSessionLookup {
     pub fn new(store: Arc<ClaudeSessionStore>) -> Self {
         Self { store }
+    }
+
+    /// Prune sessions older than `max_age` (TimeoutChecker hook). Passthrough to
+    /// the underlying store; exposed because the store is otherwise private.
+    pub async fn prune_older_than(&self, max_age: chrono::Duration) -> Result<usize, AgentOSError> {
+        self.store.prune_older_than(max_age).await
     }
 }
 
@@ -232,5 +263,19 @@ mod tests {
         assert!(s.delete("ctx1").await.unwrap());
         assert!(!s.delete("ctx1").await.unwrap());
         assert!(s.get("ctx1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn fingerprint_high_bit_round_trips() {
+        // The fingerprint is a u64 stored as a bit-cast i64; a value with the
+        // high bit set must survive the SQLite round-trip unchanged (regression
+        // guard for the `as i64` / `as u64` reinterpret, not a numeric convert).
+        let s = ClaudeSessionStore::in_memory().unwrap();
+        let fp = 0xFFFF_FFFF_FFFF_FFFF_u64;
+        s.put("ctx-hb", "sess", 3, fp).await.unwrap();
+        assert_eq!(
+            s.get("ctx-hb").await.unwrap(),
+            Some(("sess".to_string(), 3, fp))
+        );
     }
 }

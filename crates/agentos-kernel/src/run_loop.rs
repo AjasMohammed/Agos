@@ -630,6 +630,23 @@ impl Kernel {
                                         });
                                     }
 
+                                    // Prune claude-code resume sessions older than 72h. The
+                                    // success path deletes eagerly on task completion; this
+                                    // reclaims rows from tasks that failed and were never resumed.
+                                    if let Some(lookup) = kernel.claude_session_lookup.clone() {
+                                        tokio::spawn(async move {
+                                            match lookup.prune_older_than(chrono::Duration::hours(72)).await {
+                                                Ok(0) => {}
+                                                Ok(n) => {
+                                                    tracing::info!(pruned = n, "Pruned {} expired claude sessions", n);
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(error = %e, "Claude session pruning failed");
+                                                }
+                                            }
+                                        });
+                                    }
+
                                     // Prune scheduled-run history older than the configured
                                     // retention window so the run store does not grow without
                                     // bound (0 days disables pruning).

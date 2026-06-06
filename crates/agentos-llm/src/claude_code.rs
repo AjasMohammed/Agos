@@ -492,7 +492,17 @@ impl ClaudeCodeCore {
             Option<String>,
         ) = match matched {
             Some(s) => {
-                let delta: Vec<&ContextEntry> = all[s.last_sent_entry_count..].to_vec();
+                // System entries are ALWAYS carried via `--system-prompt` (rebuilt
+                // every turn by `flatten_context`), so drop them from the delta body
+                // — otherwise a tail world-state reminder would be sent twice (once
+                // in `--system-prompt`, once inlined as `## System`). The fingerprint
+                // / high-water mark still count System entries (we slice `all`), so
+                // only the rendered payload changes, not the guard boundary.
+                let delta: Vec<&ContextEntry> = all[s.last_sent_entry_count..]
+                    .iter()
+                    .copied()
+                    .filter(|e| e.role != ContextRole::System)
+                    .collect();
                 (
                     Self::flatten_delta(&delta),
                     delta,
@@ -566,140 +576,14 @@ impl ClaudeCodeCore {
     /// Stream a response by parsing `--output-format stream-json`: forward each
     /// text delta as an [`InferenceEvent::Token`], then the final result object
     /// as [`InferenceEvent::Done`]. On failure, emits [`InferenceEvent::Error`].
-    async fn run_streaming(
+    /// Run one `claude -p --output-format json` subprocess for a prepared
+    /// invocation, parse it, and record the resume session on success. Shared by
+    /// the primary call and the resume-failure retry in [`LLMCore::infer`].
+    async fn run_oneshot(
         &self,
         context: &ContextWindow,
-        tx: mpsc::Sender<InferenceEvent>,
-    ) -> Result<(), AgentOSError> {
-        let resume = self.lookup_resume(context).await;
-        // `inv` (holding the temp image dir) is kept alive until the subprocess exits.
-        let inv = self.prepare_invocation(context, resume.as_ref())?;
-
-        let mut cmd = self.base_command(
-            &inv.prompt,
-            &inv.system,
-            inv.image_dir.as_ref().map(|d| d.path()),
-            inv.resume_session_id.as_deref(),
-        );
-        // stream-json in print mode requires --verbose; --include-partial-messages
-        // surfaces token-level content_block_delta events.
-        cmd.arg("--output-format")
-            .arg("stream-json")
-            .arg("--verbose")
-            .arg("--include-partial-messages");
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| self.err(format!("failed to spawn '{}': {e}", self.binary)))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| self.err("failed to capture claude CLI stdout"))?;
-        let mut reader = BufReader::new(stdout).lines();
-        let start = Instant::now();
-
-        let outcome = tokio::time::timeout(self.timeout, async {
-            let mut final_result: Option<InferenceResult> = None;
-            let mut final_session_id: Option<String> = None;
-            while let Some(line) = reader
-                .next_line()
-                .await
-                .map_err(|e| self.err(format!("error reading claude CLI stream: {e}")))?
-            {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let v: serde_json::Value = match serde_json::from_str(trimmed) {
-                    Ok(v) => v,
-                    Err(_) => continue, // ignore any non-JSON noise
-                };
-                match v.get("type").and_then(|t| t.as_str()) {
-                    Some("stream_event") => {
-                        if let Some(text) = v
-                            .get("event")
-                            .filter(|e| {
-                                e.get("type").and_then(|t| t.as_str())
-                                    == Some("content_block_delta")
-                            })
-                            .and_then(|e| e.get("delta"))
-                            .filter(|d| {
-                                d.get("type").and_then(|t| t.as_str()) == Some("text_delta")
-                            })
-                            .and_then(|d| d.get("text"))
-                            .and_then(|t| t.as_str())
-                        {
-                            if !text.is_empty() {
-                                let _ = tx.send(InferenceEvent::Token(text.to_string())).await;
-                            }
-                        }
-                    }
-                    Some("result") => {
-                        // The result object matches the non-streaming shape.
-                        let (res, sid) =
-                            self.parse_cli_json(trimmed, start.elapsed().as_millis() as u64)?;
-                        final_session_id = sid;
-                        final_result = Some(res);
-                    }
-                    _ => {}
-                }
-            }
-            let res = final_result
-                .ok_or_else(|| self.err("claude CLI stream ended without a result event"))?;
-            Ok::<_, AgentOSError>((res, final_session_id))
-        })
-        .await
-        .map_err(|_| {
-            self.err(format!(
-                "claude CLI timed out after {}s",
-                self.timeout.as_secs()
-            ))
-        })?;
-
-        match outcome {
-            Ok((result, session_id)) => {
-                if let Some(sid) = session_id {
-                    self.record_resume(context, &sid, inv.entry_count, inv.fingerprint)
-                        .await;
-                }
-                let _ = tx.send(InferenceEvent::Done(result)).await;
-                let _ = child.wait().await;
-                Ok(())
-            }
-            Err(e) => {
-                let _ = child.start_kill();
-                let _ = tx.send(InferenceEvent::Error(e.to_string())).await;
-                Err(e)
-            }
-        }
-    }
-}
-
-#[async_trait]
-impl LLMCore for ClaudeCodeCore {
-    /// Native (MCP) tool-calling is active only when an MCP config is attached
-    /// via [`ClaudeCodeCore::with_mcp_config`] — the subprocess then exposes the
-    /// 4 AgentOS meta-tools as native `mcp__agentos__*` tools. Otherwise this is
-    /// `false` and the kernel falls back to the JSON-in-markdown envelope path
-    /// (tool instructions injected into the system prompt, tool calls recovered
-    /// from `InferenceResult.text`).
-    fn supports_native_tool_calling(&self) -> bool {
-        self.mcp_config_path.is_some()
-    }
-
-    fn inference_watchdog_secs(&self) -> u64 {
-        // One claude-code inference spawns a subprocess and, in MCP mode, runs
-        // the agent's entire tool loop (discover → invoke → reason → repeat)
-        // before returning — legitimately minutes. Use a generous watchdog so
-        // the kernel doesn't abort real work at the 120s default.
-        300
-    }
-
-    async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
-        let resume = self.lookup_resume(context).await;
-        // `inv` (holding the temp image dir) is kept alive until the call returns.
-        let inv = self.prepare_invocation(context, resume.as_ref())?;
-
+        inv: Invocation,
+    ) -> Result<InferenceResult, AgentOSError> {
         let mut cmd = self.base_command(
             &inv.prompt,
             &inv.system,
@@ -736,6 +620,218 @@ impl LLMCore for ClaudeCodeCore {
                 .await;
         }
         Ok(result)
+    }
+
+    /// Invalidate (delete) the cached resume session for this context. Best-effort.
+    async fn invalidate_resume(&self, context: &ContextWindow) {
+        if let (Some(store), Some(key)) =
+            (self.resume_store.as_ref(), context.resume_key.as_deref())
+        {
+            store.invalidate(key).await;
+        }
+    }
+
+    /// Run one streaming subprocess for a prepared invocation, forwarding text
+    /// deltas as [`InferenceEvent::Token`]. Does NOT emit the terminal
+    /// `Done`/`Error` event — the caller decides that so it can retry on failure.
+    /// On error, returns whether any token was already streamed (the caller must
+    /// not retry once output has been emitted, or it would duplicate it).
+    async fn stream_attempt(
+        &self,
+        inv: &Invocation,
+        tx: &mpsc::Sender<InferenceEvent>,
+    ) -> Result<(InferenceResult, Option<String>), (AgentOSError, bool)> {
+        let mut cmd = self.base_command(
+            &inv.prompt,
+            &inv.system,
+            inv.image_dir.as_ref().map(|d| d.path()),
+            inv.resume_session_id.as_deref(),
+        );
+        // stream-json in print mode requires --verbose; --include-partial-messages
+        // surfaces token-level content_block_delta events.
+        cmd.arg("--output-format")
+            .arg("stream-json")
+            .arg("--verbose")
+            .arg("--include-partial-messages");
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                return Err((
+                    self.err(format!("failed to spawn '{}': {e}", self.binary)),
+                    false,
+                ))
+            }
+        };
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => {
+                let _ = child.start_kill();
+                return Err((self.err("failed to capture claude CLI stdout"), false));
+            }
+        };
+        let mut reader = BufReader::new(stdout).lines();
+        let start = Instant::now();
+        // Tracks whether we've forwarded any token to `tx`; gates the caller's retry.
+        let mut emitted = false;
+
+        let outcome = tokio::time::timeout(self.timeout, async {
+            let mut final_result: Option<InferenceResult> = None;
+            let mut final_session_id: Option<String> = None;
+            while let Some(line) = reader
+                .next_line()
+                .await
+                .map_err(|e| self.err(format!("error reading claude CLI stream: {e}")))?
+            {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let v: serde_json::Value = match serde_json::from_str(trimmed) {
+                    Ok(v) => v,
+                    Err(_) => continue, // ignore any non-JSON noise
+                };
+                match v.get("type").and_then(|t| t.as_str()) {
+                    Some("stream_event") => {
+                        if let Some(text) = v
+                            .get("event")
+                            .filter(|e| {
+                                e.get("type").and_then(|t| t.as_str())
+                                    == Some("content_block_delta")
+                            })
+                            .and_then(|e| e.get("delta"))
+                            .filter(|d| {
+                                d.get("type").and_then(|t| t.as_str()) == Some("text_delta")
+                            })
+                            .and_then(|d| d.get("text"))
+                            .and_then(|t| t.as_str())
+                        {
+                            if !text.is_empty() {
+                                emitted = true;
+                                let _ = tx.send(InferenceEvent::Token(text.to_string())).await;
+                            }
+                        }
+                    }
+                    Some("result") => {
+                        // The result object matches the non-streaming shape.
+                        let (res, sid) =
+                            self.parse_cli_json(trimmed, start.elapsed().as_millis() as u64)?;
+                        final_session_id = sid;
+                        final_result = Some(res);
+                    }
+                    _ => {}
+                }
+            }
+            let res = final_result
+                .ok_or_else(|| self.err("claude CLI stream ended without a result event"))?;
+            Ok::<_, AgentOSError>((res, final_session_id))
+        })
+        .await;
+
+        match outcome {
+            Ok(Ok((result, session_id))) => {
+                let _ = child.wait().await;
+                Ok((result, session_id))
+            }
+            Ok(Err(e)) => {
+                let _ = child.start_kill();
+                Err((e, emitted))
+            }
+            Err(_) => {
+                let _ = child.start_kill();
+                Err((
+                    self.err(format!(
+                        "claude CLI timed out after {}s",
+                        self.timeout.as_secs()
+                    )),
+                    emitted,
+                ))
+            }
+        }
+    }
+
+    async fn run_streaming(
+        &self,
+        context: &ContextWindow,
+        tx: mpsc::Sender<InferenceEvent>,
+    ) -> Result<(), AgentOSError> {
+        let resume = self.lookup_resume(context).await;
+        // `inv` (holding the temp image dir) is kept alive until the subprocess exits.
+        let inv = self.prepare_invocation(context, resume.as_ref())?;
+        let resumed = inv.resume_session_id.is_some();
+
+        let outcome = match self.stream_attempt(&inv, &tx).await {
+            Ok(ok) => Ok(ok),
+            // Resume failed before streaming any output: drop the stale session and
+            // retry once as a full, fresh send (mirrors the non-streaming path).
+            // If output was already emitted we must NOT retry (would duplicate it).
+            Err((e, emitted)) if resumed && !emitted => {
+                tracing::warn!(error = %e, "claude --resume stream failed; retrying as full send");
+                self.invalidate_resume(context).await;
+                let inv = self.prepare_invocation(context, None)?;
+                self.stream_attempt(&inv, &tx).await.map_err(|(e, _)| e)
+            }
+            Err((e, _)) => Err(e),
+        };
+
+        match outcome {
+            Ok((result, session_id)) => {
+                if let Some(sid) = session_id {
+                    self.record_resume(context, &sid, inv.entry_count, inv.fingerprint)
+                        .await;
+                }
+                let _ = tx.send(InferenceEvent::Done(result)).await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = tx.send(InferenceEvent::Error(e.to_string())).await;
+                Err(e)
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl LLMCore for ClaudeCodeCore {
+    /// Native (MCP) tool-calling is active only when an MCP config is attached
+    /// via [`ClaudeCodeCore::with_mcp_config`] — the subprocess then exposes the
+    /// 4 AgentOS meta-tools as native `mcp__agentos__*` tools. Otherwise this is
+    /// `false` and the kernel falls back to the JSON-in-markdown envelope path
+    /// (tool instructions injected into the system prompt, tool calls recovered
+    /// from `InferenceResult.text`).
+    fn supports_native_tool_calling(&self) -> bool {
+        self.mcp_config_path.is_some()
+    }
+
+    fn inference_watchdog_secs(&self) -> u64 {
+        // One claude-code inference spawns a subprocess and, in MCP mode, runs
+        // the agent's entire tool loop (discover → invoke → reason → repeat)
+        // before returning — legitimately minutes. Use a generous watchdog so
+        // the kernel doesn't abort real work at the 120s default.
+        300
+    }
+
+    async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
+        let resume = self.lookup_resume(context).await;
+        // `inv` (holding the temp image dir) is kept alive until the call returns.
+        let inv = self.prepare_invocation(context, resume.as_ref())?;
+        let resumed = inv.resume_session_id.is_some();
+
+        match self.run_oneshot(context, inv).await {
+            Ok(result) => Ok(result),
+            Err(e) if resumed => {
+                // The `--resume` session may have expired or been pruned CLI-side;
+                // the fingerprint guard can't detect that. On any failure of a
+                // resumed call, drop the cached session and retry once as a full,
+                // fresh send. A genuine (non-resume) error simply recurs on the
+                // retry and surfaces normally.
+                tracing::warn!(error = %e, "claude --resume failed; retrying as full send");
+                self.invalidate_resume(context).await;
+                let inv = self.prepare_invocation(context, None)?;
+                self.run_oneshot(context, inv).await
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn infer_stream(
