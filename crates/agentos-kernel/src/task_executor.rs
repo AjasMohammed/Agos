@@ -2735,6 +2735,12 @@ impl Kernel {
                         task_prompt: task.original_prompt.clone(),
                     });
 
+            // Stable resume key (constant across the task's turns, unlike the
+            // recompiled `compiled_context.id`) so the claude-code adapter can key
+            // its opt-in CLI session cache by conversation. Adapters that don't
+            // resume ignore it.
+            compiled_context.resume_key = Some(task.id.to_string());
+
             // Per-turn system reminder: re-inject world-state at the tail of the
             // prompt every iteration so the model never drifts from current
             // turn count, recent tool outcomes, elapsed time, and standing

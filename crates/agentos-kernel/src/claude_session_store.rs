@@ -19,6 +19,7 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS claude_sessions (
     context_id            TEXT PRIMARY KEY,
     session_id            TEXT NOT NULL,
     last_sent_entry_count INTEGER NOT NULL DEFAULT 0,
+    fingerprint           INTEGER NOT NULL DEFAULT 0,
     updated_at            TEXT NOT NULL
 );";
 
@@ -60,7 +61,10 @@ impl ClaudeSessionStore {
     }
 
     /// Fetch `(session_id, last_sent_entry_count)` for a context, if present.
-    pub async fn get(&self, context_id: &str) -> Result<Option<(String, usize)>, AgentOSError> {
+    pub async fn get(
+        &self,
+        context_id: &str,
+    ) -> Result<Option<(String, usize, u64)>, AgentOSError> {
         let conn = Arc::clone(&self.conn);
         let ctx = context_id.to_string();
         tokio::task::spawn_blocking(move || {
@@ -69,13 +73,21 @@ impl ClaudeSessionStore {
                 .map_err(|e| AgentOSError::StorageError(format!("lock poisoned: {e}")))?;
             let row = guard
                 .query_row(
-                    "SELECT session_id, last_sent_entry_count FROM claude_sessions WHERE context_id = ?1",
+                    "SELECT session_id, last_sent_entry_count, fingerprint
+                     FROM claude_sessions WHERE context_id = ?1",
                     params![ctx],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, i64>(2)?,
+                        ))
+                    },
                 )
                 .optional()
                 .map_err(|e| AgentOSError::StorageError(format!("query claude_session: {e}")))?;
-            Ok(row.map(|(sid, n)| (sid, n.max(0) as usize)))
+            // fingerprint is stored as a bit-cast i64 → reinterpret back to u64.
+            Ok(row.map(|(sid, n, fp)| (sid, n.max(0) as usize, fp as u64)))
         })
         .await
         .map_err(|e| AgentOSError::StorageError(format!("spawn_blocking join: {e}")))?
@@ -87,11 +99,13 @@ impl ClaudeSessionStore {
         context_id: &str,
         session_id: &str,
         last_sent_entry_count: usize,
+        fingerprint: u64,
     ) -> Result<(), AgentOSError> {
         let conn = Arc::clone(&self.conn);
         let ctx = context_id.to_string();
         let sid = session_id.to_string();
         let n = last_sent_entry_count as i64;
+        let fp = fingerprint as i64; // bit-cast; round-trips back via `as u64`.
         let now = Utc::now().to_rfc3339();
         tokio::task::spawn_blocking(move || {
             let guard = conn
@@ -100,13 +114,14 @@ impl ClaudeSessionStore {
             guard
                 .execute(
                     "INSERT INTO claude_sessions
-                       (context_id, session_id, last_sent_entry_count, updated_at)
-                     VALUES (?1, ?2, ?3, ?4)
+                       (context_id, session_id, last_sent_entry_count, fingerprint, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
                      ON CONFLICT(context_id) DO UPDATE SET
                        session_id = excluded.session_id,
                        last_sent_entry_count = excluded.last_sent_entry_count,
+                       fingerprint = excluded.fingerprint,
                        updated_at = excluded.updated_at",
-                    params![ctx, sid, n, now],
+                    params![ctx, sid, n, fp, now],
                 )
                 .map_err(|e| AgentOSError::StorageError(format!("upsert claude_session: {e}")))?;
             Ok(())
@@ -154,10 +169,13 @@ impl KernelClaudeSessionLookup {
 impl agentos_llm::ClaudeSessionLookup for KernelClaudeSessionLookup {
     async fn lookup(&self, context_id: &str) -> Option<agentos_llm::SessionState> {
         match self.store.get(context_id).await {
-            Ok(Some((session_id, last_sent_entry_count))) => Some(agentos_llm::SessionState {
-                session_id,
-                last_sent_entry_count,
-            }),
+            Ok(Some((session_id, last_sent_entry_count, fingerprint))) => {
+                Some(agentos_llm::SessionState {
+                    session_id,
+                    last_sent_entry_count,
+                    fingerprint,
+                })
+            }
             Ok(None) => None,
             Err(e) => {
                 tracing::warn!(error = %e, context_id, "claude session lookup failed");
@@ -166,10 +184,16 @@ impl agentos_llm::ClaudeSessionLookup for KernelClaudeSessionLookup {
         }
     }
 
-    async fn record(&self, context_id: &str, session_id: &str, sent_entry_count: usize) {
+    async fn record(
+        &self,
+        context_id: &str,
+        session_id: &str,
+        sent_entry_count: usize,
+        fingerprint: u64,
+    ) {
         if let Err(e) = self
             .store
-            .put(context_id, session_id, sent_entry_count)
+            .put(context_id, session_id, sent_entry_count, fingerprint)
             .await
         {
             tracing::warn!(error = %e, context_id, "claude session record failed");
@@ -192,17 +216,17 @@ mod tests {
         let s = ClaudeSessionStore::in_memory().unwrap();
         assert!(s.get("ctx1").await.unwrap().is_none());
 
-        s.put("ctx1", "sess-A", 5).await.unwrap();
+        s.put("ctx1", "sess-A", 5, 111).await.unwrap();
         assert_eq!(
             s.get("ctx1").await.unwrap(),
-            Some(("sess-A".to_string(), 5))
+            Some(("sess-A".to_string(), 5, 111))
         );
 
-        // UPSERT replaces session id + high-water mark.
-        s.put("ctx1", "sess-B", 9).await.unwrap();
+        // UPSERT replaces session id + high-water mark + fingerprint.
+        s.put("ctx1", "sess-B", 9, 222).await.unwrap();
         assert_eq!(
             s.get("ctx1").await.unwrap(),
-            Some(("sess-B".to_string(), 9))
+            Some(("sess-B".to_string(), 9, 222))
         );
 
         assert!(s.delete("ctx1").await.unwrap());

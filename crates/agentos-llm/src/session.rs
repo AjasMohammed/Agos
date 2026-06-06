@@ -22,6 +22,13 @@ pub struct SessionState {
     /// to the CLI the last time we recorded a session. Used to compute the
     /// delta turn to send on resume.
     pub last_sent_entry_count: usize,
+    /// Fingerprint of `(system_prompt + the prefix entries already sent)` at the
+    /// time the session was recorded. On the next turn the adapter recomputes
+    /// this over the current prefix; the delta is only sent on an exact match,
+    /// otherwise it falls back to a full send + fresh session. This makes resume
+    /// safe against context recompilation (compaction, reordering, eviction,
+    /// system-prompt changes), not just monotonic appends.
+    pub fingerprint: u64,
 }
 
 /// Per-call resume resolution hook used by `ClaudeCodeCore`.
@@ -35,8 +42,15 @@ pub trait ClaudeSessionLookup: Send + Sync {
     /// Look up the stored session for a context window, if any.
     async fn lookup(&self, context_id: &str) -> Option<SessionState>;
 
-    /// Record (UPSERT) the session id and the number of entries sent so far.
-    async fn record(&self, context_id: &str, session_id: &str, sent_entry_count: usize);
+    /// Record (UPSERT) the session id, the number of entries sent so far, and
+    /// the prefix fingerprint of what the CLI session now holds.
+    async fn record(
+        &self,
+        context_id: &str,
+        session_id: &str,
+        sent_entry_count: usize,
+        fingerprint: u64,
+    );
 
     /// Invalidate (delete) the stored session for a context window.
     async fn invalidate(&self, context_id: &str);

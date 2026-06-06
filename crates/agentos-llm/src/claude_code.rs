@@ -127,6 +127,22 @@ pub struct ClaudeCodeCore {
     resume_store: Option<Arc<dyn crate::session::ClaudeSessionLookup>>,
 }
 
+/// Everything needed to spawn one CLI turn, resolved from the context + any
+/// stored resume session.
+struct Invocation {
+    system: String,
+    prompt: String,
+    image_dir: Option<tempfile::TempDir>,
+    /// Number of active entries the CLI session will hold after this turn —
+    /// recorded as the next turn's high-water mark.
+    entry_count: usize,
+    /// Fingerprint of `(system + full current prefix)`, recorded after the turn.
+    fingerprint: u64,
+    /// `Some(session_id)` ⇒ resume that session and send only the delta turn;
+    /// `None` ⇒ fresh full send (the CLI returns a new session id to record).
+    resume_session_id: Option<String>,
+}
+
 impl ClaudeCodeCore {
     /// Build an adapter for the given model. Empty or `"default"` selects
     /// [`DEFAULT_MODEL`].
@@ -275,15 +291,41 @@ impl ClaudeCodeCore {
     /// enabled. `None` ⇒ stateless full-context send.
     async fn lookup_resume(&self, context: &ContextWindow) -> Option<SessionState> {
         let store = self.resume_store.as_ref()?;
-        store.lookup(&context.id.to_string()).await
+        // Key on the STABLE resume_key (set by the kernel to the TaskID), not the
+        // ephemeral compiled `context.id` which is regenerated every turn.
+        let key = context.resume_key.as_deref()?;
+        store.lookup(key).await
+    }
+
+    /// Stable hash of the system prompt + the given prefix entries (role + text).
+    /// Detects when the conversation prefix the CLI session holds has diverged
+    /// from the current context (recompilation / compaction / reorder / eviction
+    /// / system-prompt change), in which case a delta resume would be unsafe.
+    fn prefix_fingerprint(system: &str, entries: &[&ContextEntry]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        system.hash(&mut h);
+        for e in entries {
+            std::mem::discriminant(&e.role).hash(&mut h);
+            e.text().hash(&mut h);
+        }
+        h.finish()
     }
 
     /// Record the (possibly new) CLI session id + high-water mark after a turn,
     /// so the next turn can resume and send only the delta. Best-effort.
-    async fn record_resume(&self, context: &ContextWindow, session_id: &str, entry_count: usize) {
-        if let Some(store) = self.resume_store.as_ref() {
+    async fn record_resume(
+        &self,
+        context: &ContextWindow,
+        session_id: &str,
+        entry_count: usize,
+        fingerprint: u64,
+    ) {
+        if let (Some(store), Some(key)) =
+            (self.resume_store.as_ref(), context.resume_key.as_deref())
+        {
             store
-                .record(&context.id.to_string(), session_id, entry_count)
+                .record(key, session_id, entry_count, fingerprint)
                 .await;
         }
     }
@@ -423,21 +465,41 @@ impl ClaudeCodeCore {
         &self,
         context: &ContextWindow,
         resume: Option<&SessionState>,
-    ) -> Result<(String, String, Option<tempfile::TempDir>, usize), AgentOSError> {
+    ) -> Result<Invocation, AgentOSError> {
         let all = context.active_entries();
         let entry_count = all.len();
-        // On resume, send only the delta (entries appended since the last turn)
-        // and NO system prompt (the CLI session already holds it). Otherwise send
-        // the full flattened context. A stale high-water mark (> current len, e.g.
-        // after compaction shrank the window) falls back to a full send.
-        let resuming = resume.is_some_and(|s| s.last_sent_entry_count <= entry_count);
-        let (system, convo, payload_entries): (String, String, Vec<&ContextEntry>) = if resuming {
-            let hwm = resume.unwrap().last_sent_entry_count;
-            let delta: Vec<&ContextEntry> = all[hwm..].to_vec();
-            (String::new(), Self::flatten_delta(&delta), delta)
-        } else {
-            let (sys, convo) = Self::flatten_context(context);
-            (sys, convo, all.clone())
+        // The system prompt is ALWAYS sent: it is rebuilt every turn with fresh
+        // world-state reminders, the standing injection-safety rule, and the
+        // current tool list — never dropped on resume.
+        let (system, full_convo) = Self::flatten_context(context);
+        // Fingerprint the full current prefix; recorded after the turn so the
+        // next turn can verify the CLI session still matches before a delta.
+        let fingerprint = Self::prefix_fingerprint(&system, &all);
+
+        // Send a DELTA only when a stored session's recorded prefix still matches
+        // the current one (same boundary + same fingerprint over `[..hwm]`). Any
+        // divergence — compaction, reorder, eviction, or a changed system prompt
+        // (the fingerprint folds in `system`) — falls back to a full send + fresh
+        // session, so resume is opportunistic but always safe.
+        let matched = resume.filter(|s| {
+            s.last_sent_entry_count <= entry_count
+                && Self::prefix_fingerprint(&system, &all[..s.last_sent_entry_count])
+                    == s.fingerprint
+        });
+        let (convo, payload_entries, resume_session_id): (
+            String,
+            Vec<&ContextEntry>,
+            Option<String>,
+        ) = match matched {
+            Some(s) => {
+                let delta: Vec<&ContextEntry> = all[s.last_sent_entry_count..].to_vec();
+                (
+                    Self::flatten_delta(&delta),
+                    delta,
+                    Some(s.session_id.clone()),
+                )
+            }
+            None => (full_convo, all.clone(), None),
         };
         let mut prompt = if convo.is_empty() {
             "Continue.".to_string()
@@ -459,7 +521,14 @@ impl ClaudeCodeCore {
             }
         }
         if images.is_empty() {
-            return Ok((system, prompt, None, entry_count));
+            return Ok(Invocation {
+                system,
+                prompt,
+                image_dir: None,
+                entry_count,
+                fingerprint,
+                resume_session_id,
+            });
         }
 
         let dir = tempfile::tempdir()
@@ -484,7 +553,14 @@ impl ClaudeCodeCore {
             names.len(),
             names.join(", ")
         ));
-        Ok((system, prompt, Some(dir), entry_count))
+        Ok(Invocation {
+            system,
+            prompt,
+            image_dir: Some(dir),
+            entry_count,
+            fingerprint,
+            resume_session_id,
+        })
     }
 
     /// Stream a response by parsing `--output-format stream-json`: forward each
@@ -496,15 +572,14 @@ impl ClaudeCodeCore {
         tx: mpsc::Sender<InferenceEvent>,
     ) -> Result<(), AgentOSError> {
         let resume = self.lookup_resume(context).await;
-        // `_image_dir` keeps temp image files alive until the subprocess exits.
-        let (system, prompt, _image_dir, entry_count) =
-            self.prepare_invocation(context, resume.as_ref())?;
+        // `inv` (holding the temp image dir) is kept alive until the subprocess exits.
+        let inv = self.prepare_invocation(context, resume.as_ref())?;
 
         let mut cmd = self.base_command(
-            &prompt,
-            &system,
-            _image_dir.as_ref().map(|d| d.path()),
-            resume.as_ref().map(|s| s.session_id.as_str()),
+            &inv.prompt,
+            &inv.system,
+            inv.image_dir.as_ref().map(|d| d.path()),
+            inv.resume_session_id.as_deref(),
         );
         // stream-json in print mode requires --verbose; --include-partial-messages
         // surfaces token-level content_block_delta events.
@@ -584,7 +659,8 @@ impl ClaudeCodeCore {
         match outcome {
             Ok((result, session_id)) => {
                 if let Some(sid) = session_id {
-                    self.record_resume(context, &sid, entry_count).await;
+                    self.record_resume(context, &sid, inv.entry_count, inv.fingerprint)
+                        .await;
                 }
                 let _ = tx.send(InferenceEvent::Done(result)).await;
                 let _ = child.wait().await;
@@ -621,15 +697,14 @@ impl LLMCore for ClaudeCodeCore {
 
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
         let resume = self.lookup_resume(context).await;
-        // `_image_dir` keeps the temp image files alive until the call returns.
-        let (system, prompt, _image_dir, entry_count) =
-            self.prepare_invocation(context, resume.as_ref())?;
+        // `inv` (holding the temp image dir) is kept alive until the call returns.
+        let inv = self.prepare_invocation(context, resume.as_ref())?;
 
         let mut cmd = self.base_command(
-            &prompt,
-            &system,
-            _image_dir.as_ref().map(|d| d.path()),
-            resume.as_ref().map(|s| s.session_id.as_str()),
+            &inv.prompt,
+            &inv.system,
+            inv.image_dir.as_ref().map(|d| d.path()),
+            inv.resume_session_id.as_deref(),
         );
         cmd.arg("--output-format").arg("json");
 
@@ -657,7 +732,8 @@ impl LLMCore for ClaudeCodeCore {
         let (result, session_id) =
             self.parse_cli_json(&stdout, start.elapsed().as_millis() as u64)?;
         if let Some(sid) = session_id {
-            self.record_resume(context, &sid, entry_count).await;
+            self.record_resume(context, &sid, inv.entry_count, inv.fingerprint)
+                .await;
         }
         Ok(result)
     }
@@ -874,24 +950,50 @@ mod tests {
     }
 
     #[test]
-    fn prepare_invocation_resume_sends_only_delta() {
+    fn prepare_invocation_resume_sends_only_delta_when_fingerprint_matches() {
         let core = ClaudeCodeCore::new("default");
         let mut ctx = ContextWindow::new(10_000);
         ctx.push(entry(ContextRole::System, "SYS"));
         ctx.push(entry(ContextRole::User, "first"));
         ctx.push(entry(ContextRole::Assistant, "reply"));
         ctx.push(entry(ContextRole::User, "second"));
-        // 4 active entries; resume high-water-mark = 3 ⇒ only entry[3] is sent.
+        // 4 active entries; hwm = 3. For the delta to fire, the stored
+        // fingerprint must match the current prefix [..3].
+        let all = ctx.active_entries();
+        let (system, _) = ClaudeCodeCore::flatten_context(&ctx);
+        let fp = ClaudeCodeCore::prefix_fingerprint(&system, &all[..3]);
         let resume = SessionState {
             session_id: "s".into(),
             last_sent_entry_count: 3,
+            fingerprint: fp,
         };
-        let (system, prompt, _dir, n) = core.prepare_invocation(&ctx, Some(&resume)).unwrap();
-        assert_eq!(n, 4);
-        assert!(system.is_empty(), "no system prompt is re-sent on resume");
-        assert!(prompt.contains("second"));
-        assert!(!prompt.contains("first"));
-        assert!(!prompt.contains("SYS"));
+        let inv = core.prepare_invocation(&ctx, Some(&resume)).unwrap();
+        assert_eq!(inv.entry_count, 4);
+        assert_eq!(inv.resume_session_id.as_deref(), Some("s"));
+        // System is ALWAYS re-sent (H1 fix), but the conversation is delta-only.
+        assert!(!inv.system.is_empty(), "system prompt is always re-sent");
+        assert!(inv.prompt.contains("second"));
+        assert!(!inv.prompt.contains("first"));
+    }
+
+    #[test]
+    fn prepare_invocation_full_send_when_fingerprint_mismatches() {
+        let core = ClaudeCodeCore::new("default");
+        let mut ctx = ContextWindow::new(10_000);
+        ctx.push(entry(ContextRole::User, "first"));
+        ctx.push(entry(ContextRole::User, "second"));
+        // Stale/wrong fingerprint ⇒ no resume; full context + no --resume.
+        let resume = SessionState {
+            session_id: "s".into(),
+            last_sent_entry_count: 1,
+            fingerprint: 0xDEAD_BEEF,
+        };
+        let inv = core.prepare_invocation(&ctx, Some(&resume)).unwrap();
+        assert!(
+            inv.resume_session_id.is_none(),
+            "fingerprint mismatch must fall back to a fresh full send"
+        );
+        assert!(inv.prompt.contains("first") && inv.prompt.contains("second"));
     }
 
     #[test]
@@ -940,9 +1042,9 @@ mod tests {
         let core = ClaudeCodeCore::new("default");
         let mut ctx = ContextWindow::new(10_000);
         ctx.push(entry(ContextRole::User, "hello"));
-        let (_system, prompt, dir, _n) = core.prepare_invocation(&ctx, None).unwrap();
-        assert!(dir.is_none());
-        assert!(prompt.contains("hello"));
+        let inv = core.prepare_invocation(&ctx, None).unwrap();
+        assert!(inv.image_dir.is_none());
+        assert!(inv.prompt.contains("hello"));
     }
 
     #[test]
@@ -959,11 +1061,11 @@ mod tests {
             },
         });
         ctx.push(e);
-        let (_system, prompt, dir, _n) = core.prepare_invocation(&ctx, None).expect("prepare ok");
-        let dir = dir.expect("temp image dir created");
+        let inv = core.prepare_invocation(&ctx, None).expect("prepare ok");
+        let dir = inv.image_dir.expect("temp image dir created");
         assert!(dir.path().join("image_1.png").exists());
-        assert!(prompt.contains("image_1.png"));
-        assert!(prompt.contains("Read tool"));
+        assert!(inv.prompt.contains("image_1.png"));
+        assert!(inv.prompt.contains("Read tool"));
     }
 
     fn cmd_args(cmd: &Command) -> Vec<String> {
