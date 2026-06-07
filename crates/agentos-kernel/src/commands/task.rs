@@ -139,6 +139,60 @@ impl Kernel {
             .start_task(task.id, agent.id, &task.original_prompt)
             .await;
 
+        // Atomic single-owner checkout: claim the task before dispatch so no peer
+        // agent can double-work it (crash-safe across restarts). The lease covers
+        // the task's effective timeout plus a margin so a normal run never loses
+        // its claim mid-flight; autonomous / zero-timeout tasks get a long default.
+        let lease = if task.autonomous || task.timeout.is_zero() {
+            std::time::Duration::from_secs(24 * 3600)
+        } else {
+            task.timeout + std::time::Duration::from_secs(300)
+        };
+        match self
+            .task_checkout_store
+            .try_claim(&task.id, &task.agent_id, lease)
+            .await
+        {
+            Ok(true) => {
+                self.audit_log(agentos_audit::AuditEntry {
+                    timestamp: chrono::Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: agentos_audit::AuditEventType::TaskCheckedOut,
+                    agent_id: Some(task.agent_id),
+                    task_id: Some(task.id),
+                    tool_id: None,
+                    details: serde_json::json!({ "lease_secs": lease.as_secs() }),
+                    severity: agentos_audit::AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+            }
+            Ok(false) => {
+                // Already owned — expected race outcome, not an error. Leave the
+                // task for its owner and return without dispatching.
+                let owner = self
+                    .task_checkout_store
+                    .owner_of(&task.id)
+                    .await
+                    .ok()
+                    .flatten();
+                tracing::info!(task_id = %task.id, ?owner, "Task already checked out; skipping dispatch");
+                return KernelResponse::Success {
+                    data: Some(serde_json::json!({
+                        "task_id": task.id.to_string(),
+                        "status": "already_owned",
+                        "owner_agent_id": owner.map(|o| o.to_string()),
+                    })),
+                };
+            }
+            Err(e) => {
+                // A store hiccup must not deny all work: the claim is a safety net,
+                // not a hard gate. Log and proceed — single-owner still holds in the
+                // common path; a genuine double-claim only risks the rare DB-down case.
+                tracing::warn!(task_id = %task.id, error = %e, "Task checkout claim failed; proceeding without claim");
+            }
+        }
+
         // Execute task synchronously so the CLI gets the result
         let trace_id = TraceID::new();
         let start = std::time::Instant::now();
@@ -157,6 +211,7 @@ impl Kernel {
                     .await
                     .ok();
                 self.cleanup_task_subscriptions(&task.id).await;
+                self.release_task_checkout(&task.id).await;
                 self.trace_collector
                     .finish_task(&task.id, "Complete", chrono::Utc::now())
                     .await;
@@ -212,6 +267,7 @@ impl Kernel {
                     .await
                     .ok();
                 self.cleanup_task_subscriptions(&task.id).await;
+                self.release_task_checkout(&task.id).await;
                 self.trace_collector
                     .finish_task(&task.id, "Failed", chrono::Utc::now())
                     .await;
@@ -222,6 +278,15 @@ impl Kernel {
                 self.otel.adjust_active_tasks(-1);
                 KernelResponse::Error { message: msg }
             }
+        }
+    }
+
+    /// Release a task's atomic checkout. Best-effort: a store error is logged,
+    /// not propagated (the lease sweep is the backstop), and releasing a
+    /// never-claimed task is a harmless no-op.
+    pub(crate) async fn release_task_checkout(&self, task_id: &TaskID) {
+        if let Err(e) = self.task_checkout_store.release(task_id).await {
+            tracing::warn!(task_id = %task_id, error = %e, "Task checkout release failed");
         }
     }
 
@@ -725,7 +790,37 @@ impl Kernel {
             .await
             .ok();
 
-        // 7. Enqueue the task.
+        // 7. Re-claim the atomic checkout before re-dispatching. The original
+        // claim may have been released (terminal) or swept (lease lapsed while
+        // paused/crashed); re-claiming restores single-owner ownership. If another
+        // owner already holds it, refuse the resume rather than double-running.
+        let lease = if resumed_task.autonomous || resumed_task.timeout.is_zero() {
+            std::time::Duration::from_secs(24 * 3600)
+        } else {
+            resumed_task.timeout + std::time::Duration::from_secs(300)
+        };
+        // Only `Ok(false)` (already owned) blocks the resume; `Ok(true)` (claimed)
+        // and `Err` (store hiccup — proceed best-effort) both continue.
+        if let Ok(false) = self
+            .task_checkout_store
+            .try_claim(&task_id, &resumed_task.agent_id, lease)
+            .await
+        {
+            let owner = self
+                .task_checkout_store
+                .owner_of(&task_id)
+                .await
+                .ok()
+                .flatten();
+            tracing::info!(task_id = %task_id, ?owner, "Resume refused: task already checked out");
+            return KernelResponse::Error {
+                message: format!(
+                    "Task '{task_id}' is already owned by another agent; resume refused"
+                ),
+            };
+        }
+
+        // 8. Enqueue the task.
         self.scheduler.register_external(resumed_task.clone()).await;
 
         tracing::info!(

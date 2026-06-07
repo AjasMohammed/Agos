@@ -145,6 +145,10 @@ pub enum AuditEventType {
     CheckpointRestored,
     CheckpointPruned,
 
+    // Atomic task checkout (single-owner dispatch claim)
+    TaskCheckedOut,
+    TaskCheckoutReclaimed,
+
     // Cost attribution (Spec §4)
     CostAttribution,
 

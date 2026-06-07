@@ -358,6 +358,30 @@ impl Kernel {
                                 // Sweep expired resource locks (Spec §8)
                                 kernel.resource_arbiter.sweep_expired().await;
 
+                                // Reclaim expired task checkouts — a crashed owner's
+                                // lease expires and the task becomes claimable again.
+                                match kernel.task_checkout_store.sweep_expired().await {
+                                    Ok(0) => {}
+                                    Ok(n) => {
+                                        tracing::info!(reclaimed = n, "Reclaimed {} expired task checkouts", n);
+                                        kernel.audit_log(agentos_audit::AuditEntry {
+                                            timestamp: chrono::Utc::now(),
+                                            trace_id: agentos_types::TraceID::new(),
+                                            event_type: agentos_audit::AuditEventType::TaskCheckoutReclaimed,
+                                            agent_id: None,
+                                            task_id: None,
+                                            tool_id: None,
+                                            details: serde_json::json!({ "reclaimed": n }),
+                                            severity: agentos_audit::AuditSeverity::Info,
+                                            reversible: false,
+                                            rollback_ref: None,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "Task checkout sweep failed");
+                                    }
+                                }
+
                                 // Sweep expired vault proxy tokens (Spec §3)
                                 kernel.vault.sweep_expired_proxy_tokens().await;
 

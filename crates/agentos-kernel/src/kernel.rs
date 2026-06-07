@@ -699,6 +699,10 @@ pub struct Kernel {
     pub resource_arbiter: Arc<crate::resource_arbiter::ResourceArbiter>,
     pub checkpoint_store: Arc<crate::checkpoint_store::CheckpointStore>,
     pub workspace_grants: Arc<crate::workspace_grant_store::WorkspaceGrantRegistry>,
+    /// Atomic, crash-safe task ownership claims. A task is claimed before
+    /// dispatch (single-owner guarantee) and released on terminal completion;
+    /// expired leases are swept by the `TimeoutChecker`.
+    pub task_checkout_store: Arc<crate::task_checkout_store::TaskCheckoutStore>,
     /// Opt-in claude-code session-resume cache (`[llm] claude_code_resume`).
     /// `None` when resume is disabled (the default) — the adapter then sends the
     /// full flattened context every turn. The store is a pure cache: deleted on
@@ -4567,6 +4571,22 @@ impl Kernel {
                 .map_err(|e| anyhow::anyhow!("CheckpointStore init failed: {e}"))?,
         );
 
+        // Atomic task checkout store. Single-owner dispatch claim; in-memory
+        // fallback on disk-open failure (claims then don't survive restart, but
+        // dispatch still works) rather than aborting boot.
+        let task_checkout_store = Arc::new(
+            match crate::task_checkout_store::TaskCheckoutStore::open(
+                &data_dir.join("task_checkout.db"),
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, "task_checkout.db open failed; using in-memory checkout store");
+                    crate::task_checkout_store::TaskCheckoutStore::in_memory()
+                        .map_err(|e| anyhow::anyhow!("in-memory task checkout store init: {e}"))?
+                }
+            },
+        );
+
         // Opt-in claude-code session-resume cache. Only built when enabled, so the
         // default path never opens the DB. A failure to open degrades gracefully
         // to an in-memory cache (resume still works within the process) rather than
@@ -5079,6 +5099,7 @@ impl Kernel {
             },
             checkpoint_store,
             workspace_grants,
+            task_checkout_store,
             claude_session_lookup,
             approval_mode_resolver: None,
             approval_policy_matcher: None,

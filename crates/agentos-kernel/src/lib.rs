@@ -88,6 +88,7 @@ pub mod skill_installer;
 pub mod snapshot;
 pub mod state_store;
 pub mod system_prompt;
+pub mod task_checkout_store;
 pub mod task_completion;
 pub mod task_executor;
 pub(crate) mod task_summary;

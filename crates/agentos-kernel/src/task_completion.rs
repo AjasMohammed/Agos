@@ -38,6 +38,11 @@ impl Kernel {
         tracing::info!("Task {} complete: {}", task.id, result.answer);
         crate::metrics::record_task_completed(duration_ms, true);
 
+        // Release the atomic checkout — task is terminal, so the claim must not
+        // linger. Covers the background `execute_task` and sub-agent paths; the
+        // synchronous `cmd_run_task` path releases in its own terminal arms.
+        self.release_task_checkout(&task.id).await;
+
         // Record compact task success to episodic memory (token-efficient format)
         let summary_preview = format!(
             "task:{}\nresult:success|tools:{}|iters:{}|{}ms\nanswer:{}",
@@ -470,6 +475,10 @@ impl Kernel {
             );
         }
         crate::metrics::record_task_completed(duration_ms, false);
+
+        // Terminal failure (suspended/paused/waiting returned above) — release the
+        // atomic checkout so the claim doesn't linger.
+        self.release_task_checkout(&task.id).await;
 
         // Only transition to Failed and emit events if the task hasn't
         // been marked terminal by the timeout checker while we were running.

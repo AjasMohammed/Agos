@@ -41,3 +41,6 @@ mod event_trigger_e2e;
 
 #[path = "e2e/personalization.rs"]
 mod personalization;
+
+#[path = "e2e/task_checkout_e2e.rs"]
+mod task_checkout_e2e;
