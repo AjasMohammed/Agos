@@ -6074,6 +6074,7 @@ mod preflight_tests {
             gateway: Default::default(),
             scheduler: Default::default(),
             transcription: Default::default(),
+            agent_heartbeat: Default::default(),
             user_profile: Default::default(),
             personalization: Default::default(),
         }
@@ -6333,6 +6334,7 @@ mod vault_bootstrap_tests {
             gateway: Default::default(),
             scheduler: Default::default(),
             transcription: Default::default(),
+            agent_heartbeat: Default::default(),
             user_profile: Default::default(),
             personalization: Default::default(),
         }
