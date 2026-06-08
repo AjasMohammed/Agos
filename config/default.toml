@@ -573,3 +573,16 @@ enabled = false
 # active_agent = "assistant"         # default agent for inbound chat
 # # external_id omitted for Telegram → auto-discovered from the first /start
 
+
+# Agent heartbeat — periodically wake idle agents to check their inbox and any
+# assigned schedules, acting only when there is work. Opt-in: 0 disables it.
+# This reuses the existing scheduler tick, agent inbox, and normal task path —
+# it is not a second scheduler.
+[agent_heartbeat]
+# Seconds between wakeups. 0 disables heartbeats globally (default).
+default_interval_secs = 0
+# Jitter (0.0-1.0): lengthens each agent's interval by a deterministic per-agent
+# fraction so a large idle fleet doesn't wake in lockstep.
+jitter = 0.2
+# Cap on agents woken per tick, to avoid an inference storm on a large idle fleet.
+max_wakes_per_tick = 4

@@ -382,6 +382,102 @@ impl Kernel {
                                     }
                                 }
 
+                                // Agent heartbeat: wake idle agents that actually have
+                                // work (unread inbox or owned schedules). Opt-in
+                                // (default_interval_secs = 0 disables). Reuses the
+                                // normal background-task path — not a second scheduler.
+                                {
+                                    let hb = kernel.config.agent_heartbeat.clone();
+                                    if hb.default_interval_secs > 0 {
+                                        let now = chrono::Utc::now();
+                                        let due = {
+                                            let registry = kernel.agent_registry.read().await;
+                                            crate::heartbeat::HeartbeatRunner::due_agents(
+                                                registry.list_all(),
+                                                now,
+                                                hb.default_interval_secs,
+                                                hb.jitter,
+                                            )
+                                        };
+                                        let mut woken = 0usize;
+                                        for agent_id in due {
+                                            if woken >= hb.max_wakes_per_tick {
+                                                break;
+                                            }
+                                            // Only wake when there is actually work: unread
+                                            // inbox notifications. (Owned schedules are NOT a
+                                            // wake signal — the schedule manager already fires
+                                            // DUE schedules on its own tick; counting merely
+                                            // *owned* schedules would wake every scheduled agent
+                                            // each interval for nothing.)
+                                            let unread = kernel
+                                                .agent_inbox
+                                                .unread_count(agent_id)
+                                                .await
+                                                .unwrap_or(0);
+                                            if unread == 0 {
+                                                continue;
+                                            }
+                                            let agent_name = {
+                                                let registry = kernel.agent_registry.read().await;
+                                                registry.get_by_id(&agent_id).map(|a| a.name.clone())
+                                            };
+                                            let Some(agent_name) = agent_name else {
+                                                continue;
+                                            };
+                                            let prompt = format!(
+                                                "Heartbeat wakeup: you have {unread} unread inbox \
+                                                 notification(s). Review your inbox and act on \
+                                                 anything that needs attention. If nothing \
+                                                 requires action, simply stop."
+                                            );
+                                            let task_name = format!(
+                                                "heartbeat-{}-{}",
+                                                agent_name,
+                                                now.timestamp()
+                                            );
+                                            match kernel
+                                                .create_background_task(
+                                                    task_name,
+                                                    agent_name,
+                                                    prompt,
+                                                    true,
+                                                    true,
+                                                )
+                                                .await
+                                            {
+                                                Ok(_) => {
+                                                    // Restart the interval so we don't re-fire.
+                                                    kernel
+                                                        .agent_registry
+                                                        .write()
+                                                        .await
+                                                        .touch_last_active(&agent_id);
+                                                    woken += 1;
+                                                    kernel.audit_log(agentos_audit::AuditEntry {
+                                                        timestamp: chrono::Utc::now(),
+                                                        trace_id: agentos_types::TraceID::new(),
+                                                        event_type:
+                                                            agentos_audit::AuditEventType::AgentHeartbeatFired,
+                                                        agent_id: Some(agent_id),
+                                                        task_id: None,
+                                                        tool_id: None,
+                                                        details: serde_json::json!({
+                                                            "unread": unread,
+                                                        }),
+                                                        severity: agentos_audit::AuditSeverity::Info,
+                                                        reversible: false,
+                                                        rollback_ref: None,
+                                                    });
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(agent_id = %agent_id, error = %e, "Heartbeat task enqueue failed");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 // Sweep expired vault proxy tokens (Spec §3)
                                 kernel.vault.sweep_expired_proxy_tokens().await;
 

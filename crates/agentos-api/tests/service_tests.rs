@@ -122,6 +122,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         gateway: Default::default(),
         scheduler: Default::default(),
         transcription: Default::default(),
+        agent_heartbeat: Default::default(),
         user_profile: Default::default(),
         personalization: Default::default(),
     }

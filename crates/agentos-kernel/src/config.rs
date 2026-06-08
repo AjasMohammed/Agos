@@ -104,6 +104,43 @@ pub struct KernelConfig {
     /// Inbound voice/audio transcription (speech-to-text) for channel media.
     #[serde(default)]
     pub transcription: TranscriptionSettings,
+    /// Per-agent heartbeat wakeups (opt-in; disabled by default).
+    #[serde(default)]
+    pub agent_heartbeat: HeartbeatSettings,
+}
+
+/// Periodic agent heartbeat: wake idle agents to check their inbox / assigned
+/// work. Disabled by default (`default_interval_secs = 0`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HeartbeatSettings {
+    /// Seconds between wakeups. `0` disables heartbeats globally (default).
+    #[serde(default)]
+    pub default_interval_secs: u64,
+    /// Jitter (0.0–1.0) lengthening each agent's interval by a deterministic
+    /// per-agent fraction, to avoid a thundering-herd wake on a large fleet.
+    #[serde(default = "default_heartbeat_jitter")]
+    pub jitter: f64,
+    /// Cap on agents woken per tick, to avoid an inference storm on an idle fleet.
+    #[serde(default = "default_max_wakes_per_tick")]
+    pub max_wakes_per_tick: usize,
+}
+
+fn default_heartbeat_jitter() -> f64 {
+    0.2
+}
+
+fn default_max_wakes_per_tick() -> usize {
+    4
+}
+
+impl Default for HeartbeatSettings {
+    fn default() -> Self {
+        Self {
+            default_interval_secs: 0,
+            jitter: default_heartbeat_jitter(),
+            max_wakes_per_tick: default_max_wakes_per_tick(),
+        }
+    }
 }
 
 /// Speech-to-text settings for inbound channel voice/audio messages.

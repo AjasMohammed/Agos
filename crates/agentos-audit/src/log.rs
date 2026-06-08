@@ -149,6 +149,9 @@ pub enum AuditEventType {
     TaskCheckedOut,
     TaskCheckoutReclaimed,
 
+    // Periodic agent heartbeat wakeup
+    AgentHeartbeatFired,
+
     // Cost attribution (Spec §4)
     CostAttribution,
 

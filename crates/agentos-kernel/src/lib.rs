@@ -39,6 +39,7 @@ pub mod fallback_resolver;
 pub mod file_store;
 pub mod health;
 pub mod health_monitor;
+pub mod heartbeat;
 pub mod hooks;
 pub mod identity;
 pub mod inbound_router;
