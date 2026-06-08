@@ -34,6 +34,17 @@ pub enum ConfigSubcommand {
     },
     /// List all top-level config sections
     List,
+    /// Show config revision history (most recent first)
+    History {
+        /// Maximum number of revisions to show
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Roll the config back to a prior revision (see `config history`)
+    Rollback {
+        /// Revision id to restore
+        rev: i64,
+    },
 }
 
 use commands::{
@@ -541,17 +552,30 @@ async fn tokio_main() -> anyhow::Result<()> {
         }
 
         // Config get/set/list — offline TOML editing
-        Commands::Config { command } => match command {
-            ConfigSubcommand::Get { key } => {
-                commands::config_cmd::handle_get(&key)?;
+        Commands::Config { command } => {
+            // The offline config handlers resolve the file via `AGENTOS_CONFIG`
+            // (config_cmd::config_path). Bridge the global `--config` flag into it
+            // so `agentos --config <path> config ...` operates on the right file
+            // (and writes its revisions DB beside it), matching every other command.
+            std::env::set_var("AGENTOS_CONFIG", &cli.config);
+            match command {
+                ConfigSubcommand::Get { key } => {
+                    commands::config_cmd::handle_get(&key)?;
+                }
+                ConfigSubcommand::Set { key, value } => {
+                    commands::config_cmd::handle_set(&key, &value)?;
+                }
+                ConfigSubcommand::List => {
+                    commands::config_cmd::handle_list(None)?;
+                }
+                ConfigSubcommand::History { limit } => {
+                    commands::config_cmd::handle_history(limit)?;
+                }
+                ConfigSubcommand::Rollback { rev } => {
+                    commands::config_cmd::handle_rollback(rev)?;
+                }
             }
-            ConfigSubcommand::Set { key, value } => {
-                commands::config_cmd::handle_set(&key, &value)?;
-            }
-            ConfigSubcommand::List => {
-                commands::config_cmd::handle_list(None)?;
-            }
-        },
+        }
 
         // A2A commands are offline (direct HTTP to A2A server, no kernel bus needed)
         Commands::A2a { command } => {

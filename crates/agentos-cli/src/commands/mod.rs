@@ -8,6 +8,7 @@ pub mod audit;
 pub mod bg;
 pub mod channel;
 pub mod config_cmd;
+pub mod config_revision_store;
 pub mod cost;
 pub mod doctor;
 pub mod escalation;

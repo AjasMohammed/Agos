@@ -38,6 +38,7 @@ reqwest = { workspace = true }
 dialoguer = { workspace = true }
 indicatif = { workspace = true }
 toml_edit = { workspace = true }
+rusqlite = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 libc = { workspace = true }
