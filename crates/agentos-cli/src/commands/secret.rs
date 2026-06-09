@@ -5,13 +5,19 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum SecretCommands {
-    /// Set a secret (value entered interactively — never in shell args)
+    /// Set a secret. Value is prompted interactively, or supplied via `--value`
+    /// / piped on stdin for non-interactive (CI / scripted) use.
     Set {
         /// Secret name (e.g. OPENAI_API_KEY)
         name: String,
         /// Scope: "global", "agent:<name>", or "tool:<name>"
         #[arg(long, default_value = "global")]
         scope: String,
+        /// Secret value. If omitted: prompts on a TTY, else reads one line from
+        /// stdin. NOTE: passing on the command line exposes it in the process
+        /// list — prefer the stdin form (`… | agentos secret set NAME`) in CI.
+        #[arg(long)]
+        value: Option<String>,
     },
     /// List all secrets (metadata only — values never shown)
     List,
@@ -20,10 +26,14 @@ pub enum SecretCommands {
         /// Secret name
         name: String,
     },
-    /// Rotate a secret (new value entered interactively)
+    /// Rotate a secret (new value prompted, or via `--value` / stdin)
     Rotate {
         /// Secret name
         name: String,
+        /// New value. If omitted: prompts on a TTY, else reads one line from
+        /// stdin. Prefer the stdin form in CI (command-line args are visible).
+        #[arg(long)]
+        value: Option<String>,
     },
     /// Emergency vault lockdown: revoke all proxy tokens and block new issuance
     Lockdown,
@@ -31,13 +41,12 @@ pub enum SecretCommands {
 
 pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::Result<()> {
     match command {
-        SecretCommands::Set { name, scope } => {
-            eprint!("Enter value for '{}' (input hidden): ", name);
-            let value = rpassword::read_password()?;
-
-            if value.is_empty() {
-                anyhow::bail!("Secret value cannot be empty");
-            }
+        SecretCommands::Set { name, scope, value } => {
+            let value = resolve_secret_value(
+                &name,
+                value,
+                &format!("Enter value for '{name}' (input hidden): "),
+            )?;
 
             let parsed_scope = parse_scope(&scope)?;
 
@@ -108,13 +117,12 @@ pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::
             }
         }
 
-        SecretCommands::Rotate { name } => {
-            eprint!("Enter new value for '{}' (input hidden): ", name);
-            let new_value = rpassword::read_password()?;
-
-            if new_value.is_empty() {
-                anyhow::bail!("Secret value cannot be empty");
-            }
+        SecretCommands::Rotate { name, value } => {
+            let new_value = resolve_secret_value(
+                &name,
+                value,
+                &format!("Enter new value for '{name}' (input hidden): "),
+            )?;
 
             let response = client
                 .send_command(KernelCommand::RotateSecret {
@@ -131,6 +139,37 @@ pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::
         }
     }
     Ok(())
+}
+
+/// Resolve a secret value from (in priority order): an explicit `--value` flag,
+/// a TTY hidden prompt, or one line piped on stdin (non-interactive / CI).
+fn resolve_secret_value(
+    name: &str,
+    provided: Option<String>,
+    prompt: &str,
+) -> anyhow::Result<String> {
+    use std::io::{IsTerminal, Read};
+
+    let value = match provided {
+        Some(v) => v,
+        None if std::io::stdin().is_terminal() => {
+            eprint!("{prompt}");
+            rpassword::read_password()?
+        }
+        None => {
+            // Non-interactive: consume stdin (allows `printf %s "$TOKEN" | … set NAME`).
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf.trim_end_matches(['\n', '\r']).to_string()
+        }
+    };
+
+    if value.is_empty() {
+        anyhow::bail!(
+            "Secret value for '{name}' cannot be empty (pass --value, pipe it on stdin, or type it at the prompt)"
+        );
+    }
+    Ok(value)
 }
 
 fn parse_scope(s: &str) -> anyhow::Result<SecretScope> {

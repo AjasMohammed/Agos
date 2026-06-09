@@ -607,6 +607,10 @@ async fn tokio_main() -> anyhow::Result<()> {
 
         // Doctor — offline diagnostics
         Commands::Doctor { fix } => {
+            // Bridge the global `--config` flag into the env the offline doctor
+            // resolves (`AGENTOS_CONFIG`), so `agentos --config <path> doctor`
+            // diagnoses the install you pointed at — not `config/default.toml`.
+            std::env::set_var("AGENTOS_CONFIG", &cli.config);
             commands::doctor::handle(fix).await?;
         }
 
@@ -1202,10 +1206,11 @@ mod tests {
 
         match cli.command {
             Commands::Secret {
-                command: SecretCommands::Set { name, scope },
+                command: SecretCommands::Set { name, scope, value },
             } => {
                 assert_eq!(name, "SLACK_TOKEN");
                 assert_eq!(scope, "agent:notifier");
+                assert_eq!(value, None);
             }
             _ => panic!("Wrong command parsed"),
         }
