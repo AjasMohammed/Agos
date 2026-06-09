@@ -132,6 +132,13 @@ impl ProviderCatalog {
         Self::parse(&content).map_err(|e| format!("Failed to parse provider catalog: {}", e))
     }
 
+    /// Parse a catalog from a TOML string. Used for the built-in catalog that
+    /// ships embedded in the binary as a fallback when no `providers.toml` is
+    /// colocated with the config file.
+    pub fn from_toml_str(content: &str) -> Result<Self, String> {
+        Self::parse(content).map_err(|e| format!("Failed to parse provider catalog: {}", e))
+    }
+
     /// Create an empty catalog with no providers.
     pub fn empty() -> Self {
         Self {

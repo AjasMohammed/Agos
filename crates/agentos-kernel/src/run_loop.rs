@@ -1301,7 +1301,11 @@ impl Kernel {
         // Install Prometheus metrics recorder and start health/readiness/metrics HTTP server
         if let Some(prom_handle) = crate::health::install_prometheus_recorder() {
             if let Err(e) = crate::health::start_health_server(self.clone(), prom_handle).await {
-                tracing::warn!(error = %e, "Failed to start health server, continuing without it");
+                tracing::warn!(
+                    error = %e,
+                    health_port = self.config.kernel.health_port,
+                    "Health/metrics server failed to bind — /healthz, /readyz and /metrics are UNAVAILABLE for this instance (port likely in use by another kernel; set a distinct [kernel] health_port). External health probes will fail or hit the other instance."
+                );
             }
         }
 

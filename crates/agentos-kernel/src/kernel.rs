@@ -3383,27 +3383,46 @@ impl Kernel {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("providers.toml");
-        let (provider_catalog, resolved_catalog_path) =
+        // The full provider catalog ships embedded in the binary so a deployed
+        // kernel — or any config dir without a sibling `providers.toml` — still
+        // exposes every provider in `agentos provider list`. An explicit file
+        // colocated with the config wins (and may extend/override it).
+        const EMBEDDED_PROVIDERS: &str = include_str!("../../../config/providers.toml");
+        let load_embedded = || match agentos_llm::ProviderCatalog::from_toml_str(EMBEDDED_PROVIDERS)
+        {
+            Ok(catalog) => {
+                tracing::info!(
+                    providers = catalog.len(),
+                    "Loaded embedded provider catalog (no sibling providers.toml)"
+                );
+                Arc::new(std::sync::RwLock::new(catalog))
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Embedded provider catalog failed to parse");
+                Arc::new(std::sync::RwLock::new(agentos_llm::ProviderCatalog::empty()))
+            }
+        };
+        let (provider_catalog, resolved_catalog_path) = if catalog_path.exists() {
             match agentos_llm::ProviderCatalog::from_file(&catalog_path) {
                 Ok(catalog) => {
-                    if !catalog.is_empty() {
-                        tracing::info!(
-                            path = %catalog_path.display(),
-                            providers = catalog.len(),
-                            "Loaded provider catalog"
-                        );
-                    }
-                    let path = Some(catalog_path);
-                    (Arc::new(std::sync::RwLock::new(catalog)), path)
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to load provider catalog, continuing without it");
+                    tracing::info!(
+                        path = %catalog_path.display(),
+                        providers = catalog.len(),
+                        "Loaded provider catalog"
+                    );
                     (
-                        Arc::new(std::sync::RwLock::new(agentos_llm::ProviderCatalog::empty())),
-                        None,
+                        Arc::new(std::sync::RwLock::new(catalog)),
+                        Some(catalog_path),
                     )
                 }
-            };
+                Err(e) => {
+                    tracing::warn!(error = %e, "Provider catalog file failed to load; using embedded built-ins");
+                    (load_embedded(), None)
+                }
+            }
+        } else {
+            (load_embedded(), None)
+        };
 
         // 1.5 Run pre-flight system health checks before any subsystem init
         preflight_checks(&config)?;
