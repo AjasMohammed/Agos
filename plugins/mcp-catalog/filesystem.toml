@@ -12,9 +12,11 @@ strategy = "npx"
 package = "@modelcontextprotocol/server-filesystem"
 runtime = "node"
 min_runtime_version = "18"
-# {home} is expanded at install time. Scope this to a project dir in production —
-# the server can only touch the directories passed here.
-args = ["{home}/projects"]
+# {home} is expanded at install time and always exists, so the out-of-box
+# install attaches cleanly. SECURITY: this grants the server your whole home
+# directory — narrow it to a specific project dir in production, e.g.
+# args = ["{home}/projects"] (create that dir first, or the server exits on init).
+args = ["{home}"]
 
 [auth]
 type = "none"

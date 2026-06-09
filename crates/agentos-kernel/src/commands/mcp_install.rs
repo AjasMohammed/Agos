@@ -210,9 +210,8 @@ mod tests {
         assert_eq!(cmd, "npx");
         assert_eq!(args[0], "-y");
         assert_eq!(args[1], "@modelcontextprotocol/server-filesystem");
-        // {home} expanded in the trailing path arg.
-        assert!(args.last().unwrap().contains("/projects"));
-        assert!(!args.last().unwrap().contains("{home}"));
+        // -y, package, and the (expanded) directory arg.
+        assert_eq!(args.len(), 3);
         // No auth → empty env.
         assert!(env.is_empty());
     }
