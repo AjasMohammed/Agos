@@ -15,6 +15,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// Seed catalog entries embedded into the binary at build time, so
+/// `agentos mcp catalog list` works with **no** files on disk (mirrors how the
+/// CLI embeds `config/` and `skills/core/`). The folder path is relative to
+/// this crate's manifest dir.
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../../plugins/mcp-catalog/"]
+struct EmbeddedCatalog;
+
 /// One catalog entry — a curated, installable MCP server.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CatalogEntry {
@@ -138,6 +146,28 @@ pub struct CatalogRegistry {
 }
 
 impl CatalogRegistry {
+    /// Build the registry from the embedded seed entries, then overlay any
+    /// user-supplied entries in `user_dir` (user entries override built-ins by
+    /// `id`). This is the boot-time constructor — it works with no files on
+    /// disk because the seeds ship inside the binary.
+    pub fn load(user_dir: Option<&Path>) -> Result<Self, AgentOSError> {
+        let mut reg = Self::default();
+        for file in EmbeddedCatalog::iter() {
+            let f = EmbeddedCatalog::get(&file).ok_or_else(|| {
+                AgentOSError::CatalogParse(format!("embedded catalog read {file}"))
+            })?;
+            let text = std::str::from_utf8(&f.data)
+                .map_err(|e| AgentOSError::CatalogParse(format!("embedded {file}: {e}")))?;
+            let entry: CatalogEntry = toml::from_str(text)
+                .map_err(|e| AgentOSError::CatalogParse(format!("embedded {file}: {e}")))?;
+            reg.insert_validated(entry)?;
+        }
+        if let Some(dir) = user_dir {
+            reg.merge_override(Self::load_from_dir(dir)?);
+        }
+        Ok(reg)
+    }
+
     /// Load every `*.toml` entry from `dir` (keyed by `entry.id`). A missing
     /// directory yields an empty registry (`Ok`). Invalid entries are rejected
     /// with a `CatalogParse` error rather than silently skipped.
@@ -306,6 +336,15 @@ min_runtime_version = "18"
         let mut e = sample("weird");
         e.install.strategy = "prebuilt".into();
         assert!(reg.insert_validated(e).is_err());
+    }
+
+    #[test]
+    fn load_embeds_seed_catalog_without_disk() {
+        // Proves the seeds ship inside the binary: no `user_dir`, no disk reads.
+        let reg = CatalogRegistry::load(None).expect("embedded catalog must load");
+        for id in ["filesystem", "github", "sqlite"] {
+            assert!(reg.lookup(id).is_some(), "missing embedded seed: {id}");
+        }
     }
 
     #[test]

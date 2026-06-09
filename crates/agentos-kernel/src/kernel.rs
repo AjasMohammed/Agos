@@ -836,6 +836,9 @@ pub struct Kernel {
     /// `/deny <id>` inbound commands. Shared with `ChannelBroadcastSink`
     /// so escalations only fan out to paired senders.
     pub pairing_manager: Arc<agentos_channels::pairing::PairingManager>,
+    /// Curated MCP server catalog (embedded seeds + user overrides). Backs
+    /// `agentos mcp catalog list/search/info` and `agentos mcp install <id>`.
+    pub mcp_catalog: Arc<crate::mcp_catalog::CatalogRegistry>,
     /// Hot-reloadable handle to the `host-package-install` allowlist and
     /// manager priority list. The `ConfigWatcher` reload path writes
     /// fresh values here on `[tools.host_package]` changes so revocations
@@ -5037,6 +5040,25 @@ impl Kernel {
         ));
 
         let audit_for_dispatcher = Arc::clone(&audit);
+
+        // MCP catalog: embedded seed entries plus any user overrides in
+        // `<data_dir>/../mcp-catalog/` (resolved like the plugin dirs). A
+        // malformed user entry must not abort boot — fall back to embedded-only,
+        // then to an empty catalog, logging at each step.
+        let mcp_catalog = {
+            let user_dir = data_dir.parent().unwrap_or(&data_dir).join("mcp-catalog");
+            crate::mcp_catalog::CatalogRegistry::load(Some(&user_dir))
+                .or_else(|e| {
+                    tracing::warn!(error = %e, "MCP catalog: user entries failed to load; using embedded seeds only");
+                    crate::mcp_catalog::CatalogRegistry::load(None)
+                })
+                .map(Arc::new)
+                .unwrap_or_else(|e| {
+                    tracing::error!(error = %e, "MCP catalog: embedded seeds failed to load; catalog empty");
+                    Arc::new(crate::mcp_catalog::CatalogRegistry::default())
+                })
+        };
+
         let kernel = Kernel {
             config,
             audit,
@@ -5158,6 +5180,7 @@ impl Kernel {
             channel_manager: channel_manager_arc,
             channel_manager_rx: Arc::new(tokio::sync::Mutex::new(channel_manager_inbound_rx)),
             pairing_manager,
+            mcp_catalog,
             host_package_policy,
             hook_registry: Arc::clone(&hook_registry_arc),
             plugin_registry: crate::plugin_registry::PluginRegistry::new(

@@ -366,6 +366,7 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "rusqlite",
+ "rust-embed",
  "secrecy",
  "serde",
  "serde_json",

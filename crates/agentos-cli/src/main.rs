@@ -533,6 +533,65 @@ async fn tokio_main() -> anyhow::Result<()> {
             )
             .await?;
         }
+        Commands::Mcp {
+            command: McpCommands::Catalog { command },
+        } => {
+            use commands::mcp::CatalogSubcommand;
+            let config_path = Path::new(&cli.config);
+            if !config_path.exists() {
+                anyhow::bail!("Config file not found: {}", cli.config);
+            }
+            let config = agentos_kernel::config::load_config(config_path)?;
+            let mut bus_client = BusClient::connect(Path::new(&config.bus.socket_path)).await?;
+            match command {
+                CatalogSubcommand::List { trust } => {
+                    commands::mcp::cmd_catalog_list(&mut bus_client, trust).await?
+                }
+                CatalogSubcommand::Search { query } => {
+                    commands::mcp::cmd_catalog_search(&mut bus_client, query).await?
+                }
+                CatalogSubcommand::Info { id } => {
+                    commands::mcp::cmd_catalog_info(&mut bus_client, id).await?
+                }
+            }
+        }
+        Commands::Mcp {
+            command:
+                McpCommands::Install {
+                    id,
+                    yes,
+                    unsafe_allow_community,
+                    runtime_binary,
+                    no_auth,
+                },
+        } => {
+            let config_path = Path::new(&cli.config);
+            if !config_path.exists() {
+                anyhow::bail!("Config file not found: {}", cli.config);
+            }
+            let config = agentos_kernel::config::load_config(config_path)?;
+            let mut bus_client = BusClient::connect(Path::new(&config.bus.socket_path)).await?;
+            commands::mcp::cmd_mcp_install(
+                &mut bus_client,
+                id,
+                yes,
+                unsafe_allow_community,
+                runtime_binary,
+                no_auth,
+            )
+            .await?;
+        }
+        Commands::Mcp {
+            command: McpCommands::Uninstall { id, purge },
+        } => {
+            let config_path = Path::new(&cli.config);
+            if !config_path.exists() {
+                anyhow::bail!("Config file not found: {}", cli.config);
+            }
+            let config = agentos_kernel::config::load_config(config_path)?;
+            let mut bus_client = BusClient::connect(Path::new(&config.bus.socket_path)).await?;
+            commands::mcp::cmd_mcp_uninstall(&mut bus_client, id, purge).await?;
+        }
         Commands::Mcp { command } => {
             commands::mcp::handle(command, &cli.config).await?;
         }

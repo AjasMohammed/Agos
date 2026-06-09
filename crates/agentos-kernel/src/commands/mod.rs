@@ -13,6 +13,7 @@ pub mod hal;
 pub mod identity;
 pub mod log;
 pub mod mcp;
+pub mod mcp_install;
 pub mod notification;
 pub mod permission;
 pub mod personalization;

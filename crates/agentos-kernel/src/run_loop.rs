@@ -2311,6 +2311,26 @@ impl Kernel {
             KernelCommand::EnablePlugin { plugin_id } => self.cmd_enable_plugin(plugin_id).await,
             KernelCommand::DisablePlugin { plugin_id } => self.cmd_disable_plugin(plugin_id).await,
             KernelCommand::McpStatus => self.cmd_mcp_status().await,
+            KernelCommand::McpCatalogList => self.cmd_mcp_catalog_list().await,
+            KernelCommand::McpCatalogSearch { query } => self.cmd_mcp_catalog_search(query).await,
+            KernelCommand::McpCatalogInfo { id } => self.cmd_mcp_catalog_info(id).await,
+            KernelCommand::McpInstall {
+                id,
+                assume_yes,
+                allow_community,
+                runtime_binary_override,
+                no_auth,
+            } => {
+                self.cmd_mcp_install(
+                    id,
+                    assume_yes,
+                    allow_community,
+                    runtime_binary_override,
+                    no_auth,
+                )
+                .await
+            }
+            KernelCommand::McpUninstall { id, purge } => self.cmd_mcp_uninstall(id, purge).await,
             KernelCommand::McpAttach {
                 name,
                 command,

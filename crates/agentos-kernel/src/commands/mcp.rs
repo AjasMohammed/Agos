@@ -53,7 +53,58 @@ async fn resolve_env_secrets(
     }
 }
 
+/// Map a catalog entry to its transport-layer one-line summary.
+fn catalog_summary(entry: &crate::mcp_catalog::CatalogEntry) -> agentos_bus::CatalogSummary {
+    agentos_bus::CatalogSummary {
+        id: entry.id.clone(),
+        display_name: entry.display_name.clone(),
+        description: entry.description.clone(),
+        trust_tier: entry.trust_tier.clone(),
+        transport: entry.mcp.transport.clone(),
+        runtime: entry.install.runtime.clone(),
+    }
+}
+
 impl Kernel {
+    /// List every MCP catalog entry as a one-line summary.
+    pub async fn cmd_mcp_catalog_list(&self) -> KernelResponse {
+        let entries = self
+            .mcp_catalog
+            .list()
+            .into_iter()
+            .map(catalog_summary)
+            .collect();
+        KernelResponse::McpCatalogList(entries)
+    }
+
+    /// Search catalog entries by id, display name, or description.
+    pub async fn cmd_mcp_catalog_search(&self, query: String) -> KernelResponse {
+        let entries = self
+            .mcp_catalog
+            .search(&query)
+            .into_iter()
+            .map(catalog_summary)
+            .collect();
+        KernelResponse::McpCatalogList(entries)
+    }
+
+    /// Return the full detail of a single catalog entry as JSON.
+    pub async fn cmd_mcp_catalog_info(&self, id: String) -> KernelResponse {
+        match self.mcp_catalog.lookup(&id) {
+            Some(entry) => match serde_json::to_value(entry) {
+                Ok(value) => KernelResponse::McpCatalogInfo(value),
+                Err(e) => KernelResponse::Error {
+                    message: format!("Failed to serialize catalog entry '{id}': {e}"),
+                },
+            },
+            None => KernelResponse::Error {
+                message: format!(
+                    "No catalog entry '{id}'. Try: agentos mcp catalog search <keyword>"
+                ),
+            },
+        }
+    }
+
     /// Return the live health status of all configured MCP server connections.
     pub async fn cmd_mcp_status(&self) -> KernelResponse {
         let statuses: Vec<McpServerStatus> = self

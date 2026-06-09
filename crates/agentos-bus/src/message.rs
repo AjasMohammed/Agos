@@ -574,6 +574,40 @@ pub enum KernelCommand {
 
     /// Query the health status of all configured MCP server connections.
     McpStatus,
+    /// List every entry in the MCP catalog (embedded seeds + user overrides).
+    McpCatalogList,
+    /// Search catalog entries by id, display name, or description.
+    McpCatalogSearch {
+        query: String,
+    },
+    /// Fetch the full detail of a single catalog entry as JSON.
+    McpCatalogInfo {
+        id: String,
+    },
+    /// Install an MCP server from the catalog in one step (trust-gate →
+    /// runtime-validate → attach).
+    McpInstall {
+        id: String,
+        /// Proceed without interactive confirmation (one-shot model).
+        #[serde(default)]
+        assume_yes: bool,
+        /// Allow installing a `community`-tier entry.
+        #[serde(default)]
+        allow_community: bool,
+        /// Operator-supplied runtime binary path; skips runtime resolution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_binary_override: Option<String>,
+        /// Skip auth-credential env injection.
+        #[serde(default)]
+        no_auth: bool,
+    },
+    /// Uninstall (detach) a previously-installed catalog server.
+    McpUninstall {
+        id: String,
+        /// Also purge any cached package/credential artifacts.
+        #[serde(default)]
+        purge: bool,
+    },
     /// Attach a new MCP server to the running kernel at runtime.
     ///
     /// Spawns the server process (stdio) or opens an HTTP connection, performs
@@ -1018,6 +1052,10 @@ pub enum KernelResponse {
 
     // MCP server health
     McpServerStatusList(Vec<McpServerStatus>),
+    /// Catalog entries (one-line summaries) for `mcp catalog list/search`.
+    McpCatalogList(Vec<CatalogSummary>),
+    /// Full catalog entry detail (serialized entry) for `mcp catalog info`.
+    McpCatalogInfo(serde_json::Value),
     /// MCP server successfully attached; includes the names of registered tools.
     McpAttached {
         tool_count: usize,
@@ -1116,6 +1154,18 @@ pub struct PendingPairingEntry {
     pub sender_id: String,
     /// RFC 3339 timestamp of when the pending code expires.
     pub expires_at: String,
+}
+
+/// One-line summary of an MCP catalog entry (transport DTO for `catalog list`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogSummary {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub trust_tier: String,
+    pub transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
