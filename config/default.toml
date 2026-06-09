@@ -7,6 +7,12 @@ context_window_token_budget = 32000
 # SQLite DB for persisted runtime state (tasks, escalations, cost snapshots).
 state_db_path = "/tmp/agentos/data/kernel_state.db"
 
+# Port for the /healthz, /readyz, and /metrics HTTP endpoints (0 = disabled).
+# Used by `agentos healthz` and Docker/k8s probes. Give each kernel instance a
+# distinct port if you run more than one on the same host, or they will collide
+# (the second instance logs a bind error and serves no health endpoint).
+health_port = 9091
+
 # Sandbox execution policy for tool calls.
 # "trust_aware" (default): Core tools run in-process, Community/Verified tools sandboxed.
 # "always": All sandbox-eligible tools run in sandbox children (legacy behavior).
@@ -101,7 +107,10 @@ scoping_classifier = "heuristic"
 # Each entry must be an absolute path pointing to a project or shared directory.
 # System roots (/etc, /var, /root, /home itself, /) are rejected at startup.
 # Example: allowed_paths = ["/home/user/project", "/shared/datasets"]
-allowed_paths = ["/media", "/run/media"]
+# Empty by default: bare mount roots like /media are rejected by startup
+# validation (WORKSPACE_BARE_FORBIDDEN), so shipping them here makes the
+# default config fail to boot. Add a specific project subdirectory instead.
+allowed_paths = []
 
 # host-package-install: install host OS packages via system package manager.
 # DISABLED by default. The tool runs OUTSIDE the bwrap sandbox via `pkexec` or
