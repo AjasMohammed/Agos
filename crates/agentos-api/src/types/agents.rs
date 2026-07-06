@@ -12,9 +12,19 @@ pub struct ApiAgentSummary {
     pub status: String,
     pub roles: Vec<String>,
     pub connected_at: DateTime<Utc>,
+    /// Last time the agent acted or was woken (by a task, message, or heartbeat).
+    /// Drives the liveness indicator; also what the heartbeat scheduler reads to
+    /// decide which idle agents are due for a wakeup.
+    #[serde(default = "epoch")]
+    pub last_active: DateTime<Utc>,
     /// Whether the connected LLM adapter will emit native image blocks for this agent.
     #[serde(default)]
     pub supports_images: bool,
+}
+
+/// Serde default for `last_active` on older payloads that predate the field.
+fn epoch() -> DateTime<Utc> {
+    DateTime::<Utc>::UNIX_EPOCH
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

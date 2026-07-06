@@ -233,6 +233,8 @@ impl ToolRunner {
         self.register(Box::new(LogReaderTool::new()));
         self.register(Box::new(NetworkMonitorTool::new()));
         self.register(Box::new(HardwareInfoTool::new()));
+        self.register(Box::new(crate::hardware_twin::HardwareGetTwinTool::new()));
+        self.register(Box::new(crate::hardware_twin::HardwareSetDesiredTool::new()));
         self.register(Box::new(AudioTool::new()));
         self.register(Box::new(BluetoothTool::new()));
         self.register(Box::new(DisplayConfigTool::new()));
@@ -688,6 +690,27 @@ impl ToolRunner {
             .get(tool_name)
             .map(|t| t.required_permissions())
     }
+
+    /// Required permissions for a given tool **and a specific payload**.
+    ///
+    /// Prefer this over `get_required_permissions` for capability validation:
+    /// action-scoped tools (webcam, audio, process) are then checked against
+    /// the action actually requested instead of the union of all actions —
+    /// otherwise a `list`-only grant would implicitly satisfy `capture`.
+    pub fn get_required_permissions_for(
+        &self,
+        tool_name: &str,
+        payload: &serde_json::Value,
+    ) -> Option<Vec<(String, PermissionOp)>> {
+        if let Some(t) = self.tools.get(tool_name) {
+            return Some(t.required_permissions_for(payload));
+        }
+        self.dynamic_tools
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(tool_name)
+            .map(|t| t.required_permissions_for(payload))
+    }
 }
 
 #[cfg(test)]
@@ -711,6 +734,83 @@ mod tests {
             _ctx: crate::traits::ToolExecutionContext,
         ) -> Result<serde_json::Value, agentos_types::AgentOSError> {
             Ok(serde_json::json!({}))
+        }
+    }
+
+    /// A tool whose required permissions differ per action, mirroring webcam/audio.
+    struct ActionScopedTool;
+
+    #[async_trait]
+    impl crate::traits::AgentTool for ActionScopedTool {
+        fn name(&self) -> &str {
+            "action-scoped"
+        }
+        fn required_permissions(&self) -> Vec<(String, agentos_types::PermissionOp)> {
+            vec![
+                ("scoped.list".to_string(), agentos_types::PermissionOp::Read),
+                (
+                    "scoped.capture".to_string(),
+                    agentos_types::PermissionOp::Execute,
+                ),
+            ]
+        }
+        fn required_permissions_for(
+            &self,
+            payload: &serde_json::Value,
+        ) -> Vec<(String, agentos_types::PermissionOp)> {
+            match payload.get("action").and_then(serde_json::Value::as_str) {
+                Some("capture") => vec![(
+                    "scoped.capture".to_string(),
+                    agentos_types::PermissionOp::Execute,
+                )],
+                _ => vec![("scoped.list".to_string(), agentos_types::PermissionOp::Read)],
+            }
+        }
+        async fn execute(
+            &self,
+            _payload: serde_json::Value,
+            _ctx: crate::traits::ToolExecutionContext,
+        ) -> Result<serde_json::Value, agentos_types::AgentOSError> {
+            Ok(serde_json::json!({}))
+        }
+    }
+
+    #[test]
+    fn required_permissions_for_returns_the_action_scoped_subset() {
+        let runner = ToolRunner {
+            tools: std::collections::HashMap::new(),
+            file_lock_registry: Arc::new(crate::file_lock::FileLockRegistry::new()),
+            dynamic_tools: std::sync::RwLock::new(std::collections::HashMap::new()),
+            dynamic_revision: std::sync::atomic::AtomicU64::new(0),
+        };
+        runner.register_dynamic(Box::new(ActionScopedTool));
+
+        let list_perms = runner
+            .get_required_permissions_for("action-scoped", &serde_json::json!({"action": "list"}))
+            .unwrap();
+        assert_eq!(
+            list_perms,
+            vec![("scoped.list".to_string(), agentos_types::PermissionOp::Read)]
+        );
+
+        let capture_perms = runner
+            .get_required_permissions_for(
+                "action-scoped",
+                &serde_json::json!({"action": "capture"}),
+            )
+            .unwrap();
+        assert_eq!(
+            capture_perms,
+            vec![(
+                "scoped.capture".to_string(),
+                agentos_types::PermissionOp::Execute
+            )]
+        );
+
+        // The static union remains a superset of every per-action subset.
+        let union = runner.get_required_permissions("action-scoped").unwrap();
+        for perm in list_perms.iter().chain(capture_perms.iter()) {
+            assert!(union.contains(perm), "union missing {perm:?}");
         }
     }
 

@@ -295,7 +295,14 @@ impl Hook for ApprovalHook {
                     .and_then(|v| v.get("path"))
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                if matcher.allows(tool_name, agent_id, payload_path.as_deref()) {
+                // Path-traversal guard, matching `should_auto_approve` above: a
+                // learned "allow" entry must never auto-approve a path containing
+                // `..` (e.g. `/tmp/../etc/passwd`). Fall through to escalation.
+                let has_traversal = payload_path
+                    .as_deref()
+                    .map(|p| p.contains(".."))
+                    .unwrap_or(false);
+                if !has_traversal && matcher.allows(tool_name, agent_id, payload_path.as_deref()) {
                     tracing::info!(
                         tool = %tool_name,
                         agent_id = %agent_id,

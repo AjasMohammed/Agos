@@ -74,11 +74,26 @@ impl AgentTool for ShellExec {
         // Check if bwrap is available (at runtime)
         let bwrap_check = Command::new("bwrap").arg("--version").output().await;
 
-        // Determine whether network access is explicitly requested
+        // Determine whether network access is explicitly requested. Network
+        // egress from a sandboxed command is itself a capability: requesting it
+        // requires the `network.outbound` permission, exactly like web-fetch and
+        // http-client. Without this gate `allow_network:true` would be a free
+        // SSRF/egress escape hatch for any agent holding only `process.exec`.
         let allow_network = payload
             .get("allow_network")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        if allow_network
+            && !context
+                .permissions
+                .check("network.outbound", PermissionOp::Execute)
+        {
+            return Err(AgentOSError::PermissionDenied {
+                resource: "network.outbound".into(),
+                operation: "shell-exec allow_network=true requires the network.outbound permission"
+                    .into(),
+            });
+        }
 
         let mut cmd = if bwrap_check.is_ok() {
             // Build the bwrap command
@@ -141,6 +156,27 @@ impl AgentTool for ShellExec {
                 .arg("--proc")
                 .arg("/proc")
                 .arg("--unshare-all");
+
+            // SECURITY: scrub the environment. bwrap inherits the parent process
+            // environment by default, which on the kernel host contains every
+            // provider/API secret (OPENAI_API_KEY, ANTHROPIC_API_KEY, BRAVE/…,
+            // cloud creds). `--clearenv` drops all of it inside the sandbox; we
+            // then re-inject only a minimal, non-sensitive set so ordinary
+            // commands still work. `env`/`printenv` in the sandbox now sees only
+            // these, never the kernel's secrets.
+            proc.arg("--clearenv")
+                .arg("--setenv")
+                .arg("PATH")
+                .arg("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                .arg("--setenv")
+                .arg("HOME")
+                .arg(&data_dir_str)
+                .arg("--setenv")
+                .arg("TMPDIR")
+                .arg("/tmp")
+                .arg("--setenv")
+                .arg("LANG")
+                .arg("C.UTF-8");
 
             // Only share network if explicitly requested — default is isolated
             if allow_network {

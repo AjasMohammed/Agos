@@ -10,23 +10,23 @@ use agentos_audit::AuditLog;
 use agentos_bus::BusServer;
 use agentos_capability::profiles::ProfileManager;
 use agentos_capability::CapabilityEngine;
-#[cfg(feature = "audio")]
+#[cfg(all(feature = "audio", target_os = "linux"))]
 use agentos_hal::drivers::audio::AudioDriver;
-#[cfg(feature = "bluetooth")]
+#[cfg(all(feature = "bluetooth", target_os = "linux"))]
 use agentos_hal::drivers::bluetooth::BluetoothDriver;
-#[cfg(feature = "display")]
+#[cfg(all(feature = "display", target_os = "linux"))]
 use agentos_hal::drivers::display::DisplayDriver;
 #[cfg(feature = "homeassistant")]
 use agentos_hal::drivers::homeassistant::HomeAssistantDriver;
 #[cfg(feature = "mqtt")]
 use agentos_hal::drivers::mqtt::MqttDriver;
-#[cfg(feature = "printer")]
+#[cfg(all(feature = "printer", target_os = "linux"))]
 use agentos_hal::drivers::printer::PrinterDriver;
-#[cfg(feature = "raw-usb")]
+#[cfg(all(feature = "raw-usb", target_os = "linux"))]
 use agentos_hal::drivers::raw_usb::RawUsbDriver;
-#[cfg(feature = "usb-storage")]
+#[cfg(all(feature = "usb-storage", target_os = "linux"))]
 use agentos_hal::drivers::usb_storage::UsbStorageDriver;
-#[cfg(feature = "webcam")]
+#[cfg(all(feature = "webcam", target_os = "linux"))]
 use agentos_hal::drivers::webcam::WebcamDriver;
 use agentos_hal::{
     discover_available_devices,
@@ -35,7 +35,7 @@ use agentos_hal::{
         process::ProcessDriver, sensor::SensorDriver, storage::StorageDriver, system::SystemDriver,
     },
     DeviceAccessGate, DeviceStatus, HalEventSink, HalOperation, HardwareAbstractionLayer,
-    HardwareRegistry,
+    HardwareRegistry, SafetyEngine, TwinRegistry,
 };
 use agentos_llm::{LLMCore, NoopImageResolver};
 use agentos_memory::Embedder;
@@ -60,6 +60,16 @@ struct KernelHalEventSink {
     capability_engine: Arc<CapabilityEngine>,
     audit: Arc<AuditLog>,
     event_sender: tokio::sync::mpsc::Sender<agentos_types::EventMessage>,
+}
+
+/// Parse a `[hal.raw_usb] allow` entry of the form `"vid:pid"` (hex, with or
+/// without a `0x` prefix) into a `(vendor_id, product_id)` pair.
+#[cfg(all(feature = "raw-usb", target_os = "linux"))]
+fn parse_vid_pid(s: &str) -> Option<(u16, u16)> {
+    let (v, p) = s.split_once(':')?;
+    let vid = u16::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok()?;
+    let pid = u16::from_str_radix(p.trim().trim_start_matches("0x"), 16).ok()?;
+    Some((vid, pid))
 }
 
 struct KernelDeviceAccessGate {
@@ -686,6 +696,10 @@ pub struct Kernel {
     pub background_pool: Arc<BackgroundPool>,
     pub hal: Arc<HardwareAbstractionLayer>,
     pub hardware_registry: Arc<HardwareRegistry>,
+    /// Capture-consent grants (webcam/audio), shared with the HAL drivers.
+    /// Granted only by the operator path (`cmd_hal_approve_device`), checked
+    /// by drivers against the kernel-injected authenticated agent identity.
+    pub(crate) capture_consent: Arc<agentos_hal::ConsentStore>,
     pub schema_registry: Arc<crate::schema_registry::SchemaRegistry>,
     pub pipeline_engine: Arc<PipelineEngine>,
     pub intent_validator: Arc<crate::intent_validator::IntentValidator>,
@@ -698,6 +712,12 @@ pub struct Kernel {
     pub injection_scanner: Arc<crate::injection_scanner::InjectionScanner>,
     pub resource_arbiter: Arc<crate::resource_arbiter::ResourceArbiter>,
     pub checkpoint_store: Arc<crate::checkpoint_store::CheckpointStore>,
+    /// Durable agent-org registry. `None` when `org.db` failed to open at boot
+    /// (org-chart features degrade; the rest of the kernel is unaffected).
+    pub org_store: Option<Arc<crate::org_store::OrgStore>>,
+    /// Durable work-item queue for autonomous heartbeat operation. `None` when
+    /// `work.db` failed to open at boot (the work loop degrades; rest unaffected).
+    pub work_queue: Option<Arc<crate::work_store::WorkQueue>>,
     pub workspace_grants: Arc<crate::workspace_grant_store::WorkspaceGrantRegistry>,
     /// Atomic, crash-safe task ownership claims. A task is claimed before
     /// dispatch (single-owner guarantee) and released on terminal completion;
@@ -708,6 +728,20 @@ pub struct Kernel {
     /// full flattened context every turn. The store is a pure cache: deleted on
     /// task completion, and every resume is fingerprint-guarded.
     pub claude_session_lookup: Option<Arc<crate::claude_session_store::KernelClaudeSessionLookup>>,
+    /// Per-agent buffer of tool calls made by `claude-code` agents through the
+    /// MCP gateway. The gateway executor appends each invocation; the chat loop
+    /// drains it per turn so subprocess-driven tool calls appear in the chat UI
+    /// (they never reach the adapter's `InferenceResult.tool_calls`). Only
+    /// claude-code agents have an entry; absent ⇒ no-op for normal agents.
+    ///
+    /// The buffer is per-agent and shared across all of that agent's executions.
+    /// A background task or heartbeat for the same agent pushes into the same
+    /// buffer, so its gateway calls may be drained by (and attributed to) a
+    /// concurrent chat turn. Acceptable for the interactive chat use case, where
+    /// claude-code agents are predominantly chat-driven; the push is capped so a
+    /// task-only agent (never drained by chat) can't grow it unbounded.
+    pub claude_gateway_tool_calls:
+        Arc<RwLock<HashMap<AgentID, crate::claude_mcp_gateway::GatewayToolCallCollector>>>,
     /// Active approval-mode resolver. Populated during boot after the
     /// `ApprovalHook` is registered; `None` only during the narrow window
     /// between Kernel struct construction and hook registration. The CLI
@@ -859,9 +893,8 @@ pub struct Kernel {
     /// `ProcessProvider` and the kernel's `ProcessCrashed` emitter share a
     /// single source of truth.
     pub process_table: crate::managed_process::ProcessTable,
-    /// Dynamic capability broker for runtime capability negotiation (KMC Phase 7).
-    pub capability_broker: Arc<crate::capability_broker::CapabilityBroker>,
-    /// Policy engine for capability request evaluation (KMC Phase 8).
+    /// Policy engine for dynamic capability request evaluation, enforced in the
+    /// KMC dispatch path (`[security] policy_profile`).
     pub policy_engine: Arc<RwLock<crate::policy_engine::PolicyEngine>>,
     /// Capability dispatcher for routing tool calls to providers (KMC).
     pub capability_dispatcher: Arc<crate::capability_dispatch::KernelCapabilityDispatcher>,
@@ -955,6 +988,31 @@ pub enum ChatStreamEvent {
 /// Fallback chat tool-iteration cap when config is missing. Live config value
 /// is `chat.max_tool_iterations` and is read per-call via `self.config.chat`.
 const CHAT_MAX_TOOL_ITERATIONS_FALLBACK: u32 = 25;
+
+/// TTL of the per-turn capability token minted for chat tool execution (S1).
+/// Bounded to a single chat turn, not a task lifetime — long enough to cover
+/// executing every tool call in one assistant response, short enough that a
+/// leaked chat token is useless minutes later.
+const CHAT_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Map an `IntentType` to the `IntentTypeFlag` used in capability-token scoping.
+/// Mirrors the mapping in `CapabilityEngine::validate_intent` so a chat token's
+/// `allowed_intents` narrows to exactly the intents a turn requests.
+fn chat_intent_flag(t: IntentType) -> IntentTypeFlag {
+    match t {
+        IntentType::Read => IntentTypeFlag::Read,
+        IntentType::Write => IntentTypeFlag::Write,
+        IntentType::Execute => IntentTypeFlag::Execute,
+        IntentType::Query => IntentTypeFlag::Query,
+        IntentType::Observe => IntentTypeFlag::Observe,
+        IntentType::Delegate => IntentTypeFlag::Delegate,
+        IntentType::Message => IntentTypeFlag::Message,
+        IntentType::Broadcast => IntentTypeFlag::Broadcast,
+        IntentType::Escalate => IntentTypeFlag::Escalate,
+        IntentType::Subscribe => IntentTypeFlag::Subscribe,
+        IntentType::Unsubscribe => IntentTypeFlag::Unsubscribe,
+    }
+}
 
 const EMPTY_LLM_ANSWER_PLACEHOLDER: &str =
     "_(no response from model — the provider returned an empty answer; please retry)_";
@@ -1073,11 +1131,11 @@ fn generate_vault_passphrase() -> String {
 }
 
 /// Some kernel actions require a real running task context (parent/child
-/// linkage, scheduler state, blocking task suspension). Chat sessions do not
-/// own a registered task — synthetic tasks would corrupt scheduler state or
-/// deadlock the chat HTTP request. Reject those with a clean message instead
-/// of dispatching them.
-fn chat_incompatible_action_error(
+/// linkage, scheduler state, blocking task suspension). Chat sessions and
+/// scheduled tool fires do not own a registered task — synthetic tasks would
+/// corrupt scheduler state or deadlock the calling request. Reject those with
+/// a clean message instead of dispatching them.
+pub(crate) fn chat_incompatible_action_error(
     action: &crate::kernel_action::KernelAction,
 ) -> Option<&'static str> {
     use crate::kernel_action::KernelAction;
@@ -1527,6 +1585,38 @@ impl Kernel {
         manifests
     }
 
+    /// Reset a claude-code agent's gateway tool-call buffer at the start of a
+    /// chat turn, so a drain at the end captures only this turn's calls.
+    /// No-op for agents without a gateway (normal agents).
+    async fn clear_gateway_tool_calls(&self, agent_id: AgentID) {
+        if let Some(collector) = self.claude_gateway_tool_calls.read().await.get(&agent_id) {
+            collector.lock().await.clear();
+        }
+    }
+
+    /// Drain a claude-code agent's gateway tool-call buffer into chat tool-call
+    /// records (subprocess MCP calls the chat loop didn't make itself). Empty
+    /// for agents without a gateway. Draining empties the buffer.
+    async fn take_gateway_tool_calls(&self, agent_id: AgentID) -> Vec<ChatToolCallRecord> {
+        let map = self.claude_gateway_tool_calls.read().await;
+        let Some(collector) = map.get(&agent_id) else {
+            return Vec::new();
+        };
+        let drained: Vec<crate::claude_mcp_gateway::GatewayToolCall> =
+            std::mem::take(&mut *collector.lock().await);
+        drained
+            .into_iter()
+            .map(|g| ChatToolCallRecord {
+                tool_name: g.tool_name,
+                intent_type: String::new(),
+                id: None,
+                payload: g.payload,
+                result: g.result,
+                duration_ms: g.duration_ms,
+            })
+            .collect()
+    }
+
     /// Direct chat inference — calls the agent's LLM with the conversation history.
     ///
     /// Does NOT create a task or touch the scheduler. Used exclusively by the web UI
@@ -1673,6 +1763,10 @@ impl Kernel {
         });
 
         let mut tool_calls: Vec<ChatToolCallRecord> = Vec::new();
+        // Start this turn with an empty gateway buffer so the post-inference drain
+        // captures only calls the claude-code subprocess makes this turn (no-op
+        // for normal agents).
+        self.clear_gateway_tool_calls(agent_id).await;
         let mut iterations = 0u32;
         let mut total_tokens_used = 0u64;
         let mut total_cost_usd = 0.0f64;
@@ -1749,6 +1843,13 @@ impl Kernel {
             // chat history.
             let visible_text =
                 self.sanitize_chat_inference_result(&mut result, agent_name, iterations);
+
+            // Fold in any tool calls the claude-code subprocess made via the MCP
+            // gateway this iteration. The kernel didn't execute them (they ran
+            // inside the subprocess), so they're absent from `result.tool_calls`;
+            // draining the gateway buffer surfaces them in chat history. No-op for
+            // normal agents.
+            tool_calls.extend(self.take_gateway_tool_calls(agent_id).await);
 
             tracing::info!(
                 target: "agentos::chat",
@@ -1957,6 +2058,42 @@ impl Kernel {
                 };
 
                 let mut repeat_error_abort: Option<String> = None;
+
+                // S1: mint one signed, short-TTL capability token scoped to
+                // exactly the intents this chat turn needs. Every chat tool call
+                // is then validated against it (HMAC verify + expiry + scoped
+                // intents + per-permission check) with parity to the task path —
+                // instead of running at the agent's full standing permissions.
+                let chat_task_id = TaskID::new();
+                let chat_token = {
+                    let turn_intents: std::collections::BTreeSet<IntentTypeFlag> = calls_to_execute
+                        .iter()
+                        .map(|(_, _, it, _)| {
+                            chat_intent_flag(
+                                crate::tool_call::parse_intent_type(it)
+                                    .unwrap_or(IntentType::Query),
+                            )
+                        })
+                        .collect();
+                    match self.capability_engine.issue_token(
+                        chat_task_id,
+                        agent_id,
+                        std::collections::BTreeSet::new(),
+                        turn_intents,
+                        agent_permissions.clone(),
+                        CHAT_TOKEN_TTL,
+                    ) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::error!(error = %e,
+                                "Failed to mint chat capability token — denying all tools this turn (fail-closed)");
+                            // Unsigned default token: fails HMAC verification, so
+                            // validate_tool_call rejects every call this turn.
+                            agentos_types::AgentTask::default().capability_token
+                        }
+                    }
+                };
+
                 for (tool_name, payload, intent_type_str, tool_call_id) in &calls_to_execute {
                     let chat_trace_id = TraceID::new();
                     let ws_chat = self.workspace_paths_for_agent(&agent_id);
@@ -2043,19 +2180,87 @@ impl Kernel {
                         wrapped
                     } else {
                         consecutive_dedup_count = 0;
-                        match self
-                            .tool_runner
-                            .execute(tool_name, payload.clone(), exec_ctx)
+                        let gate_task_id = exec_ctx.task_id;
+
+                        // S1: validate the per-turn capability token BEFORE the
+                        // approval gate — the cheapest hard gate first. This is
+                        // the same Layer-A check the task path runs (HMAC verify,
+                        // expiry, scoped intents, per-permission check). The
+                        // runner-level `permissions.check` stays as defense-in-depth.
+                        // Layer-B coherence (validate_tool_call_full) is intentionally
+                        // NOT run here: a chat turn has no task `original_prompt` to
+                        // check coherence against, so it would only risk false rejects.
+                        let parsed = crate::tool_call::ParsedToolCall {
+                            id: tool_call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            intent_type: crate::tool_call::parse_intent_type(intent_type_str)
+                                .unwrap_or(IntentType::Query),
+                            payload: payload.clone(),
+                        };
+                        let chat_task = AgentTask {
+                            id: chat_task_id,
+                            agent_id,
+                            priority: 5,
+                            timeout: CHAT_TOKEN_TTL,
+                            capability_token: chat_token.clone(),
+                            ..Default::default()
+                        };
+                        if let Err(reason) =
+                            self.validate_tool_call(&chat_task, &parsed, chat_trace_id)
+                        {
+                            tracing::warn!(
+                                tool = %tool_name,
+                                reason = %reason,
+                                "Chat tool call denied by capability validation"
+                            );
+                            self.audit_log(agentos_audit::AuditEntry {
+                                timestamp: chrono::Utc::now(),
+                                trace_id: chat_trace_id,
+                                event_type: agentos_audit::AuditEventType::CapabilityDenied,
+                                agent_id: Some(agent_id),
+                                task_id: Some(chat_task_id),
+                                tool_id: None,
+                                details: serde_json::json!({
+                                    "tool": tool_name, "reason": reason, "path": "chat"
+                                }),
+                                severity: agentos_audit::AuditSeverity::Warn,
+                                reversible: false,
+                                rollback_ref: None,
+                            });
+                            serde_json::json!({
+                                "error": format!("Tool '{tool_name}' denied: {reason}")
+                            })
+                        }
+                        // CR1: gate the call through the ToolPre/ApprovalHook
+                        // exactly like the task-execution path, so chat is not
+                        // an approval bypass for ExecCapable/ControlPlane tools.
+                        else if let Err(reason) = self
+                            .enforce_chat_tool_pre(agent_id, gate_task_id, tool_name, payload)
                             .await
                         {
-                            Ok(value) => value,
-                            Err(e) => {
-                                tracing::warn!(
-                                    tool = %tool_name,
-                                    error = %e,
-                                    "Chat tool execution failed"
-                                );
-                                serde_json::json!({"error": e.to_string()})
+                            tracing::warn!(
+                                tool = %tool_name,
+                                reason = %reason,
+                                "Chat tool call blocked by approval gate"
+                            );
+                            serde_json::json!({
+                                "error": format!("Tool '{tool_name}' blocked: {reason}")
+                            })
+                        } else {
+                            match self
+                                .tool_runner
+                                .execute(tool_name, payload.clone(), exec_ctx)
+                                .await
+                            {
+                                Ok(value) => value,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        tool = %tool_name,
+                                        error = %e,
+                                        "Chat tool execution failed"
+                                    );
+                                    serde_json::json!({"error": e.to_string()})
+                                }
                             }
                         }
                     };
@@ -2403,6 +2608,10 @@ impl Kernel {
         });
 
         let mut tool_calls: Vec<ChatToolCallRecord> = Vec::new();
+        // Start this turn with an empty gateway buffer so the post-inference drain
+        // captures only calls the claude-code subprocess makes this turn (no-op
+        // for normal agents).
+        self.clear_gateway_tool_calls(agent_id).await;
         let mut iterations = 0u32;
         let mut total_tokens_used = 0u64;
         let mut total_cost_usd = 0.0f64;
@@ -2572,6 +2781,41 @@ impl Kernel {
             // multi-turn tool-calling rounds do not lose chain-of-thought.
             let visible_text =
                 self.sanitize_chat_inference_result(&mut result, agent_name, iterations);
+
+            // Surface tool calls the claude-code subprocess made via the MCP
+            // gateway this iteration: append them for persistence AND emit live
+            // ToolResult stream events so they render in the chat UI. The calls
+            // already executed inside the subprocess, so this is after-the-fact.
+            // No-op for normal agents.
+            for gc in self.take_gateway_tool_calls(agent_id).await {
+                // Emit ToolStart first so the frontend creates a tool card; it
+                // pairs the following ToolResult to that card by name. Without the
+                // start, the live stream drops the result (the card only exists if
+                // a start created it). The call already ran in the subprocess, so
+                // start + result are emitted back-to-back here.
+                let _ = tx
+                    .send(ChatStreamEvent::ToolStart {
+                        tool_name: gc.tool_name.clone(),
+                        iteration: iterations,
+                    })
+                    .await;
+                let success = gc.result.get("error").is_none();
+                let result_preview = serde_json::to_string(&gc.result)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(200)
+                    .collect::<String>();
+                let _ = tx
+                    .send(ChatStreamEvent::ToolResult {
+                        tool_name: gc.tool_name.clone(),
+                        result_preview,
+                        duration_ms: gc.duration_ms,
+                        success,
+                    })
+                    .await;
+                tool_calls.push(gc);
+            }
+
             if streamed_token_events == 0 {
                 // Some providers/adapters only emit a final Done payload. Simulate
                 // incremental streaming so the UI remains responsive and visibly
@@ -2847,6 +3091,37 @@ impl Kernel {
                 };
 
                 let mut repeat_error_abort: Option<String> = None;
+
+                // S1: mint one signed, short-TTL capability token scoped to the
+                // intents this streaming chat turn needs (see non-streaming path).
+                let chat_task_id = TaskID::new();
+                let chat_token = {
+                    let turn_intents: std::collections::BTreeSet<IntentTypeFlag> = calls_to_execute
+                        .iter()
+                        .map(|(_, _, it, _)| {
+                            chat_intent_flag(
+                                crate::tool_call::parse_intent_type(it)
+                                    .unwrap_or(IntentType::Query),
+                            )
+                        })
+                        .collect();
+                    match self.capability_engine.issue_token(
+                        chat_task_id,
+                        agent_id,
+                        std::collections::BTreeSet::new(),
+                        turn_intents,
+                        agent_permissions.clone(),
+                        CHAT_TOKEN_TTL,
+                    ) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::error!(error = %e,
+                                "Failed to mint chat capability token — denying all tools this turn (fail-closed)");
+                            agentos_types::AgentTask::default().capability_token
+                        }
+                    }
+                };
+
                 for (tool_name, payload, intent_type_str, tool_call_id) in &calls_to_execute {
                     let _ = tx
                         .send(ChatStreamEvent::ToolStart {
@@ -2940,19 +3215,84 @@ impl Kernel {
                         wrapped
                     } else {
                         consecutive_dedup_count = 0;
-                        match self
-                            .tool_runner
-                            .execute(tool_name, payload.clone(), exec_ctx)
+                        let gate_task_id = exec_ctx.task_id;
+
+                        // S1: validate the per-turn capability token BEFORE the
+                        // approval gate (parity with the task path and the
+                        // non-streaming chat path). Runner `permissions.check`
+                        // remains as defense-in-depth. Layer-B coherence is
+                        // intentionally skipped (no chat task prompt to check against).
+                        let parsed = crate::tool_call::ParsedToolCall {
+                            id: tool_call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            intent_type: crate::tool_call::parse_intent_type(intent_type_str)
+                                .unwrap_or(IntentType::Query),
+                            payload: payload.clone(),
+                        };
+                        let chat_task = AgentTask {
+                            id: chat_task_id,
+                            agent_id,
+                            priority: 5,
+                            timeout: CHAT_TOKEN_TTL,
+                            capability_token: chat_token.clone(),
+                            ..Default::default()
+                        };
+                        if let Err(reason) =
+                            self.validate_tool_call(&chat_task, &parsed, chat_trace_id)
+                        {
+                            tracing::warn!(
+                                tool = %tool_name,
+                                reason = %reason,
+                                "Chat streaming tool call denied by capability validation"
+                            );
+                            self.audit_log(agentos_audit::AuditEntry {
+                                timestamp: chrono::Utc::now(),
+                                trace_id: chat_trace_id,
+                                event_type: agentos_audit::AuditEventType::CapabilityDenied,
+                                agent_id: Some(agent_id),
+                                task_id: Some(chat_task_id),
+                                tool_id: None,
+                                details: serde_json::json!({
+                                    "tool": tool_name, "reason": reason, "path": "chat_stream"
+                                }),
+                                severity: agentos_audit::AuditSeverity::Warn,
+                                reversible: false,
+                                rollback_ref: None,
+                            });
+                            serde_json::json!({
+                                "error": format!("Tool '{tool_name}' denied: {reason}")
+                            })
+                        }
+                        // CR1: gate the call through the ToolPre/ApprovalHook
+                        // exactly like the task-execution path, so streaming
+                        // chat is not an approval bypass.
+                        else if let Err(reason) = self
+                            .enforce_chat_tool_pre(agent_id, gate_task_id, tool_name, payload)
                             .await
                         {
-                            Ok(value) => value,
-                            Err(e) => {
-                                tracing::warn!(
-                                    tool = %tool_name,
-                                    error = %e,
-                                    "Chat streaming tool execution failed"
-                                );
-                                serde_json::json!({"error": e.to_string()})
+                            tracing::warn!(
+                                tool = %tool_name,
+                                reason = %reason,
+                                "Chat streaming tool call blocked by approval gate"
+                            );
+                            serde_json::json!({
+                                "error": format!("Tool '{tool_name}' blocked: {reason}")
+                            })
+                        } else {
+                            match self
+                                .tool_runner
+                                .execute(tool_name, payload.clone(), exec_ctx)
+                                .await
+                            {
+                                Ok(value) => value,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        tool = %tool_name,
+                                        error = %e,
+                                        "Chat streaming tool execution failed"
+                                    );
+                                    serde_json::json!({"error": e.to_string()})
+                                }
                             }
                         }
                     };
@@ -3526,6 +3866,11 @@ impl Kernel {
         let capability_engine = Arc::new(CapabilityEngine::boot(&vault).await);
 
         // 4.5 Initialize HardwareAbstractionLayer
+        //
+        // Capture consent (webcam/audio) is operator-originated: the shared
+        // store is granted by `cmd_hal_approve_device` and checked by the
+        // drivers against the kernel-injected authenticated agent identity.
+        let capture_consent = Arc::new(agentos_hal::ConsentStore::new());
         let mut hal = HardwareAbstractionLayer::new();
         hal.register(Box::new(SystemDriver::new()));
         hal.register(Box::new(ProcessDriver::new()));
@@ -3533,20 +3878,46 @@ impl Kernel {
         hal.register(Box::new(SensorDriver::new()));
         hal.register(Box::new(GpuDriver::new()));
         hal.register(Box::new(StorageDriver::new()));
-        #[cfg(feature = "bluetooth")]
+        #[cfg(all(feature = "bluetooth", target_os = "linux"))]
         hal.register(Box::new(BluetoothDriver::new()));
-        #[cfg(feature = "audio")]
-        hal.register(Box::new(AudioDriver::new()));
-        #[cfg(feature = "display")]
+        #[cfg(all(feature = "audio", target_os = "linux"))]
+        hal.register(Box::new(AudioDriver::with_consent_store(Arc::clone(
+            &capture_consent,
+        ))));
+        #[cfg(all(feature = "display", target_os = "linux"))]
         hal.register(Box::new(DisplayDriver::new()));
-        #[cfg(feature = "printer")]
+        #[cfg(all(feature = "printer", target_os = "linux"))]
         hal.register(Box::new(PrinterDriver::new()));
-        #[cfg(feature = "raw-usb")]
-        hal.register(Box::new(RawUsbDriver::new()));
-        #[cfg(feature = "usb-storage")]
+        #[cfg(all(feature = "raw-usb", target_os = "linux"))]
+        {
+            // The raw-USB driver is fail-closed: with an empty allowlist every
+            // open/read/write/control is denied. `[hal.raw_usb] allow` is the
+            // only way to make it usable.
+            let raw_usb = RawUsbDriver::new();
+            for entry in &config.hal.raw_usb.allow {
+                match parse_vid_pid(entry) {
+                    Some((vid, pid)) => {
+                        raw_usb.allow_device(vid, pid);
+                        tracing::info!(
+                            vid = format!("{vid:04x}"),
+                            pid = format!("{pid:04x}"),
+                            "Raw-USB device allowlisted from config"
+                        );
+                    }
+                    None => tracing::warn!(
+                        entry = %entry,
+                        "Ignoring malformed hal.raw_usb.allow entry (expected \"vid:pid\" hex)"
+                    ),
+                }
+            }
+            hal.register(Box::new(raw_usb));
+        }
+        #[cfg(all(feature = "usb-storage", target_os = "linux"))]
         hal.register(Box::new(UsbStorageDriver::new()));
-        #[cfg(feature = "webcam")]
-        hal.register(Box::new(WebcamDriver::new()));
+        #[cfg(all(feature = "webcam", target_os = "linux"))]
+        hal.register(Box::new(WebcamDriver::with_consent_store(Arc::clone(
+            &capture_consent,
+        ))));
 
         // Register log reader with app logs only - audit log is not exposed to agents
         let app_logs = HashMap::new();
@@ -3641,6 +4012,42 @@ impl Kernel {
         let data_dir = PathBuf::from(&config.tools.data_dir);
         std::fs::create_dir_all(&data_dir)?;
 
+        // 6.1 Device twins + operator safety rules (IoT actuation gate).
+        // The safety engine is the mandatory interlock for `hardware-set-desired`:
+        // operator rules in hardware_limits.toml (next to the main config file)
+        // are evaluated in Rust before any desired state is written. A present
+        // but unparseable rules file fails boot — silently dropping operator
+        // safety rules is never acceptable. If the twin DB cannot be opened,
+        // neither subsystem is attached and the twin tools fail closed.
+        match TwinRegistry::new(&data_dir.join("device_twins.db")) {
+            Ok(twin_registry) => {
+                let twin_registry = Arc::new(twin_registry);
+                let limits_path = config_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("hardware_limits.toml");
+                let safety_engine = Arc::new(SafetyEngine::from_config(
+                    &limits_path,
+                    Arc::clone(&twin_registry),
+                )?);
+                tracing::info!(
+                    twin_db = %data_dir.join("device_twins.db").display(),
+                    rules = safety_engine.rule_count(),
+                    "Device twin registry and safety engine initialized"
+                );
+                hal = hal
+                    .with_twin_registry(twin_registry)
+                    .with_safety_engine(safety_engine);
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Device twin DB could not be opened — twin/safety subsystem \
+                     disabled; hardware-set-desired and hardware-get-twin fail closed"
+                );
+            }
+        }
+
         // Canonicalize workspace paths at startup so runtime checks are fast.
         // Paths that don't exist yet are skipped with a warning.
         let workspace_paths: Vec<PathBuf> = config
@@ -3693,10 +4100,54 @@ impl Kernel {
             );
             Arc::new(Embedder::noop())
         } else {
-            Arc::new(
-                Embedder::with_cache_dir(&model_cache_dir)
-                    .map_err(|e| anyhow::anyhow!("Failed to initialize shared embedder: {}", e))?,
+            // Embedder init downloads the ~23 MB MiniLM ONNX model on first
+            // boot. A stalled CDN connection used to hang boot forever (the
+            // fetch has no internal timeout), so run it on a blocking thread
+            // under a deadline and fall back to the zero-vector embedder
+            // rather than bricking the deploy. The detached download thread
+            // may still complete in the background, warming the cache for the
+            // next boot.
+            let timeout_secs = config.memory.embedder_init_timeout_secs;
+            tracing::info!(
+                cache_dir = %model_cache_dir.display(),
+                timeout_secs,
+                "Initializing embeddings model (first boot downloads ~23 MB; \
+                 set memory.disable_embedder=true to skip)"
+            );
+            let cache_dir = model_cache_dir.clone();
+            let init = tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_secs),
+                tokio::task::spawn_blocking(move || Embedder::with_cache_dir(&cache_dir)),
             )
+            .await;
+            match init {
+                Ok(Ok(Ok(embedder))) => Arc::new(embedder),
+                Ok(Ok(Err(e))) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Embedder init failed — falling back to zero-vector embedder; \
+                         semantic retrieval disabled, lexical (FTS5) search still works"
+                    );
+                    Arc::new(Embedder::noop())
+                }
+                Ok(Err(join_err)) => {
+                    tracing::warn!(
+                        error = %join_err,
+                        "Embedder init thread panicked — falling back to zero-vector embedder"
+                    );
+                    Arc::new(Embedder::noop())
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        timeout_secs,
+                        "Embedder init timed out (likely a stalled model download) — \
+                         falling back to zero-vector embedder so boot can proceed; \
+                         the download continues in the background and may be ready \
+                         on the next restart"
+                    );
+                    Arc::new(Embedder::noop())
+                }
+            }
         };
         // Pre-compute manual section embeddings so `suggest_manual_sections`
         // can rank semantically (cosine over MiniLM) instead of falling
@@ -4593,6 +5044,38 @@ impl Kernel {
                 .map_err(|e| anyhow::anyhow!("CheckpointStore init failed: {e}"))?,
         );
 
+        // Durable agent-org registry. A failure here must not block boot — the
+        // org chart is an opt-in feature, so we degrade to `None` and log rather
+        // than abort, unlike the checkpoint store above.
+        let org_store = match crate::org_store::OrgStore::open(data_dir.join("org.db")).await {
+            Ok(s) => Some(Arc::new(s)),
+            Err(e) => {
+                tracing::warn!(error = %e, "OrgStore init failed — org-chart features disabled this run");
+                None
+            }
+        };
+
+        // Durable work-item queue for autonomous heartbeat operation. Opt-in and
+        // non-fatal on open failure, same as the org store above.
+        let work_queue = match crate::work_store::WorkQueue::open(data_dir.join("work.db")).await {
+            Ok(q) => {
+                // Reclaim items left checked-out by a previous run whose lock has
+                // since expired, so a crash can't strand work forever.
+                match q.reclaim_orphaned().await {
+                    Ok(n) if n > 0 => {
+                        tracing::warn!(reclaimed = n, "Reclaimed orphaned work items on boot")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "Work-item orphan reclaim failed on boot"),
+                }
+                Some(Arc::new(q))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "WorkQueue init failed — autonomous work loop disabled this run");
+                None
+            }
+        };
+
         // Atomic task checkout store. Single-owner dispatch claim; in-memory
         // fallback on disk-open failure (claims then don't survive restart, but
         // dispatch still works) rather than aborting boot.
@@ -4633,6 +5116,10 @@ impl Kernel {
         } else {
             None
         };
+
+        // Per-agent gateway tool-call buffers (populated when a claude-code agent
+        // connects and its MCP gateway starts).
+        let claude_gateway_tool_calls = Arc::new(RwLock::new(HashMap::new()));
 
         // User filesystem grants: durable, runtime-mutable list of host directories
         // each agent (or all agents) may read/write/exec inside. Populated from
@@ -4747,10 +5234,26 @@ impl Kernel {
                 if let Ok(port) = port_str.parse::<u16>() {
                     let client_id = std::env::var("AGENTOS_MQTT_CLIENT_ID")
                         .unwrap_or_else(|_| "agentos".to_string());
-                    let creds = std::env::var("AGENTOS_MQTT_USER").ok().map(|user| {
-                        let pass = std::env::var("AGENTOS_MQTT_PASS").unwrap_or_default();
-                        (user, pass)
-                    });
+                    // Credentials: vault first (`mqtt_user`/`mqtt_pass`), env
+                    // fallback wrapped in a zeroize-on-drop string immediately.
+                    // Both owners drop (and zero) right after MqttDriver::new.
+                    let creds: Option<(
+                        agentos_vault::ZeroizingString,
+                        agentos_vault::ZeroizingString,
+                    )> = match (vault.get("mqtt_user").await, vault.get("mqtt_pass").await) {
+                        (Ok(user), Ok(pass)) => Some((user, pass)),
+                        _ => std::env::var("AGENTOS_MQTT_USER").ok().map(|user| {
+                            tracing::warn!(
+                                "MQTT credentials read from env — prefer vault secrets \
+                                 `mqtt_user`/`mqtt_pass` (agentos secret set mqtt_user ...)"
+                            );
+                            let pass = std::env::var("AGENTOS_MQTT_PASS").unwrap_or_default();
+                            (
+                                agentos_vault::ZeroizingString::new(user),
+                                agentos_vault::ZeroizingString::new(pass),
+                            )
+                        }),
+                    };
                     let creds_ref = creds.as_ref().map(|(u, p)| (u.as_str(), p.as_str()));
                     match MqttDriver::new(
                         &host,
@@ -4776,9 +5279,29 @@ impl Kernel {
         #[cfg(feature = "homeassistant")]
         {
             if let Ok(base_url) = std::env::var("AGENTOS_HA_URL") {
-                let token = std::env::var("AGENTOS_HA_TOKEN").unwrap_or_default();
-                if !token.is_empty() {
-                    hal.register(Box::new(HomeAssistantDriver::new(&base_url, &token)));
+                // Token: vault first (`ha_token`), env fallback wrapped in a
+                // zeroize-on-drop string immediately. The owner drops (and
+                // zeros) right after HomeAssistantDriver::new copies it into
+                // its own zeroizing storage.
+                let token: Option<agentos_vault::ZeroizingString> =
+                    match vault.get("ha_token").await {
+                        Ok(token) => Some(token),
+                        Err(_) => std::env::var("AGENTOS_HA_TOKEN")
+                            .ok()
+                            .filter(|t| !t.is_empty())
+                            .map(|t| {
+                                tracing::warn!(
+                                    "Home Assistant token read from env — prefer the vault \
+                                     secret `ha_token` (agentos secret set ha_token ...)"
+                                );
+                                agentos_vault::ZeroizingString::new(t)
+                            }),
+                    };
+                if let Some(token) = token {
+                    hal.register(Box::new(HomeAssistantDriver::new(
+                        &base_url,
+                        token.as_str(),
+                    )));
                     tracing::info!(url = %base_url, "Home Assistant HAL driver registered");
                 }
             }
@@ -5060,6 +5583,13 @@ impl Kernel {
 
         let audit_for_dispatcher = Arc::clone(&audit);
 
+        // Dynamic capability policy engine (W2), profile selected by config
+        // (`[security] policy_profile`, default `off` = permissive). Shared by
+        // the kernel field and the dispatcher so policy enforcement is live.
+        let policy_engine = Arc::new(RwLock::new(
+            crate::policy_engine::PolicyEngine::from_profile_name(&config.security.policy_profile),
+        ));
+
         // MCP catalog: embedded seed entries plus any user overrides in
         // `<data_dir>/../mcp-catalog/` (resolved like the plugin dirs). A
         // malformed user entry must not abort boot — fall back to embedded-only,
@@ -5124,6 +5654,7 @@ impl Kernel {
             background_pool,
             hal,
             hardware_registry,
+            capture_consent,
             schema_registry,
             pipeline_engine,
             intent_validator: Arc::new(crate::intent_validator::IntentValidator::new()),
@@ -5139,9 +5670,12 @@ impl Kernel {
                 Arc::new(arbiter)
             },
             checkpoint_store,
+            org_store,
+            work_queue,
             workspace_grants,
             task_checkout_store,
             claude_session_lookup,
+            claude_gateway_tool_calls,
             approval_mode_resolver: None,
             approval_policy_matcher: None,
             mcp_attachment_store,
@@ -5211,10 +5745,7 @@ impl Kernel {
             )),
             zone_table: crate::managed_storage::ZoneTable::new(),
             process_table: crate::managed_process::ProcessTable::default(),
-            capability_broker: Arc::new(crate::capability_broker::CapabilityBroker::with_defaults()),
-            policy_engine: Arc::new(RwLock::new(
-                crate::policy_engine::PolicyEngine::development_profile(),
-            )),
+            policy_engine: Arc::clone(&policy_engine),
             // Placeholder — wired with actual registry reference immediately below.
             capability_dispatcher: Arc::new(
                 crate::capability_dispatch::KernelCapabilityDispatcher::new(
@@ -5222,6 +5753,7 @@ impl Kernel {
                         crate::capability_registry::CapabilityRegistry::new(),
                     )),
                     Arc::clone(&audit_for_dispatcher),
+                    Arc::clone(&policy_engine),
                 ),
             ),
             agent_tool_lru: Arc::new(RwLock::new(HashMap::new())),
@@ -5236,6 +5768,7 @@ impl Kernel {
             Arc::new(crate::capability_dispatch::KernelCapabilityDispatcher::new(
                 Arc::clone(&kernel.capability_registry),
                 Arc::clone(&kernel.audit),
+                Arc::clone(&kernel.policy_engine),
             ));
         let kernel = {
             let mut k = kernel;
@@ -5729,15 +6262,15 @@ impl Kernel {
 
     /// Public API: Set a secret through the kernel command dispatch path.
     ///
-    /// NOTE: `value` is a plain `String`. The caller should zero any `ZeroizingString`
-    /// source before this frame is dropped. A future improvement is to accept
-    /// `ZeroizingString` here and propagate it through `cmd_set_secret`.
+    /// NOTE: `value` arrives as a plain `String` (web/API callers); it is
+    /// wrapped in `Zeroizing` here, but the caller's copy is its own to zero.
     pub async fn api_set_secret(
         &self,
         name: String,
         value: String,
         scope: SecretScope,
     ) -> Result<(), String> {
+        let value = zeroize::Zeroizing::new(value);
         match self.cmd_set_secret(name, value, scope, None).await {
             agentos_bus::KernelResponse::Success { .. } => Ok(()),
             agentos_bus::KernelResponse::Error { message } => Err(message),
@@ -5985,6 +6518,25 @@ fn get_free_disk_mb(path: &std::path::Path) -> Result<u64, anyhow::Error> {
     }
 }
 
+#[cfg(all(test, feature = "raw-usb"))]
+mod raw_usb_config_tests {
+    #[test]
+    fn parse_vid_pid_accepts_hex_pairs() {
+        assert_eq!(super::parse_vid_pid("0483:5740"), Some((0x0483, 0x5740)));
+        assert_eq!(
+            super::parse_vid_pid("0x1a86:0x7523"),
+            Some((0x1a86, 0x7523))
+        );
+        assert_eq!(
+            super::parse_vid_pid(" 0483 : 5740 "),
+            Some((0x0483, 0x5740))
+        );
+        assert_eq!(super::parse_vid_pid("nope"), None);
+        assert_eq!(super::parse_vid_pid("zzzz:0001"), None);
+        assert_eq!(super::parse_vid_pid("0483"), None);
+    }
+}
+
 #[cfg(test)]
 mod meta_tool_streak_tests {
     use super::iteration_is_all_meta;
@@ -6058,6 +6610,7 @@ mod preflight_tests {
                 tool_execution: Default::default(),
                 autonomous_mode: Default::default(),
                 health_port: 9091,
+                health_bind: "127.0.0.1".to_string(),
                 per_agent_rate_limit: 0,
                 events: Default::default(),
                 sandbox_policy: Default::default(),
@@ -6117,6 +6670,9 @@ mod preflight_tests {
             scheduler: Default::default(),
             transcription: Default::default(),
             agent_heartbeat: Default::default(),
+            agent_budget: Default::default(),
+            hal: Default::default(),
+            security: Default::default(),
             user_profile: Default::default(),
             personalization: Default::default(),
         }
@@ -6318,6 +6874,7 @@ mod vault_bootstrap_tests {
                 tool_execution: Default::default(),
                 autonomous_mode: Default::default(),
                 health_port: 0,
+                health_bind: "127.0.0.1".to_string(),
                 per_agent_rate_limit: 0,
                 events: Default::default(),
                 sandbox_policy: Default::default(),
@@ -6377,6 +6934,9 @@ mod vault_bootstrap_tests {
             scheduler: Default::default(),
             transcription: Default::default(),
             agent_heartbeat: Default::default(),
+            agent_budget: Default::default(),
+            hal: Default::default(),
+            security: Default::default(),
             user_profile: Default::default(),
             personalization: Default::default(),
         }

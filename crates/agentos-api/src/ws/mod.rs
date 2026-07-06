@@ -6,6 +6,7 @@
 pub mod broadcaster;
 pub mod protocol;
 pub mod session;
+pub mod ticket;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,24 +30,36 @@ use session::WsSession;
 /// Query parameters for the WebSocket upgrade request.
 #[derive(Debug, Deserialize)]
 pub struct WsParams {
-    /// API key (`agos_<hex>`) used for authentication.
-    pub token: String,
+    /// Single-use auth ticket from `POST /api/v1/ws/ticket` (preferred: keeps
+    /// the long-lived key out of URLs, which land in proxy logs and history).
+    pub ticket: Option<String>,
+    /// Raw API key (`agos_<hex>`) — kept for script/CLI clients.
+    pub token: Option<String>,
 }
 
-/// `GET /v1/ws?token=agos_...` — Upgrade to WebSocket.
+/// `GET /v1/ws?ticket=…` (or legacy `?token=agos_...`) — Upgrade to WebSocket.
 pub async fn ws_upgrade(
     State(svc): State<Arc<dyn KernelService>>,
     Extension(key_store): Extension<ApiKeyStore>,
+    Extension(tickets): Extension<ticket::WsTicketStore>,
     Extension(broadcaster): Extension<WsBroadcaster>,
     Query(params): Query<WsParams>,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Validate API key from query param. Its scopes gate channel subscriptions.
-    let record = key_store
-        .validate(&params.token)
-        .await
-        .ok_or(ApiError::Unauthorized)?;
-    let permissions = record.permissions.clone();
+    // A ticket takes precedence over a raw key. Either way the resolved scopes
+    // gate channel subscriptions for the socket's lifetime.
+    let permissions = if let Some(t) = params.ticket.as_deref() {
+        tickets.redeem(t).await.ok_or(ApiError::Unauthorized)?
+    } else if let Some(tok) = params.token.as_deref() {
+        key_store
+            .validate(tok)
+            .await
+            .ok_or(ApiError::Unauthorized)?
+            .permissions
+            .clone()
+    } else {
+        return Err(ApiError::Unauthorized);
+    };
 
     Ok(ws.on_upgrade(move |socket| handle_connection(socket, svc, broadcaster, permissions)))
 }

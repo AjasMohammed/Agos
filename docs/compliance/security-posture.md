@@ -20,9 +20,7 @@
 | SC-8 | Transmission Confidentiality | CC6.7 | TLS (`tokio-rustls`) on all outbound channels; HMAC-signed webhook payloads | `crates/agentos-channels/` |
 | SC-28 | Protection of Data at Rest | CC6.1 | AES-256-GCM encrypted vault; Argon2id key derivation; `ZeroizingString` for in-memory secrets | `crates/agentos-vault/src/vault.rs` |
 | SI-3 | Malicious Code Protection | CC7.1 | Injection scanner (`injection_scanner.rs`) with Unicode normalisation; `<user_data>` system-prompt guard | `crates/agentos-kernel/src/injection_scanner.rs` |
-| SI-4 | System Monitoring | CC7.2 | `AnomalyScorer` — rolling permission-denial counter; alert fired at score ≥ 0.6 (> 5 denials) | `crates/agentos-audit/src/anomaly.rs` |
 | SI-10 | Information Input Validation | CC8.1 | `IntentValidator` validates every intent schema before routing; JSON Schema enforcement | `crates/agentos-kernel/src/intent_validator.rs` |
-| SA-10 | Developer Configuration Management | CC8.1 | `DynamicPermissionRule` — time-window, budget-threshold, escalation-pending conditions | `crates/agentos-capability/src/dynamic.rs` |
 
 ---
 
@@ -30,14 +28,14 @@
 
 | Framework | Controls Addressed | Notes |
 |-----------|-------------------|-------|
-| NIST SP 800-53 Rev 5 | AC-2, AC-3, AC-6, AC-17, AU-2, AU-9, AU-12, IA-5, IR-4, SC-8, SC-28, SI-3, SI-4, SI-10, SA-10 | 15 controls |
+| NIST SP 800-53 Rev 5 | AC-2, AC-3, AC-6, AC-17, AU-2, AU-9, AU-12, IA-5, IR-4, SC-8, SC-28, SI-3, SI-10 | 13 controls |
 | SOC 2 Type II | CC6.1, CC6.3, CC6.6, CC6.7, CC7.1, CC7.2, CC7.3, CC8.1 | 8 Common Criteria |
 
 ---
 
 ## Related
 
-- [`crates/agentos-capability/`](../../crates/agentos-capability/) — token, RBAC, dynamic rules
-- [`crates/agentos-audit/`](../../crates/agentos-audit/) — audit log and anomaly detection
+- [`crates/agentos-capability/`](../../crates/agentos-capability/) — capability tokens & permission sets
+- [`crates/agentos-audit/`](../../crates/agentos-audit/) — append-only, hash-chained audit log
 - [`crates/agentos-vault/`](../../crates/agentos-vault/) — encrypted secrets store
 - [`SECURITY.md`](../../SECURITY.md) — vulnerability disclosure policy

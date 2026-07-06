@@ -1154,7 +1154,7 @@ mod tests {
             request: &OpenRequest,
         ) -> Result<Box<dyn RawUsbDeviceHandle>, AgentOSError> {
             self.opens.lock().unwrap().push(request.clone());
-            Ok(Box::new(MockHandle::default()))
+            Ok(Box::new(MockHandle))
         }
     }
 

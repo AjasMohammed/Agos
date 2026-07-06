@@ -176,7 +176,7 @@ pub fn build_system_prompt(ctx: &SystemPromptContext) -> String {
         );
     } else {
         prompt.push_str(
-            "\n\n## Tools\n\
+            "\n\n## Tool Access\n\
              You can ONLY affect the system by calling your available tools (the `mcp__agentos__*` tools: search_tools, describe_tool, list_tools, invoke_tool).\n\
              To DO anything \u{2014} send a message, read/write a file, query state \u{2014} you MUST call a tool and wait for its result.\n\
              NEVER state or imply that you performed an action (sent a message, wrote a file, etc.) unless a tool call actually returned success.\n\

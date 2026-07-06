@@ -224,7 +224,14 @@ mod tests {
     #[test]
     fn test_process_list_returns_self() {
         let driver = ProcessDriver::new();
+        // Filter by our own executable name: an unfiltered listing is capped at
+        // 500 entries sorted by memory, and the tiny test binary falls below
+        // the cutoff on busy hosts (>500 processes). The filter also matches
+        // the full command line, so a kernel-truncated comm name is fine.
+        let exe = std::env::current_exe().unwrap();
+        let exe_name = exe.file_name().unwrap().to_string_lossy().to_string();
         let opts = ListOpts {
+            name_contains: Some(exe_name),
             limit: Some(500),
             ..Default::default()
         };

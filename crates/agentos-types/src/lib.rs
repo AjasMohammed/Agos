@@ -91,6 +91,8 @@ pub use task_trace::{
 };
 pub mod team;
 pub use team::{TeamConfig, TeamMember, TeamRole};
+pub mod org;
+pub use org::OrgNode;
 pub mod webhook;
 pub use chat::ChatStreamFrame;
 pub use webhook::{

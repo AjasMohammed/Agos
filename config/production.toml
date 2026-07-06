@@ -6,6 +6,8 @@ default_task_timeout_secs = 600
 context_window_max_entries = 200
 context_window_token_budget = 16000
 health_port = 9091
+# Loopback-only: scrape /metrics locally or set "0.0.0.0" behind a trusted boundary.
+health_bind = "127.0.0.1"
 state_db_path = "/var/lib/agentos/data/kernel_state.db"
 
 [kernel.tool_calls]
@@ -72,6 +74,9 @@ ollama_context_window = 32768
 
 [memory]
 model_cache_dir = "/var/lib/agentos/data/models"
+# Sweep memory entries older than this so the episodic/semantic/procedural DBs
+# don't grow without bound on a long-running install. 0 = unlimited.
+retention_days = 90
 
 [context_budget]
 total_tokens = 128000

@@ -629,6 +629,39 @@ impl InboundRouter {
                 if !ch.credential_key.is_empty() {
                     let text = msg.text.trim();
                     if !text.is_empty() {
+                        // Sender authorization: free-text chat spawns a
+                        // tool-capable agent, so the sender MUST be on the
+                        // channel's pairing allowlist — exactly like the
+                        // `/approve` path. Without this, any member of a shared
+                        // Slack/Discord channel the bot is in could drive the
+                        // agent. Unpaired senders get a self-service pairing code
+                        // and the message is dropped (no agent spawned).
+                        let channel_id_str = msg.channel_instance_id.to_string();
+                        if !self
+                            .pairing_manager
+                            .is_allowed(&channel_id_str, &msg.external_sender_id)
+                            .await
+                        {
+                            tracing::warn!(
+                                channel_id = %msg.channel_instance_id,
+                                sender = %msg.external_sender_id,
+                                "Dropping channel chat from unpaired sender"
+                            );
+                            let code = self
+                                .pairing_manager
+                                .generate_code(&channel_id_str, &msg.external_sender_id)
+                                .await;
+                            self.send_reply(
+                                &msg,
+                                format!(
+                                    "🔒 This sender is not paired with AgentOS. Reply \
+                                     `/pair {code}` to start chatting with the agent. \
+                                     Code expires in 10 minutes."
+                                ),
+                            )
+                            .await;
+                            return Ok(());
+                        }
                         // Carry any stored inbound images into the chat as vision
                         // parts so a vision-capable agent can see them.
                         let user_parts = if msg.media_file_ids.is_empty() {
@@ -1021,7 +1054,10 @@ impl InboundRouter {
                 command = cmd,
                 "Rejecting approval command from unpaired sender"
             );
-            let _ = self.audit.append(AuditEntry {
+            // W10: this is an approval-authorization event — a silently
+            // dropped audit write here would erase the record of a rejected
+            // privileged command. Log on failure rather than swallowing it.
+            if let Err(e) = self.audit.append(AuditEntry {
                 timestamp: Utc::now(),
                 trace_id: TraceID::new(),
                 event_type: AuditEventType::ActionForbidden,
@@ -1038,7 +1074,14 @@ impl InboundRouter {
                 severity: AuditSeverity::Warn,
                 reversible: false,
                 rollback_ref: None,
-            });
+            }) {
+                tracing::error!(
+                    error = %e,
+                    escalation_id = id,
+                    "Failed to persist ActionForbidden audit entry for unpaired \
+                     approval command"
+                );
+            }
             // Issue a fresh pairing code so the operator can self-
             // onboard with `/pair <code>` from this same channel.
             // Without this UX, paired-sender enforcement is a dead-end
@@ -1098,7 +1141,9 @@ impl InboundRouter {
                 } else {
                     AuditEventType::PermissionDenied
                 };
-                let _ = self.audit.append(AuditEntry {
+                // W10: the audit trail of who approved/denied a privileged
+                // escalation via channel must not vanish on a write failure.
+                if let Err(e) = self.audit.append(AuditEntry {
                     timestamp: Utc::now(),
                     trace_id: TraceID::new(),
                     event_type: event,
@@ -1116,7 +1161,14 @@ impl InboundRouter {
                     severity: AuditSeverity::Info,
                     reversible: false,
                     rollback_ref: None,
-                });
+                }) {
+                    tracing::error!(
+                        error = %e,
+                        escalation_id = id,
+                        resolution = %resolution,
+                        "Failed to persist escalation-resolution audit entry"
+                    );
+                }
                 let symbol = if resolution == "approved" {
                     "✅"
                 } else {

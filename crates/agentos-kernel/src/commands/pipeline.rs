@@ -826,6 +826,23 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
 
         let result = self.tool_runner.execute(tool_name, input, context).await;
 
+        // Kernel-action tools emit a `_kernel_action` marker for the kernel
+        // dispatch loop; the pipeline executor has no dispatcher, so the
+        // marker would flow downstream as if it were real tool output. Fail
+        // the step explicitly instead.
+        let result = result.and_then(|value| {
+            if value.get("_kernel_action").is_some() {
+                Err(AgentOSError::ToolExecutionFailed {
+                    tool_name: tool_name.to_string(),
+                    reason:
+                        "tool requires kernel action dispatch, which pipeline steps do not support"
+                            .to_string(),
+                })
+            } else {
+                Ok(value)
+            }
+        });
+
         // Audit: tool execution completed/failed
         match &result {
             Ok(_) => {

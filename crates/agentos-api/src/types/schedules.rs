@@ -3,14 +3,19 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// A single cron schedule as returned by `GET /api/v1/schedules`.
+/// A single scheduled entry as returned by `GET /api/v1/schedules` — a
+/// recurring cron job, a one-shot once-job, or an in-memory timer.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ApiScheduleSummary {
     pub id: String,
     pub name: String,
     pub agent_name: String,
-    pub cron: String,
-    /// One of `active` | `paused` | `disabled`.
+    /// One of `cron` (recurring) | `once` (one-shot job) | `timer` (in-memory countdown).
+    pub kind: String,
+    /// Cron expression; `null` for `once` and `timer` kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
+    /// `active` | `paused` | `disabled` for cron; `pending` for once/timer.
     pub state: String,
     pub prompt: String,
     pub run_count: u64,

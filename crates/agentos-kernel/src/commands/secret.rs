@@ -27,12 +27,12 @@ impl Kernel {
     pub(crate) async fn cmd_set_secret(
         &self,
         name: String,
-        value: String,
+        value: zeroize::Zeroizing<String>,
         scope: SecretScope,
         scope_raw: Option<String>,
     ) -> KernelResponse {
-        // Wrap value in ZeroizingString immediately to zero it on scope exit.
-        let value = ZeroizingString::new(value);
+        // Re-wrap in ZeroizingString for the vault API; both copies zero on drop.
+        let value = ZeroizingString::new(value.as_str().to_string());
 
         // Resolve raw scope string to proper SecretScope using kernel's agent registry.
         // Return an error if the specified agent/tool is not found — silently widening
@@ -83,9 +83,9 @@ impl Kernel {
     pub(crate) async fn cmd_rotate_secret(
         &self,
         name: String,
-        new_value: String,
+        new_value: zeroize::Zeroizing<String>,
     ) -> KernelResponse {
-        let new_value = ZeroizingString::new(new_value);
+        let new_value = ZeroizingString::new(new_value.as_str().to_string());
         match self.vault.rotate(&name, new_value.as_str()).await {
             Ok(_) => {
                 self.emit_secrets_access("rotate", &name, true).await;

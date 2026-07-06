@@ -61,6 +61,18 @@ async fn wait_for_approval_resolution(
         Err(_) => ApprovalWaitOutcome::Denied,
     }
 }
+
+/// Log a failed tool-result context push. A missing task means the task was
+/// cancelled — a teardown path removed its context while tool calls were
+/// still in flight — so the dropped result is expected and only worth a
+/// warning. Anything else is a real context failure and stays an error.
+fn log_tool_result_push_failure(e: &AgentOSError, task_id: &TaskID) {
+    if matches!(e, AgentOSError::TaskNotFound(_)) {
+        tracing::warn!(error = %e, task_id = %task_id, "Task cancelled — skipping tool result push");
+    } else {
+        tracing::error!(error = %e, task_id = %task_id, "Failed to push tool result to context — agent may not see this result on next iteration");
+    }
+}
 use tracing::Instrument;
 
 // Soft threshold (seconds) after which a long-running LLM inference is
@@ -108,6 +120,59 @@ pub(crate) struct TaskResult {
 }
 
 impl Kernel {
+    /// Fire the `ToolPre` hook for a chat-mode tool call and enforce the
+    /// `ApprovalHook` decision (CR1). The task-execution path gates every tool
+    /// call through `ToolPre`; the chat / streaming-chat paths historically did
+    /// not, so `ExecCapable`/`ControlPlane` tools ran with no approval gate and
+    /// `[approval] mode = ask_always/deny` had no effect. This restores parity:
+    ///
+    /// - `Continue` → `Ok(())`, proceed with execution.
+    /// - `Abort("approval_pending:<id>:…")` → park on the escalation channel
+    ///   (operator/channel can approve out-of-band); resume on `Approved`,
+    ///   return `Err` on deny/expiry.
+    /// - any other `Abort` → hard hook denial, return `Err(reason)`.
+    pub(crate) async fn enforce_chat_tool_pre(
+        &self,
+        agent_id: AgentID,
+        task_id: TaskID,
+        tool_name: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let pre = self
+            .hook_registry
+            .fire(&agentos_types::HookEvent::ToolPre {
+                task_id,
+                agent_id,
+                tool_name: tool_name.to_string(),
+                input_json: serde_json::to_string(payload).unwrap_or_default(),
+            })
+            .await;
+
+        let agentos_types::HookResult::Abort(reason) = pre else {
+            return Ok(());
+        };
+
+        if let Some(esc_id) = extract_approval_pending_id(&reason) {
+            match wait_for_approval_resolution(Arc::clone(&self.escalation_manager), esc_id).await {
+                ApprovalWaitOutcome::Approved => {
+                    tracing::info!(
+                        agent_id = %agent_id,
+                        tool = %tool_name,
+                        escalation_id = esc_id,
+                        "Chat approval resolved → resuming privileged tool call"
+                    );
+                    Ok(())
+                }
+                ApprovalWaitOutcome::Denied => Err(format!("denied by user (escalation {esc_id})")),
+                ApprovalWaitOutcome::Lost => Err(format!(
+                    "approval channel for escalation {esc_id} was lost; please retry"
+                )),
+            }
+        } else {
+            Err(reason)
+        }
+    }
+
     fn manual_query_details(
         tool_name: &str,
         payload: &serde_json::Value,
@@ -584,9 +649,12 @@ impl Kernel {
             Err(e) => return Err(e.to_string()),
         }
 
+        // Payload-aware: validate the token against the action actually
+        // requested, not the static union of every action the tool supports
+        // (a `list`-only grant must not implicitly satisfy `capture`).
         let required_perms = self
             .tool_runner
-            .get_required_permissions(&tool_call.tool_name)
+            .get_required_permissions_for(&tool_call.tool_name, &tool_call.payload)
             .unwrap_or_default();
 
         let required_for_validate: Vec<(String, PermissionOp)> = required_perms;
@@ -664,12 +732,7 @@ impl Kernel {
                     )
                     .await
                 {
-                    let err_str = e.to_string();
-                    if err_str.contains("Task not found") {
-                        tracing::warn!(error = %e, task_id = %task.id, "Task cancelled — skipping tool result push");
-                    } else {
-                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
-                    }
+                    log_tool_result_push_failure(&e, &task.id);
                     consecutive_push_failures += 1;
                     if consecutive_push_failures >= 3 {
                         anyhow::bail!(
@@ -860,12 +923,7 @@ impl Kernel {
                             )
                             .await
                         {
-                            let err_str = e.to_string();
-                            if err_str.contains("Task not found") {
-                                tracing::warn!(error = %e, task_id = %task.id, "Task cancelled — skipping tool result push");
-                            } else {
-                                tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
-                            }
+                            log_tool_result_push_failure(&e, &task.id);
                             consecutive_push_failures += 1;
                             if consecutive_push_failures >= 3 {
                                 anyhow::bail!(
@@ -965,7 +1023,7 @@ impl Kernel {
                     )
                     .await
                 {
-                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                    log_tool_result_push_failure(&e, &task.id);
                     consecutive_push_failures += 1;
                     if consecutive_push_failures >= 3 {
                         anyhow::bail!(
@@ -1019,7 +1077,7 @@ impl Kernel {
                         )
                         .await
                     {
-                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                        log_tool_result_push_failure(&e, &task.id);
                         consecutive_push_failures += 1;
                         if consecutive_push_failures >= 3 {
                             anyhow::bail!(
@@ -1071,7 +1129,7 @@ impl Kernel {
                         )
                         .await
                     {
-                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                        log_tool_result_push_failure(&e, &task.id);
                         consecutive_push_failures += 1;
                         if consecutive_push_failures >= 3 {
                             anyhow::bail!(
@@ -1134,7 +1192,7 @@ impl Kernel {
                         )
                         .await
                     {
-                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                        log_tool_result_push_failure(&e, &task.id);
                         consecutive_push_failures += 1;
                         if consecutive_push_failures >= 3 {
                             anyhow::bail!(
@@ -1174,7 +1232,7 @@ impl Kernel {
                     )
                     .await
                 {
-                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                    log_tool_result_push_failure(&e, &task.id);
                     consecutive_push_failures += 1;
                     if consecutive_push_failures >= 3 {
                         anyhow::bail!(
@@ -1230,7 +1288,7 @@ impl Kernel {
                     )
                     .await
                 {
-                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                    log_tool_result_push_failure(&e, &task.id);
                     consecutive_push_failures += 1;
                     if consecutive_push_failures >= 3 {
                         anyhow::bail!(
@@ -1276,7 +1334,7 @@ impl Kernel {
                         )
                         .await
                     {
-                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                        log_tool_result_push_failure(&e, &task.id);
                     }
                     continue;
                 }
@@ -1295,7 +1353,7 @@ impl Kernel {
                         )
                         .await
                     {
-                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                        log_tool_result_push_failure(&e, &task.id);
                     }
                     continue;
                 }
@@ -1930,7 +1988,7 @@ impl Kernel {
                             )
                             .await
                         {
-                            tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                            log_tool_result_push_failure(&e, &task.id);
                         }
                         continue;
                     }
@@ -1970,7 +2028,7 @@ impl Kernel {
                         )
                         .await
                     {
-                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                        log_tool_result_push_failure(&e, &task.id);
                     }
 
                     if let Err(e) = self
@@ -2077,7 +2135,7 @@ impl Kernel {
                         )
                         .await
                     {
-                        tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                        log_tool_result_push_failure(&e, &task.id);
                     }
 
                     if let Err(record_err) = self
@@ -2575,9 +2633,19 @@ impl Kernel {
                     }
 
                     let retrieved = outcome.into_results();
+                    if self.config.memory.lifecycle.reinforcement_enabled {
+                        // Lifecycle reinforcement: touch recency/use counters on
+                        // injected memories and remember injected procedures for
+                        // outcome feedback at task completion.
+                        self.retrieval_executor.reinforce(&retrieved);
+                        self.retrieval_executor
+                            .record_injected_procedures(task.id, &retrieved)
+                            .await;
+                    }
                     knowledge_blocks =
                         crate::retrieval_gate::RetrievalExecutor::format_as_knowledge_blocks(
                             &retrieved,
+                            &self.injection_scanner,
                         );
                     tracing::debug!(
                         task_id = %task.id,
@@ -3823,7 +3891,7 @@ impl Kernel {
                                     )
                                     .await
                                 {
-                                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                                    log_tool_result_push_failure(&e, &task.id);
                                 }
                                 continue;
                             }
@@ -3841,7 +3909,7 @@ impl Kernel {
                                     )
                                     .await
                                 {
-                                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                                    log_tool_result_push_failure(&e, &task.id);
                                 }
                                 // Record the rejected call so the loop counter accumulates across
                                 // iterations and the agent cannot bypass the detector indefinitely.
@@ -3877,7 +3945,7 @@ impl Kernel {
                             )
                             .await
                         {
-                            tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                            log_tool_result_push_failure(&e, &task.id);
                         }
                         continue;
                     }
@@ -3979,7 +4047,7 @@ impl Kernel {
                                     )
                                     .await
                                 {
-                                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                                    log_tool_result_push_failure(&e, &task.id);
                                 }
                                 self.trace_collector
                                     .record_tool_call(
@@ -4052,7 +4120,7 @@ impl Kernel {
                                     )
                                     .await
                                 {
-                                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                                    log_tool_result_push_failure(&e, &task.id);
                                 }
                                 self.trace_collector
                                     .record_tool_call(
@@ -4106,7 +4174,10 @@ impl Kernel {
 
                             let required_permissions = self
                                 .tool_runner
-                                .get_required_permissions(&tool_call.tool_name)
+                                .get_required_permissions_for(
+                                    &tool_call.tool_name,
+                                    &tool_call.payload,
+                                )
                                 .unwrap_or_default()
                                 .into_iter()
                                 .map(|(resource, op)| format!("{}:{:?}", resource, op))
@@ -4148,7 +4219,7 @@ impl Kernel {
                                 )
                                 .await
                             {
-                                tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                                log_tool_result_push_failure(&e, &task.id);
                             }
                             self.trace_collector
                                 .record_tool_call(
@@ -4191,7 +4262,7 @@ impl Kernel {
                                 )
                                 .await
                             {
-                                tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                                log_tool_result_push_failure(&e, &task.id);
                             }
                             self.trace_collector
                                 .record_tool_call(
@@ -4244,7 +4315,7 @@ impl Kernel {
                                 )
                                 .await
                             {
-                                tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                                log_tool_result_push_failure(&e, &task.id);
                             }
                         }
                         Ok(IntentCoherenceResult::Approved) => {
@@ -4388,7 +4459,7 @@ impl Kernel {
                                 )
                                 .await
                             {
-                                tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                                log_tool_result_push_failure(&e, &task.id);
                             }
                             continue;
                         }
@@ -4456,7 +4527,7 @@ impl Kernel {
                                 )
                                 .await
                             {
-                                tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                                log_tool_result_push_failure(&e, &task.id);
                             }
                             // Preserve context and intent history so the agent
                             // can resume with full state when approval arrives.
@@ -5054,7 +5125,7 @@ impl Kernel {
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                                    log_tool_result_push_failure(&e, &task.id);
                                     consecutive_push_failures += 1;
                                     if consecutive_push_failures >= 3 {
                                         anyhow::bail!(
@@ -5299,7 +5370,7 @@ impl Kernel {
                                 )
                                 .await
                             {
-                                tracing::error!(error = %e, task_id = %task.id, "Failed to push tool result to context — agent may not see this result on next iteration");
+                                log_tool_result_push_failure(&e, &task.id);
                             }
 
                             if let Err(record_err) = self
@@ -5579,6 +5650,7 @@ impl Kernel {
                 task_span.set_i64_attribute("task.iterations", result.iterations as i64);
                 self.otel
                     .record_task_metric(&task.agent_id.to_string(), "complete", duration_ms);
+                self.apply_memory_outcome(task, true, task_trace_id).await;
                 self.complete_task_success(task, &result, duration_ms, task_trace_id)
                     .await;
             }
@@ -5600,11 +5672,43 @@ impl Kernel {
                 task_span.record_error(e.to_string());
                 self.otel
                     .record_task_metric(&task.agent_id.to_string(), "failed", duration_ms);
+                self.apply_memory_outcome(task, false, task_trace_id).await;
                 self.complete_task_failure(task, e, duration_ms, task_trace_id)
                     .await;
             }
         }
         self.otel.adjust_active_tasks(-1);
+    }
+
+    /// Outcome feedback for the memory lifecycle: every procedure injected
+    /// into this task's context gets its success/failure counters and
+    /// Laplace-smoothed confidence updated to reflect the task result.
+    async fn apply_memory_outcome(&self, task: &AgentTask, success: bool, trace_id: TraceID) {
+        if !self.config.memory.lifecycle.reinforcement_enabled {
+            return;
+        }
+        let reinforced = self
+            .retrieval_executor
+            .apply_task_outcome(&task.id, success)
+            .await;
+        if reinforced.is_empty() {
+            return;
+        }
+        self.audit_log(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id,
+            event_type: agentos_audit::AuditEventType::MemoryReinforced,
+            agent_id: Some(task.agent_id),
+            task_id: Some(task.id),
+            tool_id: None,
+            details: serde_json::json!({
+                "procedure_ids": reinforced,
+                "success": success,
+            }),
+            severity: agentos_audit::AuditSeverity::Info,
+            reversible: false,
+            rollback_ref: None,
+        });
     }
 
     /// Build the agent directory block for inclusion in compiled context.
@@ -6300,6 +6404,83 @@ mod tests {
         assert!(super::extract_approval_pending_id("approval_pending::nope").is_none());
         // Non-numeric id.
         assert!(super::extract_approval_pending_id("approval_pending:abc:nope").is_none());
+    }
+
+    /// Glue test for payload-aware capability validation: a token granting
+    /// only `hardware.webcam.list:r` must fail validation for a `capture`
+    /// payload and pass for a `list` payload, when the required permissions
+    /// are resolved via `required_permissions_for(payload)` exactly as
+    /// `validate_tool_call` now does.
+    #[test]
+    fn list_only_grant_cannot_capture() {
+        use agentos_tools::traits::AgentTool as _;
+
+        let engine = agentos_capability::CapabilityEngine::with_key([7u8; 32]);
+        let agent_id = AgentID::new();
+        let task_id = TaskID::new();
+
+        let mut perms = PermissionSet::new();
+        perms.grant("hardware.webcam.list".to_string(), true, false, false, None);
+        let token = engine
+            .issue_token(
+                task_id,
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([agentos_types::IntentTypeFlag::Read]),
+                perms,
+                Duration::from_secs(60),
+            )
+            .expect("token issuance");
+
+        let make_intent = |payload: serde_json::Value| agentos_types::IntentMessage {
+            id: agentos_types::MessageID::new(),
+            sender_token: token.clone(),
+            intent_type: agentos_types::IntentType::Read,
+            target: agentos_types::IntentTarget::Kernel,
+            payload: agentos_types::SemanticPayload {
+                schema: "webcam".to_string(),
+                data: payload,
+            },
+            context_ref: agentos_types::ContextID::new(),
+            priority: 5,
+            timeout_ms: 1_000,
+            trace_id: TraceID::new(),
+            timestamp: chrono::Utc::now(),
+        };
+
+        let webcam = agentos_tools::WebcamTool::new();
+
+        // Payload-scoped resolution: `capture` requires capture:x, which the
+        // list-only token does not hold.
+        let capture_payload = serde_json::json!({"action": "capture"});
+        let required = webcam.required_permissions_for(&capture_payload);
+        let err = engine
+            .validate_intent(&token, &make_intent(capture_payload), &required)
+            .expect_err("list-only grant must not validate a capture");
+        assert!(matches!(
+            err,
+            agentos_types::AgentOSError::PermissionDenied { ref resource, .. }
+                if resource == "hardware.webcam.capture"
+        ));
+
+        // The same token validates a `list` payload.
+        let list_payload = serde_json::json!({"action": "list"});
+        let required = webcam.required_permissions_for(&list_payload);
+        engine
+            .validate_intent(&token, &make_intent(list_payload), &required)
+            .expect("list grant must validate a list");
+
+        // Regression guard: the OLD static-union resolution would have
+        // rejected even `list` (token lacks the union's capture:x), which is
+        // exactly the over-broad coupling this phase removes.
+        let union = webcam.required_permissions();
+        assert!(engine
+            .validate_intent(
+                &token,
+                &make_intent(serde_json::json!({"action": "list"})),
+                &union
+            )
+            .is_err());
     }
 
     #[test]

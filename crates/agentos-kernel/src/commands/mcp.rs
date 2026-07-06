@@ -236,15 +236,23 @@ impl Kernel {
                 )
                 .await
             {
-                tracing::warn!(
+                // Fail closed: never fall back to persisting the plaintext token
+                // to mcp_attachments.db (which is unencrypted and survives
+                // restarts). Refuse the attach so the operator can fix the vault.
+                tracing::error!(
                     mcp_server = %name,
                     error = %e,
-                    "Failed to store auth_token in vault — token will be used in-memory only"
+                    "Failed to store MCP auth_token in vault — refusing attach (token not persisted)"
                 );
-                Some(token)
-            } else {
-                Some(format!("vault:{}", vault_key))
+                return KernelResponse::Error {
+                    message: format!(
+                        "Failed to store auth_token for MCP server '{name}' in the vault: {e}. \
+                         Attach refused — the token was NOT persisted. Ensure the vault is \
+                         initialized/unlocked and retry."
+                    ),
+                };
             }
+            Some(format!("vault:{}", vault_key))
         } else {
             None
         };

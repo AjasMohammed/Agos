@@ -42,6 +42,7 @@ impl SemanticStore {
         let conn = Connection::open(&db_path).map_err(|e| {
             AgentOSError::StorageError(format!("Failed to open semantic memory DB: {}", e))
         })?;
+        crate::restrict_db_permissions(&db_path);
 
         conn.execute_batch(
             "
@@ -92,6 +93,8 @@ impl SemanticStore {
         .map_err(|e| {
             AgentOSError::StorageError(format!("Failed to init semantic memory tables: {}", e))
         })?;
+
+        crate::lifecycle::migrate_lifecycle_columns(&conn, "semantic_memory")?;
 
         let probe = embedder
             .embed(&["semantic-memory-dimension-probe"])
@@ -289,6 +292,8 @@ impl SemanticStore {
                 let c_content: String = row.get(9)?;
                 let blob: Vec<u8> = row.get(10)?;
                 let rowid: i64 = row.get(11)?;
+                let (last_used_at, use_count, confidence, status) =
+                    crate::lifecycle::lifecycle_from_row(row, 12)?;
 
                 let mut embedding = Vec::with_capacity(blob.len() / 4);
                 for bytes in blob.chunks_exact(4) {
@@ -313,6 +318,10 @@ impl SemanticStore {
                         created_at: parsed_created,
                         updated_at: parsed_updated,
                         tags: serde_json::from_str(&tags_str.unwrap_or_default()).unwrap_or_default(),
+                        last_used_at,
+                        use_count,
+                        confidence,
+                        status,
                     },
                     MemoryChunk {
                         id: c_id,
@@ -339,7 +348,8 @@ impl SemanticStore {
                     .join(",");
                 let sql = format!(
                     "SELECT m.id, m.agent_id, m.key, m.content, m.created_at, m.updated_at, m.tags,
-                            c.id, c.chunk_index, c.content, c.embedding, c.rowid
+                            c.id, c.chunk_index, c.content, c.embedding, c.rowid,
+                            m.last_used_at, m.use_count, m.confidence, m.status
                      FROM semantic_chunks c
                      JOIN semantic_memory m ON c.memory_id = m.id
                      WHERE c.rowid IN ({})
@@ -366,7 +376,8 @@ impl SemanticStore {
                 // Fallback: load most recent chunks (bounded); LIMIT is a constant, not user input.
                 let sql = format!(
                     "SELECT m.id, m.agent_id, m.key, m.content, m.created_at, m.updated_at, m.tags,
-                            c.id, c.chunk_index, c.content, c.embedding, c.rowid
+                            c.id, c.chunk_index, c.content, c.embedding, c.rowid,
+                            m.last_used_at, m.use_count, m.confidence, m.status
                      FROM semantic_chunks c
                      JOIN semantic_memory m ON c.memory_id = m.id
                      WHERE (?1 IS NULL OR m.agent_id IS NULL OR m.agent_id = ?1)
@@ -449,6 +460,76 @@ impl SemanticStore {
     }
 
     /// Exact key lookup. Offloads SQLite read to the blocking thread pool.
+    /// Row → `MemoryEntry` for the standard column order
+    /// `(id, agent_id, key, content, created_at, updated_at, tags, <lifecycle…>)`.
+    /// Shared by `get_by_key` and `list_recent`.
+    fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<MemoryEntry> {
+        let id: String = row.get(0)?;
+        let agent_id_str: Option<String> = row.get(1)?;
+        let key: String = row.get(2)?;
+        let content: String = row.get(3)?;
+        let created_at: String = row.get(4)?;
+        let updated_at: String = row.get(5)?;
+        let tags_str: Option<String> = row.get(6)?;
+        let (last_used_at, use_count, confidence, status) =
+            crate::lifecycle::lifecycle_from_row(row, 7)?;
+        Ok(MemoryEntry {
+            id,
+            agent_id: agent_id_str
+                .map(|s| AgentID::from_uuid(Uuid::parse_str(&s).unwrap_or_default())),
+            key,
+            full_content: content,
+            created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                .unwrap_or_else(|_| chrono::Local::now().into())
+                .with_timezone(&Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
+                .unwrap_or_else(|_| chrono::Local::now().into())
+                .with_timezone(&Utc),
+            tags: serde_json::from_str(&tags_str.unwrap_or_default()).unwrap_or_default(),
+            last_used_at,
+            use_count,
+            confidence,
+            status,
+        })
+    }
+
+    /// Most-recent semantic facts for an agent (or all agents / global entries
+    /// when `agent_id` is None), newest first — the plain browse the embedding
+    /// `search` doesn't provide. Read-only; operator memory browser.
+    pub async fn list_recent(
+        &self,
+        agent_id: Option<&AgentID>,
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>, AgentOSError> {
+        let db = self.conn.clone();
+        let agent_id_str = agent_id.map(|a| a.as_uuid().to_string());
+        let max = limit.min(i64::MAX as usize) as i64;
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock semantic db for list_recent".into())
+            })?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, agent_id, key, content, created_at, updated_at, tags,
+                            last_used_at, use_count, confidence, status
+                     FROM semantic_memory
+                     WHERE (?1 IS NULL OR agent_id IS NULL OR agent_id = ?1)
+                     ORDER BY created_at DESC LIMIT ?2",
+                )
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+            let iter = stmt
+                .query_map(params![agent_id_str, max], Self::row_to_entry)
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+            let mut out = Vec::new();
+            for r in iter {
+                out.push(r.map_err(|e| AgentOSError::StorageError(e.to_string()))?);
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("list_recent task panicked: {}", e)))?
+    }
+
     pub async fn get_by_key(&self, key: &str) -> Result<Option<MemoryEntry>, AgentOSError> {
         let db = self.conn.clone();
         let key_owned = key.to_owned();
@@ -458,37 +539,14 @@ impl SemanticStore {
             })?;
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, agent_id, key, content, created_at, updated_at, tags
+                    "SELECT id, agent_id, key, content, created_at, updated_at, tags,
+                            last_used_at, use_count, confidence, status
                      FROM semantic_memory WHERE key = ?1",
                 )
                 .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
 
             let mut rows = stmt
-                .query_map(params![key_owned], |row| {
-                    let id: String = row.get(0)?;
-                    let agent_id_str: Option<String> = row.get(1)?;
-                    let key: String = row.get(2)?;
-                    let content: String = row.get(3)?;
-                    let created_at: String = row.get(4)?;
-                    let updated_at: String = row.get(5)?;
-                    let tags_str: Option<String> = row.get(6)?;
-
-                    Ok(MemoryEntry {
-                        id,
-                        agent_id: agent_id_str
-                            .map(|s| AgentID::from_uuid(Uuid::parse_str(&s).unwrap_or_default())),
-                        key,
-                        full_content: content,
-                        created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
-                            .unwrap_or_else(|_| chrono::Local::now().into())
-                            .with_timezone(&Utc),
-                        updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
-                            .unwrap_or_else(|_| chrono::Local::now().into())
-                            .with_timezone(&Utc),
-                        tags: serde_json::from_str(&tags_str.unwrap_or_default())
-                            .unwrap_or_default(),
-                    })
-                })
+                .query_map(params![key_owned], Self::row_to_entry)
                 .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
 
             match rows.next() {
@@ -499,6 +557,49 @@ impl SemanticStore {
         })
         .await
         .map_err(|e| AgentOSError::StorageError(format!("get_by_key task panicked: {}", e)))?
+    }
+
+    /// Mark memory entries as used right now: bump `use_count` and stamp
+    /// `last_used_at`. Fire-and-forget reinforcement — callers must never fail
+    /// a task on a touch error. Returns the number of rows updated.
+    pub async fn touch(&self, ids: &[String]) -> Result<u32, AgentOSError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let db = self.conn.clone();
+        let ids = ids.to_vec();
+        let now = Utc::now().to_rfc3339();
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock semantic db for touch".to_string())
+            })?;
+            let mut total = 0u32;
+            for chunk in ids.chunks(500) {
+                // now is bound as ?1; ids are bound as ?2..?N
+                let placeholders = (2..=chunk.len() + 1)
+                    .map(|i| format!("?{}", i))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "UPDATE semantic_memory
+                     SET last_used_at = ?1, use_count = use_count + 1
+                     WHERE id IN ({placeholders})"
+                );
+                let mut bound: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() + 1);
+                bound.push(rusqlite::types::Value::Text(now.clone()));
+                for id in chunk {
+                    bound.push(rusqlite::types::Value::Text(id.clone()));
+                }
+                total += conn
+                    .execute(&sql, rusqlite::params_from_iter(bound.iter()))
+                    .map_err(|e| {
+                        AgentOSError::StorageError(format!("Failed to touch memory entries: {}", e))
+                    })? as u32;
+            }
+            Ok(total)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Touch task panicked: {}", e)))?
     }
 
     /// Delete a memory entry and its chunks by ID (transactional).
@@ -839,5 +940,43 @@ mod tests {
             deployment_score > weather_score,
             "Expected 'deployment' to rank higher than 'weather'"
         );
+    }
+
+    #[tokio::test]
+    async fn migration_adds_lifecycle_columns_to_legacy_semantic_db() {
+        let dir = TempDir::new().unwrap();
+        // Pre-lifecycle schema with one legacy row.
+        {
+            let conn = Connection::open(dir.path().join("semantic_memory.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE semantic_memory (
+                    id          TEXT PRIMARY KEY,
+                    agent_id    TEXT,
+                    key         TEXT NOT NULL,
+                    content     TEXT NOT NULL,
+                    created_at  TEXT NOT NULL,
+                    updated_at  TEXT NOT NULL,
+                    tags        TEXT
+                );",
+            )
+            .unwrap();
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO semantic_memory (id, agent_id, key, content, created_at, updated_at, tags)
+                 VALUES ('legacy-1', NULL, 'legacy-key', 'old content', ?1, ?1, '[]')",
+                params![now],
+            )
+            .unwrap();
+        }
+
+        let embedder = Arc::new(Embedder::noop());
+        let store = SemanticStore::open_with_embedder(dir.path(), embedder).unwrap();
+
+        let legacy = store.get_by_key("legacy-key").await.unwrap().unwrap();
+        assert_eq!(legacy.id, "legacy-1");
+        assert_eq!(legacy.use_count, 0);
+        assert!(legacy.last_used_at.is_none());
+        assert!((legacy.confidence - 0.6).abs() < f32::EPSILON);
+        assert_eq!(legacy.status, crate::types::MemoryStatus::Active);
     }
 }

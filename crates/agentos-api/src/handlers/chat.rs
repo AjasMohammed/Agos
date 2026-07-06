@@ -155,7 +155,8 @@ fn openai_image_url_to_part(img: &OpenAIImageUrl) -> Result<ContentPart, String>
     }
     Err(format!(
         "unsupported image_url scheme (allowed: data:image/...;base64,... or http(s)://): {}",
-        &url[..url.len().min(64)]
+        // char-safe truncation — byte slicing can panic mid-UTF-8-sequence
+        url.chars().take(64).collect::<String>()
     ))
 }
 

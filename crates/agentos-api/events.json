@@ -1,0 +1,157 @@
+{
+  "catalog": [
+    {
+      "events": [
+        "AgentAdded",
+        "AgentRemoved",
+        "AgentPermissionGranted",
+        "AgentPermissionRevoked"
+      ],
+      "resource": "events.agent_lifecycle",
+      "value": "AgentLifecycle"
+    },
+    {
+      "events": [
+        "TaskStarted",
+        "TaskCompleted",
+        "TaskFailed",
+        "TaskTimedOut",
+        "TaskDelegated",
+        "TaskRetrying",
+        "TaskDeadlockDetected",
+        "TaskPreempted"
+      ],
+      "resource": "events.task_lifecycle",
+      "value": "TaskLifecycle"
+    },
+    {
+      "events": [
+        "PromptInjectionAttempt",
+        "CapabilityViolation",
+        "UnauthorizedToolAccess",
+        "SecretsAccessAttempt",
+        "SandboxEscapeAttempt",
+        "AuditLogTamperAttempt",
+        "AgentImpersonationAttempt",
+        "UnverifiedToolInstalled"
+      ],
+      "resource": "events.security",
+      "value": "SecurityEvents"
+    },
+    {
+      "events": [
+        "ContextWindowNearLimit",
+        "ContextWindowExhausted",
+        "EpisodicMemoryWritten",
+        "SemanticMemoryConflict",
+        "MemorySearchFailed",
+        "WorkingMemoryEviction"
+      ],
+      "resource": "events.memory",
+      "value": "MemoryEvents"
+    },
+    {
+      "events": [
+        "CPUSpikeDetected",
+        "MemoryPressure",
+        "DiskSpaceLow",
+        "DiskSpaceCritical",
+        "ProcessCrashed",
+        "NetworkInterfaceDown",
+        "ContainerResourceQuotaExceeded",
+        "KernelSubsystemError"
+      ],
+      "resource": "events.system_health",
+      "value": "SystemHealth"
+    },
+    {
+      "events": [
+        "GPUAvailable",
+        "GPUMemoryPressure",
+        "SensorReadingThresholdExceeded",
+        "DeviceConnected",
+        "DeviceDisconnected",
+        "HardwareAccessGranted",
+        "DeviceMounted",
+        "DeviceUnmounted",
+        "DeviceEjected",
+        "PrintJobSubmitted",
+        "PrintJobCancelled",
+        "AudioCaptureStarted",
+        "AudioCaptureStopped",
+        "AudioPlaybackStarted",
+        "WebcamCaptureStarted",
+        "WebcamCaptureStopped",
+        "BluetoothScanStarted",
+        "BluetoothPairRequested",
+        "BluetoothConnected"
+      ],
+      "resource": "events.hardware",
+      "value": "HardwareEvents"
+    },
+    {
+      "events": [
+        "ToolInstalled",
+        "ToolRemoved",
+        "ToolExecutionFailed",
+        "ToolSandboxViolation",
+        "ToolResourceQuotaExceeded",
+        "ToolChecksumMismatch",
+        "ToolRegistryUpdated"
+      ],
+      "resource": "events.tool",
+      "value": "ToolEvents"
+    },
+    {
+      "events": [
+        "DirectMessageReceived",
+        "BroadcastReceived",
+        "DelegationReceived",
+        "DelegationResponseReceived",
+        "MessageDeliveryFailed",
+        "AgentUnreachable"
+      ],
+      "resource": "events.agent_communication",
+      "value": "AgentCommunication"
+    },
+    {
+      "events": [
+        "CronJobFired",
+        "ScheduledTaskMissed",
+        "ScheduledTaskCompleted",
+        "ScheduledTaskFailed"
+      ],
+      "resource": "events.schedule",
+      "value": "ScheduleEvents"
+    },
+    {
+      "events": [
+        "WebhookReceived",
+        "ExternalFileChanged",
+        "ExternalAPIEvent",
+        "ExternalAlertReceived"
+      ],
+      "resource": "events.external",
+      "value": "ExternalEvents"
+    }
+  ],
+  "clientFrames": [
+    "subscribe",
+    "unsubscribe",
+    "chat.send",
+    "notification.respond",
+    "chat.cancel",
+    "task.cancel",
+    "ping"
+  ],
+  "serverFrames": [
+    "subscribed",
+    "unsubscribed",
+    "event",
+    "chat.chunk",
+    "chat.done",
+    "chat.cancelled",
+    "error",
+    "pong"
+  ]
+}

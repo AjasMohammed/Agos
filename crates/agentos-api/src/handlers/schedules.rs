@@ -17,7 +17,8 @@ use crate::types::{
     CronPreviewResponse,
 };
 
-/// `GET /api/v1/schedules` — List all cron schedules.
+/// `GET /api/v1/schedules` — List all scheduled entries: recurring cron
+/// schedules plus agent-created one-shot once-jobs and timers (see `kind`).
 #[utoipa::path(
     get,
     path = "/api/v1/schedules",

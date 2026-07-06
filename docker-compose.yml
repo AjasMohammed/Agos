@@ -41,7 +41,10 @@ services:
       # - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "8080:8080"
-      - "9091:9091"
+      # Health/metrics: bind to loopback on the host so /metrics and /healthz
+      # (operational internals, unauthenticated) are not reachable from other
+      # hosts. Scrape locally or front with a trusted proxy.
+      - "127.0.0.1:9091:9091"
     restart: unless-stopped
     depends_on:
       jaeger:

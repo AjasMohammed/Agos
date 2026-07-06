@@ -344,6 +344,15 @@ impl Kernel {
     ) -> anyhow::Result<std::path::PathBuf> {
         use crate::claude_mcp_gateway::{start_claude_mcp_gateway, KernelMcpExecutor};
 
+        // Shared per-agent tool-call buffer: the executor appends each subprocess
+        // tool call, the chat loop drains it per turn so calls show in the chat UI.
+        let collector: crate::claude_mcp_gateway::GatewayToolCallCollector =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        self.claude_gateway_tool_calls
+            .write()
+            .await
+            .insert(agent_id, Arc::clone(&collector));
+
         let workspace_paths = self.workspace_paths_for_agent(&agent_id);
         let executor = Arc::new(KernelMcpExecutor::new(
             Arc::clone(&self.tool_runner),
@@ -358,6 +367,7 @@ impl Kernel {
             agent_id,
             permissions,
             workspace_paths,
+            collector,
         )) as Arc<dyn agentos_mcp::McpToolExecutor>;
 
         let gateway = start_claude_mcp_gateway(
@@ -368,6 +378,22 @@ impl Kernel {
         )
         .await?;
         Ok(gateway.config_path)
+    }
+
+    /// Resolve the budget to bind to an agent at registration. An org-node budget
+    /// (Phase 2) wins over the global `[agent_budget]` config (Phase 1); a lookup
+    /// failure degrades to the config budget rather than blocking the connect.
+    pub(crate) async fn resolve_agent_budget(&self, agent_name: &str) -> AgentBudget {
+        if let Some(org_store) = &self.org_store {
+            match org_store.budget_for_agent(agent_name).await {
+                Ok(Some(budget)) => return budget,
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(agent_name = %agent_name, error = %e, "org budget lookup failed; using config budget");
+                }
+            }
+        }
+        self.config.agent_budget.resolve(agent_name)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -829,9 +855,19 @@ impl Kernel {
             }
         }
 
-        // Register agent with cost tracker (default budget)
+        // Register agent with cost tracker. An org-node budget (Phase 2) takes
+        // precedence over the global `[agent_budget]` config (Phase 1), which in
+        // turn falls back to AgentBudget::default() when unconfigured.
+        let budget = self.resolve_agent_budget(&agent_name).await;
+        tracing::debug!(
+            agent_name = %agent_name,
+            max_tokens_per_day = budget.max_tokens_per_day,
+            max_cost_usd_per_day = budget.max_cost_usd_per_day,
+            on_hard_limit = ?budget.on_hard_limit,
+            "Binding cost budget to agent"
+        );
         self.cost_tracker
-            .register_agent(agent_id, agent_name.clone(), AgentBudget::default())
+            .register_agent(agent_id, agent_name.clone(), budget)
             .await;
 
         // On reconnect, clear any subscriptions from a prior session or auto-reactivation
@@ -1812,8 +1848,9 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                 );
             }
 
+            let budget = self.resolve_agent_budget(&agent_name).await;
             self.cost_tracker
-                .register_agent(agent_id, agent_name.clone(), AgentBudget::default())
+                .register_agent(agent_id, agent_name.clone(), budget)
                 .await;
 
             let mut default_specs: Vec<(EventTypeFilter, SubscriptionPriority)> = Vec::new();

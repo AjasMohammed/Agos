@@ -188,7 +188,8 @@ pub enum KernelCommand {
     // Secret management
     SetSecret {
         name: String,
-        value: String, // encrypted in transit? No — UDS is local-only
+        /// Zeroized on drop at both ends; transport is a local-only UDS.
+        value: Zeroizing<String>,
         scope: SecretScope,
         /// Raw scope string from CLI (e.g. "agent:notifier") for kernel-side resolution.
         #[serde(default)]
@@ -200,7 +201,7 @@ pub enum KernelCommand {
     },
     RotateSecret {
         name: String,
-        new_value: String,
+        new_value: Zeroizing<String>,
     },
 
     // Permission management
@@ -301,6 +302,8 @@ pub enum KernelCommand {
         permissions: Vec<String>,
     },
     ListSchedules,
+    ListOnceJobs,
+    ListTimers,
     PauseSchedule {
         name: String,
     },
@@ -924,6 +927,22 @@ pub enum KernelCommand {
     /// Revoke a learned approval policy entry by `id`.
     RevokeApprovalPolicy {
         id: i64,
+    },
+    /// Add (or update) a node in the durable agent org chart. The node's
+    /// capability scope must be a subset of its manager's (enforced kernel-side).
+    OrgAddNode {
+        org_id: String,
+        agent_name: String,
+        manager_node_id: Option<String>,
+        /// "coordinator" or "worker" (case-insensitive; defaults to worker).
+        role: String,
+        title: String,
+        /// Resource grants of the form `resource:rwxqo` (e.g. `fs:/home/u/:r`).
+        scope: Vec<String>,
+    },
+    /// List every node in an org chart.
+    OrgShow {
+        org_id: String,
     },
 }
 

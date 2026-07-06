@@ -24,10 +24,11 @@ use tower_http::trace::TraceLayer;
 
 use crate::api_key::ApiKeyStore;
 use crate::handlers::{
-    agent_chats, agents, audit, auth, channels, chat, chat_sessions, config, connectors, costs,
-    dashboard, doctor, escalations, events, files, identity, keys, logs, marketplace, mcp,
-    notifications, pipelines, plugins, prefs, roles, schedules, scratchpad, secrets, sse, system,
-    system_info, tasks, tools, webhooks, webhooks_admin, workflows,
+    agent_chats, agents, approval_policies, audit, auth, channels, chat, chat_sessions, config,
+    connectors, costs, dashboard, doctor, escalations, events, files, identity, inbox, keys, logs,
+    marketplace, mcp, memory, notifications, pipelines, plugins, prefs, roles, schedules,
+    scratchpad, secrets, skills, sse, system, system_info, tasks, tools, webhooks, webhooks_admin,
+    workflows,
 };
 use crate::service::KernelService;
 use crate::ws;
@@ -254,6 +255,19 @@ pub fn build_router(
             "/api/v1/escalations/{id}/resolve",
             post(escalations::resolve),
         )
+        // Approval policies (standing grants)
+        .route(
+            "/api/v1/approval-policies",
+            get(approval_policies::list).post(approval_policies::add),
+        )
+        .route(
+            "/api/v1/approval-policies/{id}",
+            axum::routing::delete(approval_policies::revoke),
+        )
+        .route("/api/v1/agents/{id}/memory/{tier}", get(memory::browse))
+        .route("/api/v1/skills", get(skills::list))
+        .route("/api/v1/skills/{name}", get(skills::get))
+        .route("/api/v1/agents/{id}/inbox", get(inbox::get))
         // User-preference proposals (governance)
         .route("/api/v1/prefs/proposals", get(prefs::list_proposals))
         .route("/api/v1/prefs/proposals/{id}/accept", post(prefs::accept))
@@ -318,6 +332,14 @@ pub fn build_router(
             "/api/v1/events/subscriptions/{id}",
             delete(events::delete_subscription),
         )
+        .route(
+            "/api/v1/events/subscriptions/{id}/enable",
+            post(events::enable_subscription),
+        )
+        .route(
+            "/api/v1/events/subscriptions/{id}/disable",
+            post(events::disable_subscription),
+        )
         .route("/api/v1/events/emit", post(events::emit))
         // Realtime SSE stream (alternative to the WebSocket endpoint)
         .route("/api/v1/events/stream", get(sse::events_stream))
@@ -339,6 +361,8 @@ pub fn build_router(
         .route("/api/v1/agents/{name}/identity", get(identity::get))
         // Auth identity + API key management
         .route("/api/v1/auth/me", get(auth::me))
+        // Single-use WS auth ticket (keeps the key out of the WS URL).
+        .route("/api/v1/ws/ticket", post(auth::ws_ticket))
         .route("/api/v1/keys", get(keys::list).post(keys::create))
         .route("/api/v1/keys/{id}", delete(keys::revoke));
 
@@ -380,11 +404,14 @@ pub fn build_router(
 
     // ── Merge public + login + protected, add shared middleware ──────────
     // Extensions available to all routes (including WS upgrade and login).
+    // The ticket store is shared between the mint handler (protected) and the
+    // WS upgrade (public), so it lives at this level.
     let app = public_routes
         .merge(login_routes)
         .merge(protected_routes)
         .layer(Extension(key_store))
         .layer(Extension(broadcaster))
+        .layer(Extension(ws::ticket::WsTicketStore::new()))
         .with_state(service);
 
     // CORS: explicit allowlist from config, or same-origin (the bind address)

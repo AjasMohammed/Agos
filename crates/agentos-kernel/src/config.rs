@@ -80,6 +80,12 @@ pub struct KernelConfig {
     /// Chat-specific kernel configuration (output filtering, enforcement modes).
     #[serde(default)]
     pub chat: ChatConfig,
+    /// Hardware Abstraction Layer policy (raw-USB allowlist, etc.).
+    #[serde(default)]
+    pub hal: HalSettings,
+    /// Security policy (dynamic capability policy engine, etc.).
+    #[serde(default)]
+    pub security: SecurityConfig,
     /// User preference adaptation post-task proposer.
     #[serde(default)]
     pub user_adaptation: UserAdaptationConfig,
@@ -107,6 +113,149 @@ pub struct KernelConfig {
     /// Per-agent heartbeat wakeups (opt-in; disabled by default).
     #[serde(default)]
     pub agent_heartbeat: HeartbeatSettings,
+    /// Per-agent cost budgets bound at connect time. Omit to use built-in defaults.
+    #[serde(default)]
+    pub agent_budget: AgentBudgetSettings,
+}
+
+/// Cost/budget configuration applied to every agent when it connects.
+///
+/// The budget is bound to the agent in the `CostTracker`, which enforces the
+/// `warn_at_pct` / `pause_at_pct` thresholds and `on_hard_limit` action during
+/// task execution. Omit the `[agent_budget]` section entirely to fall back to
+/// `AgentBudget::default()` (5M tokens / $50 / 10k tool-calls per day) — the
+/// historical behavior. Provide `[agent_budget.default]` to change the global
+/// budget, and `[agent_budget.overrides.<agent_name>]` to tune a single agent.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct AgentBudgetSettings {
+    /// Global default applied to all agents. `None` = use `AgentBudget::default()`.
+    #[serde(default)]
+    pub default: Option<AgentBudgetOverride>,
+    /// Per-agent overrides keyed by agent name, merged over the global default.
+    #[serde(default)]
+    pub overrides: std::collections::HashMap<String, AgentBudgetOverride>,
+}
+
+impl AgentBudgetSettings {
+    /// Resolve the effective budget for `agent_name`: start from
+    /// `AgentBudget::default()`, apply the global `default` overrides, then the
+    /// per-agent overrides. Each layer only touches the fields it specifies.
+    pub fn resolve(&self, agent_name: &str) -> agentos_types::AgentBudget {
+        let mut budget = agentos_types::AgentBudget::default();
+        if let Some(global) = &self.default {
+            global.apply_to(&mut budget);
+        }
+        if let Some(per_agent) = self.overrides.get(agent_name) {
+            per_agent.apply_to(&mut budget);
+        }
+        // A misconfigured threshold (e.g. warn above pause, or either above 100%)
+        // silently never fires, since cost percentages cap near 100. Surface it as
+        // a warning rather than failing the connect — the budget is still usable.
+        if budget.warn_at_pct > budget.pause_at_pct
+            || budget.warn_at_pct > 100
+            || budget.pause_at_pct > 100
+        {
+            tracing::warn!(
+                agent_name = %agent_name,
+                warn_at_pct = budget.warn_at_pct,
+                pause_at_pct = budget.pause_at_pct,
+                "agent_budget thresholds are misconfigured (expected warn_at_pct <= pause_at_pct <= 100); some thresholds may never trigger"
+            );
+        }
+        budget
+    }
+}
+
+/// A partial `AgentBudget` — every field optional so config can override just
+/// what it cares about. Applied over a base `AgentBudget` via `apply_to`.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct AgentBudgetOverride {
+    pub max_tokens_per_day: Option<u64>,
+    pub max_cost_usd_per_day: Option<f64>,
+    pub max_tool_calls_per_day: Option<u64>,
+    pub warn_at_pct: Option<u8>,
+    pub pause_at_pct: Option<u8>,
+    pub on_hard_limit: Option<agentos_types::BudgetAction>,
+    pub max_wall_time_seconds: Option<u64>,
+    pub allowed_models: Option<Vec<String>>,
+    pub downgrade_model: Option<agentos_types::ModelDowngradeTier>,
+}
+
+impl AgentBudgetOverride {
+    /// Overwrite only the fields this override specifies on `base`.
+    fn apply_to(&self, base: &mut agentos_types::AgentBudget) {
+        if let Some(v) = self.max_tokens_per_day {
+            base.max_tokens_per_day = v;
+        }
+        if let Some(v) = self.max_cost_usd_per_day {
+            base.max_cost_usd_per_day = v;
+        }
+        if let Some(v) = self.max_tool_calls_per_day {
+            base.max_tool_calls_per_day = v;
+        }
+        if let Some(v) = self.warn_at_pct {
+            base.warn_at_pct = v;
+        }
+        if let Some(v) = self.pause_at_pct {
+            base.pause_at_pct = v;
+        }
+        if let Some(v) = self.on_hard_limit {
+            base.on_hard_limit = v;
+        }
+        if let Some(v) = self.max_wall_time_seconds {
+            base.max_wall_time_seconds = v;
+        }
+        if let Some(v) = &self.allowed_models {
+            base.allowed_models = v.clone();
+        }
+        if let Some(v) = &self.downgrade_model {
+            base.downgrade_model = Some(v.clone());
+        }
+    }
+}
+
+/// Security policy configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SecurityConfig {
+    /// Dynamic capability policy-engine profile, enforced in the KMC dispatch
+    /// path (env/proc/net/storage/build capabilities). One of:
+    /// `off` (default — permissive, no enforcement; preserves prior behavior),
+    /// `development`, `production`, or `restricted`. Enabling a non-`off`
+    /// profile makes the policy engine a live authorization gate: a `Deny`
+    /// rule blocks the capability and an `Escalate`/unmatched result requires
+    /// operator approval.
+    #[serde(default = "default_policy_profile")]
+    pub policy_profile: String,
+}
+
+fn default_policy_profile() -> String {
+    "off".to_string()
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            policy_profile: default_policy_profile(),
+        }
+    }
+}
+
+/// Hardware Abstraction Layer policy.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct HalSettings {
+    /// Raw-USB device policy. The driver is fail-closed: with an empty
+    /// allowlist every open/read/write/control is denied.
+    #[serde(default)]
+    pub raw_usb: RawUsbSettings,
+}
+
+/// Raw-USB allowlist, the only way to make the `raw-usb` driver usable.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct RawUsbSettings {
+    /// Allowed devices as `"vid:pid"` hex strings, e.g. `"0483:5740"`.
+    /// Malformed entries are skipped with a warning at boot.
+    #[serde(default)]
+    pub allow: Vec<String>,
 }
 
 /// Periodic agent heartbeat: wake idle agents to check their inbox / assigned
@@ -676,6 +825,11 @@ pub struct KernelSettings {
     pub autonomous_mode: AutonomousModeConfig,
     #[serde(default = "default_health_port")]
     pub health_port: u16,
+    /// Bind address for the health/metrics HTTP server. Loopback by default —
+    /// `/metrics` exposes operational internals, so widen to "0.0.0.0" only
+    /// behind a trusted boundary (containers need it: k8s probes hit the pod IP).
+    #[serde(default = "default_health_bind")]
+    pub health_bind: String,
     /// Maximum commands per second per agent (across all connections). 0 = unlimited.
     #[serde(default = "default_per_agent_rate_limit")]
     pub per_agent_rate_limit: u32,
@@ -843,6 +997,10 @@ impl Default for TaskLimitsConfig {
 
 fn default_health_port() -> u16 {
     9091
+}
+
+fn default_health_bind() -> String {
+    "127.0.0.1".to_string()
 }
 
 fn default_state_db_path() -> String {
@@ -1316,12 +1474,47 @@ pub struct MemorySettings {
     /// without needing semantic retrieval.
     #[serde(default)]
     pub disable_embedder: bool,
+    /// Maximum seconds to wait for embedding-model initialization at boot
+    /// (covers the first-boot ~23 MB model download). When exceeded — e.g. a
+    /// stalled CDN connection — the kernel logs a warning and falls back to
+    /// the zero-vector embedder instead of hanging boot indefinitely; lexical
+    /// (FTS5) search keeps working. Default: 120.
+    #[serde(default = "default_embedder_init_timeout_secs")]
+    pub embedder_init_timeout_secs: u64,
     #[serde(default)]
     pub extraction: crate::memory_extraction::ExtractionConfig,
     #[serde(default)]
     pub consolidation: crate::consolidation::ConsolidationConfig,
     #[serde(default)]
     pub context: ContextMemoryConfig,
+    /// Age (days) after which episodic / semantic / procedural memory entries
+    /// are swept by the TimeoutChecker. The three tiers expose
+    /// `sweep_old_entries` but nothing called it, so the memory DBs grew
+    /// unbounded on a long-running install. `0` (default) keeps the prior
+    /// unbounded behavior; set a positive value to enable retention.
+    #[serde(default)]
+    pub retention_days: u32,
+    #[serde(default)]
+    pub lifecycle: MemoryLifecycleSettings,
+}
+
+/// Memory lifecycle (reinforcement / decay) configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MemoryLifecycleSettings {
+    /// When enabled, retrieved memories are touched (`last_used_at`,
+    /// `use_count`) on injection and procedures injected into a task receive
+    /// success/failure feedback (with Laplace-smoothed confidence recompute)
+    /// at task completion.
+    #[serde(default = "default_true")]
+    pub reinforcement_enabled: bool,
+}
+
+impl Default for MemoryLifecycleSettings {
+    fn default() -> Self {
+        Self {
+            reinforcement_enabled: true,
+        }
+    }
 }
 
 /// Per-agent context memory configuration.
@@ -1369,15 +1562,22 @@ impl Default for MemorySettings {
         Self {
             model_cache_dir: default_model_cache_dir(),
             disable_embedder: false,
+            embedder_init_timeout_secs: default_embedder_init_timeout_secs(),
             extraction: crate::memory_extraction::ExtractionConfig::default(),
             consolidation: crate::consolidation::ConsolidationConfig::default(),
             context: ContextMemoryConfig::default(),
+            retention_days: 0,
+            lifecycle: MemoryLifecycleSettings::default(),
         }
     }
 }
 
 fn default_model_cache_dir() -> String {
     "models".to_string()
+}
+
+fn default_embedder_init_timeout_secs() -> u64 {
+    120
 }
 
 /// Configuration for boot-time pre-flight system health checks.
@@ -2169,11 +2369,34 @@ fn validate_sandbox_settings(kernel: &KernelSettings) -> Result<(), anyhow::Erro
              values above 1024 may exhaust system resources"
         );
     }
-    if kernel.sandbox_policy == SandboxPolicy::Never {
-        tracing::warn!(
-            "kernel.sandbox_policy is set to 'never' — all tools run unsandboxed. \
-             This is NOT safe for production. Use 'trust_aware' or 'always' instead."
-        );
+    match kernel.sandbox_policy {
+        SandboxPolicy::Never => {
+            tracing::warn!(
+                "kernel.sandbox_policy is set to 'never' — all tools run unsandboxed. \
+                 This is NOT safe for production. Use 'trust_aware' or 'always' instead."
+            );
+        }
+        SandboxPolicy::TrustAware => {
+            // Make the default posture operator-visible and *accurate* (the
+            // seccomp/Landlock layer is not the only line of defense — see
+            // reference/Tool Isolation Model.md). Under trust_aware, Core
+            // (first-party) tools run in-process, but the dangerous ones are
+            // confined by other layers: shell-exec runs inside bwrap; KMC
+            // capabilities (env/proc/net/storage/build) pass the dynamic policy
+            // engine; HAL/control-plane tools require capability + approval.
+            // seccomp/Landlock additionally confines Community/Verified tools.
+            // Use 'always' to also seccomp-sandbox every sandbox-eligible Core
+            // tool (note: tools needing in-process state cannot be sandboxed).
+            tracing::info!(
+                "kernel.sandbox_policy = 'trust_aware': first-party tools run \
+                 in-process but are confined by layered controls (bwrap for \
+                 shell-exec, policy engine for KMC, capability+approval for \
+                 HAL/control-plane); seccomp/Landlock confines Community/Verified \
+                 tools. Set 'always' to also seccomp every eligible Core tool. \
+                 See reference/Tool Isolation Model.md."
+            );
+        }
+        SandboxPolicy::Always => {}
     }
     Ok(())
 }
@@ -2276,6 +2499,11 @@ where
         &lookup,
         "AGENTOS_HEALTH_PORT",
         &mut config.kernel.health_port,
+    );
+    apply_string_override(
+        &lookup,
+        "AGENTOS_HEALTH_BIND",
+        &mut config.kernel.health_bind,
     );
 
     if let Some(url) = nonempty_env(&lookup, "AGENTOS_LLM_URL") {
@@ -2475,6 +2703,74 @@ fn is_tmp_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_budget_resolve_defaults_to_builtin_when_unconfigured() {
+        let settings = AgentBudgetSettings::default();
+        let resolved = settings.resolve("anyone");
+        let builtin = agentos_types::AgentBudget::default();
+        // Unconfigured deployments keep the historical default budget exactly.
+        assert_eq!(resolved.max_tokens_per_day, builtin.max_tokens_per_day);
+        assert_eq!(resolved.max_cost_usd_per_day, builtin.max_cost_usd_per_day);
+        assert_eq!(resolved.on_hard_limit, builtin.on_hard_limit);
+    }
+
+    #[test]
+    fn agent_budget_resolve_applies_global_then_per_agent_overrides() {
+        let toml = r#"
+            [default]
+            max_cost_usd_per_day = 20.0
+            on_hard_limit = "NotifyOnly"
+
+            [overrides.researcher]
+            max_cost_usd_per_day = 5.0
+            on_hard_limit = "Kill"
+        "#;
+        let settings: AgentBudgetSettings = toml::from_str(toml).expect("parse budget settings");
+
+        // An agent with no override gets the global default layer.
+        let other = settings.resolve("designer");
+        assert_eq!(other.max_cost_usd_per_day, 20.0);
+        assert_eq!(other.on_hard_limit, agentos_types::BudgetAction::NotifyOnly);
+        // Untouched fields fall through to the built-in default.
+        assert_eq!(
+            other.max_tokens_per_day,
+            agentos_types::AgentBudget::default().max_tokens_per_day
+        );
+
+        // The named agent's override merges over the global default.
+        let researcher = settings.resolve("researcher");
+        assert_eq!(researcher.max_cost_usd_per_day, 5.0);
+        assert_eq!(researcher.on_hard_limit, agentos_types::BudgetAction::Kill);
+    }
+
+    #[test]
+    fn hal_raw_usb_allowlist_parses() {
+        let toml = r#"
+            [raw_usb]
+            allow = ["0483:5740", "0x1a86:0x7523"]
+        "#;
+        let settings: HalSettings = toml::from_str(toml).expect("parse hal settings");
+        assert_eq!(settings.raw_usb.allow, vec!["0483:5740", "0x1a86:0x7523"]);
+
+        // Omitting the section entirely yields an empty (fail-closed) list.
+        let empty: HalSettings = toml::from_str("").expect("parse empty hal settings");
+        assert!(empty.raw_usb.allow.is_empty());
+    }
+
+    #[test]
+    fn agent_budget_resolve_applies_downgrade_model() {
+        let toml = r#"
+            [default.downgrade_model]
+            model = "claude-haiku-4-5"
+            provider = "anthropic"
+        "#;
+        let settings: AgentBudgetSettings = toml::from_str(toml).expect("parse budget settings");
+        let resolved = settings.resolve("anyone");
+        let tier = resolved.downgrade_model.expect("downgrade model applied");
+        assert_eq!(tier.model, "claude-haiku-4-5");
+        assert_eq!(tier.provider, "anthropic");
+    }
 
     #[test]
     fn validate_workspace_path_accepts_user_subdirs() {

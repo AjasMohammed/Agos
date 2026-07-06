@@ -36,6 +36,7 @@ toml_edit = { workspace = true }
 rust-embed = { version = "8", features = ["compression"] }
 notify = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 regex = "1"
 unicode-normalization = { workspace = true }
 secrecy = "0.8"

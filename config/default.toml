@@ -12,6 +12,9 @@ state_db_path = "/tmp/agentos/data/kernel_state.db"
 # distinct port if you run more than one on the same host, or they will collide
 # (the second instance logs a bind error and serves no health endpoint).
 health_port = 9091
+# Bind address for the health/metrics server. Loopback by default — /metrics
+# exposes operational internals. Set "0.0.0.0" to expose beyond this host.
+health_bind = "127.0.0.1"
 
 # Sandbox execution policy for tool calls.
 # "trust_aware" (default): Core tools run in-process, Community/Verified tools sandboxed.
@@ -81,7 +84,8 @@ vault_path = "/tmp/agentos/vault/secrets.db"
 # Development default path (ephemeral on many systems).
 log_path = "/tmp/agentos/data/audit.db"
 # Maximum rows to retain (0 = unlimited). Older rows are pruned on each 10-minute sweep.
-max_audit_entries = 0
+# Capped by default so the audit DB can't grow without bound; raise per deployment.
+max_audit_entries = 200000
 # Number of recent entries to verify on startup (0 = full chain, may be slow for large logs).
 verify_last_n_entries = 1000
 
@@ -172,6 +176,14 @@ rust_allowlist = [
     "serde", "tokio", "anyhow", "clap", "tracing",
 ]
 
+# Hardware Abstraction Layer policy.
+[hal.raw_usb]
+# Allowlist of raw-USB devices agents may open, as "vid:pid" hex strings.
+# The raw-usb driver is fail-closed: with an empty list every
+# open/read/write/control is denied. Requires the `raw-usb` build feature.
+# allow = ["0483:5740"]
+allow = []
+
 [bus]
 # Development default socket path.
 socket_path = "/tmp/agentos/agentos.sock"
@@ -220,6 +232,12 @@ claude_code_resume = false
 
 [memory]
 model_cache_dir = "models"
+# Max seconds for embedding-model init at boot (first boot downloads ~23 MB).
+# On timeout/failure the kernel logs a warning and continues with a zero-vector
+# embedder (semantic retrieval off, FTS5 lexical search unaffected) instead of
+# hanging boot on a stalled download. Set disable_embedder = true to skip
+# the model entirely (e.g. low-RAM hosts, onnxruntime-incompatible CPUs).
+embedder_init_timeout_secs = 120
 
 [memory.extraction]
 enabled = true
@@ -240,6 +258,12 @@ enabled = true
 max_tokens = 4096
 max_versions = 50
 db_path = "context_memory.db"
+
+[memory.lifecycle]
+# Reinforcement: retrieved memories are touched (last_used_at / use_count) on
+# injection, and procedures injected into a task get success/failure feedback
+# (Laplace-smoothed confidence recompute) when the task completes.
+reinforcement_enabled = true
 
 [context_budget]
 total_tokens = 128000
@@ -595,3 +619,32 @@ default_interval_secs = 0
 jitter = 0.2
 # Cap on agents woken per tick, to avoid an inference storm on a large idle fleet.
 max_wakes_per_tick = 4
+
+# Per-agent cost budgets, bound to every agent when it connects. The CostTracker
+# enforces these during task execution: it warns at `warn_at_pct`, pauses at
+# `pause_at_pct`, and applies `on_hard_limit` (Suspend | NotifyOnly | Kill) when a
+# limit is exceeded. A value of 0 means "unlimited" for that resource.
+#
+# Leaving this section out entirely keeps the historical built-in default budget
+# (5,000,000 tokens / $50.00 / 10,000 tool-calls per day). Uncomment to customize.
+#
+# [agent_budget.default]
+# max_tokens_per_day = 5000000
+# max_cost_usd_per_day = 50.0
+# max_tool_calls_per_day = 10000
+# warn_at_pct = 80
+# pause_at_pct = 95
+# on_hard_limit = "Suspend"
+# max_wall_time_seconds = 0
+# Restrict which models this budget permits (empty = all allowed):
+# allowed_models = ["claude-sonnet-4-5", "claude-haiku-4-5"]
+#
+# Optional cheaper model to switch to at pause_at_pct instead of pausing:
+# [agent_budget.default.downgrade_model]
+# model = "claude-haiku-4-5"
+# provider = "anthropic"
+#
+# Per-agent overrides (merged over the default) keyed by agent name:
+# [agent_budget.overrides.researcher]
+# max_cost_usd_per_day = 5.0
+# on_hard_limit = "Kill"

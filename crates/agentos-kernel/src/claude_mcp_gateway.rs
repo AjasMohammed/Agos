@@ -31,7 +31,26 @@ use agentos_types::{
     TraceID,
 };
 use async_trait::async_trait;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
+/// One tool invocation made by the `claude` subprocess through this gateway,
+/// captured so the kernel's chat loop can surface it in the chat UI (the
+/// subprocess runs its own tool loop, so these calls never appear in the
+/// adapter's `InferenceResult.tool_calls`). Drained per chat turn.
+#[derive(Debug, Clone)]
+pub struct GatewayToolCall {
+    /// Resolved AgentOS tool name (e.g. `search-tools`, or the inner tool for
+    /// `invoke_tool` — never the `mcp__agentos__*` wrapper name).
+    pub tool_name: String,
+    pub payload: serde_json::Value,
+    pub result: serde_json::Value,
+    pub duration_ms: u64,
+}
+
+/// Shared, per-agent buffer of gateway tool calls (one per `claude-code` agent,
+/// created when its gateway starts). The executor appends; the chat loop drains.
+pub type GatewayToolCallCollector = Arc<Mutex<Vec<GatewayToolCall>>>;
 
 use crate::agent_registry::AgentRegistry;
 use crate::capability_dispatch::KernelCapabilityDispatcher;
@@ -68,6 +87,9 @@ pub struct KernelMcpExecutor {
     /// Resolved once at construction; the agent's workspace grants are stable
     /// for the lifetime of the connection.
     workspace_paths: AgentWorkspacePaths,
+    /// Per-turn buffer the chat loop drains so subprocess tool calls show in the
+    /// chat UI. Every successful or failed invocation is appended here.
+    tool_call_collector: GatewayToolCallCollector,
 }
 
 impl KernelMcpExecutor {
@@ -87,6 +109,7 @@ impl KernelMcpExecutor {
         agent_id: AgentID,
         permissions: PermissionSet,
         workspace_paths: AgentWorkspacePaths,
+        tool_call_collector: GatewayToolCallCollector,
     ) -> Self {
         Self {
             tool_runner,
@@ -101,6 +124,7 @@ impl KernelMcpExecutor {
             agent_id,
             permissions,
             workspace_paths,
+            tool_call_collector,
         }
     }
 
@@ -136,21 +160,43 @@ impl KernelMcpExecutor {
         let tool_start = std::time::Instant::now();
         let result = self
             .tool_runner
-            .execute(tool_name, payload, self.build_ctx().await)
+            .execute(tool_name, payload.clone(), self.build_ctx().await)
             .await;
         let duration_ms = tool_start.elapsed().as_millis() as u64;
 
-        // Fire ToolPost — informational, always fires regardless of result.
-        let output_json = match &result {
-            Ok(v) => serde_json::to_string(v).unwrap_or_default(),
-            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        // Structured result value reused for both the ToolPost hook and the
+        // chat-UI collector record.
+        let result_value = match &result {
+            Ok(v) => v.clone(),
+            Err(e) => serde_json::json!({ "error": e.to_string() }),
         };
+
+        // Record for the chat loop so this subprocess-driven call surfaces in the
+        // chat UI (best-effort; never blocks or fails the tool call). Bounded: the
+        // chat loop drains this per turn, but a task-only agent never drains it, so
+        // cap it to avoid unbounded growth (keep the most recent CAP entries).
+        {
+            const COLLECTOR_CAP: usize = 256;
+            let mut buf = self.tool_call_collector.lock().await;
+            buf.push(GatewayToolCall {
+                tool_name: tool_name.to_string(),
+                payload,
+                result: result_value.clone(),
+                duration_ms,
+            });
+            if buf.len() > COLLECTOR_CAP {
+                let overflow = buf.len() - COLLECTOR_CAP;
+                buf.drain(0..overflow);
+            }
+        }
+
+        // Fire ToolPost — informational, always fires regardless of result.
         self.hook_registry
             .fire(&agentos_types::HookEvent::ToolPost {
                 task_id,
                 agent_id: self.agent_id,
                 tool_name: tool_name.to_string(),
-                output_json,
+                output_json: serde_json::to_string(&result_value).unwrap_or_default(),
                 duration_ms,
             })
             .await;

@@ -81,6 +81,54 @@ pub async fn delete_subscription(
     Ok(Json(Envelope::new(serde_json::json!({ "removed": id }))))
 }
 
+/// `POST /api/v1/events/subscriptions/{id}/enable` — Activate a subscription.
+#[utoipa::path(
+    post,
+    path = "/api/v1/events/subscriptions/{id}/enable",
+    tag = "events",
+    operation_id = "events_enable_subscription",
+    params(("id" = String, Path, description = "Subscription id")),
+    responses(
+        (status = 200, description = "Subscription enabled", body = crate::response::Envelope<serde_json::Value>),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody),
+        (status = 404, description = "Subscription not found", body = crate::error::ApiErrorBody)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn enable_subscription(
+    State(svc): State<Arc<dyn KernelService>>,
+    Extension(key): Extension<AuthenticatedKey>,
+    Path(id): Path<String>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    require_permission(&key, "events:w")?;
+    svc.enable_event_subscription(&id).await?;
+    Ok(Json(Envelope::new(serde_json::json!({ "enabled": id }))))
+}
+
+/// `POST /api/v1/events/subscriptions/{id}/disable` — Pause a subscription.
+#[utoipa::path(
+    post,
+    path = "/api/v1/events/subscriptions/{id}/disable",
+    tag = "events",
+    operation_id = "events_disable_subscription",
+    params(("id" = String, Path, description = "Subscription id")),
+    responses(
+        (status = 200, description = "Subscription disabled", body = crate::response::Envelope<serde_json::Value>),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody),
+        (status = 404, description = "Subscription not found", body = crate::error::ApiErrorBody)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn disable_subscription(
+    State(svc): State<Arc<dyn KernelService>>,
+    Extension(key): Extension<AuthenticatedKey>,
+    Path(id): Path<String>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    require_permission(&key, "events:w")?;
+    svc.disable_event_subscription(&id).await?;
+    Ok(Json(Envelope::new(serde_json::json!({ "disabled": id }))))
+}
+
 /// `POST /api/v1/events/emit` — Emit an event into the kernel event bus.
 #[utoipa::path(
     post,

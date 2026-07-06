@@ -611,10 +611,10 @@ pub async fn resume(
         disable_tool_scoping: false,
     };
 
-    let _ = state
+    state
         .kernel
         .context_manager
-        .replace_context(&task_id, payload.context.window)
+        .restore_context(task_id, agent.id, payload.context.window)
         .await;
     state.kernel.scheduler.enqueue(resumed_task).await;
     let _ = state.kernel.audit.append(agentos_audit::AuditEntry {

@@ -344,6 +344,17 @@ impl ApprovalPolicyMatcher {
                     Some(p) => p,
                     None => continue, // glob requires a path; none provided
                 };
+                // Traversal guard: a learned glob like `/data/**` must never
+                // auto-approve a path that escapes via `..` (e.g.
+                // `/data/../etc/passwd`). glob_match treats `..` as an ordinary
+                // segment, so reject any traversal component outright and force
+                // human review — mirrors the AutoApprovePolicy path guard.
+                if std::path::Path::new(payload_path)
+                    .components()
+                    .any(|c| c == std::path::Component::ParentDir)
+                {
+                    continue;
+                }
                 if !glob_match(glob, payload_path) {
                     continue;
                 }

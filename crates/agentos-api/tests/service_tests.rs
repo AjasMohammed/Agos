@@ -41,6 +41,7 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             tool_execution: Default::default(),
             autonomous_mode: Default::default(),
             health_port: 0,
+            health_bind: "127.0.0.1".to_string(),
             per_agent_rate_limit: 0,
             events: Default::default(),
             sandbox_policy: Default::default(),
@@ -101,6 +102,9 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             consolidation: Default::default(),
             context: Default::default(),
             disable_embedder: true,
+            embedder_init_timeout_secs: 120,
+            retention_days: 0,
+            lifecycle: Default::default(),
         },
         context_budget: Default::default(),
         context: Default::default(),
@@ -123,6 +127,9 @@ fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         scheduler: Default::default(),
         transcription: Default::default(),
         agent_heartbeat: Default::default(),
+        agent_budget: Default::default(),
+        hal: Default::default(),
+        security: Default::default(),
         user_profile: Default::default(),
         personalization: Default::default(),
     }
@@ -560,6 +567,92 @@ async fn send(
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     };
     (status, json)
+}
+
+/// Perform a real RFC 6455 handshake over TCP and return the HTTP status code.
+/// `oneshot` can't exercise the upgrade route — the `WebSocketUpgrade`
+/// extractor needs hyper's `OnUpgrade` connection machinery — so the WS leg of
+/// the test talks to a genuinely served socket.
+async fn ws_handshake_status(addr: std::net::SocketAddr, path_and_query: &str) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "GET {path_and_query} HTTP/1.1\r\n\
+         host: {addr}\r\n\
+         connection: upgrade\r\n\
+         upgrade: websocket\r\n\
+         sec-websocket-version: 13\r\n\
+         sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = [0u8; 256];
+    let n = stream.read(&mut buf).await.unwrap();
+    let head = std::str::from_utf8(&buf[..n]).unwrap();
+    head.split_whitespace().nth(1).unwrap().parse().unwrap()
+}
+
+/// A ticket minted via the protected `POST /ws/ticket` must redeem on the
+/// public `GET /ws` upgrade — this pins the Extension-layering invariant that
+/// both routes share ONE `WsTicketStore` (layer applied after every merge).
+/// Also covers: unauthenticated mint, single-use redeem, credential-less 401.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn http_ws_ticket_mint_and_redeem() {
+    let (kernel, _td) = boot_kernel_with_operator_token("op-token").await;
+    let app = auth_router(&kernel, vec![], false);
+
+    // Serve the SAME router on an ephemeral port for the WS handshake legs.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let served = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            served.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    // Login for a bearer key (REST legs go through `oneshot`).
+    let (s, body) = send(
+        &app,
+        Method::POST,
+        "/api/v1/auth/login",
+        None,
+        Some(r#"{"credential":"op-token"}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let key = body["data"]["api_key"].as_str().unwrap().to_string();
+
+    // Mint requires auth.
+    let (s, _) = send(&app, Method::POST, "/api/v1/ws/ticket", None, None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // Authed mint returns a seconds-lived ticket.
+    let (s, body) = send(&app, Method::POST, "/api/v1/ws/ticket", Some(&key), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let ticket = body["data"]["ticket"].as_str().unwrap().to_string();
+    assert_eq!(body["data"]["expires_in"], 30);
+
+    // Redeem on the PUBLIC upgrade route → 101 Switching Protocols. This pins
+    // the shared-store invariant: the ticket minted through the protected
+    // route must be visible to the public upgrade route.
+    let path = format!("/api/v1/ws?ticket={ticket}");
+    assert_eq!(ws_handshake_status(addr, &path).await, 101);
+
+    // Single-use: the same ticket is consumed.
+    assert_eq!(ws_handshake_status(addr, &path).await, 401);
+
+    // No ticket and no token → 401 (fail-closed).
+    assert_eq!(ws_handshake_status(addr, "/api/v1/ws").await, 401);
+
+    // Legacy raw-key auth still works for script clients.
+    let path = format!("/api/v1/ws?token={key}");
+    assert_eq!(ws_handshake_status(addr, &path).await, 101);
+
+    server.abort();
 }
 
 /// Full operator-login → use key → create/list/revoke key lifecycle over HTTP.

@@ -53,7 +53,15 @@ pub struct PairingManager {
     allowed: RwLock<Vec<AllowedSender>>,
     pending: RwLock<HashMap<String, PendingPairing>>, // code → pairing
     code_ttl: Duration,
+    /// Sliding-window failed-guess counter `(count, window_start)`. Defense in
+    /// depth against pairing-code brute force on top of the large keyspace.
+    failed_guesses: RwLock<(u32, DateTime<Utc>)>,
 }
+
+/// Max failed `approve_code` guesses allowed per [`GUESS_WINDOW`] before the
+/// guess path is briefly locked out. Generous enough never to impede a real
+/// operator (who has the exact code) while throttling automated guessing.
+const MAX_FAILED_GUESSES_PER_WINDOW: u32 = 20;
 
 impl PairingManager {
     pub fn new() -> Arc<Self> {
@@ -61,7 +69,35 @@ impl PairingManager {
             allowed: RwLock::new(Vec::new()),
             pending: RwLock::new(HashMap::new()),
             code_ttl: Duration::minutes(10),
+            failed_guesses: RwLock::new((0, Utc::now())),
         })
+    }
+
+    /// Duration of the failed-guess rate-limit window.
+    fn guess_window() -> Duration {
+        Duration::minutes(1)
+    }
+
+    /// Returns `true` if the failed-guess budget for the current window is
+    /// exhausted (caller should reject without consulting the code map).
+    async fn guess_budget_exhausted(&self) -> bool {
+        let mut g = self.failed_guesses.write().await;
+        let now = Utc::now();
+        if now - g.1 > Self::guess_window() {
+            *g = (0, now); // new window
+        }
+        g.0 >= MAX_FAILED_GUESSES_PER_WINDOW
+    }
+
+    /// Record one failed guess against the current window.
+    async fn record_failed_guess(&self) {
+        let mut g = self.failed_guesses.write().await;
+        let now = Utc::now();
+        if now - g.1 > Self::guess_window() {
+            *g = (1, now);
+        } else {
+            g.0 += 1;
+        }
     }
 
     /// Returns `true` if the sender is on the allowlist for the given channel.
@@ -107,13 +143,25 @@ impl PairingManager {
     /// Returns a uniform error message whether the code is wrong, used, or expired,
     /// to prevent attackers from distinguishing between these states.
     pub async fn approve_code(&self, code: &str) -> Result<AllowedSender, String> {
+        // Throttle brute-force guessing: once the per-window failed-guess
+        // budget is spent, reject with the same uniform error without even
+        // consulting the code map.
+        if self.guess_budget_exhausted().await {
+            return Err("Invalid or expired pairing code".to_string());
+        }
+
         let mut pending = self.pending.write().await;
-        let pairing = pending
-            .remove(code)
-            .ok_or_else(|| "Invalid or expired pairing code".to_string())?;
+        let Some(pairing) = pending.remove(code) else {
+            drop(pending);
+            self.record_failed_guess().await;
+            return Err("Invalid or expired pairing code".to_string());
+        };
 
         if Utc::now() > pairing.expires_at {
-            // Code existed but is expired — return same uniform error.
+            // Code existed but is expired — uniform error, and count it as a
+            // failed guess so expired-code spamming is throttled too.
+            drop(pending);
+            self.record_failed_guess().await;
             return Err("Invalid or expired pairing code".to_string());
         }
 
@@ -203,6 +251,7 @@ impl Default for PairingManager {
             allowed: RwLock::new(Vec::new()),
             pending: RwLock::new(HashMap::new()),
             code_ttl: Duration::minutes(10),
+            failed_guesses: RwLock::new((0, Utc::now())),
         }
     }
 }
@@ -235,6 +284,33 @@ mod tests {
         pm.approve_code(&code).await.unwrap();
         // Second use should fail.
         assert!(pm.approve_code(&code).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_brute_force_guessing_is_throttled() {
+        let pm = PairingManager::new();
+        // Burn the per-window failed-guess budget with wrong codes.
+        for _ in 0..MAX_FAILED_GUESSES_PER_WINDOW {
+            assert!(pm.approve_code("WRONG0").await.is_err());
+        }
+        // Now even the CORRECT code is rejected until the window resets —
+        // the guess path is locked out.
+        let code = pm.generate_code("discord", "user123").await;
+        assert!(
+            pm.approve_code(&code).await.is_err(),
+            "guess path should be locked out after exhausting the budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_successful_pair_not_penalized_by_throttle() {
+        let pm = PairingManager::new();
+        // A handful of correct pairings in a row must all succeed — success
+        // does not consume the failed-guess budget.
+        for i in 0..5 {
+            let code = pm.generate_code("discord", &format!("user{i}")).await;
+            assert!(pm.approve_code(&code).await.is_ok());
+        }
     }
 
     #[tokio::test]

@@ -4,17 +4,29 @@ default_task_timeout_secs = 300
 context_window_max_entries = 200
 context_window_token_budget = 128000
 health_port = 9091
+# Containers must bind all interfaces: k8s/docker probes hit the pod/container IP.
+health_bind = "0.0.0.0"
 state_db_path = "/var/lib/agentos/data/kernel_state.db"
 
 [kernel.tool_calls]
 allow_parallel = true
 max_parallel = 5
 
+[kernel.tool_execution]
+# Without this, in-process (non-sandboxed) tool calls fall back to the 60s code
+# default — 5x lower than default/production (300s) — silently truncating long
+# legitimate tool calls in containers. Keep it aligned with the other profiles.
+default_timeout_seconds = 300
+
 [bus]
 socket_path = "/var/lib/agentos/data/agentos.sock"
 
 [audit]
 log_path = "/var/lib/agentos/data/audit.db"
+# Cap audit-log growth in the persistent Docker volume. Older rows are pruned by
+# the TimeoutChecker sweep once this many are retained. 0 = unlimited (would grow
+# the DB without bound in a long-running container).
+max_audit_entries = 500000
 
 [secrets]
 # Vault stays under /var/lib/agentos/data because that is the only path backed
@@ -44,6 +56,9 @@ ollama_context_window = 32768
 
 [memory]
 model_cache_dir = "/var/lib/agentos/data/models"
+# Sweep memory entries older than this so the three memory DBs on the persistent
+# volume don't grow without bound. 0 = unlimited (the code default).
+retention_days = 90
 
 [memory.extraction]
 enabled = true

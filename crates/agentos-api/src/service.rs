@@ -201,6 +201,40 @@ pub trait KernelService: Send + Sync {
         note: Option<String>,
     ) -> Result<ResolveEscalationResponse, ApiError>;
 
+    // ── Approval policies (standing grants) ──────────────────────────────────
+
+    async fn list_approval_policies(&self) -> Result<Vec<ApiApprovalPolicy>, ApiError>;
+
+    async fn add_approval_policy(
+        &self,
+        req: AddApprovalPolicyRequest,
+    ) -> Result<ApiApprovalPolicy, ApiError>;
+
+    async fn revoke_approval_policy(&self, id: i64) -> Result<(), ApiError>;
+
+    /// Browse or search one memory tier for an agent (read-only). Empty `q`
+    /// returns most-recent items; a non-empty `q` searches the tier.
+    async fn browse_agent_memory(
+        &self,
+        agent_id: String,
+        tier: String,
+        q: Option<String>,
+        limit: Option<usize>,
+    ) -> Result<Vec<ApiMemoryItem>, ApiError>;
+
+    /// List installed skills (read-only).
+    async fn list_skills(&self) -> Result<Vec<ApiSkillSummary>, ApiError>;
+
+    /// Get one installed skill's full detail by name.
+    async fn get_skill(&self, name: String) -> Result<ApiSkillDetail, ApiError>;
+
+    /// Agent-to-agent message timeline for an agent (read-only).
+    async fn agent_inbox(
+        &self,
+        agent_id: String,
+        limit: Option<usize>,
+    ) -> Result<Vec<ApiInboxMessage>, ApiError>;
+
     // ── User-preference proposals (governance) ───────────────────────────────
 
     async fn list_pref_proposals(
@@ -314,6 +348,8 @@ pub trait KernelService: Send + Sync {
         req: CreateSubscriptionRequest,
     ) -> Result<ApiEventSubscription, ApiError>;
     async fn delete_event_subscription(&self, id: &str) -> Result<(), ApiError>;
+    async fn enable_event_subscription(&self, id: &str) -> Result<(), ApiError>;
+    async fn disable_event_subscription(&self, id: &str) -> Result<(), ApiError>;
     async fn emit_event(&self, req: EmitEventRequest) -> Result<(), ApiError>;
 
     async fn list_webhooks(&self) -> Result<Vec<ApiWebhookEndpoint>, ApiError>;

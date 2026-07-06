@@ -43,6 +43,10 @@ impl Kernel {
         // synchronous `cmd_run_task` path releases in its own terminal arms.
         self.release_task_checkout(&task.id).await;
 
+        // Close the autonomous work-loop: if this task was driving a claimed work
+        // item, mark it Done and unblock dependents. No-op for ordinary tasks.
+        self.complete_work_item_for_task(&task.id, true).await;
+
         // Record compact task success to episodic memory (token-efficient format)
         let summary_preview = format!(
             "task:{}\nresult:success|tools:{}|iters:{}|{}ms\nanswer:{}",
@@ -479,6 +483,11 @@ impl Kernel {
         // Terminal failure (suspended/paused/waiting returned above) — release the
         // atomic checkout so the claim doesn't linger.
         self.release_task_checkout(&task.id).await;
+
+        // Mark any work item this task was driving as Failed. Suspended/waiting
+        // tasks returned above, so reaching here means a genuine terminal failure
+        // (the item is released, not re-queued — dependents stay blocked).
+        self.complete_work_item_for_task(&task.id, false).await;
 
         // Only transition to Failed and emit events if the task hasn't
         // been marked terminal by the timeout checker while we were running.

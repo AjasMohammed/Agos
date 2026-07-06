@@ -336,6 +336,11 @@ impl Kernel {
                                     kernel.context_manager.remove_context(&timed_out.task_id).await;
                                     kernel.intent_validator.remove_task(&timed_out.task_id).await;
                                     kernel.resource_arbiter.release_all_for_agent(timed_out.agent_id).await;
+                                    // Close any work item this timed-out task was driving (Failed)
+                                    // and release its dispatch claim, so it isn't stranded until the
+                                    // work-lock TTL expires. Both are idempotent no-ops otherwise.
+                                    kernel.complete_work_item_for_task(&timed_out.task_id, false).await;
+                                    kernel.release_task_checkout(&timed_out.task_id).await;
                                 }
 
                                 // Sweep expired RPC calls (Phase 7)
@@ -404,12 +409,113 @@ impl Kernel {
                                             if woken >= hb.max_wakes_per_tick {
                                                 break;
                                             }
-                                            // Only wake when there is actually work: unread
-                                            // inbox notifications. (Owned schedules are NOT a
-                                            // wake signal — the schedule manager already fires
-                                            // DUE schedules on its own tick; counting merely
-                                            // *owned* schedules would wake every scheduled agent
-                                            // each interval for nothing.)
+                                            // Resolve the agent name once — needed
+                                            // for both the work-queue claim and the
+                                            // task enqueue below.
+                                            let agent_name = {
+                                                let registry = kernel.agent_registry.read().await;
+                                                registry.get_by_id(&agent_id).map(|a| a.name.clone())
+                                            };
+                                            let Some(agent_name) = agent_name else {
+                                                continue;
+                                            };
+
+                                            // Wake signal #1 (priority): a claimable
+                                            // work item. Atomically claim one; if we
+                                            // win it, run it as a background task and
+                                            // link the task so completion closes the
+                                            // item (see task_completion). Lock TTL must
+                                            // comfortably outlast a typical task.
+                                            let claimed = if let Some(wq) = &kernel.work_queue {
+                                                wq.checkout(
+                                                    &agent_name,
+                                                    std::time::Duration::from_secs(900),
+                                                )
+                                                .await
+                                                .unwrap_or(None)
+                                            } else {
+                                                None
+                                            };
+
+                                            if let Some(item) = claimed {
+                                                let prompt = match &item.goal_ancestry {
+                                                    Some(why) => format!(
+                                                        "{}\n\nContext (why this matters): {}",
+                                                        item.prompt, why
+                                                    ),
+                                                    None => item.prompt.clone(),
+                                                };
+                                                // Include the item id so the task
+                                                // name is unique even if an agent
+                                                // claims multiple items within one
+                                                // second (create_background_task
+                                                // rejects duplicate names).
+                                                let task_name = format!(
+                                                    "work-{}-{}",
+                                                    agent_name,
+                                                    item.item_id
+                                                );
+                                                match kernel
+                                                    .create_background_task(
+                                                        task_name,
+                                                        agent_name.clone(),
+                                                        prompt,
+                                                        true,
+                                                        true,
+                                                    )
+                                                    .await
+                                                {
+                                                    Ok(task_id) => {
+                                                        if let Some(wq) = &kernel.work_queue {
+                                                            if let Err(e) = wq
+                                                                .set_task(
+                                                                    &item.item_id,
+                                                                    &task_id.to_string(),
+                                                                )
+                                                                .await
+                                                            {
+                                                                tracing::warn!(item_id = %item.item_id, error = %e, "Failed to link work item to task");
+                                                            }
+                                                        }
+                                                        kernel
+                                                            .agent_registry
+                                                            .write()
+                                                            .await
+                                                            .touch_last_active(&agent_id);
+                                                        woken += 1;
+                                                        kernel.audit_log(agentos_audit::AuditEntry {
+                                                            timestamp: chrono::Utc::now(),
+                                                            trace_id: agentos_types::TraceID::new(),
+                                                            event_type:
+                                                                agentos_audit::AuditEventType::AgentHeartbeatFired,
+                                                            agent_id: Some(agent_id),
+                                                            task_id: None,
+                                                            tool_id: None,
+                                                            details: serde_json::json!({
+                                                                "work_item": item.item_id,
+                                                            }),
+                                                            severity: agentos_audit::AuditSeverity::Info,
+                                                            reversible: false,
+                                                            rollback_ref: None,
+                                                        });
+                                                    }
+                                                    Err(e) => {
+                                                        // Couldn't enqueue — release the
+                                                        // claim so the item isn't stranded
+                                                        // until its lock expires.
+                                                        tracing::warn!(agent_id = %agent_id, error = %e, "Heartbeat work-item enqueue failed");
+                                                        if let Some(wq) = &kernel.work_queue {
+                                                            let _ = wq.release(&item.item_id).await;
+                                                        }
+                                                    }
+                                                }
+                                                continue;
+                                            }
+
+                                            // Wake signal #2: unread inbox notifications.
+                                            // (Owned schedules are NOT a wake signal — the
+                                            // schedule manager fires DUE schedules on its
+                                            // own tick.)
                                             let unread = kernel
                                                 .agent_inbox
                                                 .unread_count(agent_id)
@@ -418,13 +524,6 @@ impl Kernel {
                                             if unread == 0 {
                                                 continue;
                                             }
-                                            let agent_name = {
-                                                let registry = kernel.agent_registry.read().await;
-                                                registry.get_by_id(&agent_id).map(|a| a.name.clone())
-                                            };
-                                            let Some(agent_name) = agent_name else {
-                                                continue;
-                                            };
                                             let prompt = format!(
                                                 "Heartbeat wakeup: you have {unread} unread inbox \
                                                  notification(s). Review your inbox and act on \
@@ -790,6 +889,35 @@ impl Kernel {
                                         }
                                     }
 
+                                    // Prune memory-tier entries older than the configured
+                                    // retention window (0 days disables — unbounded growth).
+                                    // Episodic auto-writes on every task completion, so without
+                                    // this the three memory DBs grow without bound (W5).
+                                    {
+                                        let retention_days = kernel.config.memory.retention_days;
+                                        if retention_days > 0 {
+                                            let max_age = std::time::Duration::from_secs(
+                                                u64::from(retention_days) * 24 * 60 * 60,
+                                            );
+                                            let episodic = kernel.episodic_memory.clone();
+                                            let semantic = kernel.semantic_memory.clone();
+                                            let procedural = kernel.procedural_memory.clone();
+                                            tokio::spawn(async move {
+                                                for (tier, result) in [
+                                                    ("episodic", episodic.sweep_old_entries(max_age).await),
+                                                    ("semantic", semantic.sweep_old_entries(max_age).await),
+                                                    ("procedural", procedural.sweep_old_entries(max_age).await),
+                                                ] {
+                                                    match result {
+                                                        Ok(0) => {}
+                                                        Ok(n) => tracing::info!(tier, pruned = n, retention_days, "Pruned {} expired {} memory entries", n, tier),
+                                                        Err(e) => tracing::warn!(tier, error = %e, "Memory retention sweep failed"),
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+
                                     // Sweep expired OAuth pending flows (10min TTL)
                                     if let Err(e) = kernel.vault.oauth_store().sweep_expired_flows().await {
                                         tracing::warn!(error = %e, "OAuth pending flow sweep failed");
@@ -1063,6 +1191,7 @@ impl Kernel {
                                             patterns = report.patterns_found,
                                             created = report.created,
                                             skipped = report.skipped_existing,
+                                            skipped_low_information = report.skipped_low_information,
                                             "Consolidation cycle completed"
                                         );
                                     }
@@ -1304,7 +1433,8 @@ impl Kernel {
                 tracing::warn!(
                     error = %e,
                     health_port = self.config.kernel.health_port,
-                    "Health/metrics server failed to bind — /healthz, /readyz and /metrics are UNAVAILABLE for this instance (port likely in use by another kernel; set a distinct [kernel] health_port). External health probes will fail or hit the other instance."
+                    health_bind = %self.config.kernel.health_bind,
+                    "Health/metrics server failed to start — /healthz, /readyz and /metrics are UNAVAILABLE for this instance. Either [kernel] health_bind is not a valid IP address, or the port is in use by another kernel (set a distinct [kernel] health_port). External health probes will fail or hit the other instance."
                 );
             }
         }
@@ -2075,6 +2205,8 @@ impl Kernel {
                     .await
             }
             KernelCommand::ListSchedules => self.cmd_list_schedules().await,
+            KernelCommand::ListOnceJobs => self.cmd_list_once_jobs().await,
+            KernelCommand::ListTimers => self.cmd_list_timers().await,
             KernelCommand::PauseSchedule { name } => self.cmd_pause_schedule(name).await,
             KernelCommand::ResumeSchedule { name } => self.cmd_resume_schedule(name).await,
             KernelCommand::DeleteSchedule { name } => self.cmd_delete_schedule(name).await,
@@ -2158,6 +2290,20 @@ impl Kernel {
             // Checkpoint recovery
             KernelCommand::ResumeTask { task_id } => self.cmd_resume_task(task_id).await,
             KernelCommand::ListCheckpoints => self.cmd_list_checkpoints().await,
+
+            // Agent org chart
+            KernelCommand::OrgAddNode {
+                org_id,
+                agent_name,
+                manager_node_id,
+                role,
+                title,
+                scope,
+            } => {
+                self.cmd_org_add_node(org_id, agent_name, manager_node_id, role, title, scope)
+                    .await
+            }
+            KernelCommand::OrgShow { org_id } => self.cmd_org_show(org_id).await,
 
             // Event system
             KernelCommand::EventSubscribe {
@@ -3262,12 +3408,13 @@ impl Kernel {
         };
 
         let ws_sched = self.workspace_paths_for_agent(&agent.id);
+        let trace_id = TraceID::new();
         let exec_ctx = ToolExecutionContext {
             data_dir: self.data_dir.clone(),
             task_id: TaskID::new(),
             agent_id: agent.id,
-            trace_id: TraceID::new(),
-            permissions,
+            trace_id,
+            permissions: permissions.clone(),
             vault: None,
             hal: Some(self.hal.clone()),
             file_lock_registry: None,
@@ -3284,7 +3431,45 @@ impl Kernel {
             tool_categories: None,
         };
 
-        self.tool_runner.execute(&tool_name, args, exec_ctx).await
+        let result = self.tool_runner.execute(&tool_name, args, exec_ctx).await?;
+
+        // Kernel-action tools (notify-user, channel-send, memory-block-*, …)
+        // return a `_kernel_action` marker instead of doing the work. Dispatch
+        // it here — otherwise the scheduled fire records the raw marker in run
+        // history and the action never actually executes.
+        if let Some(action) = crate::kernel_action::KernelAction::from_tool_result(&result) {
+            if let Some(reject) = crate::kernel::chat_incompatible_action_error(&action) {
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name,
+                    reason: format!(
+                        "kernel action not allowed from a scheduled fire: {}",
+                        reject
+                    ),
+                });
+            }
+            let synthetic_task = {
+                let mut t = agentos_types::AgentTask {
+                    agent_id: agent.id,
+                    ..Default::default()
+                };
+                t.capability_token.agent_id = agent.id;
+                t.capability_token.task_id = t.id;
+                t.capability_token.permissions = permissions;
+                t
+            };
+            let outcome = self
+                .dispatch_kernel_action(&synthetic_task, action, trace_id)
+                .await;
+            if !outcome.success {
+                return Err(AgentOSError::ToolExecutionFailed {
+                    tool_name,
+                    reason: outcome.result.to_string(),
+                });
+            }
+            return Ok(outcome.result);
+        }
+
+        Ok(result)
     }
 
     /// Fire a scheduled `RunTool` action: invoke the tool with a synthetic

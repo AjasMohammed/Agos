@@ -22,6 +22,7 @@ pub mod log;
 pub mod mcp;
 pub mod notifications;
 pub mod onboard;
+pub mod org;
 pub mod perm;
 pub mod personalization;
 pub mod pipeline;
@@ -60,6 +61,7 @@ pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow
         Commands::Bg { command } => bg::handle(client, command).await,
         Commands::Pipeline { command } => pipeline::handle(client, command).await,
         Commands::Cost { command } => cost::handle(client, command).await,
+        Commands::Org { command } => org::handle(client, command).await,
         Commands::Resource { command } => resource::handle(client, command).await,
         Commands::Escalation { command } => escalation::handle(client, command).await,
         Commands::Snapshot { command } => snapshot::handle(client, command).await,

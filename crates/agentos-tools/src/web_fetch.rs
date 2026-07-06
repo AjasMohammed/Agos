@@ -22,6 +22,7 @@ impl WebFetch {
                 }
                 let block_reason: Option<String> = {
                     let url = attempt.url();
+                    let port = url.port_or_known_default().unwrap_or(0);
                     url.host_str().and_then(|host| {
                         if let Ok(ip) = host.parse::<std::net::IpAddr>() {
                             if is_private_ip(&ip) {
@@ -40,6 +41,21 @@ impl WebFetch {
                                     "SSRF: redirect to local hostname blocked: {}",
                                     host
                                 ));
+                            }
+                            // DNS-rebinding defense (W12): block a redirect to a
+                            // hostname that resolves to a private/loopback IP.
+                            // The redirect policy is sync; resolve synchronously.
+                            if let Ok(addrs) =
+                                std::net::ToSocketAddrs::to_socket_addrs(&(lower.as_str(), port))
+                            {
+                                for addr in addrs {
+                                    if is_private_ip(&addr.ip()) {
+                                        return Some(format!(
+                                            "SSRF: redirect host {host} resolves to private IP {} (blocked)",
+                                            addr.ip()
+                                        ));
+                                    }
+                                }
                             }
                         }
                         None

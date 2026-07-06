@@ -17,7 +17,8 @@ use crate::auth::AuthenticatedKey;
 use crate::error::ApiError;
 use crate::response::Envelope;
 use crate::service::{CredentialCheck, KernelService};
-use crate::types::{AuthMe, IssuedKeyResponse, LoginRequest};
+use crate::types::{AuthMe, IssuedKeyResponse, LoginRequest, WsTicketResponse};
+use crate::ws::ticket::{WsTicketStore, WS_TICKET_TTL_SECS};
 use agentos_audit::AuditEventType;
 
 /// Default scopes granted to a key minted via operator login (full access).
@@ -111,6 +112,36 @@ pub async fn me(
         name: r.name.clone(),
         scopes: r.permissions.clone(),
         expires_at: r.expires_at,
+    })))
+}
+
+/// `POST /api/v1/ws/ticket` — Mint a short-lived, single-use WebSocket auth
+/// ticket carrying the presented key's scopes. Browsers can't send an
+/// `Authorization` header on a WS upgrade; the ticket keeps the long-lived key
+/// out of the URL query string (which lands in proxy logs and history).
+///
+/// Not audit-logged: a ticket is a seconds-lived derivative of the presented
+/// key with identical scopes, minted on every reconnect — logging each mint
+/// would flood the audit trail with what is effectively "key was used".
+#[utoipa::path(
+    post,
+    path = "/api/v1/ws/ticket",
+    tag = "auth",
+    operation_id = "auth_ws_ticket",
+    responses(
+        (status = 200, description = "Single-use WS ticket (seconds-lived)", body = crate::response::Envelope<crate::types::WsTicketResponse>),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn ws_ticket(
+    Extension(tickets): Extension<WsTicketStore>,
+    Extension(key): Extension<AuthenticatedKey>,
+) -> Result<Json<Envelope<WsTicketResponse>>, ApiError> {
+    let ticket = tickets.mint(key.0.permissions.clone()).await;
+    Ok(Json(Envelope::new(WsTicketResponse {
+        ticket,
+        expires_in: WS_TICKET_TTL_SECS,
     })))
 }
 

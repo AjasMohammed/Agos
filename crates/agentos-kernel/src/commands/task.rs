@@ -290,6 +290,32 @@ impl Kernel {
         }
     }
 
+    /// Close the autonomous work-loop for a terminal task: if this task was
+    /// driving a claimed work item, mark it Done/Failed (success) and unblock its
+    /// dependents. A no-op when the work queue is disabled or the task has no
+    /// linked item, so it is safe to call on every task completion.
+    pub(crate) async fn complete_work_item_for_task(&self, task_id: &TaskID, success: bool) {
+        let Some(work_queue) = &self.work_queue else {
+            return;
+        };
+        match work_queue
+            .complete_by_task(&task_id.to_string(), success)
+            .await
+        {
+            Ok(unblocked) if !unblocked.is_empty() => {
+                tracing::info!(
+                    task_id = %task_id,
+                    unblocked = unblocked.len(),
+                    "Work item completed; unblocked dependents"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "Work item completion failed");
+            }
+        }
+    }
+
     pub(crate) async fn cmd_list_tasks(&self) -> KernelResponse {
         let tasks = self.scheduler.list_tasks().await;
         KernelResponse::TaskList(tasks)
@@ -365,6 +391,11 @@ impl Kernel {
                 self.trace_collector
                     .finish_task(&task_id, "Cancelled", chrono::Utc::now())
                     .await;
+                // Close any work item this task was driving (Failed) and release its
+                // dispatch claim immediately rather than waiting for lock-TTL expiry.
+                // Idempotent no-ops when there is no linked item / claim.
+                self.complete_work_item_for_task(&task_id, false).await;
+                self.release_task_checkout(&task_id).await;
                 // Cascade cancel to all registered sub-agent children.
                 let children = self.scheduler.get_children(&task_id).await;
                 for child_id in children {
@@ -784,11 +815,12 @@ impl Kernel {
             disable_tool_scoping: false,
         };
 
-        // 6. Restore context window from checkpoint.
+        // 6. Restore context window from checkpoint. Upserts: the failure
+        // teardown that made this task resumable also removed its context
+        // entry, so a plain `replace_context` would silently restore nothing.
         self.context_manager
-            .replace_context(&task_id, payload.context.window)
-            .await
-            .ok();
+            .restore_context(task_id, agent.id, payload.context.window)
+            .await;
 
         // 7. Re-claim the atomic checkout before re-dispatching. The original
         // claim may have been released (terminal) or swept (lease lapsed while
@@ -820,8 +852,11 @@ impl Kernel {
             };
         }
 
-        // 8. Enqueue the task.
-        self.scheduler.register_external(resumed_task.clone()).await;
+        // 8. Enqueue the task onto the run queue so the background
+        // task_executor_loop dequeues and executes it. `register_external`
+        // only inserts into the task map without queueing, which would leave
+        // the resumed task parked in Queued state forever (never executed).
+        self.scheduler.enqueue(resumed_task.clone()).await;
 
         tracing::info!(
             task_id = %task_id,
@@ -878,6 +913,109 @@ impl Kernel {
                 message: format!("failed to list checkpoints: {e}"),
             },
         }
+    }
+
+    /// Submit a task asynchronously from the REST API — routes or resolves the
+    /// agent, enqueues the task, and returns the task ID immediately without
+    /// waiting for execution to complete.
+    pub async fn api_submit_task(
+        &self,
+        agent_name: Option<String>,
+        prompt: String,
+        autonomous: bool,
+    ) -> Result<TaskID, String> {
+        let registry = self.agent_registry.read().await;
+        let agent_id = match agent_name {
+            Some(ref name) => match registry.get_by_name(name) {
+                Some(a) if a.status != AgentStatus::Offline => a.id,
+                Some(_) => return Err(format!("Agent '{}' is offline", name)),
+                None => return Err(format!("Agent '{}' not found", name)),
+            },
+            None => {
+                let agents: Vec<AgentProfile> =
+                    registry.list_online().into_iter().cloned().collect();
+                match self.router.route(&prompt, &agents).await {
+                    Ok(id) => id,
+                    Err(e) => return Err(format!("Failed to route task: {}", e)),
+                }
+            }
+        };
+
+        let agent: AgentProfile = match registry.get_by_id(&agent_id) {
+            Some(a) => a.clone(),
+            None => return Err(format!("Agent '{}' not found after routing", agent_id)),
+        };
+        let mut effective_permissions = registry.compute_effective_permissions(&agent_id);
+        drop(registry);
+
+        if autonomous {
+            effective_permissions.grant_op("process.exec".to_string(), PermissionOp::Execute, None);
+        }
+
+        let task_id = TaskID::new();
+        let task_timeout = if autonomous {
+            Duration::from_secs(self.config.kernel.autonomous_mode.task_timeout_secs)
+        } else {
+            Duration::from_secs(self.config.kernel.default_task_timeout_secs)
+        };
+        let capability_token = self
+            .capability_engine
+            .issue_token(
+                task_id,
+                agent.id,
+                BTreeSet::new(),
+                BTreeSet::from([
+                    IntentTypeFlag::Read,
+                    IntentTypeFlag::Write,
+                    IntentTypeFlag::Execute,
+                    IntentTypeFlag::Query,
+                    IntentTypeFlag::Observe,
+                    IntentTypeFlag::Message,
+                    IntentTypeFlag::Delegate,
+                    IntentTypeFlag::Broadcast,
+                    IntentTypeFlag::Escalate,
+                    IntentTypeFlag::Subscribe,
+                    IntentTypeFlag::Unsubscribe,
+                ]),
+                effective_permissions,
+                task_timeout,
+            )
+            .map_err(|e| format!("Failed to issue capability token: {}", e))?;
+
+        let task = AgentTask {
+            id: task_id,
+            state: TaskState::Queued,
+            agent_id: agent.id,
+            capability_token,
+            assigned_llm: Some(agent.id),
+            priority: 5,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            timeout: task_timeout,
+            original_prompt: prompt.clone(),
+            history: Vec::new(),
+            parent_task: None,
+            reasoning_hints: Some(infer_reasoning_hints(&prompt)),
+            max_iterations: None,
+            trigger_source: None,
+            autonomous,
+            parent_task_id: None,
+            spawn_depth: 0,
+            is_team_coordinator: false,
+            skip_checkpoint: false,
+            thinking_level: ThinkingLevel::Off,
+            spawner_agent_id: None,
+            tool_categories: None,
+            disable_tool_scoping: false,
+        };
+
+        self.trace_collector
+            .start_task(task.id, agent.id, &task.original_prompt)
+            .await;
+
+        let _ = self.scheduler.enqueue(task).await;
+
+        Ok(task_id)
     }
 }
 

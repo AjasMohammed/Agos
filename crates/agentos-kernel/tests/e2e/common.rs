@@ -34,6 +34,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             tool_execution: Default::default(),
             autonomous_mode: Default::default(),
             health_port: 0,
+            health_bind: "127.0.0.1".to_string(),
             per_agent_rate_limit: 0,
             events: Default::default(),
             sandbox_policy: Default::default(),
@@ -95,6 +96,9 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             // boot. Lexical FTS5 search still works for the assertions that
             // need memory; semantic retrieval is the only thing degraded.
             disable_embedder: true,
+            embedder_init_timeout_secs: 120,
+            retention_days: 0,
+            lifecycle: Default::default(),
             extraction: Default::default(),
             consolidation: Default::default(),
             context: Default::default(),
@@ -120,6 +124,9 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         scheduler: Default::default(),
         transcription: Default::default(),
         agent_heartbeat: Default::default(),
+        agent_budget: Default::default(),
+        hal: Default::default(),
+        security: Default::default(),
         user_profile: Default::default(),
         personalization: Default::default(),
     }
@@ -136,8 +143,23 @@ pub async fn setup_kernel() -> (
     tempfile::TempDir,
     tokio::task::JoinHandle<()>,
 ) {
+    setup_kernel_with(|_| {}).await
+}
+
+/// Like [`setup_kernel`] but lets the caller mutate the `KernelConfig` before
+/// boot (e.g. to enable the agent heartbeat).
+#[allow(dead_code)]
+pub async fn setup_kernel_with<F: FnOnce(&mut KernelConfig)>(
+    mutate: F,
+) -> (
+    Arc<Kernel>,
+    BusClient,
+    tempfile::TempDir,
+    tokio::task::JoinHandle<()>,
+) {
     let temp_dir = tempfile::TempDir::new().unwrap();
-    let config = create_test_config(&temp_dir);
+    let mut config = create_test_config(&temp_dir);
+    mutate(&mut config);
     let config_path = temp_dir.path().join("config.toml");
     std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
 

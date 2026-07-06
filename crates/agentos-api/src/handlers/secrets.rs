@@ -44,16 +44,18 @@ pub async fn list(
 pub async fn set(
     State(svc): State<Arc<dyn KernelService>>,
     Extension(key): Extension<AuthenticatedKey>,
-    Json(mut req): Json<SetSecretRequest>,
+    Json(req): Json<SetSecretRequest>,
 ) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
     require_permission(&key, "secrets:w")?;
-    // C5: Take ownership of the secret value and clear the original
-    let mut value = std::mem::take(&mut req.value);
-    let result = svc.set_secret(req).await;
-    // Zero out the value in memory
-    value.clear();
-    value.shrink_to_fit();
-    result?;
+    if req.value.is_empty() {
+        return Err(ApiError::BadRequest(
+            "secret value must not be empty".into(),
+        ));
+    }
+    // The request (including its value) is moved into the kernel service, which
+    // stores it through the vault's zeroizing secret types. Do NOT take the
+    // value out of `req` before this call — doing so stores an empty secret.
+    svc.set_secret(req).await?;
     Ok(Json(Envelope::new(serde_json::json!({ "ok": true }))))
 }
 

@@ -128,7 +128,13 @@ pub async fn start_health_server(
         return Ok(None);
     }
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let bind: std::net::IpAddr = kernel.config.kernel.health_bind.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "invalid [kernel] health_bind '{}': {e}",
+            kernel.config.kernel.health_bind
+        )
+    })?;
+    let addr = std::net::SocketAddr::new(bind, port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual_addr = listener.local_addr()?;
 

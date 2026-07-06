@@ -701,6 +701,18 @@ impl ScheduleManager {
         Ok(removed)
     }
 
+    /// Cancel a timer by its `ScheduleID` (operator/API path).
+    pub async fn cancel_timer(&self, id: &ScheduleID) -> Result<TimerEntry, AgentOSError> {
+        let mut timers = self.timers.write().await;
+        let removed = timers.remove(id).ok_or_else(|| AgentOSError::KernelError {
+            reason: format!("Timer {} not found", id),
+        })?;
+        drop(timers);
+        self.forget_creator(id).await;
+        self.flush().await;
+        Ok(removed)
+    }
+
     /// Same as `create_timer` but records the creator for ownership checks.
     pub async fn create_timer_with_creator(
         &self,
@@ -827,6 +839,21 @@ impl ScheduleManager {
         Ok(job)
     }
 
+    /// Cancel a pending once-job by its `ScheduleID` (operator/API path).
+    pub async fn cancel_once_job(&self, id: &ScheduleID) -> Result<OnceJob, AgentOSError> {
+        let mut once_jobs = self.once_jobs.write().await;
+        let mut job = once_jobs
+            .remove(id)
+            .ok_or_else(|| AgentOSError::KernelError {
+                reason: format!("Once-job {} not found", id),
+            })?;
+        job.state = OnceJobState::Cancelled;
+        drop(once_jobs);
+        self.forget_creator(id).await;
+        self.flush().await;
+        Ok(job)
+    }
+
     /// Same as `create_once_job` but records the creator for ownership checks.
     pub async fn create_once_job_with_creator(
         &self,
@@ -920,6 +947,44 @@ mod tests {
             .expect("5-field cron should be accepted");
         let job = mgr.get_job(&id).await.unwrap();
         assert_eq!(job.cron_expression, "0 */5 * * * *");
+    }
+
+    #[tokio::test]
+    async fn test_cancel_once_job_and_timer_by_id() {
+        let mgr = ScheduleManager::new();
+
+        let once_id = mgr
+            .create_once_job(
+                "one-shot".into(),
+                chrono::Utc::now() + chrono::Duration::hours(1),
+                "agent".into(),
+                OnceJobAction::RunTask {
+                    prompt: "task".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let cancelled = mgr.cancel_once_job(&once_id).await.unwrap();
+        assert_eq!(cancelled.state, OnceJobState::Cancelled);
+        assert!(mgr.list_once_jobs().await.is_empty());
+        assert!(mgr.cancel_once_job(&once_id).await.is_err());
+
+        let timer_id = mgr
+            .create_timer(
+                "countdown".into(),
+                60,
+                "agent".into(),
+                TimerAction::RunTask {
+                    prompt: "task".into(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let removed = mgr.cancel_timer(&timer_id).await.unwrap();
+        assert_eq!(removed.id, timer_id);
+        assert!(mgr.list_timers().await.is_empty());
+        assert!(mgr.cancel_timer(&timer_id).await.is_err());
     }
 
     #[tokio::test]

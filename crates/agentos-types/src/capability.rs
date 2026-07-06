@@ -227,6 +227,87 @@ impl PermissionSet {
         })
     }
 
+    /// Returns `true` if every capability this set grants is also granted by
+    /// `parent` — i.e. `self` is a *downward-only subset* of `parent`. Used to
+    /// enforce that a delegated/child scope can never exceed its manager's.
+    ///
+    /// This deliberately reuses [`PermissionSet::check`] for the per-resource
+    /// test, so the subset check and live enforcement share one code path
+    /// (wildcards, path-prefix boundaries, deny precedence, and expiry all
+    /// behave identically). Deny entries on `self` only *further* restrict, so
+    /// they never widen the subset and are not considered here.
+    pub fn is_subset_of(&self, parent: &PermissionSet) -> bool {
+        let now = chrono::Utc::now();
+        self.entries.iter().all(|entry| {
+            // Expired grants confer nothing, so they can't violate the subset.
+            if entry.expires_at.is_some_and(|exp| now >= exp) {
+                return true;
+            }
+            [
+                (entry.read, PermissionOp::Read),
+                (entry.write, PermissionOp::Write),
+                (entry.execute, PermissionOp::Execute),
+                (entry.query, PermissionOp::Query),
+                (entry.observe, PermissionOp::Observe),
+            ]
+            .into_iter()
+            .all(|(granted, op)| !granted || parent.check(&entry.resource, op))
+        })
+    }
+
+    /// Return a new set containing only the capabilities that both `self` and
+    /// `ceiling` grant — i.e. `self` clamped so it can never exceed `ceiling`.
+    ///
+    /// Reuses [`PermissionSet::check`] for the per-op test, so wildcard,
+    /// path-prefix, deny, and expiry semantics match live enforcement. The
+    /// result is always a subset of `ceiling` (`result.is_subset_of(ceiling)`
+    /// holds), which is what makes this safe to use as a downward-only clamp on
+    /// a delegated/child scope. Deny entries from both inputs are unioned —
+    /// denials only further restrict, so keeping them is defense-in-depth.
+    pub fn intersect_with(&self, ceiling: &PermissionSet) -> PermissionSet {
+        let mut out = PermissionSet::new();
+        // Candidate resources = every resource named by either side. When two
+        // prefix grants overlap, the narrower one is the intersection and it
+        // always appears here — so a broad `self` grant clamped by a narrower
+        // `ceiling` grant correctly yields the narrower prefix (and vice-versa).
+        // `check()` already excludes expired and denied grants on both sides.
+        let mut seen = std::collections::HashSet::new();
+        for resource in self
+            .entries
+            .iter()
+            .map(|e| &e.resource)
+            .chain(ceiling.entries.iter().map(|e| &e.resource))
+        {
+            if !seen.insert(resource.clone()) {
+                continue;
+            }
+            let grant = |op: PermissionOp| self.check(resource, op) && ceiling.check(resource, op);
+            let read = grant(PermissionOp::Read);
+            let write = grant(PermissionOp::Write);
+            let execute = grant(PermissionOp::Execute);
+            let query = grant(PermissionOp::Query);
+            let observe = grant(PermissionOp::Observe);
+            if read || write || execute || query || observe {
+                out.entries.push(PermissionEntry {
+                    resource: resource.clone(),
+                    read,
+                    write,
+                    execute,
+                    query,
+                    observe,
+                    expires_at: None,
+                });
+            }
+        }
+        out.deny_entries = self.deny_entries.clone();
+        for d in &ceiling.deny_entries {
+            if !out.deny_entries.contains(d) {
+                out.deny_entries.push(d.clone());
+            }
+        }
+        out
+    }
+
     pub fn grant(
         &mut self,
         resource: String,
@@ -712,5 +793,88 @@ mod tests {
 
         assert!(perms.check("memory.semantic", PermissionOp::Read));
         assert!(perms.check("memory.semantic", PermissionOp::Query));
+    }
+
+    #[test]
+    fn is_subset_of_accepts_equal_and_narrower_scopes() {
+        let mut manager = PermissionSet::new();
+        manager.grant("fs:/home/user/".into(), true, true, false, None);
+        manager.grant("net:".into(), true, false, false, None);
+
+        // Identical scope is a subset of itself.
+        assert!(manager.is_subset_of(&manager));
+
+        // A narrower child (fewer resources, fewer bits, path under the grant).
+        let mut child = PermissionSet::new();
+        child.grant("fs:/home/user/docs/".into(), true, false, false, None);
+        assert!(child.is_subset_of(&manager));
+
+        // Empty scope is a subset of anything.
+        assert!(PermissionSet::new().is_subset_of(&manager));
+    }
+
+    #[test]
+    fn is_subset_of_rejects_escalation() {
+        let mut manager = PermissionSet::new();
+        manager.grant("fs:/home/user/".into(), true, false, false, None); // read only
+
+        // Child wants write where the manager only has read → not a subset.
+        let mut writer = PermissionSet::new();
+        writer.grant("fs:/home/user/".into(), true, true, false, None);
+        assert!(!writer.is_subset_of(&manager));
+
+        // Child wants a resource the manager never holds → not a subset.
+        let mut outsider = PermissionSet::new();
+        outsider.grant("fs:/etc/".into(), true, false, false, None);
+        assert!(!outsider.is_subset_of(&manager));
+
+        // A manager denial inside its own granted prefix narrows what it can
+        // delegate: the child requesting the denied path is not a subset.
+        let mut denying_mgr = PermissionSet::new();
+        denying_mgr.grant("fs:/home/user/".into(), true, true, false, None);
+        denying_mgr.deny("fs:/home/user/.ssh/".into());
+        let mut ssh_child = PermissionSet::new();
+        ssh_child.grant("fs:/home/user/.ssh/".into(), true, false, false, None);
+        assert!(!ssh_child.is_subset_of(&denying_mgr));
+    }
+
+    #[test]
+    fn intersect_with_clamps_to_ceiling_and_is_a_subset() {
+        // Requested wants read+write on two resources.
+        let mut requested = PermissionSet::new();
+        requested.grant("fs:/home/user/".into(), true, true, false, None);
+        requested.grant("net:".into(), true, true, false, None);
+
+        // Ceiling only allows read under a narrower fs path, nothing on net.
+        let mut ceiling = PermissionSet::new();
+        ceiling.grant("fs:/home/user/docs/".into(), true, false, false, None);
+
+        let clamped = requested.intersect_with(&ceiling);
+
+        // The result can never exceed the ceiling.
+        assert!(clamped.is_subset_of(&ceiling));
+        // Only the read under the allowed sub-path survives; write is dropped.
+        assert!(clamped.check("fs:/home/user/docs/file", PermissionOp::Read));
+        assert!(!clamped.check("fs:/home/user/docs/file", PermissionOp::Write));
+        // The net grant is entirely outside the ceiling → gone.
+        assert!(!clamped.check("net:http://example.com", PermissionOp::Read));
+    }
+
+    #[test]
+    fn intersect_with_empty_ceiling_yields_empty() {
+        let mut requested = PermissionSet::new();
+        requested.grant("fs:/anywhere/".into(), true, true, true, None);
+        let clamped = requested.intersect_with(&PermissionSet::new());
+        assert!(clamped.entries.is_empty());
+    }
+
+    #[test]
+    fn is_subset_of_wildcard_parent_accepts_anything() {
+        let mut root = PermissionSet::new();
+        root.grant("*".into(), true, true, true, None);
+
+        let mut child = PermissionSet::new();
+        child.grant("fs:/anywhere/".into(), true, true, true, None);
+        assert!(child.is_subset_of(&root));
     }
 }

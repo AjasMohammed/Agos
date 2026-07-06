@@ -15,6 +15,7 @@ pub mod log;
 pub mod mcp;
 pub mod mcp_install;
 pub mod notification;
+pub mod org;
 pub mod permission;
 pub mod personalization;
 pub mod pipeline;

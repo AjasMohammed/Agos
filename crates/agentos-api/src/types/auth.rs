@@ -57,6 +57,16 @@ pub struct IssuedKeyResponse {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+/// A short-lived, single-use WebSocket auth ticket (`POST /api/v1/ws/ticket`).
+/// Connect with `GET /api/v1/ws?ticket=…` before it expires.
+#[derive(Clone, Serialize, ToSchema)]
+pub struct WsTicketResponse {
+    /// Opaque single-use ticket; carries the minting key's scopes.
+    pub ticket: String,
+    /// Seconds until the ticket expires.
+    pub expires_in: u64,
+}
+
 /// Identity of the presented key — lets the SPA render scopes and gate UI.
 #[derive(Clone, Serialize, ToSchema)]
 pub struct AuthMe {

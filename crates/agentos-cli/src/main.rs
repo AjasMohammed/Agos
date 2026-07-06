@@ -185,6 +185,12 @@ pub enum Commands {
         command: CostCommands,
     },
 
+    /// Manage the durable agent org chart (reporting lines + capability scopes)
+    Org {
+        #[command(subcommand)]
+        command: commands::org::OrgCommands,
+    },
+
     /// Manage resource locks (arbitration)
     Resource {
         #[command(subcommand)]
@@ -1047,6 +1053,7 @@ async fn cmd_start(config_str: &str, gateway: bool) -> anyhow::Result<()> {
         broadcaster
             .clone()
             .start_realtime_relay(kernel.realtime_event_sender.subscribe());
+        let api_shutdown = kernel.cancellation_token.clone();
         tokio::spawn(async move {
             if let Err(e) = agentos_api::run_api_server(
                 service,
@@ -1056,6 +1063,7 @@ async fn cmd_start(config_str: &str, gateway: bool) -> anyhow::Result<()> {
                 api_docs_enabled,
                 api_cors_origins,
                 api_refresh_enabled,
+                api_shutdown,
             )
             .await
             {

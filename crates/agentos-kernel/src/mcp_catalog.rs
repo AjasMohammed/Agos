@@ -7,11 +7,17 @@
 //! registry**; the install command and CLI/bus wiring build on top of it.
 //!
 //! Trust: built-in (distribution-shipped) entries are trusted; user-supplied
-//! `verified`-tier entries must carry an Ed25519 `signature` (checked by the
-//! install path). `community` entries require an explicit opt-in to install.
+//! `verified`-tier entries must carry a valid Ed25519 `author_pubkey` +
+//! `signature` over the canonical entry payload — enforced by
+//! [`CatalogRegistry::load`], which **demotes** unsigned or invalidly-signed
+//! user entries to `community` (so `mcp install` then requires the explicit
+//! `--unsafe-allow-community` opt-in). User entries claiming `core` are always
+//! demoted: that tier is distribution-only.
 
 use agentos_types::AgentOSError;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -43,10 +49,76 @@ pub struct CatalogEntry {
     pub auth: AuthBlock,
     #[serde(default)]
     pub tools: ToolsBlock,
-    /// Ed25519 signature over the canonical entry — required for user-supplied
-    /// `verified` entries; built-in entries are distribution-trusted.
+    /// Hex-encoded Ed25519 public key of the entry author — required (with
+    /// `signature`) for user-supplied `verified` entries.
+    #[serde(default)]
+    pub author_pubkey: Option<String>,
+    /// Hex-encoded Ed25519 signature over [`signing_payload`] — required for
+    /// user-supplied `verified` entries; built-in entries are
+    /// distribution-trusted.
     #[serde(default)]
     pub signature: Option<String>,
+    /// True for entries embedded in the binary (distribution-trusted, exempt
+    /// from signature checks). Never read from TOML — set by the loader.
+    #[serde(skip)]
+    pub builtin: bool,
+}
+
+/// Build the deterministic signing payload for a catalog entry: a canonical
+/// JSON object (BTreeMap-ordered keys) over the exec-relevant fields. Mutable
+/// display metadata (`display_name`, `description`, `homepage`) and the
+/// signature fields themselves are excluded.
+pub fn signing_payload(entry: &CatalogEntry) -> Vec<u8> {
+    let mut payload = Map::new();
+    // Domain-separation tag: binds the signature to this payload schema, so a
+    // signature can never be replayed against a future field layout.
+    payload.insert("_scheme".into(), json!("agentos-mcp-catalog-v1"));
+    payload.insert("args".into(), json!(entry.install.args));
+    payload.insert("auth_credential".into(), json!(entry.auth.credential));
+    payload.insert("auth_env".into(), json!(entry.auth.env));
+    payload.insert("auth_kind".into(), json!(entry.auth.kind));
+    payload.insert("id".into(), json!(entry.id));
+    payload.insert(
+        "min_runtime_version".into(),
+        json!(entry.install.min_runtime_version),
+    );
+    payload.insert("package".into(), json!(entry.install.package));
+    payload.insert("risk_class".into(), json!(entry.tools.default_risk_class));
+    payload.insert("risk_overrides".into(), json!(entry.tools.overrides));
+    payload.insert("runtime".into(), json!(entry.install.runtime));
+    payload.insert("strategy".into(), json!(entry.install.strategy));
+    payload.insert("transport".into(), json!(entry.mcp.transport));
+    payload.insert("trust_tier".into(), json!(entry.trust_tier));
+    payload.insert("url".into(), json!(entry.mcp.url));
+
+    serde_json::to_vec(&Value::Object(payload))
+        .expect("catalog signing payload serialization is infallible")
+}
+
+/// Verify the entry's Ed25519 `author_pubkey` + `signature` over the canonical
+/// payload. Returns a human-readable reason on failure.
+fn verify_entry_signature(entry: &CatalogEntry) -> Result<(), String> {
+    let pubkey_hex = entry
+        .author_pubkey
+        .as_deref()
+        .ok_or("missing author_pubkey")?;
+    let sig_hex = entry.signature.as_deref().ok_or("missing signature")?;
+
+    let pubkey_bytes: [u8; 32] = hex::decode(pubkey_hex)
+        .map_err(|e| format!("author_pubkey is not valid hex: {e}"))?
+        .try_into()
+        .map_err(|_| "author_pubkey must be 32 bytes".to_string())?;
+    let key = VerifyingKey::from_bytes(&pubkey_bytes)
+        .map_err(|e| format!("invalid author_pubkey: {e}"))?;
+
+    let sig_bytes: [u8; 64] = hex::decode(sig_hex)
+        .map_err(|e| format!("signature is not valid hex: {e}"))?
+        .try_into()
+        .map_err(|_| "signature must be 64 bytes".to_string())?;
+    let signature = Signature::from_bytes(&sig_bytes);
+
+    key.verify(&signing_payload(entry), &signature)
+        .map_err(|_| "signature does not match entry payload".to_string())
 }
 
 /// Transport block: how the kernel talks to the running server.
@@ -158,20 +230,60 @@ impl CatalogRegistry {
             })?;
             let text = std::str::from_utf8(&f.data)
                 .map_err(|e| AgentOSError::CatalogParse(format!("embedded {file}: {e}")))?;
-            let entry: CatalogEntry = toml::from_str(text)
+            let mut entry: CatalogEntry = toml::from_str(text)
                 .map_err(|e| AgentOSError::CatalogParse(format!("embedded {file}: {e}")))?;
+            entry.builtin = true;
             reg.insert_validated(entry)?;
         }
         if let Some(dir) = user_dir {
-            reg.merge_override(Self::load_from_dir(dir)?);
+            let mut user = Self::load_from_dir(dir)?;
+            user.enforce_user_trust_policy();
+            reg.merge_override(user);
         }
         Ok(reg)
+    }
+
+    /// Trust policy for user-supplied (non-builtin) entries: `core` is
+    /// distribution-only, and `verified` requires a valid Ed25519 signature.
+    /// Violations are demoted to `community` (fail-closed: installing then
+    /// requires the explicit `--unsafe-allow-community` opt-in) rather than
+    /// dropped, so `catalog list` still shows the entry honestly.
+    fn enforce_user_trust_policy(&mut self) {
+        for entry in self.entries.values_mut() {
+            if entry.builtin {
+                continue;
+            }
+            match entry.trust_tier.as_str() {
+                "core" => {
+                    tracing::warn!(
+                        catalog_id = %entry.id,
+                        "User catalog entry claims 'core' tier (distribution-only) — demoting to 'community'"
+                    );
+                    entry.trust_tier = "community".to_string();
+                }
+                "verified" => {
+                    if let Err(reason) = verify_entry_signature(entry) {
+                        tracing::warn!(
+                            catalog_id = %entry.id,
+                            %reason,
+                            "User catalog entry claims 'verified' tier without a valid Ed25519 signature — demoting to 'community'"
+                        );
+                        entry.trust_tier = "community".to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Load every `*.toml` entry from `dir` (keyed by `entry.id`). A missing
     /// directory yields an empty registry (`Ok`). Invalid entries are rejected
     /// with a `CatalogParse` error rather than silently skipped.
-    pub fn load_from_dir(dir: &Path) -> Result<Self, AgentOSError> {
+    ///
+    /// Crate-private on purpose: entries loaded here have NOT been through
+    /// [`Self::enforce_user_trust_policy`] — external callers must go through
+    /// [`Self::load`].
+    pub(crate) fn load_from_dir(dir: &Path) -> Result<Self, AgentOSError> {
         let mut reg = Self::default();
         if !dir.exists() {
             return Ok(reg);
@@ -219,9 +331,23 @@ impl CatalogRegistry {
         Ok(())
     }
 
-    /// Merge another registry, overriding by `id` (user entries win over built-ins).
+    /// Merge another registry, overriding by `id`. Built-in ids are protected:
+    /// a user entry colliding with a distribution `builtin` entry is ignored
+    /// (with a warning) so user catalogs cannot swap a trusted entry's exec
+    /// details (command/package/args) under a name the operator trusts.
     pub fn merge_override(&mut self, other: CatalogRegistry) {
         for (id, e) in other.entries {
+            if self
+                .entries
+                .get(&id)
+                .is_some_and(|existing| existing.builtin)
+            {
+                tracing::warn!(
+                    catalog_id = %id,
+                    "user catalog entry shadows a built-in id — ignoring"
+                );
+                continue;
+            }
             self.entries.insert(id, e);
         }
     }
@@ -281,8 +407,92 @@ mod tests {
             },
             auth: AuthBlock::default(),
             tools: ToolsBlock::default(),
+            author_pubkey: None,
             signature: None,
+            builtin: false,
         }
+    }
+
+    /// Sign `entry` with a deterministic test keypair, filling in
+    /// `author_pubkey` + `signature`.
+    fn sign(entry: &mut CatalogEntry) {
+        use ed25519_dalek::{Signer, SigningKey};
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        entry.author_pubkey = Some(hex::encode(key.verifying_key().to_bytes()));
+        let sig = key.sign(&signing_payload(entry));
+        entry.signature = Some(hex::encode(sig.to_bytes()));
+    }
+
+    #[test]
+    fn user_verified_entry_without_signature_is_demoted() {
+        let mut reg = CatalogRegistry::default();
+        reg.insert_validated(sample("unsigned")).unwrap();
+        reg.enforce_user_trust_policy();
+        assert_eq!(reg.lookup("unsigned").unwrap().trust_tier, "community");
+    }
+
+    #[test]
+    fn user_verified_entry_with_valid_signature_is_kept() {
+        let mut e = sample("signed");
+        sign(&mut e);
+        let mut reg = CatalogRegistry::default();
+        reg.insert_validated(e).unwrap();
+        reg.enforce_user_trust_policy();
+        assert_eq!(reg.lookup("signed").unwrap().trust_tier, "verified");
+    }
+
+    #[test]
+    fn user_entry_with_tampered_payload_is_demoted() {
+        let mut e = sample("tampered");
+        sign(&mut e);
+        // Swap the package after signing — the exec-relevant payload changed.
+        e.install.package = Some("evil-package".into());
+        let mut reg = CatalogRegistry::default();
+        reg.insert_validated(e).unwrap();
+        reg.enforce_user_trust_policy();
+        assert_eq!(reg.lookup("tampered").unwrap().trust_tier, "community");
+    }
+
+    #[test]
+    fn user_core_claim_is_demoted_and_builtin_is_exempt() {
+        let mut user_core = sample("fake-core");
+        user_core.trust_tier = "core".into();
+        let mut builtin = sample("real");
+        builtin.builtin = true; // unsigned, but distribution-trusted
+        let mut reg = CatalogRegistry::default();
+        reg.insert_validated(user_core).unwrap();
+        reg.insert_validated(builtin).unwrap();
+        reg.enforce_user_trust_policy();
+        assert_eq!(reg.lookup("fake-core").unwrap().trust_tier, "community");
+        assert_eq!(reg.lookup("real").unwrap().trust_tier, "verified");
+    }
+
+    #[test]
+    fn merge_override_refuses_to_shadow_builtin_ids() {
+        let mut builtin = sample("filesystem");
+        builtin.builtin = true;
+        builtin.install.package = Some("trusted-package".into());
+        let mut base = CatalogRegistry::default();
+        base.insert_validated(builtin).unwrap();
+
+        // User catalog tries to swap the trusted entry's exec details, and
+        // also brings a legitimately new id.
+        let mut shadow = sample("filesystem");
+        shadow.install.package = Some("evil-package".into());
+        let mut user = CatalogRegistry::default();
+        user.insert_validated(shadow).unwrap();
+        user.insert_validated(sample("brand-new")).unwrap();
+
+        base.merge_override(user);
+        assert_eq!(
+            base.lookup("filesystem")
+                .unwrap()
+                .install
+                .package
+                .as_deref(),
+            Some("trusted-package")
+        );
+        assert!(base.lookup("brand-new").is_some());
     }
 
     #[test]

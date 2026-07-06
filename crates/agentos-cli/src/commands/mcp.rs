@@ -9,8 +9,7 @@ use std::sync::Arc;
 
 use agentos_bus::{BusClient, KernelCommand, KernelResponse};
 use agentos_mcp::{
-    A2AClient, AgentCard, AuthRequirement, McpAuthValidator, McpServer, McpToolDef,
-    McpToolExecutor, NoAuth,
+    A2AClient, AgentCard, AuthRequirement, McpAuthValidator, McpServer, McpToolDef, McpToolExecutor,
 };
 use agentos_tools::runner::ToolRunner;
 use async_trait::async_trait;
@@ -43,7 +42,9 @@ pub enum McpCommands {
         port: u16,
 
         /// Bearer token required for HTTP clients (HTTP transport only).
-        /// If omitted, no authentication is required.
+        /// REQUIRED for `--transport http` (may also be set via AGENTOS_MCP_TOKEN);
+        /// the server refuses to start the HTTP transport without it. Ignored for
+        /// stdio.
         #[arg(long)]
         token: Option<String>,
     },
@@ -381,13 +382,25 @@ async fn cmd_serve(
             server.serve_stdio().await?;
         }
         "http" => {
-            let auth: Arc<dyn McpAuthValidator> = if let Some(t) = token {
-                Arc::new(BearerTokenAuth(t))
-            } else {
-                Arc::new(NoAuth)
+            // The HTTP transport exposes full tool execution (shell, filesystem,
+            // network) over the network and binds 0.0.0.0. Refuse to start
+            // without a bearer token — otherwise this is unauthenticated remote
+            // code execution for anyone who can reach the port. The token may be
+            // supplied via --token or the AGENTOS_MCP_TOKEN env var.
+            let token = token.or_else(|| std::env::var("AGENTOS_MCP_TOKEN").ok());
+            let token = match token {
+                Some(t) if !t.trim().is_empty() => t,
+                _ => anyhow::bail!(
+                    "Refusing to start MCP HTTP transport without authentication. \
+                     Pass --token <secret> (or set AGENTOS_MCP_TOKEN). Use --transport stdio \
+                     for local, unauthenticated use."
+                ),
             };
+            let auth: Arc<dyn McpAuthValidator> = Arc::new(BearerTokenAuth(token));
             let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-            eprintln!("AgentOS MCP HTTP server on http://0.0.0.0:{port}/mcp");
+            eprintln!(
+                "AgentOS MCP HTTP server on http://0.0.0.0:{port}/mcp (bearer auth required)"
+            );
             agentos_mcp::serve_http(executor, auth, addr).await?;
         }
         other => anyhow::bail!("Unknown transport '{}'. Use 'stdio' or 'http'.", other),

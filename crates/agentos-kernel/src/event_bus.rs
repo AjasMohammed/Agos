@@ -456,94 +456,124 @@ pub fn parse_event_category(name: &str) -> Option<EventCategory> {
     }
 }
 
+/// Canonical table of **subscribable** events: every name accepted by
+/// [`parse_event_type`], in display order. The `EventType` enum has extra
+/// variants (internal-only events) that are deliberately absent here.
+///
+/// This is the single source of truth for BOTH the parser and the generated
+/// panel event catalog (`gen-events` bin in `agentos-api`) — add a row here
+/// and both stay in sync by construction.
+pub const SUBSCRIBABLE_EVENTS: &[(&str, EventType)] = &[
+    // AgentLifecycle
+    ("AgentAdded", EventType::AgentAdded),
+    ("AgentRemoved", EventType::AgentRemoved),
+    ("AgentPermissionGranted", EventType::AgentPermissionGranted),
+    ("AgentPermissionRevoked", EventType::AgentPermissionRevoked),
+    // TaskLifecycle
+    ("TaskStarted", EventType::TaskStarted),
+    ("TaskCompleted", EventType::TaskCompleted),
+    ("TaskFailed", EventType::TaskFailed),
+    ("TaskTimedOut", EventType::TaskTimedOut),
+    ("TaskDelegated", EventType::TaskDelegated),
+    ("TaskRetrying", EventType::TaskRetrying),
+    ("TaskDeadlockDetected", EventType::TaskDeadlockDetected),
+    ("TaskPreempted", EventType::TaskPreempted),
+    // SecurityEvents
+    ("PromptInjectionAttempt", EventType::PromptInjectionAttempt),
+    ("CapabilityViolation", EventType::CapabilityViolation),
+    ("UnauthorizedToolAccess", EventType::UnauthorizedToolAccess),
+    ("SecretsAccessAttempt", EventType::SecretsAccessAttempt),
+    ("SandboxEscapeAttempt", EventType::SandboxEscapeAttempt),
+    ("AuditLogTamperAttempt", EventType::AuditLogTamperAttempt),
+    (
+        "AgentImpersonationAttempt",
+        EventType::AgentImpersonationAttempt,
+    ),
+    (
+        "UnverifiedToolInstalled",
+        EventType::UnverifiedToolInstalled,
+    ),
+    // MemoryEvents
+    ("ContextWindowNearLimit", EventType::ContextWindowNearLimit),
+    ("ContextWindowExhausted", EventType::ContextWindowExhausted),
+    ("EpisodicMemoryWritten", EventType::EpisodicMemoryWritten),
+    ("SemanticMemoryConflict", EventType::SemanticMemoryConflict),
+    ("MemorySearchFailed", EventType::MemorySearchFailed),
+    ("WorkingMemoryEviction", EventType::WorkingMemoryEviction),
+    // SystemHealth
+    ("CPUSpikeDetected", EventType::CPUSpikeDetected),
+    ("MemoryPressure", EventType::MemoryPressure),
+    ("DiskSpaceLow", EventType::DiskSpaceLow),
+    ("DiskSpaceCritical", EventType::DiskSpaceCritical),
+    ("ProcessCrashed", EventType::ProcessCrashed),
+    ("NetworkInterfaceDown", EventType::NetworkInterfaceDown),
+    (
+        "ContainerResourceQuotaExceeded",
+        EventType::ContainerResourceQuotaExceeded,
+    ),
+    ("KernelSubsystemError", EventType::KernelSubsystemError),
+    // HardwareEvents
+    ("GPUAvailable", EventType::GPUAvailable),
+    ("GPUMemoryPressure", EventType::GPUMemoryPressure),
+    (
+        "SensorReadingThresholdExceeded",
+        EventType::SensorReadingThresholdExceeded,
+    ),
+    ("DeviceConnected", EventType::DeviceConnected),
+    ("DeviceDisconnected", EventType::DeviceDisconnected),
+    ("HardwareAccessGranted", EventType::HardwareAccessGranted),
+    ("DeviceMounted", EventType::DeviceMounted),
+    ("DeviceUnmounted", EventType::DeviceUnmounted),
+    ("DeviceEjected", EventType::DeviceEjected),
+    ("PrintJobSubmitted", EventType::PrintJobSubmitted),
+    ("PrintJobCancelled", EventType::PrintJobCancelled),
+    ("AudioCaptureStarted", EventType::AudioCaptureStarted),
+    ("AudioCaptureStopped", EventType::AudioCaptureStopped),
+    ("AudioPlaybackStarted", EventType::AudioPlaybackStarted),
+    ("WebcamCaptureStarted", EventType::WebcamCaptureStarted),
+    ("WebcamCaptureStopped", EventType::WebcamCaptureStopped),
+    ("BluetoothScanStarted", EventType::BluetoothScanStarted),
+    ("BluetoothPairRequested", EventType::BluetoothPairRequested),
+    ("BluetoothConnected", EventType::BluetoothConnected),
+    // ToolEvents
+    ("ToolInstalled", EventType::ToolInstalled),
+    ("ToolRemoved", EventType::ToolRemoved),
+    ("ToolExecutionFailed", EventType::ToolExecutionFailed),
+    ("ToolSandboxViolation", EventType::ToolSandboxViolation),
+    (
+        "ToolResourceQuotaExceeded",
+        EventType::ToolResourceQuotaExceeded,
+    ),
+    ("ToolChecksumMismatch", EventType::ToolChecksumMismatch),
+    ("ToolRegistryUpdated", EventType::ToolRegistryUpdated),
+    // AgentCommunication
+    ("DirectMessageReceived", EventType::DirectMessageReceived),
+    ("BroadcastReceived", EventType::BroadcastReceived),
+    ("DelegationReceived", EventType::DelegationReceived),
+    (
+        "DelegationResponseReceived",
+        EventType::DelegationResponseReceived,
+    ),
+    ("MessageDeliveryFailed", EventType::MessageDeliveryFailed),
+    ("AgentUnreachable", EventType::AgentUnreachable),
+    // ScheduleEvents
+    ("CronJobFired", EventType::CronJobFired),
+    ("ScheduledTaskMissed", EventType::ScheduledTaskMissed),
+    ("ScheduledTaskCompleted", EventType::ScheduledTaskCompleted),
+    ("ScheduledTaskFailed", EventType::ScheduledTaskFailed),
+    // ExternalEvents
+    ("WebhookReceived", EventType::WebhookReceived),
+    ("ExternalFileChanged", EventType::ExternalFileChanged),
+    ("ExternalAPIEvent", EventType::ExternalAPIEvent),
+    ("ExternalAlertReceived", EventType::ExternalAlertReceived),
+];
+
 pub fn parse_event_type(name: &str) -> Option<EventType> {
-    match name {
-        // AgentLifecycle
-        "AgentAdded" => Some(EventType::AgentAdded),
-        "AgentRemoved" => Some(EventType::AgentRemoved),
-        "AgentPermissionGranted" => Some(EventType::AgentPermissionGranted),
-        "AgentPermissionRevoked" => Some(EventType::AgentPermissionRevoked),
-        // TaskLifecycle
-        "TaskStarted" => Some(EventType::TaskStarted),
-        "TaskCompleted" => Some(EventType::TaskCompleted),
-        "TaskFailed" => Some(EventType::TaskFailed),
-        "TaskTimedOut" => Some(EventType::TaskTimedOut),
-        "TaskDelegated" => Some(EventType::TaskDelegated),
-        "TaskRetrying" => Some(EventType::TaskRetrying),
-        "TaskDeadlockDetected" => Some(EventType::TaskDeadlockDetected),
-        "TaskPreempted" => Some(EventType::TaskPreempted),
-        // SecurityEvents
-        "PromptInjectionAttempt" => Some(EventType::PromptInjectionAttempt),
-        "CapabilityViolation" => Some(EventType::CapabilityViolation),
-        "UnauthorizedToolAccess" => Some(EventType::UnauthorizedToolAccess),
-        "SecretsAccessAttempt" => Some(EventType::SecretsAccessAttempt),
-        "SandboxEscapeAttempt" => Some(EventType::SandboxEscapeAttempt),
-        "AuditLogTamperAttempt" => Some(EventType::AuditLogTamperAttempt),
-        "AgentImpersonationAttempt" => Some(EventType::AgentImpersonationAttempt),
-        "UnverifiedToolInstalled" => Some(EventType::UnverifiedToolInstalled),
-        // MemoryEvents
-        "ContextWindowNearLimit" => Some(EventType::ContextWindowNearLimit),
-        "ContextWindowExhausted" => Some(EventType::ContextWindowExhausted),
-        "EpisodicMemoryWritten" => Some(EventType::EpisodicMemoryWritten),
-        "SemanticMemoryConflict" => Some(EventType::SemanticMemoryConflict),
-        "MemorySearchFailed" => Some(EventType::MemorySearchFailed),
-        "WorkingMemoryEviction" => Some(EventType::WorkingMemoryEviction),
-        // SystemHealth
-        "CPUSpikeDetected" => Some(EventType::CPUSpikeDetected),
-        "MemoryPressure" => Some(EventType::MemoryPressure),
-        "DiskSpaceLow" => Some(EventType::DiskSpaceLow),
-        "DiskSpaceCritical" => Some(EventType::DiskSpaceCritical),
-        "ProcessCrashed" => Some(EventType::ProcessCrashed),
-        "NetworkInterfaceDown" => Some(EventType::NetworkInterfaceDown),
-        "ContainerResourceQuotaExceeded" => Some(EventType::ContainerResourceQuotaExceeded),
-        "KernelSubsystemError" => Some(EventType::KernelSubsystemError),
-        // HardwareEvents
-        "GPUAvailable" => Some(EventType::GPUAvailable),
-        "GPUMemoryPressure" => Some(EventType::GPUMemoryPressure),
-        "SensorReadingThresholdExceeded" => Some(EventType::SensorReadingThresholdExceeded),
-        "DeviceConnected" => Some(EventType::DeviceConnected),
-        "DeviceDisconnected" => Some(EventType::DeviceDisconnected),
-        "HardwareAccessGranted" => Some(EventType::HardwareAccessGranted),
-        "DeviceMounted" => Some(EventType::DeviceMounted),
-        "DeviceUnmounted" => Some(EventType::DeviceUnmounted),
-        "DeviceEjected" => Some(EventType::DeviceEjected),
-        "PrintJobSubmitted" => Some(EventType::PrintJobSubmitted),
-        "PrintJobCancelled" => Some(EventType::PrintJobCancelled),
-        "AudioCaptureStarted" => Some(EventType::AudioCaptureStarted),
-        "AudioCaptureStopped" => Some(EventType::AudioCaptureStopped),
-        "AudioPlaybackStarted" => Some(EventType::AudioPlaybackStarted),
-        "WebcamCaptureStarted" => Some(EventType::WebcamCaptureStarted),
-        "WebcamCaptureStopped" => Some(EventType::WebcamCaptureStopped),
-        "BluetoothScanStarted" => Some(EventType::BluetoothScanStarted),
-        "BluetoothPairRequested" => Some(EventType::BluetoothPairRequested),
-        "BluetoothConnected" => Some(EventType::BluetoothConnected),
-        // ToolEvents
-        "ToolInstalled" => Some(EventType::ToolInstalled),
-        "ToolRemoved" => Some(EventType::ToolRemoved),
-        "ToolExecutionFailed" => Some(EventType::ToolExecutionFailed),
-        "ToolSandboxViolation" => Some(EventType::ToolSandboxViolation),
-        "ToolResourceQuotaExceeded" => Some(EventType::ToolResourceQuotaExceeded),
-        "ToolChecksumMismatch" => Some(EventType::ToolChecksumMismatch),
-        "ToolRegistryUpdated" => Some(EventType::ToolRegistryUpdated),
-        // AgentCommunication
-        "DirectMessageReceived" => Some(EventType::DirectMessageReceived),
-        "BroadcastReceived" => Some(EventType::BroadcastReceived),
-        "DelegationReceived" => Some(EventType::DelegationReceived),
-        "DelegationResponseReceived" => Some(EventType::DelegationResponseReceived),
-        "MessageDeliveryFailed" => Some(EventType::MessageDeliveryFailed),
-        "AgentUnreachable" => Some(EventType::AgentUnreachable),
-        // ScheduleEvents
-        "CronJobFired" => Some(EventType::CronJobFired),
-        "ScheduledTaskMissed" => Some(EventType::ScheduledTaskMissed),
-        "ScheduledTaskCompleted" => Some(EventType::ScheduledTaskCompleted),
-        "ScheduledTaskFailed" => Some(EventType::ScheduledTaskFailed),
-        // ExternalEvents
-        "WebhookReceived" => Some(EventType::WebhookReceived),
-        "ExternalFileChanged" => Some(EventType::ExternalFileChanged),
-        "ExternalAPIEvent" => Some(EventType::ExternalAPIEvent),
-        "ExternalAlertReceived" => Some(EventType::ExternalAlertReceived),
-        _ => None,
-    }
+    // Linear scan is fine: called on subscribe, not on the event hot path.
+    SUBSCRIBABLE_EVENTS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, t)| *t)
 }
 
 pub fn parse_filter(filter_str: &str) -> Result<EventFilterExpr, String> {
@@ -1028,6 +1058,24 @@ mod tests {
             signature: vec![],
             trace_id: TraceID::new(),
             chain_depth: 0,
+        }
+    }
+
+    /// SUBSCRIBABLE_EVENTS is the single source for the parser AND the
+    /// generated panel catalog — pin its internal coherence: names are unique,
+    /// each name is the exact Debug name of its EventType (no typo'd strings),
+    /// and parse_event_type round-trips every row.
+    #[test]
+    fn test_subscribable_events_table_is_coherent() {
+        let mut seen = std::collections::HashSet::new();
+        for (name, ty) in SUBSCRIBABLE_EVENTS {
+            assert!(seen.insert(*name), "duplicate table entry: {name}");
+            assert_eq!(
+                *name,
+                format!("{ty:?}"),
+                "table name does not match the variant's Debug name"
+            );
+            assert_eq!(parse_event_type(name), Some(*ty));
         }
     }
 

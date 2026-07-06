@@ -5,13 +5,12 @@ use std::sync::{Arc, LazyLock};
 
 use agentos_types::{AgentOSError, PermissionOp};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde_json::{json, Value};
 use tokio::process::Command;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::consent::ConsentStore;
 use crate::hal::HalDriver;
 
 const DEFAULT_CAPTURE_SECONDS: u64 = 5;
@@ -21,16 +20,7 @@ const MAX_CAPTURE_SECONDS: u64 = 300;
 const MAX_SAMPLE_RATE: u32 = 192_000;
 const MAX_CHANNELS: u32 = 8;
 const MAX_PLAYBACK_BYTES: u64 = 100 * 1024 * 1024;
-const DEFAULT_CONSENT_TTL_SECONDS: u64 = 300;
-const MAX_CONSENT_TTL_SECONDS: u64 = 3600;
 const AUDIO_DEVICE_PREFIX: &str = "audio:";
-
-#[derive(Clone, Debug)]
-struct AudioConsentGrant {
-    target: String,
-    expires_at: DateTime<Utc>,
-    granted_at: DateTime<Utc>,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AudioNode {
@@ -111,7 +101,9 @@ impl AudioCommandRunner for SystemAudioCommandRunner {
 /// - device-scoped quarantine via `device_key()`
 /// - predictable JSON outputs for orchestration
 pub struct AudioDriver {
-    consent_store: Arc<RwLock<HashMap<String, AudioConsentGrant>>>,
+    /// Consent grants keyed `(authenticated agent, "audio:<node>")`. Shared
+    /// with the kernel so operator device approval can grant a capture window.
+    consent_store: Arc<ConsentStore>,
     runner: Arc<dyn AudioCommandRunner>,
 }
 
@@ -123,8 +115,15 @@ impl Default for AudioDriver {
 
 impl AudioDriver {
     pub fn new() -> Self {
+        Self::with_consent_store(Arc::new(ConsentStore::new()))
+    }
+
+    /// Construct with a shared consent store. The kernel passes its own store
+    /// so that `agentos hal approve audio:<node> <agent>` grants the capture
+    /// consent window the driver checks.
+    pub fn with_consent_store(consent_store: Arc<ConsentStore>) -> Self {
         Self {
-            consent_store: Arc::new(RwLock::new(HashMap::new())),
+            consent_store,
             runner: Arc::new(SystemAudioCommandRunner),
         }
     }
@@ -132,7 +131,7 @@ impl AudioDriver {
     #[cfg(test)]
     fn with_runner(runner: Arc<dyn AudioCommandRunner>) -> Self {
         Self {
-            consent_store: Arc::new(RwLock::new(HashMap::new())),
+            consent_store: Arc::new(ConsentStore::new()),
             runner,
         }
     }
@@ -444,67 +443,50 @@ impl AudioDriver {
         }))
     }
 
-    async fn grant_capture_consent(&self, params: &Value) -> Result<Value, AgentOSError> {
-        let source = self
-            .sanitize_audio_target(params, &["source", "node_id"], "source")?
-            .ok_or_else(|| AgentOSError::HalError("Missing 'source' param".into()))?;
-        let ttl_seconds = params
-            .get("ttl_seconds")
-            .and_then(Value::as_u64)
-            .unwrap_or(DEFAULT_CONSENT_TTL_SECONDS);
-        if ttl_seconds == 0 || ttl_seconds > MAX_CONSENT_TTL_SECONDS {
-            return Err(AgentOSError::HalError(format!(
-                "'ttl_seconds' must be between 1 and {MAX_CONSENT_TTL_SECONDS}"
-            )));
-        }
-
-        let now = Utc::now();
-        let grant = AudioConsentGrant {
-            target: Self::normalize_device_key(source),
-            granted_at: now,
-            expires_at: now + chrono::Duration::seconds(ttl_seconds as i64),
-        };
-
-        self.consent_store
-            .write()
-            .await
-            .insert(grant.target.clone(), grant.clone());
-
-        Ok(json!({
-            "consent_granted": true,
-            "source": grant.target,
-            "granted_at": grant.granted_at,
-            "expires_at": grant.expires_at,
-        }))
+    /// Consent resource key for a capture source — identical to the registry
+    /// device key (`audio:<node>`), so an operator `agentos hal approve` and
+    /// the consent check use the same identifier.
+    fn consent_resource(source: &str) -> String {
+        format!(
+            "{AUDIO_DEVICE_PREFIX}{}",
+            Self::normalize_device_key(source)
+        )
     }
 
-    async fn revoke_capture_consent(&self, params: &Value) -> Result<Value, AgentOSError> {
-        let source = self
-            .sanitize_audio_target(params, &["source", "node_id"], "source")?
-            .ok_or_else(|| AgentOSError::HalError("Missing 'source' param".into()))?;
-        let removed = self
-            .consent_store
-            .write()
-            .await
-            .remove(&Self::normalize_device_key(source))
-            .is_some();
+    /// The authenticated agent identity stamped into the payload by the tool
+    /// wrapper (`AudioTool`). Agent-supplied `agent_id`/`session_id` claims
+    /// are never consulted — only the kernel-injected reserved key counts.
+    fn authenticated_agent(params: &Value) -> Result<&str, AgentOSError> {
+        params
+            .get("__authenticated_agent_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AgentOSError::HalError(
+                    "Capture consent requires an authenticated agent identity".into(),
+                )
+            })
+    }
 
-        Ok(json!({
-            "consent_revoked": removed,
-            "source": Self::normalize_device_key(source),
-        }))
+    /// Consent grants are operator-originated (`agentos hal approve`); an
+    /// agent must never be able to grant or revoke its own capture consent.
+    fn consent_is_operator_only() -> Result<Value, AgentOSError> {
+        Err(AgentOSError::PermissionDenied {
+            resource: "hardware.audio.capture.consent".to_string(),
+            operation: "operator_approval_required".to_string(),
+        })
     }
 
     async fn list_capture_consents(&self) -> Result<Value, AgentOSError> {
-        self.prune_expired_consents().await;
-        let grants = self.consent_store.read().await;
-        let entries: Vec<Value> = grants
-            .values()
-            .map(|grant| {
+        let entries: Vec<Value> = self
+            .consent_store
+            .list()
+            .into_iter()
+            .filter(|(_, resource, _)| resource.starts_with(AUDIO_DEVICE_PREFIX))
+            .map(|(agent_id, resource, ttl_seconds)| {
                 json!({
-                    "source": grant.target,
-                    "granted_at": grant.granted_at,
-                    "expires_at": grant.expires_at,
+                    "agent_id": agent_id,
+                    "source": resource,
+                    "ttl_seconds": ttl_seconds,
                 })
             })
             .collect();
@@ -512,20 +494,11 @@ impl AudioDriver {
         Ok(json!({ "consents": entries }))
     }
 
-    async fn prune_expired_consents(&self) {
-        let now = Utc::now();
-        self.consent_store
-            .write()
-            .await
-            .retain(|_, grant| grant.expires_at > now);
-    }
-
-    async fn ensure_capture_consent(&self, source: &str) -> Result<(), AgentOSError> {
-        let source = Self::normalize_device_key(source);
-        let now = Utc::now();
-        let mut grants = self.consent_store.write().await;
-        grants.retain(|_, grant| grant.expires_at > now);
-        if grants.contains_key(&source) {
+    fn ensure_capture_consent(&self, agent_id: &str, source: &str) -> Result<(), AgentOSError> {
+        if self
+            .consent_store
+            .check(agent_id, &Self::consent_resource(source))
+        {
             return Ok(());
         }
 
@@ -544,7 +517,8 @@ impl AudioDriver {
             .sanitize_audio_target(params, &["source", "node_id"], "source")?
             .ok_or_else(|| AgentOSError::HalError("Missing 'source' param".into()))?;
 
-        self.ensure_capture_consent(source).await?;
+        let agent_id = Self::authenticated_agent(params)?;
+        self.ensure_capture_consent(agent_id, source)?;
 
         let mut args = vec![
             "--signal=INT".to_string(),
@@ -565,10 +539,9 @@ impl AudioDriver {
             "--target".to_string(),
             Self::normalize_device_key(source),
         ];
-        if let Some(remote) = self.sanitize_audio_target(params, &["remote"], "remote")? {
-            args.push("--remote".to_string());
-            args.push(remote.to_string());
-        }
+        // No `--remote` passthrough: capture always targets the local
+        // PipeWire daemon. An agent-supplied remote would widen the capture
+        // surface beyond the device the operator approved.
         // Positional output path must come last, after all flags
         args.push(output_path.display().to_string());
 
@@ -591,6 +564,9 @@ impl AudioDriver {
 
         Ok(json!({
             "captured": true,
+            // Surfaced so the kernel's ToolExecuted audit records that this
+            // capture passed an operator-granted consent check.
+            "consent_checked": true,
             "audio_path": output_path.display().to_string(),
             "duration_seconds": duration_seconds,
             "sample_rate": sample_rate,
@@ -749,8 +725,7 @@ impl HalDriver for AudioDriver {
             "capture" => self.capture_audio(&params).await,
             "playback" => self.playback_audio(&params).await,
             "volume" => self.volume(&params).await,
-            "grant_capture_consent" => self.grant_capture_consent(&params).await,
-            "revoke_capture_consent" => self.revoke_capture_consent(&params).await,
+            "grant_capture_consent" | "revoke_capture_consent" => Self::consent_is_operator_only(),
             "list_capture_consents" => self.list_capture_consents().await,
             action => Err(AgentOSError::HalError(format!(
                 "Unsupported audio action '{action}'"
@@ -830,12 +805,28 @@ id 62, type PipeWire:Interface:Node/3
     }
 
     #[tokio::test]
+    async fn capture_requires_authenticated_identity() {
+        let driver = AudioDriver::with_runner(Arc::new(FakeRunner::new(HashMap::new())));
+        // A payload-supplied agent_id is NOT an authenticated identity.
+        let error = driver
+            .capture_audio(&json!({
+                "action": "capture",
+                "source": "47",
+                "agent_id": "spoofed",
+            }))
+            .await
+            .expect_err("capture should require authenticated identity");
+        assert!(error.to_string().contains("authenticated agent identity"));
+    }
+
+    #[tokio::test]
     async fn capture_requires_explicit_consent() {
         let driver = AudioDriver::with_runner(Arc::new(FakeRunner::new(HashMap::new())));
         let error = driver
             .capture_audio(&json!({
                 "action": "capture",
                 "source": "47",
+                "__authenticated_agent_id": "agent-a",
             }))
             .await
             .expect_err("capture should require consent");
@@ -882,96 +873,96 @@ id 62, type PipeWire:Interface:Node/3
     }
 
     #[tokio::test]
-    async fn consent_lifecycle_grant_then_revoke() {
+    async fn agent_cannot_grant_or_revoke_consent() {
+        let driver = AudioDriver::with_runner(Arc::new(FakeRunner::new(HashMap::new())));
+        for action in ["grant_capture_consent", "revoke_capture_consent"] {
+            let err = driver
+                .query(json!({
+                    "action": action,
+                    "source": "47",
+                    "__authenticated_agent_id": "agent-a",
+                }))
+                .await
+                .expect_err("agent-invoked consent grant/revoke must be rejected");
+            match err {
+                AgentOSError::PermissionDenied { operation, .. } => {
+                    assert_eq!(operation, "operator_approval_required");
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn consent_is_scoped_to_the_granted_agent() {
         let driver = AudioDriver::with_runner(Arc::new(FakeRunner::new(HashMap::new())));
 
-        // Before consent: capture denied
+        // Operator-originated grant for agent-a on audio:47.
+        driver
+            .consent_store
+            .grant("agent-a", "audio:47", std::time::Duration::from_secs(60));
+
+        // agent-a passes the consent check.
+        assert!(driver.ensure_capture_consent("agent-a", "47").is_ok());
+        // agent-b does NOT inherit agent-a's grant.
         let err = driver
-            .capture_audio(&json!({ "source": "47" }))
-            .await
-            .expect_err("should require consent");
+            .ensure_capture_consent("agent-b", "47")
+            .expect_err("another agent must not inherit consent");
         assert!(matches!(err, AgentOSError::PermissionDenied { .. }));
 
-        // Grant consent
-        let grant = driver
-            .grant_capture_consent(&json!({ "source": "47", "ttl_seconds": 60 }))
-            .await
-            .expect("grant should succeed");
-        assert_eq!(grant["consent_granted"], true);
-        assert_eq!(grant["source"], "47");
-
-        // List consents — should have one entry
+        // The grant is visible in the listing with its agent.
         let list = driver
             .list_capture_consents()
             .await
             .expect("list should succeed");
-        assert_eq!(list["consents"].as_array().unwrap().len(), 1);
+        let consents = list["consents"].as_array().unwrap();
+        assert_eq!(consents.len(), 1);
+        assert_eq!(consents[0]["agent_id"], "agent-a");
+        assert_eq!(consents[0]["source"], "audio:47");
+    }
 
-        // Revoke consent
-        let revoke = driver
-            .revoke_capture_consent(&json!({ "source": "47" }))
-            .await
-            .expect("revoke should succeed");
-        assert_eq!(revoke["consent_revoked"], true);
+    #[tokio::test]
+    async fn capture_ignores_agent_supplied_remote() {
+        // FakeRunner errors with the exact command line it received, so the
+        // assertion can prove `--remote` never reaches pw-record.
+        let driver = AudioDriver::with_runner(Arc::new(FakeRunner::new(HashMap::new())));
+        driver
+            .consent_store
+            .grant("agent-a", "audio:47", std::time::Duration::from_secs(60));
 
-        // After revoke: capture denied again
         let err = driver
-            .capture_audio(&json!({ "source": "47" }))
+            .capture_audio(&json!({
+                "action": "capture",
+                "source": "47",
+                "remote": "evil-remote",
+                "__authenticated_agent_id": "agent-a",
+            }))
             .await
-            .expect_err("should require consent after revoke");
-        assert!(matches!(err, AgentOSError::PermissionDenied { .. }));
-
-        // List consents — should be empty
-        let list = driver
-            .list_capture_consents()
-            .await
-            .expect("list should succeed");
-        assert!(list["consents"].as_array().unwrap().is_empty());
+            .expect_err("FakeRunner has no canned response, so capture errs with the command");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--target 47"),
+            "capture should target the source: {msg}"
+        );
+        assert!(
+            !msg.contains("--remote"),
+            "agent-supplied remote must be ignored: {msg}"
+        );
     }
 
     #[tokio::test]
     async fn consent_ttl_expiration() {
         let driver = AudioDriver::with_runner(Arc::new(FakeRunner::new(HashMap::new())));
 
-        // Manually insert an already-expired consent
-        {
-            let now = Utc::now();
-            let mut store = driver.consent_store.write().await;
-            store.insert(
-                "47".to_string(),
-                AudioConsentGrant {
-                    target: "47".to_string(),
-                    granted_at: now - chrono::Duration::seconds(120),
-                    expires_at: now - chrono::Duration::seconds(1),
-                },
-            );
-        }
+        driver
+            .consent_store
+            .grant("agent-a", "audio:47", std::time::Duration::from_millis(1));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        // Capture should fail — consent is expired
         let err = driver
-            .capture_audio(&json!({ "source": "47" }))
-            .await
+            .ensure_capture_consent("agent-a", "47")
             .expect_err("expired consent should be rejected");
         assert!(matches!(err, AgentOSError::PermissionDenied { .. }));
-    }
-
-    #[tokio::test]
-    async fn consent_ttl_validation() {
-        let driver = AudioDriver::with_runner(Arc::new(FakeRunner::new(HashMap::new())));
-
-        // TTL of 0 is rejected
-        let err = driver
-            .grant_capture_consent(&json!({ "source": "47", "ttl_seconds": 0 }))
-            .await
-            .expect_err("ttl 0 should be rejected");
-        assert!(err.to_string().contains("ttl_seconds"));
-
-        // TTL exceeding max is rejected
-        let err = driver
-            .grant_capture_consent(&json!({ "source": "47", "ttl_seconds": 9999 }))
-            .await
-            .expect_err("ttl exceeding max should be rejected");
-        assert!(err.to_string().contains("ttl_seconds"));
     }
 
     #[tokio::test]

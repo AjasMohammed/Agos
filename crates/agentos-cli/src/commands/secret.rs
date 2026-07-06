@@ -61,8 +61,8 @@ pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::
 
             match response {
                 KernelResponse::Success { .. } => println!("✅ Secret '{}' stored securely", name),
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => return Err(anyhow::anyhow!("{message}")),
+                _ => return Err(anyhow::anyhow!("unexpected kernel response")),
             }
         }
 
@@ -85,8 +85,8 @@ pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::
                         }
                     }
                 }
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => return Err(anyhow::anyhow!("{message}")),
+                _ => return Err(anyhow::anyhow!("unexpected kernel response")),
             }
         }
 
@@ -96,8 +96,8 @@ pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::
                 .await?;
             match response {
                 KernelResponse::Success { .. } => println!("✅ Secret '{}' revoked", name),
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => return Err(anyhow::anyhow!("{message}")),
+                _ => return Err(anyhow::anyhow!("unexpected kernel response")),
             }
         }
 
@@ -112,8 +112,8 @@ pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::
                         .unwrap_or("Vault locked down");
                     println!("{}", msg);
                 }
-                KernelResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => eprintln!("Unexpected response"),
+                KernelResponse::Error { message } => return Err(anyhow::anyhow!("{message}")),
+                _ => return Err(anyhow::anyhow!("unexpected kernel response")),
             }
         }
 
@@ -133,8 +133,8 @@ pub async fn handle(client: &mut BusClient, command: SecretCommands) -> anyhow::
 
             match response {
                 KernelResponse::Success { .. } => println!("✅ Secret '{}' rotated", name),
-                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
-                _ => eprintln!("❌ Unexpected response"),
+                KernelResponse::Error { message } => return Err(anyhow::anyhow!("{message}")),
+                _ => return Err(anyhow::anyhow!("unexpected kernel response")),
             }
         }
     }
@@ -147,22 +147,28 @@ fn resolve_secret_value(
     name: &str,
     provided: Option<String>,
     prompt: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<zeroize::Zeroizing<String>> {
     use std::io::{IsTerminal, Read};
 
-    let value = match provided {
-        Some(v) => v,
+    let value = zeroize::Zeroizing::new(match provided {
+        Some(v) => {
+            eprintln!(
+                "⚠ --value exposes the secret in the process list and shell history; \
+                 prefer piping it on stdin (printf %s \"$TOKEN\" | agentos secret set {name})"
+            );
+            v
+        }
         None if std::io::stdin().is_terminal() => {
             eprint!("{prompt}");
             rpassword::read_password()?
         }
         None => {
             // Non-interactive: consume stdin (allows `printf %s "$TOKEN" | … set NAME`).
-            let mut buf = String::new();
+            let mut buf = zeroize::Zeroizing::new(String::new());
             std::io::stdin().read_to_string(&mut buf)?;
             buf.trim_end_matches(['\n', '\r']).to_string()
         }
-    };
+    });
 
     if value.is_empty() {
         anyhow::bail!(

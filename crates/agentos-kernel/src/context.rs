@@ -703,6 +703,35 @@ impl ContextManager {
         }
     }
 
+    /// Restore a task's context window from a checkpoint, creating the task
+    /// entry if a prior teardown removed it (failure/abort paths call
+    /// `remove_context`, so by resume time the entry is usually gone —
+    /// `replace_context` would silently fail and the task would resume with
+    /// an empty context). The restored window already contains the original
+    /// prompt, so `prompt_pushed` is set to avoid a duplicate injection.
+    pub async fn restore_context(&self, task_id: TaskID, agent_id: AgentID, window: ContextWindow) {
+        let mut tasks = self.tasks.write().await;
+        match tasks.get_mut(&task_id) {
+            Some(tc) => {
+                tc.window = window;
+                tc.agent_id = agent_id;
+                tc.prompt_pushed = true;
+            }
+            None => {
+                tasks.insert(
+                    task_id,
+                    TaskContext {
+                        window,
+                        agent_id,
+                        injected_sub_agents: HashSet::new(),
+                        prompt_pushed: true,
+                        token_budget_override: None,
+                    },
+                );
+            }
+        }
+    }
+
     /// Remove a task's context (on completion/failure).
     pub async fn remove_context(&self, task_id: &TaskID) {
         self.tasks.write().await.remove(task_id);
@@ -725,5 +754,55 @@ impl ContextManager {
             }
             None => Err(AgentOSError::TaskNotFound(*task_id)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checkpoint_window(text: &str) -> ContextWindow {
+        let mut window = ContextWindow::with_strategy(100, OverflowStrategy::SemanticEviction);
+        window.push(ContextEntry::from_text(ContextRole::User, text));
+        window
+    }
+
+    /// Resume after a failure teardown: the task entry was removed, so the
+    /// restore must create it (a plain `replace_context` would fail and the
+    /// task would resume with an empty context — issue #27).
+    #[tokio::test]
+    async fn restore_context_creates_missing_entry() {
+        let mgr = ContextManager::new(100);
+        let task_id = TaskID::new();
+        let agent_id = AgentID::new();
+
+        mgr.restore_context(task_id, agent_id, checkpoint_window("checkpointed work"))
+            .await;
+
+        let ctx = mgr.get_context(&task_id).await.expect("entry must exist");
+        assert_eq!(ctx.entries.len(), 1);
+        assert!(
+            mgr.is_prompt_pushed(&task_id).await,
+            "restored window already contains the prompt — must not be re-injected"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_context_overwrites_existing_entry() {
+        let mgr = ContextManager::new(100);
+        let task_id = TaskID::new();
+        let agent_id = AgentID::new();
+        mgr.create_context(task_id, agent_id, "system prompt").await;
+
+        mgr.restore_context(task_id, agent_id, checkpoint_window("restored"))
+            .await;
+
+        let ctx = mgr.get_context(&task_id).await.expect("entry must exist");
+        assert_eq!(ctx.entries.len(), 1);
+        match &ctx.entries[0].parts[0] {
+            ContentPart::Text { text } => assert_eq!(text, "restored"),
+            other => panic!("expected text part, got {other:?}"),
+        }
+        assert!(mgr.is_prompt_pushed(&task_id).await);
     }
 }

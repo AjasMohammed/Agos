@@ -28,7 +28,8 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             tool_calls: Default::default(),
             tool_execution: Default::default(),
             autonomous_mode: Default::default(),
-            health_port: 0,          // 0 = disabled in tests
+            health_port: 0, // 0 = disabled in tests
+            health_bind: "127.0.0.1".to_string(),
             per_agent_rate_limit: 0, // 0 = unlimited in tests
             events: Default::default(),
             sandbox_policy: Default::default(),
@@ -89,6 +90,9 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             consolidation: Default::default(),
             context: Default::default(),
             disable_embedder: true,
+            embedder_init_timeout_secs: 120,
+            retention_days: 0,
+            lifecycle: Default::default(),
         },
         context_budget: Default::default(),
         health_monitor: HealthMonitorConfig::default(),
@@ -111,6 +115,9 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         scheduler: Default::default(),
         transcription: Default::default(),
         agent_heartbeat: Default::default(),
+        agent_budget: Default::default(),
+        hal: Default::default(),
+        security: Default::default(),
         user_profile: Default::default(),
         personalization: Default::default(),
     }

@@ -6,6 +6,7 @@ version = "1.0.0"
 description = "Set the desired state for an IoT device (subject to operator-defined safety rules). The safety engine evaluates all applicable rules before the command is dispatched."
 author = "agentos-core"
 trust_tier = "core"
+risk_class = "control_plane"
 tags = ["iot", "hardware", "safety"]
 
 [capabilities_required]

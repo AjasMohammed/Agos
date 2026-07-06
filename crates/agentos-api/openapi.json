@@ -293,6 +293,159 @@
         ]
       }
     },
+    "/api/v1/agents/{id}/inbox": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "`GET /api/v1/agents/{id}/inbox` — Agent-to-agent message history for an agent\n(messages it sent, received directly, or received via broadcast), oldest first.",
+        "operationId": "agent_inbox",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max messages to return, newest window (default 50, capped 200).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Message timeline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Vec_ApiInboxMessage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad agent id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/agents/{id}/memory/{tier}": {
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "`GET /api/v1/agents/{id}/memory/{tier}` — Browse or search an agent's memory.",
+        "description": "`tier` is one of `episodic` / `semantic` / `procedural`. With `?q=` set the\ntier is searched (FTS/embedding, ranked); without it the most-recent items\nare returned. Read-only.",
+        "operationId": "agent_memory_browse",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tier",
+            "in": "path",
+            "description": "Memory tier: episodic | semantic | procedural",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Search query. When empty, returns the most-recent items (browse mode).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max items to return (default 50, capped at 200).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Memory items",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Vec_ApiMemoryItem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad agent id or unknown tier",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/api/v1/agents/{name}": {
       "get": {
         "tags": [
@@ -929,6 +1082,155 @@
           },
           "404": {
             "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/approval-policies": {
+      "get": {
+        "tags": [
+          "approval-policies"
+        ],
+        "summary": "`GET /api/v1/approval-policies` — List active standing grants.",
+        "operationId": "approval_policies_list",
+        "responses": {
+          "200": {
+            "description": "Active approval policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Vec_ApiApprovalPolicy"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "approval-policies"
+        ],
+        "summary": "`POST /api/v1/approval-policies` — Add a standing grant.",
+        "description": "Returns 409 Conflict if an active policy already exists for the same\n(tool_name, path_glob, agent_id) scope.",
+        "operationId": "approval_policies_add",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddApprovalPolicyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Policy created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiApprovalPolicy"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Duplicate policy for this scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/approval-policies/{id}": {
+      "delete": {
+        "tags": [
+          "approval-policies"
+        ],
+        "summary": "`DELETE /api/v1/approval-policies/{id}` — Revoke a standing grant.",
+        "operationId": "approval_policies_revoke",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Approval policy ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Policy revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Policy not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -2995,6 +3297,120 @@
         "responses": {
           "200": {
             "description": "Subscription removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Subscription not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/events/subscriptions/{id}/disable": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "`POST /api/v1/events/subscriptions/{id}/disable` — Pause a subscription.",
+        "operationId": "events_disable_subscription",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Subscription id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Subscription disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Subscription not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/events/subscriptions/{id}/enable": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "`POST /api/v1/events/subscriptions/{id}/enable` — Activate a subscription.",
+        "operationId": "events_enable_subscription",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Subscription id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Subscription enabled",
             "content": {
               "application/json": {
                 "schema": {
@@ -5429,7 +5845,7 @@
         "tags": [
           "schedules"
         ],
-        "summary": "`GET /api/v1/schedules` — List all cron schedules.",
+        "summary": "`GET /api/v1/schedules` — List all scheduled entries: recurring cron\nschedules plus agent-created one-shot once-jobs and timers (see `kind`).",
         "operationId": "schedules_list",
         "responses": {
           "200": {
@@ -6153,6 +6569,99 @@
           },
           "404": {
             "description": "Secret not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/skills": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "`GET /api/v1/skills` — List installed skills.",
+        "operationId": "skills_list",
+        "responses": {
+          "200": {
+            "description": "Installed skills",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_Vec_ApiSkillSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/skills/{name}": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "`GET /api/v1/skills/{name}` — Get one skill's full detail.",
+        "operationId": "skills_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Skill name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Skill detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_ApiSkillDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Skill not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -7353,10 +7862,82 @@
           }
         ]
       }
+    },
+    "/api/v1/ws/ticket": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /api/v1/ws/ticket` — Mint a short-lived, single-use WebSocket auth\nticket carrying the presented key's scopes. Browsers can't send an\n`Authorization` header on a WS upgrade; the ticket keeps the long-lived key\nout of the URL query string (which lands in proxy logs and history).",
+        "description": "Not audit-logged: a ticket is a seconds-lived derivative of the presented\nkey with identical scopes, minted on every reconnect — logging each mint\nwould flood the audit trail with what is effectively \"key was used\".",
+        "operationId": "auth_ws_ticket",
+        "responses": {
+          "200": {
+            "description": "Single-use WS ticket (seconds-lived)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope_WsTicketResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
     }
   },
   "components": {
     "schemas": {
+      "AddApprovalPolicyRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/v1/approval-policies`.",
+        "required": [
+          "tool_name"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional agent UUID to scope to; omit to apply to every agent."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Optional expiry (RFC3339); omit for a permanent grant."
+          },
+          "path_glob": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional payload `path` glob to scope the grant (e.g. `\"/tmp/**\"`)."
+          },
+          "tool_name": {
+            "type": "string",
+            "description": "Tool this standing grant auto-approves (matched exactly)."
+          }
+        }
+      },
       "ApiAgentDetail": {
         "type": "object",
         "required": [
@@ -7454,6 +8035,11 @@
           "id": {
             "type": "string"
           },
+          "last_active": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last time the agent acted or was woken (by a task, message, or heartbeat).\nDrives the liveness indicator; also what the heartbeat scheduler reads to\ndecide which idle agents are due for a wakeup."
+          },
           "model": {
             "type": "string"
           },
@@ -7475,6 +8061,55 @@
           "supports_images": {
             "type": "boolean",
             "description": "Whether the connected LLM adapter will emit native image blocks for this agent."
+          }
+        }
+      },
+      "ApiApprovalPolicy": {
+        "type": "object",
+        "description": "A persisted \"allow always\" approval policy (standing grant).",
+        "required": [
+          "id",
+          "tool_name",
+          "granted_at",
+          "granted_by",
+          "source"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "granted_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "granted_by": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "path_glob": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string"
+          },
+          "tool_name": {
+            "type": "string"
           }
         }
       },
@@ -8125,6 +8760,55 @@
           }
         }
       },
+      "ApiInboxMessage": {
+        "type": "object",
+        "description": "One agent-to-agent message in the timeline.",
+        "required": [
+          "id",
+          "from",
+          "to",
+          "kind",
+          "preview",
+          "timestamp",
+          "signed"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "description": "Sender agent id (UUID)."
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "Content kind: `text` | `structured` | `delegation` | `result`."
+          },
+          "preview": {
+            "type": "string",
+            "description": "Human-readable content preview (truncated)."
+          },
+          "reply_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Id of the message this replies to, if any."
+          },
+          "signed": {
+            "type": "boolean",
+            "description": "Whether the message carried a sender signature (presence only — not\nre-verified here)."
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "to": {
+            "type": "string",
+            "description": "Rendered target: `direct:<uuid>`, `name:<n>`, `group:<id>`, or `broadcast`."
+          }
+        }
+      },
       "ApiKeyMeta": {
         "type": "object",
         "description": "Management metadata for an API key (never includes key material).",
@@ -8291,6 +8975,57 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "ApiMemoryItem": {
+        "type": "object",
+        "description": "A single memory item, normalized across all three tiers.",
+        "required": [
+          "id",
+          "tier",
+          "kind",
+          "title",
+          "content",
+          "created_at",
+          "metadata"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "Body text (episodic content, semantic fact, procedure description)."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time — except procedural items, which carry `updated_at` so the\ntimestamp matches that tier's recency ordering."
+          },
+          "id": {
+            "type": "string",
+            "description": "Tier-local id (episodic rowid, semantic/procedural UUID) as a string."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Sub-kind: the episodic entry type, `fact`, or `procedure`."
+          },
+          "metadata": {
+            "description": "Tier-specific extras (tags, use_count, success/failure counts, …)."
+          },
+          "score": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Search relevance (RRF fused score) when `q` was supplied; `null` in browse mode."
+          },
+          "tier": {
+            "type": "string",
+            "description": "`episodic` | `semantic` | `procedural`."
+          },
+          "title": {
+            "type": "string",
+            "description": "Short label (episodic summary, semantic key, procedure name)."
           }
         }
       },
@@ -8635,12 +9370,12 @@
       },
       "ApiScheduleSummary": {
         "type": "object",
-        "description": "A single cron schedule as returned by `GET /api/v1/schedules`.",
+        "description": "A single scheduled entry as returned by `GET /api/v1/schedules` — a\nrecurring cron job, a one-shot once-job, or an in-memory timer.",
         "required": [
           "id",
           "name",
           "agent_name",
-          "cron",
+          "kind",
           "state",
           "prompt",
           "run_count",
@@ -8651,7 +9386,11 @@
             "type": "string"
           },
           "cron": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cron expression; `null` for `once` and `timer` kinds."
           },
           "delivery_mode": {
             "type": "string",
@@ -8659,6 +9398,10 @@
           },
           "id": {
             "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "One of `cron` (recurring) | `once` (one-shot job) | `timer` (in-memory countdown)."
           },
           "last_run_at": {
             "type": [
@@ -8687,7 +9430,7 @@
           },
           "state": {
             "type": "string",
-            "description": "One of `active` | `paused` | `disabled`."
+            "description": "`active` | `paused` | `disabled` for cron; `pending` for once/timer."
           }
         }
       },
@@ -8745,6 +9488,121 @@
           }
         }
       },
+      "ApiSkillDetail": {
+        "type": "object",
+        "description": "Full skill detail including required tools/permissions, budget, and prompt.",
+        "required": [
+          "summary",
+          "tools_required",
+          "tools_optional",
+          "permissions_required",
+          "max_cost_per_run",
+          "max_tokens_per_run",
+          "system_prompt"
+        ],
+        "properties": {
+          "default_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "default_provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "license": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_cost_per_run": {
+            "type": "number",
+            "format": "double"
+          },
+          "max_tokens_per_run": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "permissions_required": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "summary": {
+            "$ref": "#/components/schemas/ApiSkillSummary"
+          },
+          "system_prompt": {
+            "type": "string",
+            "description": "Full system-prompt text for the skill's agent."
+          },
+          "tools_optional": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tools_required": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ApiSkillSummary": {
+        "type": "object",
+        "description": "A skill in the registry, list view.",
+        "required": [
+          "name",
+          "version",
+          "description",
+          "author",
+          "trust_tier"
+        ],
+        "properties": {
+          "author": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Kernel events that trigger the skill, if any."
+          },
+          "name": {
+            "type": "string"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "schedule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cron schedule for autonomous runs, if any."
+          },
+          "trust_tier": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
       "ApiTaskDetail": {
         "type": "object",
         "required": [
@@ -8779,6 +9637,13 @@
           },
           "status": {
             "type": "string"
+          },
+          "trigger_event_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Event type that triggered this task, if it was created by an event\nsubscription (e.g. `DiskSpaceLow`). Absent for user/scheduled tasks."
           }
         }
       },
@@ -9786,6 +10651,11 @@
               "id": {
                 "type": "string"
               },
+              "last_active": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Last time the agent acted or was woken (by a task, message, or heartbeat).\nDrives the liveness indicator; also what the heartbeat scheduler reads to\ndecide which idle agents are due for a wakeup."
+              },
               "model": {
                 "type": "string"
               },
@@ -9807,6 +10677,64 @@
               "supports_images": {
                 "type": "boolean",
                 "description": "Whether the connected LLM adapter will emit native image blocks for this agent."
+              }
+            }
+          }
+        }
+      },
+      "Envelope_ApiApprovalPolicy": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A persisted \"allow always\" approval policy (standing grant).",
+            "required": [
+              "id",
+              "tool_name",
+              "granted_at",
+              "granted_by",
+              "source"
+            ],
+            "properties": {
+              "agent_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "expires_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "granted_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "granted_by": {
+                "type": "string"
+              },
+              "id": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "path_glob": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": "string"
+              },
+              "tool_name": {
+                "type": "string"
               }
             }
           }
@@ -10544,12 +11472,12 @@
         "properties": {
           "data": {
             "type": "object",
-            "description": "A single cron schedule as returned by `GET /api/v1/schedules`.",
+            "description": "A single scheduled entry as returned by `GET /api/v1/schedules` — a\nrecurring cron job, a one-shot once-job, or an in-memory timer.",
             "required": [
               "id",
               "name",
               "agent_name",
-              "cron",
+              "kind",
               "state",
               "prompt",
               "run_count",
@@ -10560,7 +11488,11 @@
                 "type": "string"
               },
               "cron": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Cron expression; `null` for `once` and `timer` kinds."
               },
               "delivery_mode": {
                 "type": "string",
@@ -10568,6 +11500,10 @@
               },
               "id": {
                 "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "description": "One of `cron` (recurring) | `once` (one-shot job) | `timer` (in-memory countdown)."
               },
               "last_run_at": {
                 "type": [
@@ -10596,7 +11532,7 @@
               },
               "state": {
                 "type": "string",
-                "description": "One of `active` | `paused` | `disabled`."
+                "description": "`active` | `paused` | `disabled` for cron; `pending` for once/timer."
               }
             }
           }
@@ -10665,6 +11601,82 @@
           }
         }
       },
+      "Envelope_ApiSkillDetail": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Full skill detail including required tools/permissions, budget, and prompt.",
+            "required": [
+              "summary",
+              "tools_required",
+              "tools_optional",
+              "permissions_required",
+              "max_cost_per_run",
+              "max_tokens_per_run",
+              "system_prompt"
+            ],
+            "properties": {
+              "default_model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "default_provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "license": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "max_cost_per_run": {
+                "type": "number",
+                "format": "double"
+              },
+              "max_tokens_per_run": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "permissions_required": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "summary": {
+                "$ref": "#/components/schemas/ApiSkillSummary"
+              },
+              "system_prompt": {
+                "type": "string",
+                "description": "Full system-prompt text for the skill's agent."
+              },
+              "tools_optional": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "tools_required": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
       "Envelope_ApiTaskDetail": {
         "type": "object",
         "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
@@ -10706,6 +11718,13 @@
               },
               "status": {
                 "type": "string"
+              },
+              "trigger_event_type": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Event type that triggered this task, if it was created by an event\nsubscription (e.g. `DiskSpaceLow`). Absent for user/scheduled tasks."
               }
             }
           }
@@ -11432,6 +12451,11 @@
                 "id": {
                   "type": "string"
                 },
+                "last_active": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "Last time the agent acted or was woken (by a task, message, or heartbeat).\nDrives the liveness indicator; also what the heartbeat scheduler reads to\ndecide which idle agents are due for a wakeup."
+                },
                 "model": {
                   "type": "string"
                 },
@@ -11453,6 +12477,67 @@
                 "supports_images": {
                   "type": "boolean",
                   "description": "Whether the connected LLM adapter will emit native image blocks for this agent."
+                }
+              }
+            }
+          }
+        }
+      },
+      "Envelope_Vec_ApiApprovalPolicy": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A persisted \"allow always\" approval policy (standing grant).",
+              "required": [
+                "id",
+                "tool_name",
+                "granted_at",
+                "granted_by",
+                "source"
+              ],
+              "properties": {
+                "agent_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "expires_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time"
+                },
+                "granted_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "granted_by": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "path_glob": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                },
+                "tool_name": {
+                  "type": "string"
                 }
               }
             }
@@ -11783,6 +12868,67 @@
           }
         }
       },
+      "Envelope_Vec_ApiInboxMessage": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One agent-to-agent message in the timeline.",
+              "required": [
+                "id",
+                "from",
+                "to",
+                "kind",
+                "preview",
+                "timestamp",
+                "signed"
+              ],
+              "properties": {
+                "from": {
+                  "type": "string",
+                  "description": "Sender agent id (UUID)."
+                },
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "Content kind: `text` | `structured` | `delegation` | `result`."
+                },
+                "preview": {
+                  "type": "string",
+                  "description": "Human-readable content preview (truncated)."
+                },
+                "reply_to": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Id of the message this replies to, if any."
+                },
+                "signed": {
+                  "type": "boolean",
+                  "description": "Whether the message carried a sender signature (presence only — not\nre-verified here)."
+                },
+                "timestamp": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "to": {
+                  "type": "string",
+                  "description": "Rendered target: `direct:<uuid>`, `name:<n>`, `group:<id>`, or `broadcast`."
+                }
+              }
+            }
+          }
+        }
+      },
       "Envelope_Vec_ApiKeyMeta": {
         "type": "object",
         "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
@@ -11945,6 +13091,69 @@
                     "null"
                   ],
                   "description": "http URL, if persisted."
+                }
+              }
+            }
+          }
+        }
+      },
+      "Envelope_Vec_ApiMemoryItem": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A single memory item, normalized across all three tiers.",
+              "required": [
+                "id",
+                "tier",
+                "kind",
+                "title",
+                "content",
+                "created_at",
+                "metadata"
+              ],
+              "properties": {
+                "content": {
+                  "type": "string",
+                  "description": "Body text (episodic content, semantic fact, procedure description)."
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "Creation time — except procedural items, which carry `updated_at` so the\ntimestamp matches that tier's recency ordering."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "Tier-local id (episodic rowid, semantic/procedural UUID) as a string."
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "Sub-kind: the episodic entry type, `fact`, or `procedure`."
+                },
+                "metadata": {
+                  "description": "Tier-specific extras (tags, use_count, success/failure counts, …)."
+                },
+                "score": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "format": "float",
+                  "description": "Search relevance (RRF fused score) when `q` was supplied; `null` in browse mode."
+                },
+                "tier": {
+                  "type": "string",
+                  "description": "`episodic` | `semantic` | `procedural`."
+                },
+                "title": {
+                  "type": "string",
+                  "description": "Short label (episodic summary, semantic key, procedure name)."
                 }
               }
             }
@@ -12222,12 +13431,12 @@
             "type": "array",
             "items": {
               "type": "object",
-              "description": "A single cron schedule as returned by `GET /api/v1/schedules`.",
+              "description": "A single scheduled entry as returned by `GET /api/v1/schedules` — a\nrecurring cron job, a one-shot once-job, or an in-memory timer.",
               "required": [
                 "id",
                 "name",
                 "agent_name",
-                "cron",
+                "kind",
                 "state",
                 "prompt",
                 "run_count",
@@ -12238,7 +13447,11 @@
                   "type": "string"
                 },
                 "cron": {
-                  "type": "string"
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Cron expression; `null` for `once` and `timer` kinds."
                 },
                 "delivery_mode": {
                   "type": "string",
@@ -12246,6 +13459,10 @@
                 },
                 "id": {
                   "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "One of `cron` (recurring) | `once` (one-shot job) | `timer` (in-memory countdown)."
                 },
                 "last_run_at": {
                   "type": [
@@ -12274,7 +13491,67 @@
                 },
                 "state": {
                   "type": "string",
-                  "description": "One of `active` | `paused` | `disabled`."
+                  "description": "`active` | `paused` | `disabled` for cron; `pending` for once/timer."
+                }
+              }
+            }
+          }
+        }
+      },
+      "Envelope_Vec_ApiSkillSummary": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A skill in the registry, list view.",
+              "required": [
+                "name",
+                "version",
+                "description",
+                "author",
+                "trust_tier"
+              ],
+              "properties": {
+                "author": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "events": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Kernel events that trigger the skill, if any."
+                },
+                "name": {
+                  "type": "string"
+                },
+                "roles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "schedule": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Cron schedule for autonomous runs, if any."
+                },
+                "trust_tier": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
                 }
               }
             }
@@ -12694,6 +13971,35 @@
             "properties": {
               "id": {
                 "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "Envelope_WsTicketResponse": {
+        "type": "object",
+        "description": "Success envelope wrapping a response payload under a `data` key.\n\n`T` is the inner payload type (a single DTO, a `Vec<DTO>` for lists, or\n`serde_json::Value` for ad-hoc acknowledgement bodies like `{ \"ok\": true }`).",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A short-lived, single-use WebSocket auth ticket (`POST /api/v1/ws/ticket`).\nConnect with `GET /api/v1/ws?ticket=…` before it expires.",
+            "required": [
+              "ticket",
+              "expires_in"
+            ],
+            "properties": {
+              "expires_in": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Seconds until the ticket expires.",
+                "minimum": 0
+              },
+              "ticket": {
+                "type": "string",
+                "description": "Opaque single-use ticket; carries the minting key's scopes."
               }
             }
           }
@@ -14023,6 +15329,26 @@
         "properties": {
           "id": {
             "type": "string"
+          }
+        }
+      },
+      "WsTicketResponse": {
+        "type": "object",
+        "description": "A short-lived, single-use WebSocket auth ticket (`POST /api/v1/ws/ticket`).\nConnect with `GET /api/v1/ws?ticket=…` before it expires.",
+        "required": [
+          "ticket",
+          "expires_in"
+        ],
+        "properties": {
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds until the ticket expires.",
+            "minimum": 0
+          },
+          "ticket": {
+            "type": "string",
+            "description": "Opaque single-use ticket; carries the minting key's scopes."
           }
         }
       }

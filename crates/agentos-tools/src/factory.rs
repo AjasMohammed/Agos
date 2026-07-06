@@ -71,6 +71,11 @@ const HAL_TOOL_NAMES: &[&str] = &[
 ];
 
 const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
+    // IoT twin tools need the kernel's shared TwinRegistry/SafetyEngine Arcs
+    // (attached to the in-process HAL at boot) — a sandbox child rebuilds the
+    // HAL without them, so these must never be sandbox-dispatched.
+    "hardware-get-twin",
+    "hardware-set-desired",
     "agent-message",
     "task-delegate",
     "task-spawn-async",

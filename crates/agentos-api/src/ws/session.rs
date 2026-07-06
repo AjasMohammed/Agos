@@ -22,7 +22,10 @@ pub struct WsSession {
     next_sub_id: u64,
     outbound_tx: mpsc::Sender<ServerFrame>,
     /// Scopes of the API key that authenticated this connection (e.g. `"audit:r"`,
-    /// `"*:rw"`). Empty = full access (bootstrap key). Used to gate `subscribe`.
+    /// `"*"`). Empty = NO access (fail-closed); the bootstrap/admin key carries the
+    /// explicit `"*"` wildcard. Gates both `subscribe` and the action frames
+    /// (chat/task-cancel/notification-respond) so the WS transport enforces the
+    /// same per-scope authorization as REST.
     permissions: Vec<String>,
 }
 
@@ -63,7 +66,8 @@ impl WsSession {
                 }
                 // Scope check: subscribing to a channel requires the matching read
                 // scope (e.g. `audit` needs `audit:r`). Empty key permissions =
-                // full access (bootstrap). Mirrors REST `require_permission`.
+                // NO access (fail-closed); the admin key uses the `"*"` wildcard.
+                // Mirrors REST `require_permission`.
                 let required = channel_required_scope(&channel);
                 if !permissions_grant(&self.permissions, &required) {
                     let _ = self
@@ -110,6 +114,13 @@ impl WsSession {
                 message,
                 agent_name,
             } => {
+                // Action frames carry the same authorization weight as their REST
+                // equivalents (POST /v1/chat/completions requires `chat:w`). Without
+                // this gate a read-only or empty-scope key could drive inference and
+                // tool execution over the WS transport.
+                if !self.require_scope("chat:w").await {
+                    return;
+                }
                 // Non-streaming for now — send the full response as ChatDone.
                 let req = crate::types::ChatRequest {
                     session_id: session_id.clone(),
@@ -139,11 +150,17 @@ impl WsSession {
             }
 
             ClientFrame::ChatCancel { session_id } => {
+                if !self.require_scope("chat:w").await {
+                    return;
+                }
                 // Cancellation not yet wired — acknowledge and move on.
                 let _ = self.send(ServerFrame::ChatCancelled { session_id }).await;
             }
 
             ClientFrame::TaskCancel { task_id } => {
+                if !self.require_scope("tasks:w").await {
+                    return;
+                }
                 let parsed: Result<agentos_types::TaskID, _> = task_id.parse();
                 match parsed {
                     Ok(id) => match service.cancel_task(id).await {
@@ -177,6 +194,9 @@ impl WsSession {
             }
 
             ClientFrame::NotificationRespond { id, text } => {
+                if !self.require_scope("notifications:w").await {
+                    return;
+                }
                 let parsed: Result<agentos_types::NotificationID, _> = id.parse();
                 match parsed {
                     Ok(nid) => match service.respond_to_notification(nid, text).await {
@@ -215,6 +235,23 @@ impl WsSession {
         }
     }
 
+    /// Check that this connection's API key grants `required` (`resource:op`).
+    /// On failure, sends a FORBIDDEN error frame to the client and returns false
+    /// so the caller can bail. Mirrors REST `require_permission` semantics so the
+    /// WS transport enforces the same per-scope authorization as REST.
+    async fn require_scope(&self, required: &str) -> bool {
+        if permissions_grant(&self.permissions, required) {
+            return true;
+        }
+        let _ = self
+            .send(ServerFrame::Error {
+                code: "FORBIDDEN".into(),
+                message: format!("Missing permission '{required}'"),
+            })
+            .await;
+        false
+    }
+
     /// Send a frame to the client. Returns Err if the channel is closed.
     async fn send(&self, frame: ServerFrame) -> Result<(), ApiError> {
         self.outbound_tx
@@ -244,11 +281,12 @@ pub(crate) fn channel_required_scope(channel: &str) -> String {
     format!("{resource}:r")
 }
 
-/// Whether `permissions` grant `required` (`resource:op`). Empty permissions =
-/// full access (bootstrap key). Mirrors `handlers::require_permission`.
+/// Whether `permissions` grant `required` (`resource:op`). An empty scope list
+/// grants NO access (fail-closed); the bootstrap/admin key uses the explicit
+/// `"*"` wildcard. Mirrors `handlers::require_permission`.
 fn permissions_grant(permissions: &[String], required: &str) -> bool {
     if permissions.is_empty() {
-        return true;
+        return false;
     }
     let req_res = required.split(':').next().unwrap_or(required);
     let req_op = required
@@ -257,9 +295,13 @@ fn permissions_grant(permissions: &[String], required: &str) -> bool {
         .and_then(|o| o.chars().next())
         .unwrap_or('r');
     permissions.iter().any(|p| {
+        // A bare `"*"` is the admin wildcard: all resources AND all ops.
+        if p == "*" {
+            return true;
+        }
         let res = p.split(':').next().unwrap_or(p);
         let op = p.split(':').nth(1).unwrap_or("r");
-        (res == req_res || res == "*") && op.contains(req_op)
+        (res == req_res || res == "*") && (op == "*" || op.contains(req_op))
     })
 }
 

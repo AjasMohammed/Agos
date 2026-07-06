@@ -104,12 +104,20 @@ impl Modify for SecurityAddon {
         crate::handlers::auth::login,
         crate::handlers::auth::me,
         crate::handlers::auth::refresh,
+        crate::handlers::auth::ws_ticket,
         crate::handlers::keys::list,
         crate::handlers::keys::create,
         crate::handlers::keys::revoke,
         crate::handlers::escalations::list,
         crate::handlers::escalations::get,
         crate::handlers::escalations::resolve,
+        crate::handlers::approval_policies::list,
+        crate::handlers::approval_policies::add,
+        crate::handlers::approval_policies::revoke,
+        crate::handlers::memory::browse,
+        crate::handlers::skills::list,
+        crate::handlers::skills::get,
+        crate::handlers::inbox::get,
         crate::handlers::prefs::list_proposals,
         crate::handlers::prefs::accept,
         crate::handlers::prefs::reject,
@@ -161,6 +169,8 @@ impl Modify for SecurityAddon {
         crate::handlers::events::list_subscriptions,
         crate::handlers::events::create_subscription,
         crate::handlers::events::delete_subscription,
+        crate::handlers::events::enable_subscription,
+        crate::handlers::events::disable_subscription,
         crate::handlers::events::emit,
         crate::handlers::sse::events_stream,
         crate::handlers::marketplace::search,
@@ -190,12 +200,19 @@ impl Modify for SecurityAddon {
         crate::types::LoginRequest,
         crate::types::IssuedKeyResponse,
         crate::types::AuthMe,
+        crate::types::WsTicketResponse,
         crate::types::ApiKeyMeta,
         crate::types::CreateKeyRequest,
         crate::types::EscalationListQuery,
         crate::types::ApiEscalation,
         crate::types::ResolveEscalationRequest,
         crate::types::ResolveEscalationResponse,
+        crate::types::ApiApprovalPolicy,
+        crate::types::ApiMemoryItem,
+        crate::types::ApiInboxMessage,
+        crate::types::ApiSkillSummary,
+        crate::types::ApiSkillDetail,
+        crate::types::AddApprovalPolicyRequest,
         crate::types::PrefProposalQuery,
         crate::types::ApiPrefProposal,
         crate::types::ApiProposalStats,
@@ -365,6 +382,6 @@ mod tests {
             .values()
             .map(|item| methods.iter().filter(|m| item.get(*m).is_some()).count())
             .sum();
-        assert_eq!(ops, 135, "expected 135 documented operations");
+        assert_eq!(ops, 145, "expected 145 documented operations");
     }
 }

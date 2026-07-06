@@ -59,11 +59,19 @@ pub trait CapabilityProvider: Send + Sync {
     ///
     /// # Preconditions
     ///
-    /// The kernel has already:
-    /// 1. Validated the agent's `CapabilityToken` signature
-    /// 2. Checked `required_permissions(action)` against the token
-    /// 3. Fired `HookEvent::ToolPre` (approval hooks may have aborted)
-    /// 4. Checked the capability broker for dynamic grants (if static perms insufficient)
+    /// Before a provider's `execute` runs, the dispatcher
+    /// (`KernelCapabilityDispatcher::dispatch`) has:
+    /// 1. Checked `required_permissions(action)` against the request's token
+    ///    permissions (static authorization).
+    /// 2. Evaluated the dynamic policy engine for this `(domain, action,
+    ///    resource)`; a `Deny`/`Escalate` result blocks execution.
+    ///
+    /// Note: `HookEvent::ToolPre` (interactive approval) is fired by the tool
+    /// CALLER — the task executor and the chat path both gate the bridge tool
+    /// name through `ToolPre` before reaching dispatch. The dispatcher itself
+    /// does not fire ToolPre, so a code path that reaches `dispatch` without
+    /// going through a gated tool call would skip approval — keep all dispatch
+    /// entry points behind a `ToolPre`-gated tool invocation.
     ///
     /// # Errors
     ///

@@ -75,6 +75,133 @@ fn parse_scope(s: &str) -> SecretScope {
     }
 }
 
+/// Truncate to at most `max` chars on a char boundary, for item titles.
+fn truncate_title(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_string(),
+    }
+}
+
+fn episodic_to_item(e: agentos_memory::EpisodicEntry) -> ApiMemoryItem {
+    ApiMemoryItem {
+        id: e.id.to_string(),
+        tier: "episodic".to_string(),
+        kind: format!("{:?}", e.entry_type),
+        title: e
+            .summary
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| truncate_title(&e.content, 80)),
+        content: e.content,
+        created_at: e.timestamp,
+        score: None,
+        metadata: e.metadata.unwrap_or_else(|| serde_json::json!({})),
+    }
+}
+
+fn semantic_entry_to_item(e: agentos_memory::MemoryEntry, score: Option<f32>) -> ApiMemoryItem {
+    ApiMemoryItem {
+        id: e.id,
+        tier: "semantic".to_string(),
+        kind: "fact".to_string(),
+        title: e.key,
+        content: e.full_content,
+        created_at: e.created_at,
+        score,
+        metadata: serde_json::json!({
+            "tags": e.tags,
+            "use_count": e.use_count,
+            "confidence": e.confidence,
+        }),
+    }
+}
+
+fn procedure_to_item(p: agentos_memory::types::Procedure, score: Option<f32>) -> ApiMemoryItem {
+    ApiMemoryItem {
+        id: p.id,
+        tier: "procedural".to_string(),
+        kind: "procedure".to_string(),
+        title: p.name,
+        content: p.description,
+        // Procedural browse orders by `updated_at`, so surface that as the item
+        // timestamp — otherwise the list would look out of order by the shown time.
+        created_at: p.updated_at,
+        score,
+        metadata: serde_json::json!({
+            "success_count": p.success_count,
+            "failure_count": p.failure_count,
+            "steps": p.steps.len(),
+            "status": format!("{:?}", p.status),
+        }),
+    }
+}
+
+fn inbox_target_str(t: &agentos_types::MessageTarget) -> String {
+    match t {
+        agentos_types::MessageTarget::Direct(a) => format!("direct:{a}"),
+        agentos_types::MessageTarget::DirectByName(n) => format!("name:{n}"),
+        agentos_types::MessageTarget::Group(g) => format!("group:{g}"),
+        agentos_types::MessageTarget::Broadcast => "broadcast".to_string(),
+    }
+}
+
+fn inbox_content_parts(c: &agentos_types::MessageContent) -> (&'static str, String) {
+    match c {
+        agentos_types::MessageContent::Text(s) => ("text", s.clone()),
+        agentos_types::MessageContent::Structured(v) => ("structured", v.to_string()),
+        agentos_types::MessageContent::TaskDelegation { prompt, .. } => {
+            ("delegation", prompt.clone())
+        }
+        agentos_types::MessageContent::TaskResult { task_id, .. } => {
+            ("result", format!("result for task {task_id}"))
+        }
+    }
+}
+
+fn inbox_message_to_api(m: agentos_types::AgentMessage) -> ApiInboxMessage {
+    let (kind, preview) = inbox_content_parts(&m.content);
+    ApiInboxMessage {
+        id: m.id.to_string(),
+        from: m.from.to_string(),
+        to: inbox_target_str(&m.to),
+        kind: kind.to_string(),
+        preview: truncate_title(&preview, 200),
+        reply_to: m.reply_to.map(|r| r.to_string()),
+        timestamp: m.timestamp,
+        signed: m.signature.is_some(),
+    }
+}
+
+fn skill_summary(m: &agentos_types::skill::SkillManifest) -> ApiSkillSummary {
+    ApiSkillSummary {
+        name: m.skill.name.clone(),
+        version: m.skill.version.clone(),
+        description: m.skill.description.clone(),
+        author: m.skill.author.clone(),
+        trust_tier: m.skill.trust_tier.clone(),
+        roles: m.agent.roles.clone(),
+        schedule: m.triggers.schedule.clone(),
+        events: m.triggers.events.clone(),
+    }
+}
+
+fn skill_detail(inst: &agentos_skills::InstalledSkill) -> ApiSkillDetail {
+    let m = &inst.manifest;
+    ApiSkillDetail {
+        summary: skill_summary(m),
+        license: m.skill.license.clone(),
+        default_provider: m.agent.default_provider.clone(),
+        default_model: m.agent.default_model.clone(),
+        tools_required: m.tools.required.clone(),
+        tools_optional: m.tools.optional.clone(),
+        permissions_required: m.permissions.required.clone(),
+        max_cost_per_run: m.budget.max_cost_per_run,
+        max_tokens_per_run: m.budget.max_tokens_per_run,
+        system_prompt: inst.system_prompt.clone(),
+    }
+}
+
 fn agent_summary(profile: &agentos_types::AgentProfile, supports_images: bool) -> ApiAgentSummary {
     ApiAgentSummary {
         id: profile.id,
@@ -84,6 +211,7 @@ fn agent_summary(profile: &agentos_types::AgentProfile, supports_images: bool) -
         status: status_str(&profile.status).to_string(),
         roles: profile.roles.clone(),
         connected_at: profile.created_at,
+        last_active: profile.last_active,
         supports_images,
     }
 }
@@ -118,6 +246,21 @@ fn escalation_to_api(e: agentos_kernel::escalation::PendingEscalation) -> ApiEsc
         resolved: e.resolved,
         resolution: e.resolution,
         metadata: e.metadata,
+    }
+}
+
+fn approval_policy_to_api(
+    e: agentos_kernel::approval_policy_store::ApprovalPolicyEntry,
+) -> ApiApprovalPolicy {
+    ApiApprovalPolicy {
+        id: e.id,
+        tool_name: e.tool_name,
+        path_glob: e.path_glob,
+        agent_id: e.agent_id.map(|a| a.to_string()),
+        granted_at: e.granted_at,
+        granted_by: e.granted_by,
+        source: e.source,
+        expires_at: e.expires_at,
     }
 }
 
@@ -544,13 +687,74 @@ fn schedule_to_api(j: &agentos_types::ScheduledJob) -> ApiScheduleSummary {
         id: j.id.to_string(),
         name: j.name.clone(),
         agent_name: j.agent_name.clone(),
-        cron: j.cron_expression.clone(),
+        kind: "cron".to_string(),
+        cron: Some(j.cron_expression.clone()),
         state: schedule_state_str(&j.state).to_string(),
         prompt: j.task_prompt.clone(),
         run_count: j.run_count,
         last_run_at: j.last_run_at,
         next_run_at: j.next_run_at,
         delivery_mode: delivery_mode_tag(&j.delivery).to_string(),
+    }
+}
+
+/// Human-readable one-liner for what fires when a once-job triggers.
+fn once_action_summary(a: &agentos_types::OnceJobAction) -> String {
+    use agentos_types::OnceJobAction;
+    match a {
+        OnceJobAction::RunTask { prompt } => prompt.clone(),
+        OnceJobAction::NotifyUser { subject, .. } => format!("Notify: {subject}"),
+        OnceJobAction::RunTool { tool, .. } => format!("Run tool: {tool}"),
+    }
+}
+
+/// Human-readable one-liner for what fires when a timer triggers.
+fn timer_action_summary(a: &agentos_types::TimerAction) -> String {
+    use agentos_types::TimerAction;
+    match a {
+        TimerAction::RunTask { prompt } | TimerAction::RunTaskAndNotify { prompt, .. } => {
+            prompt.clone()
+        }
+        TimerAction::NotifyUser { subject, .. } => format!("Notify: {subject}"),
+        TimerAction::RunTool { tool, .. } => format!("Run tool: {tool}"),
+    }
+}
+
+fn once_job_to_api(j: &agentos_types::OnceJob) -> ApiScheduleSummary {
+    use agentos_types::OnceJobState;
+    ApiScheduleSummary {
+        id: j.id.to_string(),
+        name: j.name.clone(),
+        agent_name: j.agent_name.clone(),
+        kind: "once".to_string(),
+        cron: None,
+        state: match j.state {
+            OnceJobState::Pending => "pending",
+            OnceJobState::Fired => "fired",
+            OnceJobState::Cancelled => "cancelled",
+        }
+        .to_string(),
+        prompt: once_action_summary(&j.action),
+        run_count: 0,
+        last_run_at: None,
+        next_run_at: Some(j.fire_at),
+        delivery_mode: delivery_mode_tag(&j.delivery).to_string(),
+    }
+}
+
+fn timer_to_api(t: &agentos_types::TimerEntry) -> ApiScheduleSummary {
+    ApiScheduleSummary {
+        id: t.id.to_string(),
+        name: t.name.clone(),
+        agent_name: t.agent_name.clone(),
+        kind: "timer".to_string(),
+        cron: None,
+        state: "pending".to_string(),
+        prompt: timer_action_summary(&t.action),
+        run_count: 0,
+        last_run_at: None,
+        next_run_at: Some(t.fire_at),
+        delivery_mode: delivery_mode_tag(&t.delivery).to_string(),
     }
 }
 
@@ -1085,13 +1289,17 @@ impl KernelService for Kernel {
             status: task_state_str(&task.state).to_string(),
             created_at: task.created_at,
             completed_at: None,
+            trigger_event_type: task
+                .trigger_source
+                .as_ref()
+                .map(|t| t.event_type.to_string()),
         })
     }
 
-    async fn run_task(&self, _req: RunTaskRequest) -> Result<TaskID, ApiError> {
-        Err(ApiError::NotImplemented(
-            "Task execution via API not yet wired".into(),
-        ))
+    async fn run_task(&self, req: RunTaskRequest) -> Result<TaskID, ApiError> {
+        self.api_submit_task(req.agent_name, req.prompt, req.autonomous)
+            .await
+            .map_err(ApiError::Conflict)
     }
 
     async fn cancel_task(&self, id: TaskID) -> Result<(), ApiError> {
@@ -1175,6 +1383,10 @@ impl KernelService for Kernel {
     }
 
     async fn chat_send(&self, req: ChatRequest) -> Result<ChatResponse, ApiError> {
+        // S1: tools execute INSIDE `chat_infer_with_tools`, where each call is
+        // gated by per-turn capability-token validation (HMAC/expiry/scope) in
+        // the kernel chat loop. The API never dispatches tools itself, so the
+        // REST/OpenAI-compat path inherits that enforcement — no separate gate.
         let history: Vec<(String, String)> = req.history;
         let user_parts = (!req.parts.is_empty()).then_some(req.parts.clone());
         let result = self
@@ -1216,6 +1428,8 @@ impl KernelService for Kernel {
         // For now we perform full inference and emit Thinking → Done events.
         // This unblocks SSE clients while a full token-level streaming implementation
         // is wired in a future iteration.
+        // S1: as in chat_send, tools execute inside the kernel chat loop and are
+        // capability-validated there; the API adds no independent tool dispatch.
         let _ = tx.send(ChatStreamEvent::Thinking { iteration: 1 }).await;
 
         let history: Vec<(String, String)> = req.history;
@@ -1620,11 +1834,24 @@ impl KernelService for Kernel {
         channel_id: &str,
         secret: &str,
     ) -> Result<bool, ApiError> {
+        use subtle::ConstantTimeEq;
         let cid: agentos_types::ChannelInstanceID = channel_id
             .parse()
             .map_err(|_| ApiError::BadRequest(format!("Invalid channel ID: {channel_id}")))?;
         let secrets = self.webhook_secrets.read().await;
-        Ok(secrets.get(&cid).map(|s| s.as_str()) == Some(secret))
+        // W13: constant-time compare — the webhook secret (e.g. Telegram's
+        // X-Telegram-Bot-Api-Secret-Token) is a shared secret; a plain `==`
+        // is a timing oracle. Length may leak; the bytes are compared in
+        // constant time only when lengths match.
+        let valid = match secrets.get(&cid) {
+            Some(expected) => {
+                let a = expected.as_bytes();
+                let b = secret.as_bytes();
+                a.len() == b.len() && bool::from(a.ct_eq(b))
+            }
+            None => false,
+        };
+        Ok(valid)
     }
 
     async fn channel_pinned_external_id(
@@ -1782,6 +2009,184 @@ impl KernelService for Kernel {
                 "Unexpected kernel response resolving escalation".into(),
             )),
         }
+    }
+
+    // ── Approval policies (standing grants) ──────────────────────────────
+
+    async fn list_approval_policies(&self) -> Result<Vec<ApiApprovalPolicy>, ApiError> {
+        let matcher = self.approval_policy_matcher.as_ref().ok_or_else(|| {
+            ApiError::ServiceUnavailable("Approval policy store is not configured".into())
+        })?;
+        let entries = matcher
+            .list_all()
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        Ok(entries.into_iter().map(approval_policy_to_api).collect())
+    }
+
+    async fn add_approval_policy(
+        &self,
+        req: AddApprovalPolicyRequest,
+    ) -> Result<ApiApprovalPolicy, ApiError> {
+        let matcher = self.approval_policy_matcher.as_ref().ok_or_else(|| {
+            ApiError::ServiceUnavailable("Approval policy store is not configured".into())
+        })?;
+        // Validate at the trust boundary: an empty tool or a past expiry are
+        // malformed requests (400), not privilege (403) or a dead-row 409.
+        if req.tool_name.trim().is_empty() {
+            return Err(ApiError::BadRequest("tool_name must not be empty".into()));
+        }
+        if let Some(exp) = req.expires_at {
+            if exp <= chrono::Utc::now() {
+                return Err(ApiError::BadRequest(
+                    "expires_at must be in the future".into(),
+                ));
+            }
+        }
+        // Parse the optional agent scope; a malformed UUID is a client error.
+        let agent_id = match req.agent_id.as_deref() {
+            Some(s) if !s.is_empty() => Some(
+                s.parse::<agentos_types::AgentID>()
+                    .map_err(|_| ApiError::BadRequest(format!("Invalid agent_id: {s}")))?,
+            ),
+            _ => None,
+        };
+        let entry = matcher
+            .add(
+                &req.tool_name,
+                req.path_glob.as_deref(),
+                agent_id,
+                "operator-api",
+                "api",
+                req.expires_at,
+            )
+            .map_err(|e| match &e {
+                // Duplicate active scope → 409, matching the escalation-resolve style.
+                agentos_types::AgentOSError::PermissionDenied { resource, .. }
+                    if resource
+                        == agentos_kernel::approval_policy_store::POLICY_DUPLICATE_RESOURCE =>
+                {
+                    ApiError::Conflict(e.to_string())
+                }
+                _ => ApiError::from(e),
+            })?;
+        Ok(approval_policy_to_api(entry))
+    }
+
+    async fn revoke_approval_policy(&self, id: i64) -> Result<(), ApiError> {
+        let matcher = self.approval_policy_matcher.as_ref().ok_or_else(|| {
+            ApiError::ServiceUnavailable("Approval policy store is not configured".into())
+        })?;
+        let revoked = matcher
+            .revoke(id)
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        if revoked {
+            Ok(())
+        } else {
+            Err(ApiError::NotFound(format!(
+                "Approval policy {id} not found"
+            )))
+        }
+    }
+
+    async fn browse_agent_memory(
+        &self,
+        agent_id: String,
+        tier: String,
+        q: Option<String>,
+        limit: Option<usize>,
+    ) -> Result<Vec<ApiMemoryItem>, ApiError> {
+        let aid = agent_id
+            .parse::<agentos_types::AgentID>()
+            .map_err(|_| ApiError::BadRequest(format!("Invalid agent id: {agent_id}")))?;
+        let limit = limit.unwrap_or(50).min(200);
+        let query = q.unwrap_or_default();
+        let has_q = !query.trim().is_empty();
+        // Note: episodic is strictly per-agent, but semantic/procedural browse
+        // also include global (agent_id IS NULL) entries — mirroring the agent's
+        // effective retrieval (own + shared), so the browse matches what the
+        // agent can actually recall.
+        let items: Vec<ApiMemoryItem> = match tier.as_str() {
+            "episodic" => {
+                let entries = if has_q {
+                    self.episodic_memory
+                        .recall_global(&query, Some(&aid), None, limit)
+                        .await
+                } else {
+                    self.episodic_memory.recent(Some(&aid), limit).await
+                }
+                .map_err(ApiError::from)?;
+                entries.into_iter().map(episodic_to_item).collect()
+            }
+            "semantic" => {
+                if has_q {
+                    self.semantic_memory
+                        .search(&query, Some(&aid), limit, 0.0)
+                        .await
+                        .map_err(ApiError::from)?
+                        .into_iter()
+                        .map(|r| semantic_entry_to_item(r.entry, Some(r.rrf_score)))
+                        .collect()
+                } else {
+                    self.semantic_memory
+                        .list_recent(Some(&aid), limit)
+                        .await
+                        .map_err(ApiError::from)?
+                        .into_iter()
+                        .map(|e| semantic_entry_to_item(e, None))
+                        .collect()
+                }
+            }
+            "procedural" => {
+                if has_q {
+                    self.procedural_memory
+                        .search(&query, Some(&aid), limit, 0.0)
+                        .await
+                        .map_err(ApiError::from)?
+                        .into_iter()
+                        .map(|r| procedure_to_item(r.procedure, Some(r.rrf_score)))
+                        .collect()
+                } else {
+                    self.procedural_memory
+                        .list_by_agent(Some(&aid), limit)
+                        .await
+                        .map_err(ApiError::from)?
+                        .into_iter()
+                        .map(|p| procedure_to_item(p, None))
+                        .collect()
+                }
+            }
+            other => {
+                return Err(ApiError::BadRequest(format!(
+                    "unknown memory tier '{other}' (expected episodic | semantic | procedural)"
+                )))
+            }
+        };
+        Ok(items)
+    }
+
+    async fn list_skills(&self) -> Result<Vec<ApiSkillSummary>, ApiError> {
+        let reg = self.skill_registry.read().await;
+        Ok(reg.list().into_iter().map(skill_summary).collect())
+    }
+
+    async fn get_skill(&self, name: String) -> Result<ApiSkillDetail, ApiError> {
+        let reg = self.skill_registry.read().await;
+        reg.get(&name)
+            .map(skill_detail)
+            .ok_or_else(|| ApiError::NotFound(format!("Skill '{name}' not found")))
+    }
+
+    async fn agent_inbox(
+        &self,
+        agent_id: String,
+        limit: Option<usize>,
+    ) -> Result<Vec<ApiInboxMessage>, ApiError> {
+        let aid = agent_id
+            .parse::<agentos_types::AgentID>()
+            .map_err(|_| ApiError::BadRequest(format!("Invalid agent id: {agent_id}")))?;
+        let limit = limit.unwrap_or(50).min(200);
+        let msgs = self.message_bus.get_history(&aid, limit).await;
+        Ok(msgs.into_iter().map(inbox_message_to_api).collect())
     }
 
     // ── User-preference proposals ────────────────────────────────────────
@@ -2263,8 +2668,37 @@ impl KernelService for Kernel {
     // ── Automation: schedules ────────────────────────────────────────────
 
     async fn list_schedules(&self) -> Result<Vec<ApiScheduleSummary>, ApiError> {
-        let jobs = self.schedule_manager.list_jobs().await;
-        Ok(jobs.iter().map(schedule_to_api).collect())
+        // Unified view across all three schedule kinds so agent-created
+        // once-jobs and timers are visible alongside cron schedules.
+        let mut entries: Vec<ApiScheduleSummary> = self
+            .schedule_manager
+            .list_jobs()
+            .await
+            .iter()
+            .map(schedule_to_api)
+            .collect();
+        entries.extend(
+            self.schedule_manager
+                .list_once_jobs()
+                .await
+                .iter()
+                .map(once_job_to_api),
+        );
+        entries.extend(
+            self.schedule_manager
+                .list_timers()
+                .await
+                .iter()
+                .map(timer_to_api),
+        );
+        // Soonest-firing first; entries with no upcoming fire time sort last.
+        entries.sort_by(|a, b| match (a.next_run_at, b.next_run_at) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.name.cmp(&b.name),
+        });
+        Ok(entries)
     }
 
     async fn create_schedule(
@@ -2314,10 +2748,18 @@ impl KernelService for Kernel {
         let sid: agentos_types::ScheduleID = id
             .parse()
             .map_err(|_| ApiError::BadRequest(format!("Invalid schedule ID: {id}")))?;
+        // The id may belong to any schedule kind; fall through cron → once → timer.
+        if self.schedule_manager.delete(&sid).await.is_ok() {
+            return Ok(());
+        }
+        if self.schedule_manager.cancel_once_job(&sid).await.is_ok() {
+            return Ok(());
+        }
         self.schedule_manager
-            .delete(&sid)
+            .cancel_timer(&sid)
             .await
-            .map_err(|e| ApiError::NotFound(e.to_string()))
+            .map(|_| ())
+            .map_err(|_| ApiError::NotFound(format!("Schedule {id} not found")))
     }
 
     async fn get_schedule_runs(
@@ -2700,8 +3142,24 @@ impl KernelService for Kernel {
     }
 
     async fn disconnect_connector(&self, id: &str) -> Result<(), ApiError> {
-        let _ = self.vault.oauth_store().delete(id).await;
-        let _ = self.connector_registry.deregister(id).await;
+        // Disconnect is idempotent (a missing credential/registration is a
+        // success — the desired end-state is "gone"), but a genuine failure must
+        // not be silently swallowed: otherwise the operator believes the OAuth
+        // token was revoked while it is still stored. Log failures loudly.
+        if let Err(e) = self.vault.oauth_store().delete(id).await {
+            tracing::warn!(
+                connector_id = %id,
+                error = %e,
+                "disconnect_connector: OAuth credential delete did not succeed (may already be absent)"
+            );
+        }
+        if let Err(e) = self.connector_registry.deregister(id).await {
+            tracing::warn!(
+                connector_id = %id,
+                error = %e,
+                "disconnect_connector: connector deregister did not succeed (may already be absent)"
+            );
+        }
         Ok(())
     }
 
@@ -2785,6 +3243,28 @@ impl KernelService for Kernel {
             .parse()
             .map_err(|_| ApiError::BadRequest(format!("Invalid subscription ID: {id}")))?;
         if self.event_bus.unsubscribe(&sid).await {
+            Ok(())
+        } else {
+            Err(ApiError::NotFound(format!("Subscription '{id}' not found")))
+        }
+    }
+
+    async fn enable_event_subscription(&self, id: &str) -> Result<(), ApiError> {
+        let sid: agentos_types::SubscriptionID = id
+            .parse()
+            .map_err(|_| ApiError::BadRequest(format!("Invalid subscription ID: {id}")))?;
+        if self.event_bus.enable_subscription(&sid).await {
+            Ok(())
+        } else {
+            Err(ApiError::NotFound(format!("Subscription '{id}' not found")))
+        }
+    }
+
+    async fn disable_event_subscription(&self, id: &str) -> Result<(), ApiError> {
+        let sid: agentos_types::SubscriptionID = id
+            .parse()
+            .map_err(|_| ApiError::BadRequest(format!("Invalid subscription ID: {id}")))?;
+        if self.event_bus.disable_subscription(&sid).await {
             Ok(())
         } else {
             Err(ApiError::NotFound(format!("Subscription '{id}' not found")))

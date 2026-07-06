@@ -245,6 +245,11 @@ pub enum AuditEventType {
     /// Emitted when an agent's context memory is created, updated, rolled back, or cleared.
     ContextMemoryUpdated,
 
+    // Memory lifecycle (reinforcement / decay)
+    /// Emitted at task completion when injected procedures receive outcome
+    /// feedback (success/failure counts + confidence recompute).
+    MemoryReinforced,
+
     // MCP (Model Context Protocol)
     /// Emitted when an MCP tool call is executed (client mode).
     McpToolCall,
@@ -455,6 +460,18 @@ impl AuditLog {
     pub fn open(path: &Path) -> Result<Self, AgentOSError> {
         let conn = Connection::open(path)
             .map_err(|e| AgentOSError::VaultError(format!("AuditLog DB open failed: {}", e)))?;
+
+        // W11: the audit log records secret names, agent IDs, capability
+        // actions, and arbitrary `details` payloads. Restrict it to owner
+        // read/write (matching the vault) so it is not world-readable under a
+        // default umask. The hash chain protects integrity, not confidentiality.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |e| AgentOSError::VaultError(format!("Failed to set audit DB permissions: {}", e)),
+            )?;
+        }
 
         conn.execute_batch(
             "

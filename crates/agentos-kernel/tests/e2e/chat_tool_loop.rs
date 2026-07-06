@@ -24,6 +24,72 @@ fn tool_call_response_with_payload(tool: &str, payload: serde_json::Value) -> Mo
     }])
 }
 
+/// CR1 "is it wired" guard: the chat path must fire the `ToolPre`/ApprovalHook
+/// before executing a tool, exactly like the task-execution path. Under
+/// `Deny` approval mode the hook aborts immediately (no escalation, no wait),
+/// so a tool call in chat must surface as an approval-*blocked* result rather
+/// than being executed. If the chat path ever stops firing ToolPre (the
+/// original CR1 bug), this test fails because the tool would run / fail with a
+/// non-approval error instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_tool_call_is_gated_by_approval_hook() {
+    let (kernel, _client, _tmp, handle) = common::setup_kernel().await;
+
+    // Deny mode: every non-readonly / unknown-risk tool is hard-rejected by
+    // the ApprovalHook with an immediate Abort.
+    {
+        let resolver = kernel
+            .approval_mode_resolver
+            .as_ref()
+            .expect("approval mode resolver must be wired at boot");
+        let mut cfg = resolver.snapshot();
+        cfg.mode = agentos_types::ApprovalMode::Deny;
+        resolver.reload(cfg);
+    }
+
+    common::register_mock_agent_with_responses(
+        &kernel,
+        "chat-approval-agent",
+        vec![
+            // Unknown tool → ApprovalHook defaults it to ExecCapable
+            // (fail-closed) → Deny mode aborts before execution.
+            tool_call_response("shell-exec"),
+            MockResponse::text("Understood, I will not run that.")
+                .with_stop_reason(StopReason::EndTurn),
+        ],
+    )
+    .await;
+
+    let result = kernel
+        .chat_infer_with_tools(
+            "chat-approval-agent",
+            &[],
+            "Run a shell command.",
+            None,
+            None,
+        )
+        .await
+        .expect("chat_infer_with_tools failed");
+
+    assert_eq!(result.tool_calls.len(), 1, "expected one tool call record");
+    let call = &result.tool_calls[0];
+    let err = call
+        .result
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    assert!(
+        err.contains("blocked") || err.contains("approval") || err.contains("denied"),
+        "chat tool call must be gated by the approval hook (CR1); got result: {}",
+        call.result
+    );
+
+    kernel.shutdown();
+    handle.await.unwrap();
+}
+
 /// Plain response with no tool call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]

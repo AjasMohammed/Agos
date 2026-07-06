@@ -21,6 +21,29 @@ pub fn handle_get(key: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether a dotted config key names a raw secret (so its value must not be
+/// echoed to the terminal or persisted in plaintext to the revision DB).
+///
+/// `*_env` / `*_ref` keys hold an env-var NAME or a `@vault` reference, not the
+/// secret itself, so they are deliberately NOT treated as secrets.
+fn key_holds_secret(key: &str) -> bool {
+    let leaf = key.rsplit('.').next().unwrap_or(key).to_ascii_lowercase();
+    if leaf.ends_with("_env") || leaf.ends_with("_ref") || leaf.ends_with("_envvar") {
+        return false;
+    }
+    const SECRET_MARKERS: &[&str] = &[
+        "api_key",
+        "apikey",
+        "secret",
+        "password",
+        "passwd",
+        "token",
+        "credential",
+        "private_key",
+    ];
+    SECRET_MARKERS.iter().any(|m| leaf.contains(m))
+}
+
 /// Set a dotted key in the config file, preserving comments and formatting.
 pub fn handle_set(key: &str, value: &str) -> anyhow::Result<()> {
     let path = config_path();
@@ -30,11 +53,28 @@ pub fn handle_set(key: &str, value: &str) -> anyhow::Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("Config parse error: {}", e))?;
 
+    let is_secret = key_holds_secret(key);
+    if is_secret {
+        eprintln!(
+            "warning: '{key}' looks like a secret. Storing secrets in the config \
+             file is plaintext on disk — prefer `agentos secret set {key}` (vault) \
+             and reference it via a `*_env` key. The value below is redacted in \
+             output and revision history."
+        );
+    }
+
     // Snapshot the PRE-WRITE file content so this change can be rolled back.
     // Revisioning is a safety sidecar, not a gate: a snapshot failure (e.g. an
-    // unwritable DB) is logged but must NOT block the config write.
+    // unwritable DB) is logged but must NOT block the config write. Secret
+    // values are redacted in the revision record so the DB never holds a
+    // second plaintext copy.
     let old = resolve_dotted_key(&doc, key).ok();
-    if let Err(e) = super::config_revision_store::snapshot(&content, key, old.as_deref(), value) {
+    let (snap_old, snap_new) = if is_secret {
+        (old.as_deref().map(|_| "***"), "***")
+    } else {
+        (old.as_deref(), value)
+    };
+    if let Err(e) = super::config_revision_store::snapshot(&content, key, snap_old, snap_new) {
         eprintln!("warning: could not record config revision: {e}");
     }
 
@@ -43,7 +83,11 @@ pub fn handle_set(key: &str, value: &str) -> anyhow::Result<()> {
     std::fs::write(&path, doc.to_string())
         .map_err(|e| anyhow::anyhow!("Cannot write config: {}", e))?;
 
-    println!("{} = {}", key, value);
+    if is_secret {
+        println!("{} = ***", key);
+    } else {
+        println!("{} = {}", key, value);
+    }
     Ok(())
 }
 
@@ -332,6 +376,37 @@ mod tests {
         assert!(err.to_string().contains("not valid TOML"));
         // The live config must be untouched.
         assert_eq!(g.read_config(), before);
+    }
+
+    #[test]
+    fn secret_key_detection() {
+        assert!(key_holds_secret("llm.api_key"));
+        assert!(key_holds_secret("providers.anthropic.token"));
+        assert!(key_holds_secret("db.password"));
+        assert!(key_holds_secret("x.client_secret"));
+        // Reference keys hold a name/handle, not the secret itself.
+        assert!(!key_holds_secret("llm.api_key_env"));
+        assert!(!key_holds_secret("x.token_ref"));
+        // Ordinary keys are not secrets.
+        assert!(!key_holds_secret("kernel.max_concurrent_tasks"));
+        assert!(!key_holds_secret("llm.primary"));
+    }
+
+    #[test]
+    #[serial]
+    fn secret_value_redacted_in_revision_history() {
+        let g = EnvGuard::new("[llm]\nprimary = \"x\"\n");
+        handle_set("llm.api_key", "sk-supersecret-value").unwrap();
+        // The config file holds the value (user's explicit intent)...
+        assert!(g.read_config().contains("sk-supersecret-value"));
+        // ...but the revision DB's new_value must be redacted, not plaintext.
+        let rows = super::super::config_revision_store::list(10).unwrap();
+        assert_eq!(rows[0].new_value.as_deref(), Some("***"));
+        assert_ne!(
+            rows[0].new_value.as_deref(),
+            Some("sk-supersecret-value"),
+            "secret must never land in the revision new_value column"
+        );
     }
 
     #[test]

@@ -611,21 +611,17 @@ impl LLMCore for AnthropicCore {
     async fn health_check(&self) -> crate::types::HealthStatus {
         use crate::types::HealthStatus;
         let start = std::time::Instant::now();
-        let url = format!("{}/messages", self.base_url);
-        let body = json!({
-            "model": self.model,
-            "max_tokens": 1,
-            "messages": [
-                {"role": "user", "content": "hello"}
-            ]
-        });
+        // Use the non-billable GET /models endpoint instead of POST /messages.
+        // A real inference (even max_tokens=1) is billed on every probe, and
+        // health checks run periodically — a recurring charge just for liveness.
+        // GET /models validates reachability + API key auth at zero token cost.
+        let url = format!("{}/models", self.base_url);
 
         match self
             .client
-            .post(&url)
+            .get(&url)
             .header("x-api-key", self.api_key.expose_secret())
             .header("anthropic-version", "2023-06-01")
-            .json(&body)
             .send()
             .await
         {

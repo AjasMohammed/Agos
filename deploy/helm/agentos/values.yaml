@@ -31,6 +31,11 @@ vault:
 config:
   autoInitVault: true
   healthPort: 9091
+  # Bind the health/metrics server to all interfaces inside the pod so the
+  # kubelet's httpGet probes (which connect to the pod IP, not loopback) can
+  # reach it. The pod network namespace is isolated, so this is not exposed
+  # beyond the pod unless a Service/Ingress is created for it.
+  healthBind: "0.0.0.0"
   ollamaHost: http://ollama:11434
   ollamaModel: kimi-k2.5:cloud
   llmUrl: ""

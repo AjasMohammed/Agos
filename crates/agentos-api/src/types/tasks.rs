@@ -22,6 +22,10 @@ pub struct ApiTaskDetail {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// Event type that triggered this task, if it was created by an event
+    /// subscription (e.g. `DiskSpaceLow`). Absent for user/scheduled tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_event_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema, utoipa::IntoParams)]

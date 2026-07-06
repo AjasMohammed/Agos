@@ -157,24 +157,61 @@ impl Kernel {
             };
         }
 
-        let (command, args, env) = match install_invocation(&entry, no_auth) {
+        let (mut command, args, mut env) = match install_invocation(&entry, no_auth) {
             Ok(t) => t,
             Err(message) => return KernelResponse::Error { message },
         };
 
-        // Validate the declared runtime is present for a clear early error
-        // (skipped when the operator supplies an explicit runtime binary).
-        if runtime_binary_override.is_none() {
-            if let Some(rt) = &entry.install.runtime {
-                let min = entry.install.min_runtime_version.as_deref().unwrap_or("0");
-                if let Err(e) = crate::runtime_resolver::resolve_by_name(rt, min) {
+        // Resolve the runtime binary the server must run under: an explicit
+        // --runtime-binary wins (existence-checked, version check skipped);
+        // otherwise the resolver picks the best installed runtime
+        // (nvm/volta/asdf before system PATH).
+        let runtime_binary = match &runtime_binary_override {
+            Some(path) => {
+                let p = std::path::PathBuf::from(path);
+                if !p.is_file() {
                     return KernelResponse::Error {
-                        message: format!(
-                            "{e}. Install {rt} (>= {min}) or pass --runtime-binary <path>."
-                        ),
+                        message: format!("--runtime-binary {path} does not exist or is not a file"),
                     };
                 }
+                Some(p)
             }
+            None => match &entry.install.runtime {
+                Some(rt) => {
+                    let min = entry.install.min_runtime_version.as_deref().unwrap_or("0");
+                    match crate::runtime_resolver::resolve_by_name(rt, min) {
+                        Ok(resolved) => Some(resolved.binary),
+                        Err(e) => {
+                            return KernelResponse::Error {
+                                message: format!(
+                                    "{e}. Install {rt} (>= {min}) or pass --runtime-binary <path>."
+                                ),
+                            }
+                        }
+                    }
+                }
+                None => None,
+            },
+        };
+
+        // Pin the spawn to the resolved runtime instead of trusting the
+        // kernel's PATH (the 2026-04-18 Gmail incident: `#!/usr/bin/env node`
+        // resolved an ancient system node). The launcher colocated with the
+        // runtime (nvm/volta/asdf ship npx next to node) becomes the absolute
+        // command, and the runtime's bin dir is prepended to the child PATH so
+        // env-shebang lookups inside the launcher resolve the same runtime.
+        if let Some(bin_dir) = runtime_binary.as_deref().and_then(|b| b.parent()) {
+            // join() with an absolute `command` (bundled/global strategies) is
+            // a deliberate no-op; only relative launchers (npx/uvx) get pinned.
+            let colocated = bin_dir.join(&command);
+            if colocated.is_file() {
+                command = colocated.to_string_lossy().into_owned();
+            }
+            let child_path = match std::env::var("PATH") {
+                Ok(p) if !p.is_empty() => format!("{}:{p}", bin_dir.display()),
+                _ => bin_dir.display().to_string(),
+            };
+            env.insert("PATH".to_string(), child_path);
         }
 
         tracing::info!(catalog_id = %id, command = %command, "Installing MCP server from catalog");

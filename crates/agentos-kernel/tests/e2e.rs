@@ -44,3 +44,6 @@ mod personalization;
 
 #[path = "e2e/task_checkout_e2e.rs"]
 mod task_checkout_e2e;
+
+#[path = "e2e/heartbeat_work_loop_e2e.rs"]
+mod heartbeat_work_loop_e2e;
