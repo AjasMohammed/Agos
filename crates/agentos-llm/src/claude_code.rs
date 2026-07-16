@@ -437,6 +437,14 @@ impl ClaudeCodeCore {
         if let Some(dir) = image_dir {
             cmd.arg("--add-dir").arg(dir).current_dir(dir);
         }
+        // Isolation: `--strict-mcp-config` makes the CLI use ONLY the MCP servers
+        // we pass via `--mcp-config` and IGNORE the host user's `~/.claude.json`
+        // servers. Passed unconditionally so that even when no gateway is attached
+        // (plain-adapter fallback), the agent can never reach the operator's
+        // personal MCP servers (gmail, browser, etc.) — those live entirely
+        // outside AgentOS's capability/audit/sandbox layer. Without this the
+        // `claude` CLI silently merges the user's servers into the agent's toolset.
+        cmd.arg("--strict-mcp-config");
         // When an MCP config is attached, expose the 4 AgentOS meta-tools as
         // native MCP tools. The built-in denylist above still applies, so only
         // these `mcp__agentos__*` tools are allowed alongside the denied built-ins.

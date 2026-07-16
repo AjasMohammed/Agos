@@ -380,6 +380,63 @@ impl Kernel {
         Ok(gateway.config_path)
     }
 
+    /// For `claude-code`/`claude-cli` agents, stand up the per-agent MCP tool
+    /// gateway and return a `ClaudeCodeCore` bound to it, so the `claude`
+    /// subprocess can call AgentOS tools natively (through `ToolRunner` with the
+    /// agent's real permission set — capability enforcement preserved). For any
+    /// other provider it returns `base_adapter` unchanged; if the gateway fails
+    /// to start it falls back to `base_adapter` (non-fatal — the agent still
+    /// works via the markdown tool envelope).
+    ///
+    /// Shared by the interactive connect path AND boot-time auto-reactivation so
+    /// a restarted claude-code agent keeps its native tool plane. Without this on
+    /// the restart path the agent silently loses every AgentOS tool.
+    pub(crate) async fn build_claude_code_adapter(
+        &self,
+        agent_id: AgentID,
+        agent_model: &str,
+        provider: &LLMProvider,
+        permissions: PermissionSet,
+        base_adapter: Arc<dyn LLMCore>,
+    ) -> Arc<dyn LLMCore> {
+        let is_claude_cli = matches!(
+            provider,
+            LLMProvider::Custom(name) if name == "claude-code" || name == "claude-cli"
+        );
+        if !is_claude_cli {
+            return base_adapter;
+        }
+        match self
+            .start_claude_mcp_gateway_for_agent(agent_id, permissions)
+            .await
+        {
+            Ok(config_path) => {
+                let image_resolver = self
+                    .image_resolver
+                    .read()
+                    .expect("image_resolver lock poisoned")
+                    .clone();
+                let mut core = ClaudeCodeCore::new(agent_model.to_string())
+                    .with_image_resolver(image_resolver)
+                    .with_mcp_config(config_path);
+                if let Some(lookup) = &self.claude_session_lookup {
+                    core = core.with_resume_store(
+                        lookup.clone() as Arc<dyn agentos_llm::ClaudeSessionLookup>
+                    );
+                }
+                Arc::new(core) as Arc<dyn LLMCore>
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "Failed to start Claude MCP tool gateway; using plain claude-code adapter"
+                );
+                base_adapter
+            }
+        }
+    }
+
     /// Resolve the budget to bind to an agent at registration. An org-node budget
     /// (Phase 2) wins over the global `[agent_budget]` config (Phase 1); a lookup
     /// failure degrades to the config budget rather than blocking the connect.
@@ -739,50 +796,19 @@ impl Kernel {
 
         // For the `claude-code`/`claude-cli` subprocess backend, stand up a
         // per-agent localhost MCP tool gateway and rebuild the adapter with its
-        // config so the `claude` subprocess can call AgentOS tools natively.
-        // This is done here (not in `build_llm_adapter`) because the gateway
-        // needs the agent's real `agent_id` and `PermissionSet`, which only
-        // exist after registration. Tool calls flow through `ToolRunner` with
-        // the agent's REAL permission set — capability enforcement is preserved.
-        let llm_adapter = if matches!(
-            &profile.provider,
-            LLMProvider::Custom(name) if name == "claude-code" || name == "claude-cli"
-        ) {
-            match self
-                .start_claude_mcp_gateway_for_agent(agent_id, profile.permissions.clone())
-                .await
-            {
-                Ok(config_path) => {
-                    let image_resolver = self
-                        .image_resolver
-                        .read()
-                        .expect("image_resolver lock poisoned")
-                        .clone();
-                    let mut core = ClaudeCodeCore::new(agent_model.clone())
-                        .with_image_resolver(image_resolver)
-                        .with_mcp_config(config_path);
-                    if let Some(lookup) = &self.claude_session_lookup {
-                        core = core.with_resume_store(
-                            lookup.clone() as Arc<dyn agentos_llm::ClaudeSessionLookup>
-                        );
-                    }
-                    Arc::new(core) as Arc<dyn LLMCore>
-                }
-                Err(e) => {
-                    // Non-fatal: fall back to the plain adapter (no native tool
-                    // gateway). The agent still works via the markdown tool
-                    // envelope; we just lose native MCP tool calling.
-                    tracing::warn!(
-                        agent_id = %agent_id,
-                        error = %e,
-                        "Failed to start Claude MCP tool gateway; using plain claude-code adapter"
-                    );
-                    llm_adapter
-                }
-            }
-        } else {
-            llm_adapter
-        };
+        // config so the `claude` subprocess can call AgentOS tools natively. Done
+        // here (not in `build_llm_adapter`) because the gateway needs the agent's
+        // real `agent_id` and `PermissionSet`, which only exist after
+        // registration. Shared with the boot-time restart path.
+        let llm_adapter = self
+            .build_claude_code_adapter(
+                agent_id,
+                &agent_model,
+                &profile.provider,
+                profile.permissions.clone(),
+                llm_adapter,
+            )
+            .await;
 
         {
             let mut active = self.active_llms.write().await;
@@ -1773,6 +1799,21 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                     continue;
                 }
             };
+
+            // Rebuild the per-agent Claude MCP tool gateway on restart, exactly
+            // like the interactive connect path. Without this a restarted
+            // claude-code agent gets a gateway-less adapter and silently loses
+            // every AgentOS tool (and, before `--strict-mcp-config`, fell back to
+            // the host operator's personal MCP servers). No-op for other providers.
+            let llm_adapter = self
+                .build_claude_code_adapter(
+                    agent_id,
+                    &agent_model,
+                    &agent.provider,
+                    agent.permissions.clone(),
+                    llm_adapter,
+                )
+                .await;
 
             // Recover missing Ed25519 identity — edge case where key gen failed at first
             // connect. The boot pre-population loop skips agents without a pubkey, so
