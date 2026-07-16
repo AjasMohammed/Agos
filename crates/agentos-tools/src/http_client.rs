@@ -44,6 +44,7 @@ impl HttpClientTool {
                 // Materialize any error message before consuming `attempt`.
                 let block_reason: Option<String> = {
                     let url = attempt.url();
+                    let port = url.port_or_known_default().unwrap_or(0);
                     url.host_str().and_then(|host| {
                         if let Ok(ip) = host.parse::<std::net::IpAddr>() {
                             if is_private_ip(&ip) {
@@ -62,6 +63,25 @@ impl HttpClientTool {
                                     "SSRF: redirect to local hostname blocked: {}",
                                     host
                                 ));
+                            }
+                            // DNS-rebinding defense (W12): a redirect to a
+                            // hostname that resolves to a private/loopback IP
+                            // must be blocked. The redirect policy is sync, so
+                            // resolve synchronously here and reject if ANY
+                            // resolved address is private. Resolution failures
+                            // are not treated as SSRF (the request will simply
+                            // fail to connect).
+                            if let Ok(addrs) =
+                                std::net::ToSocketAddrs::to_socket_addrs(&(lower.as_str(), port))
+                            {
+                                for addr in addrs {
+                                    if is_private_ip(&addr.ip()) {
+                                        return Some(format!(
+                                            "SSRF: redirect host {host} resolves to private IP {} (blocked)",
+                                            addr.ip()
+                                        ));
+                                    }
+                                }
                             }
                         }
                         None

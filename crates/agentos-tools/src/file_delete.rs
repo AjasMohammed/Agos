@@ -41,11 +41,11 @@ impl AgentTool for FileDelete {
 
         tracing::debug!(path = path_str, "file-delete: starting");
 
-        // SECURITY: resolve path, checking workspace paths before falling back to data_dir.
+        // SECURITY: file-delete writes — resolve against the *writable* workspace list.
         let resolved = crate::traits::resolve_tool_path(
             path_str,
             &context.data_dir,
-            &context.workspace_paths,
+            &context.workspace_paths_writable,
         )?;
 
         // canonicalize verifies the file actually exists and resolves symlinks.
@@ -66,7 +66,7 @@ impl AgentTool for FileDelete {
                 })?;
 
         let in_workspace = context
-            .workspace_paths
+            .workspace_paths_writable
             .iter()
             .any(|wp| canonical.starts_with(wp));
         // KMC Phase 3: check dynamic storage zones

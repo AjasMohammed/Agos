@@ -17,14 +17,14 @@ outputs = ["schedules"]
 input  = "ListMySchedulesIntent"
 output = "ListMySchedulesResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.kinds]
+[payload_schema.properties.kinds]
 type        = "array"
 description = "Optional filter: subset of ['schedule', 'once', 'timer']. Default = all."
 
-[input_schema.properties.include_inactive]
+[payload_schema.properties.include_inactive]
 type        = "boolean"
 description = "Include Paused/Disabled/Fired/Cancelled schedules. Default false."
 

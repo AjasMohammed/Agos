@@ -104,7 +104,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | agentos mcp serve
 
 **Offline command** — does not require a running kernel. The tool registry is loaded fresh from tool manifest files.
 
-The server grants a broad `operator_permissions()` permission set covering all 11 resource namespaces used by core tools:
+The server grants a broad `operator_permissions()` permission set covering all 12 resource namespaces used by core tools:
 
 | Namespace | Access |
 |-----------|--------|
@@ -188,20 +188,17 @@ web-search           disconnected 0        MCP server 'web-search' reconnect fai
 Beyond `[[mcp.servers]]` config-driven boot, the kernel supports **runtime attach**: connect a new MCP server without restarting. Attachments are persisted to the kernel database (SQLite) and restored automatically on the next boot.
 
 ```bash
-# Stdio transport — typical for npm/python MCP packages
-agentos mcp attach github \
-  --transport stdio \
-  --command "npx -y @modelcontextprotocol/server-github"
+# Stdio transport — typical for npm/python MCP packages.
+# The server command and its arguments go after `--`.
+agentos mcp attach github -- npx -y @modelcontextprotocol/server-github
 
-# HTTP transport — for self-hosted MCP servers
+# HTTP transport with a static bearer token — for self-hosted MCP servers
 agentos mcp attach corp-tools \
-  --transport http \
   --url https://mcp.internal.example.com \
-  --bearer "$CORP_TOOLS_TOKEN"
+  --token "$CORP_TOOLS_TOKEN"
 
 # OAuth-protected server — token lifecycle managed by the kernel
 agentos mcp attach jira \
-  --transport http \
   --url https://mcp.atlassian.example.com \
   --oauth-connector jira
 
@@ -209,19 +206,23 @@ agentos mcp attach jira \
 agentos mcp detach github
 ```
 
-`mcp attach` writes a `McpAttached` audit event; `mcp detach` writes `McpDetached`. The kernel reports `McpStatus` for each running server (config-driven and runtime-attached) in a single list.
+Pass environment variables to a stdio server with repeated `--env KEY=VALUE` flags (use `vault:SECRET_NAME` as the value to read a secret from the vault), e.g. `agentos mcp attach github --env GITHUB_TOKEN=vault:github_token -- npx -y @modelcontextprotocol/server-github`.
+
+Both `attach` and `detach` are kernel-mediated: the change is applied to the running supervisor and persisted to SQLite. The kernel reports `McpStatus` for each running server (config-driven and runtime-attached) in a single list — confirm the result with `agentos mcp status`.
 
 ### `mcp tools` / `mcp call`
 
 ```bash
-# List every tool currently exposed by attached servers
+# List every tool in the local AgentOS tool registry (offline — loaded from
+# tool manifest files, not the live kernel or attached servers)
 agentos mcp tools
 
-# Direct invocation of a single tool — bypasses the agent loop
-agentos mcp call github list_repositories '{"owner": "example"}'
+# Direct invocation of a single tool — bypasses the agent loop.
+# Operates on the local AgentOS tool registry.
+agentos mcp call --tool file-reader --input '{"path": "notes.txt"}'
 ```
 
-These are useful for smoke-testing a server immediately after attaching it.
+`mcp tools` lists the local AgentOS tool registry offline; it does not query attached MCP servers. Both commands are useful for smoke-testing tool dispatch.
 
 ---
 
@@ -255,12 +256,21 @@ Treat MCP tool output the same way you treat any untrusted user data: use it as 
 Beyond classic MCP tool import, AgentOS speaks an **Agent-to-Agent** protocol so one AgentOS instance can discover and delegate tasks to agents on another instance.
 
 ```bash
+# Show this agent's own A2A card (what external agents would see)
+agentos a2a card
+
 # Discover agents exposed by a remote AgentOS endpoint
 agentos a2a discover https://other.example.com
 
-# Delegate a task to a remote agent
-agentos a2a delegate https://other.example.com/agents/researcher \
-  --task "Find the latest CVEs for openssl 3.x"
+# Delegate a capability invocation to a remote agent and wait for the result
+agentos a2a delegate \
+  --agent https://other.example.com \
+  --capability researcher \
+  --input '{"query":"Find the latest CVEs for openssl 3.x"}' \
+  --wait
+
+# List active A2A task delegations
+agentos a2a tasks
 ```
 
 The remote call is wrapped in a `task-delegate`-shaped intent and passes through the same `CapabilityToken` and `ApprovalHook` machinery as a local delegation. Failures (network, auth, capability) are returned as `ToolExecutionFailed` with the remote error embedded.

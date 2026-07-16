@@ -90,6 +90,7 @@ impl Kernel {
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
             tool_categories: None,
+            disable_tool_scoping: false,
         };
 
         self.background_pool

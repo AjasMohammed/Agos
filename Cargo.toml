@@ -32,7 +32,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/agentos/agentos"
@@ -74,7 +74,7 @@ toml_edit = "0.22"
 notify = { version = "6", features = ["macos_fsevent"] }
 
 # HTTP client (for Ollama adapter)
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls"] }
 url = "2"
 
 # Error handling
@@ -108,11 +108,12 @@ libc = "0.2"
 nix = { version = "0.29", features = ["fs"] }
 
 # WASM runtime
-wasmtime = { version = "44.0.1", features = ["async", "cranelift"] }
-wasmtime-wasi = "44.0.1"
+wasmtime = { version = "44.0.2", features = ["async", "cranelift"] }
+wasmtime-wasi = "44.0.2"
 
 # JSON Schema validation
 jsonschema = "0.28"
+schemars = { version = "0.8", features = ["derive"] }
 
 # Container runtime
 bollard = "0.18"
@@ -121,7 +122,7 @@ bollard = "0.18"
 rumqttc = "0.25"
 
 # Email (SMTP)
-lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport", "hostname"] }
+lettre = { version = "0.11.22", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport", "hostname"] }
 
 # TLS
 tokio-rustls = "0.26"
@@ -148,15 +149,16 @@ agentos-http = { path = "crates/agentos-http" }
 [profile.dev]
 opt-level = 0
 debug = 1          # line tables only — faster to write, gdb still works
-incremental = true
+incremental = false  # incremental cache repeatedly ballooned to 11-13G and filled the disk
 
 [profile.dev.package."*"]
 opt-level = 1      # compile deps at opt-level 1 — big speedup for heavy crates like wasmtime/reqwest
 
 [profile.release]
-lto = "thin"
+lto = false
 codegen-units = 16
 strip = "debuginfo"
+incremental = false  # see [profile.dev] — keeps target/ bounded
 
 [profile.dist]
 inherits = "release"

@@ -106,6 +106,43 @@ impl Kernel {
             ps
         };
 
+        // 4b. Org-chart clamp: if the target agent occupies org node(s), its
+        //     effective scope can never exceed the configured node ceiling(s),
+        //     no matter how broadly the parent delegates. Fail-closed — clamp to
+        //     the intersection of every node the agent belongs to. This is the
+        //     runtime half of the downward-only invariant the OrgStore enforces
+        //     at write time (see org_store.rs).
+        let requested = if let Some(org_store) = &self.org_store {
+            match org_store.scopes_for_agent(agent_name).await {
+                Ok(scopes) if !scopes.is_empty() => {
+                    let node_count = scopes.len();
+                    let clamped = scopes
+                        .iter()
+                        .fold(requested, |acc, ceiling| acc.intersect_with(ceiling));
+                    tracing::debug!(
+                        agent_name = %agent_name,
+                        node_count,
+                        "SpawnSubAgent: clamped child scope to org node ceiling"
+                    );
+                    clamped
+                }
+                Ok(_) => requested, // agent not in any org — no clamp
+                Err(e) => {
+                    // Lookup failure must not silently widen scope. The downstream
+                    // scope_for_child still intersects with the parent token, so
+                    // we degrade to that bound and log loudly.
+                    tracing::warn!(
+                        agent_name = %agent_name,
+                        error = %e,
+                        "SpawnSubAgent: org scope lookup failed — proceeding with parent-token bound only"
+                    );
+                    requested
+                }
+            }
+        } else {
+            requested
+        };
+
         // Resolve effective tool_categories allowlist for the child.
         // Sub-agents may NEVER widen the parent's allowlist; child request must
         // be a subset of parent's allowlist when both are present. If the child
@@ -192,6 +229,7 @@ impl Kernel {
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
             tool_categories: effective_tool_categories,
+            disable_tool_scoping: false,
         };
 
         self.scheduler.enqueue(child_task).await;
@@ -389,6 +427,7 @@ mod tests {
             thinking_level: Default::default(),
             spawner_agent_id: None,
             tool_categories: None,
+            disable_tool_scoping: false,
         }
     }
 

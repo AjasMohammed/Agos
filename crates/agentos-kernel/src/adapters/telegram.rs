@@ -1,10 +1,11 @@
 use crate::notification_router::{DeliveryAdapter, DeliveryError, InboundMessage};
 use agentos_types::{
-    ChannelInstanceID, DeliveryChannel, NotificationPriority, NotificationSource, UserMessage,
-    UserMessageKind,
+    AttachmentKind, ChannelInstanceID, DeliveryChannel, NotificationPriority, NotificationSource,
+    UserMessage, UserMessageKind,
 };
 use async_trait::async_trait;
 use chrono::Utc;
+use futures::StreamExt;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -245,19 +246,173 @@ impl DeliveryAdapter for TelegramDeliveryAdapter {
     }
 
     async fn deliver(&self, msg: &UserMessage) -> Result<(), DeliveryError> {
-        let chat_id = self.chat_id.read().await;
-        if chat_id.is_empty() {
-            return Err(DeliveryError(
-                "Telegram chat_id not yet discovered — send /start to the bot first".into(),
-            ));
-        }
+        // Clone the discovered chat_id and release the read lock immediately —
+        // holding it across the awaited HTTP sends (with up to ~1h of bounded
+        // 429 backoff) would block inbound chat_id discovery writes.
+        let chat_id: String = {
+            let guard = self.chat_id.read().await;
+            if guard.is_empty() {
+                return Err(DeliveryError(
+                    "Telegram chat_id not yet discovered — send /start to the bot first".into(),
+                ));
+            }
+            guard.clone()
+        };
 
-        let plain = format_telegram_plain(msg);
-        let reply_markup = build_inline_keyboard(msg);
         let reply_to = msg
             .reply_to_external_id
             .as_ref()
             .and_then(|s| s.parse::<i64>().ok());
+
+        // Media attachment: Telegram fetches the URL itself via sendPhoto /
+        // sendDocument. The text body (if any) is still sent as a normal message
+        // by the loop below, so a long body is never truncated into a caption.
+        if let Some(att) = &msg.attachment {
+            let (method, field) = match att.kind {
+                AttachmentKind::Image => ("sendPhoto", "photo"),
+                AttachmentKind::Document => ("sendDocument", "document"),
+            };
+            let media_url = self.api_url(method);
+
+            // Telegram caps captions at 1024 chars. Render markdown → HTML, but
+            // only use it when the rendered form still fits; HTML entity/tag
+            // expansion can push a 1024-char source over the limit, so fall back
+            // to the plain (un-rendered) caption rather than risk MESSAGE_TOO_LONG.
+            let (plain_caption, html_caption) = match &att.caption {
+                Some(cap) => {
+                    let plain: String = cap.chars().take(1024).collect();
+                    let html = agentos_channels::telegram_format::markdown_to_telegram_html(&plain);
+                    if html.chars().count() <= 1024 {
+                        (plain, Some(html))
+                    } else {
+                        (plain, None)
+                    }
+                }
+                None => (String::new(), None),
+            };
+
+            if !att.group_urls.is_empty() {
+                // Album of image URLs via sendMediaGroup (2–10 items). The caption
+                // attaches to the first item and shows as the album caption.
+                let mut all = Vec::with_capacity(att.group_urls.len() + 1);
+                all.push(att.url.clone());
+                all.extend(att.group_urls.iter().cloned());
+                let media: Vec<Value> = all
+                    .iter()
+                    .take(10)
+                    .enumerate()
+                    .map(|(i, u)| {
+                        let mut item = json!({ "type": "photo", "media": u });
+                        if i == 0 && !plain_caption.is_empty() {
+                            if let Some(html) = &html_caption {
+                                item["caption"] = json!(html);
+                                item["parse_mode"] = json!("HTML");
+                            } else {
+                                item["caption"] = json!(plain_caption);
+                            }
+                        }
+                        item
+                    })
+                    .collect();
+                let mut payload = json!({ "chat_id": &chat_id, "media": media });
+                if let Some(rid) = reply_to {
+                    payload["reply_to_message_id"] = json!(rid);
+                }
+                let group_url = self.api_url("sendMediaGroup");
+                telegram_post_json_with_retry(&self.client, &group_url, &payload).await?;
+            } else if let Some(inline) = &att.inline {
+                // Inline bytes (resolved from a file_id): multipart upload.
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(inline.data_base64.as_bytes())
+                    .map_err(|_| DeliveryError("inline attachment: invalid base64".into()))?;
+                let fname = att.filename.clone().unwrap_or_else(|| match att.kind {
+                    AttachmentKind::Image => "image".to_string(),
+                    AttachmentKind::Document => "file".to_string(),
+                });
+                let mime = if inline.mime.is_empty() {
+                    "application/octet-stream"
+                } else {
+                    &inline.mime
+                };
+                let part = reqwest::multipart::Part::bytes(bytes)
+                    .file_name(fname)
+                    .mime_str(mime)
+                    .map_err(|_| DeliveryError("inline attachment: invalid mime".into()))?;
+                let mut form = reqwest::multipart::Form::new()
+                    .text("chat_id", chat_id.clone())
+                    .part(field.to_string(), part);
+                if !plain_caption.is_empty() {
+                    if let Some(html) = &html_caption {
+                        form = form
+                            .text("caption", html.clone())
+                            .text("parse_mode", "HTML");
+                    } else {
+                        form = form.text("caption", plain_caption.clone());
+                    }
+                }
+                if let Some(rid) = reply_to {
+                    form = form.text("reply_to_message_id", rid.to_string());
+                }
+                let resp = self
+                    .client
+                    .post(&media_url)
+                    .multipart(form)
+                    .send()
+                    .await
+                    .map_err(|_| {
+                        DeliveryError("Telegram media upload failed (details redacted)".into())
+                    })?;
+                if !resp.status().is_success() {
+                    return Err(DeliveryError(format!(
+                        "Telegram media upload HTTP {}",
+                        resp.status().as_u16()
+                    )));
+                }
+            } else {
+                // URL path: Telegram fetches the URL itself.
+                let mut payload = json!({ "chat_id": &chat_id });
+                payload[field] = json!(att.url);
+                if !plain_caption.is_empty() {
+                    if let Some(html) = &html_caption {
+                        payload["caption"] = json!(html);
+                        payload["parse_mode"] = json!("HTML");
+                    } else {
+                        payload["caption"] = json!(plain_caption);
+                    }
+                }
+                if let Some(rid) = reply_to {
+                    payload["reply_to_message_id"] = json!(rid);
+                }
+                if let Err(e) =
+                    telegram_post_json_with_retry(&self.client, &media_url, &payload).await
+                {
+                    let es = format!("{e}");
+                    // Only retry as plain text on an actual entity-parse failure; a
+                    // generic 400 (bad/unreachable URL, unsupported type) would just
+                    // fail again, so surface it directly.
+                    if payload.get("parse_mode").is_some() && es.contains("can't parse entities") {
+                        tracing::warn!(error = %e, "Telegram media caption HTML parse failed; resending caption as plain");
+                        payload["caption"] = json!(plain_caption);
+                        if let Some(obj) = payload.as_object_mut() {
+                            obj.remove("parse_mode");
+                        }
+                        telegram_post_json_with_retry(&self.client, &media_url, &payload).await?;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        // Skip the synthetic notification banner when this is an attachment-only
+        // message with no body — the media speaks for itself.
+        let plain = if msg.attachment.is_some() && msg.body.trim().is_empty() {
+            String::new()
+        } else {
+            format_telegram_plain(msg)
+        };
+        let reply_markup = build_inline_keyboard(msg);
 
         let url = self.api_url("sendMessage");
         let has_markup = !reply_markup.is_null();
@@ -550,6 +705,144 @@ async fn telegram_poll_loop(
     }
 }
 
+/// Maximum bytes downloaded for an inbound media file. Bounds memory and matches
+/// the spirit of the web upload cap; Telegram's Bot API getFile is limited to
+/// 20 MiB regardless.
+pub const TELEGRAM_MAX_DOWNLOAD_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Detect a content type from leading magic bytes. Returns a best-effort MIME or
+/// `application/octet-stream` when unrecognized.
+pub fn sniff_mime(bytes: &[u8]) -> &'static str {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => "image/png",
+        [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",
+        [b'G', b'I', b'F', b'8', ..] => "image/gif",
+        // RIFF....WEBP
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "image/webp",
+        [b'%', b'P', b'D', b'F', ..] => "application/pdf",
+        // OGG container (Telegram voice notes are OGG/Opus)
+        [b'O', b'g', b'g', b'S', ..] => "audio/ogg",
+        [b'I', b'D', b'3', ..] => "audio/mpeg",
+        // ISO-BMFF (mp4): bytes 4..8 == "ftyp"
+        [_, _, _, _, b'f', b't', b'y', b'p', ..] => "video/mp4",
+        _ => "application/octet-stream",
+    }
+}
+
+/// File extension for a detected MIME (used to name stored files).
+pub fn ext_for_mime(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "application/pdf" => "pdf",
+        "audio/ogg" => "ogg",
+        "audio/mpeg" => "mp3",
+        "video/mp4" => "mp4",
+        _ => "bin",
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GetFileResponse {
+    ok: bool,
+    #[serde(default)]
+    result: Option<GetFileResult>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetFileResult {
+    file_path: Option<String>,
+    #[serde(default)]
+    file_size: Option<i64>,
+}
+
+/// Download an inbound Telegram file by `file_id`.
+///
+/// Calls `getFile` to resolve the temporary file path, enforces `max_bytes`
+/// against the reported size, then fetches the bytes from the Bot API file
+/// endpoint and sniffs the MIME from magic bytes. The download URL is always
+/// `api.telegram.org` derived from Telegram's own `file_path`, so it is not
+/// attacker-controllable (no SSRF surface). Returns `(bytes, detected_mime)`.
+pub async fn download_telegram_file(
+    client: &reqwest::Client,
+    token: &str,
+    file_id: &str,
+    max_bytes: u64,
+) -> Result<(Vec<u8>, String), DeliveryError> {
+    let get_file_url = format!("https://api.telegram.org/bot{token}/getFile");
+    let resp = client
+        .post(&get_file_url)
+        .json(&json!({ "file_id": file_id }))
+        .send()
+        .await
+        .map_err(|_| DeliveryError("Telegram getFile request failed (details redacted)".into()))?;
+    let parsed: GetFileResponse = resp
+        .json()
+        .await
+        .map_err(|_| DeliveryError("Telegram getFile parse failed".into()))?;
+    if !parsed.ok {
+        return Err(DeliveryError(format!(
+            "Telegram getFile error: {}",
+            parsed.description.as_deref().unwrap_or("unknown")
+        )));
+    }
+    let result = parsed
+        .result
+        .ok_or_else(|| DeliveryError("Telegram getFile returned no result".into()))?;
+    let file_path = result
+        .file_path
+        .ok_or_else(|| DeliveryError("Telegram getFile returned no file_path".into()))?;
+    if let Some(sz) = result.file_size {
+        if sz as u64 > max_bytes {
+            return Err(DeliveryError(format!(
+                "Telegram media too large: {sz} bytes (cap {max_bytes})"
+            )));
+        }
+    }
+
+    // Telegram-derived path; not attacker-controllable. NOTE: `token` is
+    // embedded in this URL — reqwest errors (whose Display includes the URL)
+    // must never be logged verbatim; all error arms here are redacted.
+    let dl_url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
+    let dl =
+        client.get(&dl_url).send().await.map_err(|_| {
+            DeliveryError("Telegram file download failed (details redacted)".into())
+        })?;
+    if !dl.status().is_success() {
+        return Err(DeliveryError(format!(
+            "Telegram file download HTTP {}",
+            dl.status().as_u16()
+        )));
+    }
+    // Pre-check Content-Length when present (covers the case where getFile
+    // omitted file_size), then stream the body and enforce the cap
+    // incrementally so memory is bounded even without a declared length.
+    if let Some(len) = dl.content_length() {
+        if len > max_bytes {
+            return Err(DeliveryError(format!(
+                "Telegram media too large: {len} bytes (cap {max_bytes})"
+            )));
+        }
+    }
+    let mut stream = dl.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| DeliveryError("Telegram file body read failed".into()))?;
+        if buf.len() as u64 + chunk.len() as u64 > max_bytes {
+            return Err(DeliveryError(format!(
+                "Telegram media exceeded cap during download (> {max_bytes} bytes)"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    let mime = sniff_mime(&buf).to_string();
+    Ok((buf, mime))
+}
+
 /// Pull the chat_id from the first available location in a Telegram update.
 pub fn extract_chat_id_from_update(update: &TelegramUpdate) -> Option<String> {
     if let Some(msg) = &update.message {
@@ -572,7 +865,20 @@ pub fn extract_inbound_message(
     // Regular message
     if let Some(msg) = &update.message {
         if msg.chat.id.to_string() == registered_chat_id {
-            let text = msg.text.clone().unwrap_or_default();
+            // Telegram puts the user's typed text in `text` for plain messages
+            // and in `caption` when media is attached. Compose both plus a note
+            // describing any attachment so media messages are no longer dropped.
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(t) = msg.text.as_deref().filter(|s| !s.is_empty()) {
+                parts.push(t.to_string());
+            }
+            if let Some(c) = msg.caption.as_deref().filter(|s| !s.is_empty()) {
+                parts.push(c.to_string());
+            }
+            if let Some(media) = telegram_media_ref(msg) {
+                parts.push(telegram_media_note(&media));
+            }
+            let text = parts.join("\n");
             if !text.is_empty() {
                 return Some(InboundMessage {
                     channel: DeliveryChannel::custom(DeliveryChannel::TELEGRAM),
@@ -582,6 +888,8 @@ pub fn extract_inbound_message(
                     reply_to_notification_id: None,
                     received_at: Utc::now(),
                     raw: serde_json::to_value(msg).unwrap_or_default(),
+                    media_file_ids: Vec::new(),
+                    pending_media: Vec::new(),
                 });
             }
         }
@@ -605,6 +913,8 @@ pub fn extract_inbound_message(
                     reply_to_notification_id: None,
                     received_at: Utc::now(),
                     raw: serde_json::to_value(cq).unwrap_or_default(),
+                    media_file_ids: Vec::new(),
+                    pending_media: Vec::new(),
                 });
             }
         }
@@ -732,6 +1042,154 @@ pub struct TelegramMessage {
     pub chat: TelegramChat,
     #[serde(default)]
     pub text: Option<String>,
+    /// Caption accompanying a media message (photo/document/etc.). Telegram puts
+    /// the user's typed text here — NOT in `text` — when media is attached.
+    #[serde(default)]
+    pub caption: Option<String>,
+    /// Photo sizes (ascending). Largest is the best quality.
+    #[serde(default)]
+    pub photo: Option<Vec<TelegramPhotoSize>>,
+    #[serde(default)]
+    pub document: Option<TelegramDocument>,
+    #[serde(default)]
+    pub voice: Option<TelegramVoice>,
+    #[serde(default)]
+    pub audio: Option<TelegramAudio>,
+    #[serde(default)]
+    pub video: Option<TelegramVideo>,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct TelegramPhotoSize {
+    pub file_id: String,
+    #[serde(default)]
+    pub file_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct TelegramDocument {
+    pub file_id: String,
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub file_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct TelegramVoice {
+    pub file_id: String,
+    #[serde(default)]
+    pub duration: i64,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub file_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct TelegramAudio {
+    pub file_id: String,
+    #[serde(default)]
+    pub duration: i64,
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub file_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct TelegramVideo {
+    pub file_id: String,
+    #[serde(default)]
+    pub duration: i64,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub file_size: Option<i64>,
+}
+
+/// A description of a media attachment found on an inbound Telegram message,
+/// plus the `file_id` needed to download it later (kernel-side, where the bot
+/// token and storage sink live).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramMediaRef {
+    pub file_id: String,
+    /// Human label for the agent (e.g. "photo", "voice message").
+    pub kind_label: String,
+    /// Optional original filename (documents/audio).
+    pub filename: Option<String>,
+}
+
+/// Identify the primary media attachment on a Telegram message, if any.
+/// For photos, the largest size (last in the ascending array) is chosen.
+pub fn telegram_media_ref(msg: &TelegramMessage) -> Option<TelegramMediaRef> {
+    if let Some(photos) = &msg.photo {
+        if let Some(largest) = photos.last() {
+            return Some(TelegramMediaRef {
+                file_id: largest.file_id.clone(),
+                kind_label: "photo".to_string(),
+                filename: None,
+            });
+        }
+    }
+    if let Some(doc) = &msg.document {
+        return Some(TelegramMediaRef {
+            file_id: doc.file_id.clone(),
+            kind_label: "document".to_string(),
+            filename: doc.file_name.clone(),
+        });
+    }
+    if let Some(v) = &msg.voice {
+        return Some(TelegramMediaRef {
+            file_id: v.file_id.clone(),
+            kind_label: "voice message".to_string(),
+            filename: None,
+        });
+    }
+    if let Some(a) = &msg.audio {
+        return Some(TelegramMediaRef {
+            file_id: a.file_id.clone(),
+            kind_label: "audio".to_string(),
+            filename: a.file_name.clone(),
+        });
+    }
+    if let Some(v) = &msg.video {
+        return Some(TelegramMediaRef {
+            file_id: v.file_id.clone(),
+            kind_label: "video".to_string(),
+            filename: None,
+        });
+    }
+    None
+}
+
+/// A short note appended to inbound text so the agent knows media arrived and
+/// does not hallucinate its contents. Replaced by real content (transcription /
+/// vision / stored file_id) once those phases land.
+fn telegram_media_note(media: &TelegramMediaRef) -> String {
+    match media.kind_label.as_str() {
+        "voice message" | "audio" => format!(
+            "[The user sent a {} — a transcript follows below if transcription is enabled; otherwise ask them to type the content.]",
+            media.kind_label
+        ),
+        "photo" => "[The user sent a photo.]".to_string(),
+        "video" => "[The user sent a video — video understanding is not available, so you cannot watch it. Ask them to describe it if needed.]".to_string(),
+        _ => {
+            let name = media
+                .filename
+                .as_deref()
+                .map(|n| format!(": {n}"))
+                .unwrap_or_default();
+            format!(
+                "[The user sent a {}{} — file contents are not yet retrievable. Ask them to paste the relevant text if needed.]",
+                media.kind_label, name
+            )
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -766,5 +1224,84 @@ mod tests {
     fn retry_after_from_parameters_object_reads_int() {
         let v = json!({"retry_after": 17});
         assert_eq!(retry_after_from_parameters_object(&v), 17);
+    }
+
+    fn msg_from(value: serde_json::Value) -> TelegramMessage {
+        serde_json::from_value(value).expect("valid TelegramMessage")
+    }
+
+    #[test]
+    fn photo_message_picks_largest_file_id() {
+        let m = msg_from(json!({
+            "message_id": 1,
+            "chat": {"id": 42},
+            "photo": [
+                {"file_id": "small", "file_size": 100},
+                {"file_id": "large", "file_size": 9000}
+            ]
+        }));
+        let media = telegram_media_ref(&m).expect("media");
+        assert_eq!(media.file_id, "large");
+        assert_eq!(media.kind_label, "photo");
+    }
+
+    #[test]
+    fn document_message_keeps_filename() {
+        let m = msg_from(json!({
+            "message_id": 1,
+            "chat": {"id": 42},
+            "document": {"file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf"}
+        }));
+        let media = telegram_media_ref(&m).expect("media");
+        assert_eq!(media.file_id, "doc1");
+        assert_eq!(media.filename.as_deref(), Some("report.pdf"));
+    }
+
+    #[test]
+    fn inbound_caption_is_captured_not_dropped() {
+        // A photo with a caption used to be dropped entirely. Now the caption
+        // text and a media note both reach the agent.
+        let update: TelegramUpdate = serde_json::from_value(json!({
+            "update_id": 1,
+            "message": {
+                "message_id": 5,
+                "chat": {"id": 42},
+                "caption": "what is wrong here?",
+                "photo": [{"file_id": "p1"}]
+            }
+        }))
+        .unwrap();
+        let inbound =
+            extract_inbound_message(&update, "42", ChannelInstanceID::new()).expect("inbound");
+        assert!(inbound.text.contains("what is wrong here?"));
+        assert!(inbound.text.contains("photo"));
+    }
+
+    #[test]
+    fn inbound_voice_only_still_produces_message() {
+        let update: TelegramUpdate = serde_json::from_value(json!({
+            "update_id": 2,
+            "message": {
+                "message_id": 6,
+                "chat": {"id": 42},
+                "voice": {"file_id": "v1", "duration": 3}
+            }
+        }))
+        .unwrap();
+        let inbound =
+            extract_inbound_message(&update, "42", ChannelInstanceID::new()).expect("inbound");
+        assert!(inbound.text.contains("voice message"));
+    }
+
+    #[test]
+    fn inbound_plain_text_unchanged() {
+        let update: TelegramUpdate = serde_json::from_value(json!({
+            "update_id": 3,
+            "message": {"message_id": 7, "chat": {"id": 42}, "text": "hello"}
+        }))
+        .unwrap();
+        let inbound =
+            extract_inbound_message(&update, "42", ChannelInstanceID::new()).expect("inbound");
+        assert_eq!(inbound.text, "hello");
     }
 }

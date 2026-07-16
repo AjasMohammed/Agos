@@ -17,21 +17,21 @@ outputs = ["content.text"]
 input  = "WebFetchIntent"
 output = "WebFetchResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["url"]
 
-[input_schema.properties.url]
+[payload_schema.properties.url]
 type = "string"
 format = "uri"
 description = "HTTP or HTTPS URL"
 
-[input_schema.properties.extract_text]
+[payload_schema.properties.extract_text]
 type = "boolean"
 default = true
 description = "When true, extract text from HTML responses"
 
-[input_schema.properties.max_chars]
+[payload_schema.properties.max_chars]
 type = "integer"
 default = 32000
 minimum = 1
@@ -45,3 +45,8 @@ gpu           = false
 max_memory_mb = 64
 max_cpu_ms    = 35000
 syscalls      = []
+
+[[examples]]
+description = "Fetch the content of a web page"
+[examples.payload]
+url = "https://example.com"

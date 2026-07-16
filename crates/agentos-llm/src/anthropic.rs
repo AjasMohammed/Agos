@@ -255,7 +255,11 @@ impl AnthropicCore {
             anthropic_tools.push(json!({
                 "name": tool_name,
                 "description": manifest.manifest.description,
-                "input_schema": tool_helpers::normalize_tool_input_schema(manifest.input_schema.as_ref()),
+                // Anthropic Messages API requires `input_schema` (NOT `payload_schema`).
+                // Using the wrong key causes 400 errors or silent schemaless tool definitions.
+                // Examples embedded inside input_schema via JSON-Schema "examples" keyword
+                // — survives the Anthropic API unchanged (sibling keys would 400).
+                "input_schema": tool_helpers::normalize_tool_input_schema_with_examples(manifest.payload_schema.as_ref(), &manifest.examples),
             }));
         }
 
@@ -350,6 +354,10 @@ fn attach_cache_control_to_last_block(message: &mut Value) {
 
 #[async_trait]
 impl LLMCore for AnthropicCore {
+    fn supports_native_tool_calling(&self) -> bool {
+        true
+    }
+
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
         self.infer_with_tools(context, &[]).await
     }
@@ -603,21 +611,17 @@ impl LLMCore for AnthropicCore {
     async fn health_check(&self) -> crate::types::HealthStatus {
         use crate::types::HealthStatus;
         let start = std::time::Instant::now();
-        let url = format!("{}/messages", self.base_url);
-        let body = json!({
-            "model": self.model,
-            "max_tokens": 1,
-            "messages": [
-                {"role": "user", "content": "hello"}
-            ]
-        });
+        // Use the non-billable GET /models endpoint instead of POST /messages.
+        // A real inference (even max_tokens=1) is billed on every probe, and
+        // health checks run periodically — a recurring charge just for liveness.
+        // GET /models validates reachability + API key auth at zero token cost.
+        let url = format!("{}/models", self.base_url);
 
         match self
             .client
-            .post(&url)
+            .get(&url)
             .header("x-api-key", self.api_key.expose_secret())
             .header("anthropic-version", "2023-06-01")
-            .json(&body)
             .send()
             .await
         {
@@ -735,30 +739,33 @@ impl LLMCore for AnthropicCore {
             serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
         );
 
-        let res = self
-            .client
-            .post(&url)
-            .header("x-api-key", self.api_key.expose_secret())
-            .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AgentOSError::LLMError {
-                provider: "anthropic".to_string(),
-                reason: format!("Reqwest failed: {}", e),
-            })?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let text = res.text().await.unwrap_or_default();
-            let err_msg = format!("Anthropic API error {}: {}", status, text);
-            let _ = tx.send(InferenceEvent::Error(err_msg.clone())).await;
-            return Err(AgentOSError::LLMError {
-                provider: "anthropic".to_string(),
-                reason: err_msg,
-            });
-        }
+        // Retry the initial POST + status check (before any SSE event is
+        // forwarded) so a transient upstream 5xx / network blip doesn't fail
+        // the whole chat turn — matching the resilience of the non-streaming
+        // path. `send_with_retry` returns the live `Response` with its body
+        // stream intact on 2xx.
+        let res = crate::retry::send_with_retry(
+            "anthropic",
+            &self.retry_policy,
+            &self.circuit_breaker,
+            Some(&self.concurrency),
+            || {
+                self.client
+                    .post(&url)
+                    .header("x-api-key", self.api_key.expose_secret())
+                    .header("anthropic-version", "2023-06-01")
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+            },
+        )
+        .await;
+        let res = match res {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(InferenceEvent::Error(e.to_string())).await;
+                return Err(e);
+            }
+        };
 
         // Streaming state.
         let mut full_text = String::new();
@@ -1134,9 +1141,10 @@ mod tests {
                 input: "Input".to_string(),
                 output: "Output".to_string(),
             },
-            input_schema: Some(
+            payload_schema: Some(
                 json!({"type": "object", "properties": {"path": {"type": "string"}}}),
             ),
+            examples: vec![],
             sandbox: ToolSandbox {
                 network: false,
                 fs_write: false,
@@ -1158,6 +1166,21 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "file-reader");
         assert_eq!(intent_map.get("file-reader"), Some(&"read".to_string()));
+
+        // Golden-body assertion: Anthropic Messages API requires `input_schema`
+        // (NOT `payload_schema`). Using the wrong key silently produces schemaless
+        // tools or 400 errors. This is the regression test for that bug.
+        assert!(
+            tools[0].get("input_schema").is_some(),
+            "Anthropic tool def must use `input_schema` key; got: {}",
+            tools[0]
+        );
+        assert!(
+            tools[0].get("payload_schema").is_none(),
+            "Anthropic tool def must NOT carry `payload_schema` — that's the AgentOS-internal field name"
+        );
+        assert_eq!(tools[0]["input_schema"]["type"], "object");
+        assert!(tools[0]["input_schema"]["properties"]["path"].is_object());
     }
 
     #[test]

@@ -16,7 +16,21 @@ impl Kernel {
         task_trace_id: &TraceID,
     ) -> anyhow::Result<(String, String, String, crate::retrieval_gate::RetrievalPlan)> {
         // 1. Collect elements for CompilationInputs
-        let base_tools_desc = self.tool_registry.read().await.tools_for_prompt();
+        // Tier-0 index: category counts + usage-ranked top-N names per category.
+        // Usage scores are loaded once per task setup (this fn runs once per
+        // task, not per iteration), so the rendered block is stable across the
+        // task's iterations and stays behind the Anthropic tools cache breakpoint.
+        let usage = agentos_tools::agent_manual::AgentManualTool::load_usage_scores_async(
+            self.data_dir.clone(),
+            task.agent_id,
+        )
+        .await;
+        let discovery = &self.config.tools.discovery;
+        let base_tools_desc = self.tool_registry.read().await.tools_for_prompt_ranked(
+            &usage,
+            discovery.l0_max_names_per_category,
+            discovery.l0_max_tokens,
+        );
         // Append recently-used tool hint from the in-memory LRU (cap 10 per agent).
         let tools_desc = {
             let lru_guard = self.agent_tool_lru.read().await;
@@ -76,6 +90,14 @@ impl Kernel {
             }
         };
 
+        let native_tool_calling = {
+            let active = self.active_llms.read().await;
+            active
+                .get(&task.agent_id)
+                .map(|llm| llm.supports_native_tool_calling())
+                .unwrap_or(false)
+        };
+
         let mut system_prompt = system_prompt::build_system_prompt(&SystemPromptContext {
             agent_name,
             agent_description,
@@ -87,6 +109,7 @@ impl Kernel {
             enforce_final_tag: false,
             timezone: system_prompt::local_timezone_str(),
             connected_channels,
+            native_tool_calling,
         });
         let inbox_segment = crate::agent_inbox_prompt::InboxPromptRenderer::new(
             self.agent_inbox.clone(),

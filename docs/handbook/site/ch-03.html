@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture Overview · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a><div class="nav-subs"><a class="nav-sub" href="#system-architecture-diagram" data-target="system-architecture-diagram">System Architecture Diagram</a><a class="nav-sub" href="#crate-dependency-graph" data-target="crate-dependency-graph">Crate Dependency Graph</a><a class="nav-sub" href="#kernel-boot-sequence" data-target="kernel-boot-sequence">Kernel Boot Sequence</a><a class="nav-sub" href="#intent-flow" data-target="intent-flow">Intent Flow</a><a class="nav-sub" href="#task-routing-engine" data-target="task-routing-engine">Task Routing Engine</a><a class="nav-sub" href="#memory-architecture" data-target="memory-architecture">Memory Architecture</a><a class="nav-sub" href="#agent-message-bus" data-target="agent-message-bus">Agent Message Bus</a><a class="nav-sub" href="#multi-agent-coordination" data-target="multi-agent-coordination">Multi-Agent Coordination</a><a class="nav-sub" href="#event-system-architecture" data-target="event-system-architecture">Event System Architecture</a><a class="nav-sub" href="#rest-api-and-websocket-layer" data-target="rest-api-and-websocket-layer">REST API and WebSocket Layer</a><a class="nav-sub" href="#security-layers" data-target="security-layers">Security Layers</a><a class="nav-sub" href="#cost-tracking-architecture" data-target="cost-tracking-architecture">Cost Tracking Architecture</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 03 · Architecture Overview</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 03</div><h1 class="ch-title">Architecture Overview</h1><p class="ch-summary">System architecture, crate dependency graph, the intent flow from CLI to tool execution</p></div>
+    <article class="prose"><h1 id="architecture-overview" class="anchored"><a class="hanchor" href="#architecture-overview" aria-label="link">#</a>Architecture Overview</h1>
+<blockquote><p>A deep dive into the AgentOS kernel, crate dependencies, boot sequence, intent flow, routing, memory, events, security, and cost tracking.</p></blockquote>
+<hr>
+<h2 id="system-architecture-diagram" class="anchored"><a class="hanchor" href="#system-architecture-diagram" aria-label="link">#</a>System Architecture Diagram</h2>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>┌─────────────────────────────────────────────────────────────────────┐
+│                          agentos (CLI)                             │
+│                     clap-based, 39 commands                        │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ Unix Domain Socket (length-prefixed JSON)
+                               │
+┌──────────────────────────────▼──────────────────────────────────────┐
+│                         agentos-bus                                  │
+│                    IPC Message Transport                             │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │
+┌─────────────────────────────────────────────────────────────────────┐
+│                       agentos-api (optional)                        │
+│                  REST API + WebSocket Server                         │
+│                                                                     │
+│  GET/POST /api/v1/*  │  GET /api/v1/ws?token=  │  API Key Auth      │
+│  30+ REST endpoints  │  Real-time events, chat  │  Bearer tokens     │
+│                      │  streaming, task control  │  HMAC-SHA256 keys  │
+│                 KernelService trait (abstraction layer)              │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────────────┐
+│                      INFERENCE KERNEL                                │
+│                                                                      │
+│  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐  ┌───────────┐ │
+│  │  Scheduler   │  │   Router    │  │   Context     │  │  Agent    │ │
+│  │  (tasks)     │  │  (4 strats) │  │   Manager     │  │  Registry │ │
+│  └─────────────┘  └─────────────┘  └──────────────┘  └───────────┘ │
+│                                                                      │
+│  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐  ┌───────────┐ │
+│  │  Cost        │  │ Escalation  │  │  Injection    │  │   Risk    │ │
+│  │  Tracker     │  │  Manager    │  │  Scanner      │  │ Classifier│ │
+│  └─────────────┘  └─────────────┘  └──────────────┘  └───────────┘ │
+│                                                                      │
+│  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐  ┌───────────┐ │
+│  │  Event Bus   │  │  Snapshot   │  │  Pipeline     │  │  Intent   │ │
+│  │              │  │  Manager    │  │  Engine       │  │ Validator │ │
+│  └─────────────┘  └─────────────┘  └──────────────┘  └───────────┘ │
+│                                                                      │
+└──┬──────────┬──────────┬──────────┬──────────┬──────────┬───────────┘
+   │          │          │          │          │          │
+   ▼          ▼          ▼          ▼          ▼          ▼
+┌──────┐ ┌──────┐ ┌──────────┐ ┌───────┐ ┌────────┐ ┌────────┐
+│ LLM  │ │Tools │ │ Security │ │Memory │ │ Audit  │ │  HAL   │
+│      │ │      │ │          │ │       │ │        │ │        │
+│Ollama│ │file  │ │Capability│ │Episod.│ │SQLite  │ │System  │
+│OpenAI│ │shell │ │  Vault   │ │Semant.│ │146 evt │ │Process │
+│Anthro│ │memory│ │ Sandbox  │ │Proced.│ │  types │ │Network │
+│Gemini│ │data  │ │  WASM    │ │Embedd.│ │        │ │GPU     │
+│Mock  │ │coord │ │          │ │       │ │        │ │Storage │
+│      │ │      │ │          │ │       │ │        │ │Audio*  │
+└──────┘ └──────┘ └──────────┘ └───────┘ └────────┘ └────────┘
+</pre></div>
+</div>
+<hr>
+<h2 id="crate-dependency-graph" class="anchored"><a class="hanchor" href="#crate-dependency-graph" aria-label="link">#</a>Crate Dependency Graph</h2>
+<p>The 28 crates form a layered dependency tree. Dependencies flow downward — no circular dependencies.</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos-cli
+├── agentos-kernel
+│   ├── agentos-types          (shared types, IDs, errors)
+│   ├── agentos-bus            (IPC messages, bus server)
+│   │   └── agentos-types
+│   ├── agentos-llm            (LLM adapters)
+│   │   └── agentos-types
+│   ├── agentos-tools          (built-in tools, signing)
+│   │   ├── agentos-types
+│   │   └── agentos-capability
+│   ├── agentos-capability     (tokens, permissions)
+│   │   └── agentos-types
+│   ├── agentos-vault          (encrypted secrets)
+│   │   └── agentos-types
+│   ├── agentos-audit          (audit log)
+│   │   └── agentos-types
+│   ├── agentos-memory         (episodic, semantic, procedural)
+│   │   └── agentos-types
+│   ├── agentos-pipeline       (workflow orchestration)
+│   │   └── agentos-types
+│   ├── agentos-sandbox        (seccomp-BPF)
+│   │   └── agentos-types
+│   ├── agentos-wasm           (Wasmtime runtime)
+│   │   └── agentos-types
+│   └── agentos-hal            (hardware abstraction)
+│       └── agentos-types
+├── agentos-bus
+└── agentos-types
+
+agentos-api                    (REST API + WebSocket server)
+├── agentos-kernel             (via KernelService trait impl)
+└── agentos-types
+
+agentos-sdk                    (tool development kit)
+├── agentos-sdk-macros         (proc-macro for #[tool])
+└── agentos-types
+
+agentos-web                    (web UI, under development)
+├── agentos-kernel
+└── agentos-types
+</pre></div>
+</div>
+<hr>
+<h2 id="kernel-boot-sequence" class="anchored"><a class="hanchor" href="#kernel-boot-sequence" aria-label="link">#</a>Kernel Boot Sequence</h2>
+<p>When <code>agentos start</code> is called, <code>Kernel::boot()</code> performs these steps in order:</p>
+<div class="table-wrap"><table><thead><tr><th>Step</th><th>Subsystem</th><th>What Happens</th></tr></thead><tbody><tr><td>1</td><td>Config</td><td>Load configuration from TOML file</td></tr><tr><td>2</td><td>Directories</td><td>Create directories for audit, vault, tools, and bus socket</td></tr><tr><td>3</td><td>Tools</td><td>Install core tool manifests from <code>tools/core/</code></td></tr><tr><td>4</td><td>Audit</td><td>Open SQLite audit log database, create tables if needed</td></tr><tr><td>5</td><td>Vault</td><td>Open encrypted secrets vault, derive key with Argon2id from passphrase</td></tr><tr><td>6</td><td>Capability</td><td>Initialize the capability engine and load permission matrix</td></tr><tr><td>7</td><td>HAL</td><td>Initialize Hardware Abstraction Layer with core drivers (System, Process, Network, Sensor, GPU, Storage, Log Reader) plus feature-gated peripheral drivers (Audio, Bluetooth, Display, Printer, Raw USB, USB Storage, Webcam)</td></tr><tr><td>8</td><td>Tools</td><td>Load tool manifests, validate trust tiers (Core/Verified/Community/Blocked), check Ed25519 signatures</td></tr><tr><td>9</td><td>Schema</td><td>Build JSON schema registry from tool manifests for intent validation</td></tr><tr><td>10</td><td>Memory</td><td>Initialize embedder and 3 memory stores: episodic, semantic, procedural</td></tr><tr><td>11</td><td>WASM</td><td>Register WASM-based tools from manifests via Wasmtime runtime</td></tr><tr><td>12</td><td>Core</td><td>Initialize scheduler, context manager, agent registry, and task router</td></tr><tr><td>13</td><td>Pipeline</td><td>Create pipeline engine for multi-step workflow orchestration</td></tr><tr><td>14</td><td>Bus</td><td>Start bus server listening on Unix domain socket for CLI commands</td></tr><tr><td>15</td><td>V3 Systems</td><td>Initialize cost tracker, escalation manager, injection scanner, risk classifier, snapshot manager, event bus</td></tr><tr><td>16</td><td>IPC</td><td>Create bounded channels (capacity 1024) for internal subsystem communication</td></tr><tr><td>17</td><td>API</td><td>If <code>[api].enabled = true</code>, start <code>agentos-api</code> HTTP server alongside the kernel (REST + WebSocket)</td></tr><tr><td>18</td><td>Audit</td><td>Emit <code>KernelStarted</code> audit event — system is ready</td></tr></tbody></table></div>
+<p>After boot, the kernel enters the main event loop (<code>run_loop.rs</code>) which spawns 9 concurrent subsystem tasks, each with fault-tolerant auto-restart (max 5 restarts per 60-second window).</p>
+<hr>
+<h2 id="intent-flow" class="anchored"><a class="hanchor" href="#intent-flow" aria-label="link">#</a>Intent Flow</h2>
+<p>When a user issues a CLI command that triggers LLM inference, the request flows through 12 steps:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span> 1. User types CLI command
+    │
+ 2. agentos parses command, serializes to BusMessage
+    │
+ 3. BusMessage sent over Unix domain socket to kernel
+    │
+ 4. Kernel deserializes → KernelCommand
+    │
+ 5. Router selects target agent (strategy + rules)
+    │
+ 6. CapabilityToken validated against required PermissionSet
+    │
+ 7. Intent schema validated against tool&#39;s JSON Schema
+    │
+ 8. Injection scanner checks prompt for known attack patterns
+    │
+ 9. Tool execution in sandbox (seccomp-BPF or WASM)
+    │
+10. Tool result sanitized and injected into ContextWindow
+    │
+11. LLM inference with context → InferenceResult
+    │
+12. AuditLog entry written, result returned via bus to CLI
+</pre></div>
+</div>
+<h3 id="step-details" class="anchored"><a class="hanchor" href="#step-details" aria-label="link">#</a>Step details</h3>
+<ol><li><strong>CLI parsing</strong> — <code>agentos</code> uses clap to parse arguments into a strongly-typed <code>Commands</code> enum</li><li><strong>Bus serialization</strong> — the command is wrapped in a <code>BusMessage</code> with length-prefixed JSON encoding</li><li><strong>Socket transport</strong> — sent over the Unix domain socket at the configured <code>bus.socket_path</code></li><li><strong>Kernel dispatch</strong> — <code>run_loop.rs</code> routes the message to the appropriate command handler in <code>commands/</code></li><li><strong>Agent routing</strong> — the <code>TaskRouter</code> evaluates pattern-based rules first, then falls back to the configured routing strategy (see <a class="wikilink" href="ch-03.html#task-routing-engine">Task Routing Engine</a>)</li><li><strong>Capability check</strong> — the agent's <code>CapabilityToken</code> is validated: HMAC signature, expiry, and required permissions</li><li><strong>Schema validation</strong> — the intent payload is validated against the tool's JSON Schema definition</li><li><strong>Injection scan</strong> — the <code>InjectionScanner</code> checks for prompt injection patterns and assigns a risk score</li><li><strong>Sandboxed execution</strong> — tools run under seccomp-BPF syscall filtering (Linux) or WASM isolation</li><li><strong>Context injection</strong> — tool results are sanitized (escape delimiters), wrapped in typed containers, and assigned importance scores (errors: 0.8, success: 0.5)</li><li><strong>LLM inference</strong> — the <code>ContextWindow</code> is sent to the selected LLM adapter; response is parsed into <code>InferenceResult</code></li><li><strong>Audit + response</strong> — an audit entry is written to the append-only log; the result is serialized back to the CLI via the bus</li></ol>
+<hr>
+<h2 id="task-routing-engine" class="anchored"><a class="hanchor" href="#task-routing-engine" aria-label="link">#</a>Task Routing Engine</h2>
+<p>The <code>TaskRouter</code> selects which agent handles a given task. It first evaluates <strong>routing rules</strong> (regex pattern matching on the prompt), then falls back to the configured <strong>routing strategy</strong>.</p>
+<h3 id="routing-strategies" class="anchored"><a class="hanchor" href="#routing-strategies" aria-label="link">#</a>Routing strategies</h3>
+<div class="table-wrap"><table><thead><tr><th>Strategy</th><th>Preference Order</th><th>Use Case</th></tr></thead><tbody><tr><td><strong>CapabilityFirst</strong> (default)</td><td>Anthropic → OpenAI → Gemini → Custom → Ollama</td><td>Maximum reasoning quality</td></tr><tr><td><strong>CostFirst</strong></td><td>Ollama → Custom → Gemini → OpenAI → Anthropic</td><td>Minimize cost, prefer local</td></tr><tr><td><strong>LatencyFirst</strong></td><td>Ollama → Custom → Gemini → OpenAI → Anthropic</td><td>Minimize response time (local = faster)</td></tr><tr><td><strong>RoundRobin</strong></td><td>Even distribution across all agents</td><td>Load balancing</td></tr></tbody></table></div>
+<h3 id="routing-rules" class="anchored"><a class="hanchor" href="#routing-rules" aria-label="link">#</a>Routing rules</h3>
+<p>Rules are evaluated before strategies. Each rule has:</p>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>task_pattern</code></td><td><code>Option&lt;String&gt;</code></td><td>Regex pattern matched against the task prompt</td></tr><tr><td><code>preferred_agent</code></td><td><code>String</code></td><td>Primary agent to route to</td></tr><tr><td><code>fallback_agent</code></td><td><code>Option&lt;String&gt;</code></td><td>Backup agent if preferred is offline</td></tr></tbody></table></div>
+<p>The router filters to <strong>online and idle</strong> agents only. If no online agent matches, it returns an error.</p>
+<hr>
+<h2 id="memory-architecture" class="anchored"><a class="hanchor" href="#memory-architecture" aria-label="link">#</a>Memory Architecture</h2>
+<p>AgentOS provides a 3-tier memory system, each tier serving a different temporal scope:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>┌─────────────────────────────────────────────────────┐
+│                  WORKING MEMORY                      │
+│            (ContextWindow per task)                   │
+│                                                      │
+│  System prompt │ Tool results │ History │ Knowledge  │
+│  Budget: token_budget from config (default 8000)     │
+│  Eviction: semantic importance scoring               │
+│  Compress at 80%, checkpoint at 95%                  │
+└──────────────────────────┬──────────────────────────┘
+                           │ task completion
+                           ▼
+┌─────────────────────────────────────────────────────┐
+│                 EPISODIC MEMORY                       │
+│               (EpisodicStore)                         │
+│                                                      │
+│  Task-scoped history: intents, tool calls, results   │
+│  Auto-written on task completion                     │
+│  Queryable by task ID, agent ID, time range          │
+└──────────────────────────┬──────────────────────────┘
+                           │ consolidation (hourly)
+                           ▼
+┌─────────────────────────────────────────────────────┐
+│                 SEMANTIC MEMORY                       │
+│               (SemanticStore)                         │
+│                                                      │
+│  Cross-task knowledge with vector embeddings         │
+│  Keyword + similarity search                         │
+│  Long-term knowledge base for all agents             │
+└─────────────────────────────────────────────────────┘
+</pre></div>
+</div>
+<p>Additionally, a <strong>Procedural Memory</strong> store (<code>ProceduralStore</code>) holds reusable how-to procedures and multi-step workflows that agents can retrieve and execute.</p>
+<h3 id="memory-consolidation" class="anchored"><a class="hanchor" href="#memory-consolidation" aria-label="link">#</a>Memory consolidation</h3>
+<p>The kernel runs a background consolidation process on a configurable interval (<code>memory.consolidation_interval_secs</code>, default 3600s) that extracts key information from episodic records and indexes it into the semantic store with embeddings for future retrieval.</p>
+<hr>
+<h2 id="agent-message-bus" class="anchored"><a class="hanchor" href="#agent-message-bus" aria-label="link">#</a>Agent Message Bus</h2>
+<p>Agents communicate via 3 messaging modes:</p>
+<div class="table-wrap"><table><thead><tr><th>Mode</th><th>Description</th><th>Use Case</th></tr></thead><tbody><tr><td><strong>Direct</strong></td><td>Point-to-point message from one agent to another</td><td>Asking a specific agent for help</td></tr><tr><td><strong>Delegation</strong></td><td>Assign a sub-task to another agent, await result</td><td>Complex tasks requiring specialized agents</td></tr><tr><td><strong>Broadcast</strong></td><td>Send a message to all registered agents</td><td>Announcements, shared state updates</td></tr></tbody></table></div>
+<p>Messages flow through the kernel's <code>CommNotificationListener</code> subsystem, which validates capability tokens before delivery.</p>
+<hr>
+<h2 id="multi-agent-coordination" class="anchored"><a class="hanchor" href="#multi-agent-coordination" aria-label="link">#</a>Multi-Agent Coordination</h2>
+<p>AgentOS supports hierarchical multi-agent workflows through sub-agent spawning, context handoff, and agent teams.</p>
+<h3 id="architecture" class="anchored"><a class="hanchor" href="#architecture" aria-label="link">#</a>Architecture</h3>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Parent Agent Task
+  │
+  ├── spawn-agent → Child Task 1 (spawn_depth=1)
+  │                   ├── ContextSlice (last N messages from parent)
+  │                   └── Scoped CapabilityToken (intersection of parent perms)
+  │
+  ├── spawn-agent → Child Task 2 (spawn_depth=1)
+  │
+  └── await-agents [child1, child2]
+        ├── SubAgentResult injected into parent context
+        └── Parent resumes with children&#39;s outputs
+</pre></div>
+</div>
+<h3 id="key-components" class="anchored"><a class="hanchor" href="#key-components" aria-label="link">#</a>Key Components</h3>
+<div class="table-wrap"><table><thead><tr><th>Component</th><th>Location</th><th>Role</th></tr></thead><tbody><tr><td><code>ContextSlice</code></td><td><code>agentos-types/src/context.rs</code></td><td>Portable slice of parent context for child handoff</td></tr><tr><td><code>SubAgentResult</code></td><td><code>agentos-types/src/context.rs</code></td><td>Completed child result, ready for parent injection</td></tr><tr><td><code>ContextManager.seed_from_slice()</code></td><td><code>agentos-kernel/src/context.rs</code></td><td>Seeds child context from parent slice</td></tr><tr><td><code>ContextManager.inject_sub_agent_result()</code></td><td><code>agentos-kernel/src/context.rs</code></td><td>Injects child result into parent context</td></tr><tr><td><code>SpawnAgentTool</code></td><td><code>agentos-tools/src/coordination.rs</code></td><td>Tool that emits <code>_kernel_action: &quot;spawn_agent&quot;</code></td></tr><tr><td><code>AwaitAgentsTool</code></td><td><code>agentos-tools/src/coordination.rs</code></td><td>Tool that emits <code>_kernel_action: &quot;await_agents&quot;</code></td></tr><tr><td><code>VerifyOutputTool</code></td><td><code>agentos-tools/src/coordination.rs</code></td><td>Spawns a critic agent for output verification</td></tr><tr><td><code>TeamConfig</code></td><td><code>agentos-types/src/team.rs</code></td><td>TOML-loadable team configuration</td></tr></tbody></table></div>
+<h3 id="safety-mechanisms" class="anchored"><a class="hanchor" href="#safety-mechanisms" aria-label="link">#</a>Safety Mechanisms</h3>
+<ul><li><strong>Spawn depth limit</strong> — prevents unbounded recursive spawning (default max: 4)</li><li><strong>Capability scoping</strong> — child tokens are an intersection of parent permissions via <code>scope_for_child()</code></li><li><strong>Cascading cancellation</strong> — parent cancellation propagates to all children</li><li><strong>Idempotent injection</strong> — <code>injected_sub_agents</code> set prevents duplicate result injection</li><li><strong>Context message cap</strong> — <code>context_messages</code> is clamped to 100 even if schema validation is bypassed</li></ul>
+<p>See <a class="wikilink" href="ch-05.html">Agent Management</a> for the full user-facing reference.</p>
+<hr>
+<h2 id="event-system-architecture" class="anchored"><a class="hanchor" href="#event-system-architecture" aria-label="link">#</a>Event System Architecture</h2>
+<p>The event system enables reactive workflows where events trigger automated actions.</p>
+<h3 id="components" class="anchored"><a class="hanchor" href="#components" aria-label="link">#</a>Components</h3>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Event Source (tool exec, task complete, etc.)
+    │
+    ▼
+EventBus (subscription registry + filter evaluator)
+    │
+    ├── Subscription 1: filter=[agent_id=X, event=TaskCompleted]
+    │       → triggered task: &quot;summarize results&quot;
+    │
+    ├── Subscription 2: filter=[event=BudgetWarning]
+    │       → triggered task: &quot;notify admin&quot;
+    │
+    └── Subscription 3: filter=[event=*] (throttled: 1/min)
+            → triggered task: &quot;log to external system&quot;
+</pre></div>
+</div>
+<h3 id="subscription-filtering" class="anchored"><a class="hanchor" href="#subscription-filtering" aria-label="link">#</a>Subscription filtering</h3>
+<p>Each subscription has an <code>EventFilterExpr</code> composed of AND-combined predicates:</p>
+<div class="table-wrap"><table><thead><tr><th>Filter Operation</th><th>Description</th></tr></thead><tbody><tr><td><code>Eq</code></td><td>Exact match</td></tr><tr><td><code>NotEq</code></td><td>Not equal</td></tr><tr><td><code>Gt</code> / <code>Gte</code></td><td>Greater than / greater-or-equal</td></tr><tr><td><code>Lt</code> / <code>Lte</code></td><td>Less than / less-or-equal</td></tr><tr><td><code>In</code></td><td>Value is in a list</td></tr><tr><td><code>Contains</code></td><td>String contains substring</td></tr></tbody></table></div>
+<p>Filter values can be <code>String</code>, <code>Number</code>, <code>Bool</code>, or <code>List</code>.</p>
+<h3 id="throttling" class="anchored"><a class="hanchor" href="#throttling" aria-label="link">#</a>Throttling</h3>
+<p>Subscriptions support rate limiting to prevent event storms:</p>
+<ul><li><strong>Time-based</strong>: minimum interval between deliveries</li><li><strong>Count-based</strong>: maximum deliveries per time window</li><li><strong>Chain depth limit</strong>: prevents infinite event → task → event loops (configurable <code>max_chain_depth</code>)</li></ul>
+<h3 id="architecture-note" class="anchored"><a class="hanchor" href="#architecture-note" aria-label="link">#</a>Architecture note</h3>
+<p>The <code>EventBus</code> is a <strong>pure registry and filter evaluator</strong> — it does not create tasks directly. The kernel orchestrates the full flow: event emission → filter evaluation → task creation, via the <code>event_dispatch.rs</code> module.</p>
+<hr>
+<h2 id="rest-api-and-websocket-layer" class="anchored"><a class="hanchor" href="#rest-api-and-websocket-layer" aria-label="link">#</a>REST API and WebSocket Layer</h2>
+<p>The <code>agentos-api</code> crate provides an optional HTTP server that runs alongside the kernel when <code>[api].enabled = true</code> in the configuration. It exposes the kernel's full functionality to external consumers without requiring a Unix domain socket connection.</p>
+<h3 id="architecture-2" class="anchored"><a class="hanchor" href="#architecture-2" aria-label="link">#</a>Architecture</h3>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>External Consumers (scripts, UIs, CI, other services)
+      │
+      │  HTTP/WebSocket  (Bearer agos_&lt;key&gt;)
+      ▼
+┌─────────────────────────────────────────────────────┐
+│              agentos-api (Axum)                      │
+│                                                     │
+│  REST routes           WebSocket                    │
+│  /api/v1/*             /api/v1/ws?token=            │
+│                                                     │
+│  Auth middleware        WsBroadcaster               │
+│  (ApiKeyStore)          (event fan-out)             │
+│                                                     │
+│          KernelService trait                        │
+│    (abstraction — delegates to Kernel)              │
+└───────────────────────┬─────────────────────────────┘
+                        │
+                   Kernel (agentos-kernel)
+</pre></div>
+</div>
+<h3 id="kernelservice-trait" class="anchored"><a class="hanchor" href="#kernelservice-trait" aria-label="link">#</a>KernelService Trait</h3>
+<p>The <code>KernelService</code> trait in <code>agentos-api/src/service.rs</code> defines the complete API surface — agents, tasks, tools, secrets, pipelines, audit, costs, notifications, system status. The <code>Kernel</code> struct implements this trait in <code>kernel_impl.rs</code>, which translates REST DTOs into <code>KernelCommand</code> variants and dispatches them through the same <code>api_*</code> wrapper methods used by the bus path.</p>
+<p>This design means:</p>
+<ul><li>REST and CLI bus paths share identical kernel logic (no code duplication)</li><li>The <code>KernelService</code> trait can be mocked for integration testing the API layer without a running kernel</li><li>Additional transports (gRPC, GraphQL) can be added by implementing <code>KernelService</code></li></ul>
+<h3 id="websocket-broadcaster" class="anchored"><a class="hanchor" href="#websocket-broadcaster" aria-label="link">#</a>WebSocket Broadcaster</h3>
+<p>The <code>WsBroadcaster</code> is a multi-producer, multi-consumer event fan-out component wired into the kernel's internal event bus. When the kernel emits events (task completed, agent connected, budget alert, etc.), the broadcaster routes them to all active WebSocket sessions that have subscribed to the corresponding channel.</p>
+<hr>
+<h2 id="security-layers" class="anchored"><a class="hanchor" href="#security-layers" aria-label="link">#</a>Security Layers</h2>
+<p>AgentOS implements defense-in-depth with 8 security layers:</p>
+<div class="table-wrap"><table><thead><tr><th>Layer</th><th>Component</th><th>Mechanism</th></tr></thead><tbody><tr><td><strong>1. Capability Tokens</strong></td><td><code>agentos-capability</code></td><td>HMAC-SHA256 signed tokens with expiry, permission sets, and deny entries</td></tr><tr><td><strong>2. Permission Matrix</strong></td><td><code>agentos-capability</code></td><td>Per-resource rwx permissions with path-prefix matching and SSRF blocking</td></tr><tr><td><strong>3. Secrets Vault</strong></td><td><code>agentos-vault</code></td><td>AES-256-GCM encryption, Argon2id key derivation, <code>ZeroizingString</code> for in-memory secrets</td></tr><tr><td><strong>4. Syscall Sandbox</strong></td><td><code>agentos-sandbox</code></td><td>Seccomp-BPF filtering restricts which system calls tools can make (Linux-only)</td></tr><tr><td><strong>5. WASM Isolation</strong></td><td><code>agentos-wasm</code></td><td>Wasmtime sandbox for untrusted tool execution with controlled host access</td></tr><tr><td><strong>6. Tool Trust Tiers</strong></td><td><code>agentos-tools</code></td><td>Ed25519 signed manifests; 4 tiers: Core (trusted), Verified (signed), Community (signed), Blocked (rejected)</td></tr><tr><td><strong>7. Injection Scanning</strong></td><td><code>agentos-kernel</code></td><td>Prompt injection detection with risk classification; system prompt includes standing safety instructions</td></tr><tr><td><strong>8. API Authentication</strong></td><td><code>agentos-api</code></td><td>HMAC-SHA256 API keys with scope-based permissions, constant-time validation, optional expiry</td></tr></tbody></table></div>
+<h3 id="path-traversal-protection" class="anchored"><a class="hanchor" href="#path-traversal-protection" aria-label="link">#</a>Path traversal protection</h3>
+<p>All file tools reject any path containing <code>..</code> — this is a hard-coded security invariant enforced before capability token validation.</p>
+<h3 id="audit-trail" class="anchored"><a class="hanchor" href="#audit-trail" aria-label="link">#</a>Audit trail</h3>
+<p>Every security-relevant operation is logged to the append-only SQLite audit log (<code>agentos-audit</code>), which supports 146 event types. The log cannot be modified or deleted through normal operation.</p>
+<hr>
+<h2 id="cost-tracking-architecture" class="anchored"><a class="hanchor" href="#cost-tracking-architecture" aria-label="link">#</a>Cost Tracking Architecture</h2>
+<p>The cost tracker enforces per-agent budgets and prevents runaway spending on LLM inference.</p>
+<h3 id="architecture-3" class="anchored"><a class="hanchor" href="#architecture-3" aria-label="link">#</a>Architecture</h3>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>LLM Adapter (inference response)
+    │
+    ▼
+CostTracker.record_inference()
+    ├── Calculate cost from ModelPricing table (micro-USD precision)
+    ├── Update AgentCostState (tokens, cost, tool calls)
+    ├── Check against budget thresholds
+    │   ├── &lt; 80%  → Ok
+    │   ├── 80-95% → Warning (broadcast BudgetAlert)
+    │   ├── 95-100% → PauseRequired (broadcast BudgetAlert)
+    │   └── &gt; 100% → HardLimitExceeded (action: pause or kill task)
+    └── Check model downgrade recommendation
+        └── If configured, suggest cheaper model at threshold
+</pre></div>
+</div>
+<h3 id="budget-enforcement" class="anchored"><a class="hanchor" href="#budget-enforcement" aria-label="link">#</a>Budget enforcement</h3>
+<div class="table-wrap"><table><thead><tr><th>Check</th><th>Scope</th><th>Description</th></tr></thead><tbody><tr><td><strong>Token limit</strong></td><td>Per agent, daily</td><td>Maximum input + output tokens per 24h period</td></tr><tr><td><strong>Cost limit</strong></td><td>Per agent, daily</td><td>Maximum spend in USD per 24h period (tracked in micro-USD)</td></tr><tr><td><strong>Tool call limit</strong></td><td>Per agent, daily</td><td>Maximum tool executions per 24h period</td></tr><tr><td><strong>Wall time limit</strong></td><td>Per task</td><td>Maximum elapsed seconds for a single task</td></tr><tr><td><strong>Model allowlist</strong></td><td>Per agent</td><td>Restrict which models an agent can use</td></tr></tbody></table></div>
+<h3 id="budget-thresholds" class="anchored"><a class="hanchor" href="#budget-thresholds" aria-label="link">#</a>Budget thresholds</h3>
+<div class="table-wrap"><table><thead><tr><th>Threshold</th><th>Default</th><th>Action</th></tr></thead><tbody><tr><td>Warning</td><td>80%</td><td>Broadcast <code>BudgetAlert</code>, continue execution</td></tr><tr><td>Pause</td><td>95%</td><td>Broadcast <code>BudgetAlert</code>, pause task for human review</td></tr><tr><td>Hard limit</td><td>100%</td><td>Stop task, emit <code>HardLimitExceeded</code></td></tr></tbody></table></div>
+<h3 id="model-downgrade" class="anchored"><a class="hanchor" href="#model-downgrade" aria-label="link">#</a>Model downgrade</h3>
+<p>When an agent approaches its budget limit, the cost tracker can recommend a cheaper model:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>Agent &quot;gpt-agent&quot; at 85% budget
+  → ModelDowngradeRecommended { downgrade_to: &quot;gpt-3.5-turbo&quot;, provider: &quot;openai&quot; }
+</pre></div>
+</div>
+<h3 id="pricing-resolution" class="anchored"><a class="hanchor" href="#pricing-resolution" aria-label="link">#</a>Pricing resolution</h3>
+<p>Model pricing is resolved in priority order:</p>
+<ol><li><strong>Exact match</strong> — <code>openai/gpt-4</code> matches the pricing entry for <code>openai/gpt-4</code></li><li><strong>Wildcard</strong> — <code>ollama/*</code> matches any Ollama model</li><li><strong>Zero-cost fallback</strong> — unknown models default to zero cost (logged as warning)</li></ol>
+<h3 id="budget-reset" class="anchored"><a class="hanchor" href="#budget-reset" aria-label="link">#</a>Budget reset</h3>
+<p>Agent cost counters automatically reset on a 24-hour rolling boundary. The <code>period_start</code> timestamp tracks when the current budget period began.</p>
+<h3 id="cost-attribution" class="anchored"><a class="hanchor" href="#cost-attribution" aria-label="link">#</a>Cost attribution</h3>
+<p>Every inference generates a <code>CostAttribution</code> audit event with structured JSON containing the agent ID, model, provider, token counts, and calculated cost.</p></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-02.html"><span class="pn-dir">← Previous</span><span class="pn-title">Installation and First Run</span></a><a class="pn pn-next" href="ch-04.html"><span class="pn-dir">Next →</span><span class="pn-title">CLI Reference Complete</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#system-architecture-diagram" data-target="system-architecture-diagram">System Architecture Diagram</a></li><li class="toc-h2"><a href="#crate-dependency-graph" data-target="crate-dependency-graph">Crate Dependency Graph</a></li><li class="toc-h2"><a href="#kernel-boot-sequence" data-target="kernel-boot-sequence">Kernel Boot Sequence</a></li><li class="toc-h2"><a href="#intent-flow" data-target="intent-flow">Intent Flow</a></li><li class="toc-h3"><a href="#step-details" data-target="step-details">Step details</a></li><li class="toc-h2"><a href="#task-routing-engine" data-target="task-routing-engine">Task Routing Engine</a></li><li class="toc-h3"><a href="#routing-strategies" data-target="routing-strategies">Routing strategies</a></li><li class="toc-h3"><a href="#routing-rules" data-target="routing-rules">Routing rules</a></li><li class="toc-h2"><a href="#memory-architecture" data-target="memory-architecture">Memory Architecture</a></li><li class="toc-h3"><a href="#memory-consolidation" data-target="memory-consolidation">Memory consolidation</a></li><li class="toc-h2"><a href="#agent-message-bus" data-target="agent-message-bus">Agent Message Bus</a></li><li class="toc-h2"><a href="#multi-agent-coordination" data-target="multi-agent-coordination">Multi-Agent Coordination</a></li><li class="toc-h3"><a href="#architecture" data-target="architecture">Architecture</a></li><li class="toc-h3"><a href="#key-components" data-target="key-components">Key Components</a></li><li class="toc-h3"><a href="#safety-mechanisms" data-target="safety-mechanisms">Safety Mechanisms</a></li><li class="toc-h2"><a href="#event-system-architecture" data-target="event-system-architecture">Event System Architecture</a></li><li class="toc-h3"><a href="#components" data-target="components">Components</a></li><li class="toc-h3"><a href="#subscription-filtering" data-target="subscription-filtering">Subscription filtering</a></li><li class="toc-h3"><a href="#throttling" data-target="throttling">Throttling</a></li><li class="toc-h3"><a href="#architecture-note" data-target="architecture-note">Architecture note</a></li><li class="toc-h2"><a href="#rest-api-and-websocket-layer" data-target="rest-api-and-websocket-layer">REST API and WebSocket Layer</a></li><li class="toc-h3"><a href="#architecture-2" data-target="architecture-2">Architecture</a></li><li class="toc-h3"><a href="#kernelservice-trait" data-target="kernelservice-trait">KernelService Trait</a></li><li class="toc-h3"><a href="#websocket-broadcaster" data-target="websocket-broadcaster">WebSocket Broadcaster</a></li><li class="toc-h2"><a href="#security-layers" data-target="security-layers">Security Layers</a></li><li class="toc-h3"><a href="#path-traversal-protection" data-target="path-traversal-protection">Path traversal protection</a></li><li class="toc-h3"><a href="#audit-trail" data-target="audit-trail">Audit trail</a></li><li class="toc-h2"><a href="#cost-tracking-architecture" data-target="cost-tracking-architecture">Cost Tracking Architecture</a></li><li class="toc-h3"><a href="#architecture-3" data-target="architecture-3">Architecture</a></li><li class="toc-h3"><a href="#budget-enforcement" data-target="budget-enforcement">Budget enforcement</a></li><li class="toc-h3"><a href="#budget-thresholds" data-target="budget-thresholds">Budget thresholds</a></li><li class="toc-h3"><a href="#model-downgrade" data-target="model-downgrade">Model downgrade</a></li><li class="toc-h3"><a href="#pricing-resolution" data-target="pricing-resolution">Pricing resolution</a></li><li class="toc-h3"><a href="#budget-reset" data-target="budget-reset">Budget reset</a></li><li class="toc-h3"><a href="#cost-attribution" data-target="cost-attribution">Cost attribution</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

@@ -15,6 +15,7 @@ pub mod intent;
 pub mod notification;
 pub mod path;
 pub mod plugin;
+pub mod profile;
 pub mod registry_query;
 pub mod role;
 pub mod schedule;
@@ -43,7 +44,8 @@ pub use context::{
 pub use error::AgentOSError;
 pub use event::{
     EventCategory, EventMessage, EventSeverity, EventSource, EventSubscription, EventType,
-    EventTypeFilter, RawUsbDeviceOpened, RawUsbTransfer, SubscriptionPriority, ThrottlePolicy,
+    EventTypeFilter, RawUsbDeviceOpened, RawUsbTransfer, RealtimeEvent, SubscriptionPriority,
+    ThrottlePolicy,
 };
 pub use fallback::{apply_transforms, TransformOp};
 pub use hook::{HookEvent, HookResult};
@@ -55,10 +57,12 @@ pub use intent::{
     SubscriptionDuration, UnsubscribePayload,
 };
 pub use notification::{
-    DeliveryChannel, DeliveryStatus, InteractionRequest, NotificationPriority, NotificationSource,
-    TaskOutcome, UserMessage, UserMessageKind, UserResponse,
+    AttachmentKind, DeliveryChannel, DeliveryStatus, InlineAttachment, InteractionRequest,
+    MessageAttachment, NotificationPriority, NotificationSource, TaskOutcome, UserMessage,
+    UserMessageKind, UserResponse,
 };
 pub use plugin::{ChannelDeclaration, PluginManifest};
+pub use profile::{ProfileCategory, ProfileEntry, ProfileEntryStatus, ProfilePatch, ProfileSource};
 pub use registry_query::{
     AgentRegistryQuery, AgentRegistrySnapshot, AgentSummary, CapabilityDescriptorSummary,
     CapabilityDispatchRequest, CapabilityDispatcher, CapabilityRegistryQuery,
@@ -77,12 +81,18 @@ pub use tool::{
     ExecutorType, FallbackRule, RegisteredTool, RiskClass, ToolExecutor, ToolManifest, ToolSandbox,
     ToolStatus, TrustTier, UsageHints,
 };
+pub mod approval;
+pub use approval::{ApprovalDecision, ApprovalMode};
+pub mod workspace_grant;
+pub use workspace_grant::{WorkspaceGrant, WorkspaceGrantMode};
 pub mod task_trace;
 pub use task_trace::{
     IterationTrace, PermissionCheckTrace, TaskTrace, TaskTraceSummary, ToolCallTrace,
 };
 pub mod team;
 pub use team::{TeamConfig, TeamMember, TeamRole};
+pub mod org;
+pub use org::OrgNode;
 pub mod webhook;
 pub use chat::ChatStreamFrame;
 pub use webhook::{

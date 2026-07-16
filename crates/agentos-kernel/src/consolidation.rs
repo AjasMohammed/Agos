@@ -1,9 +1,9 @@
-use agentos_memory::types::{Procedure, ProcedureStep};
+use agentos_memory::types::{Procedure, ProcedureSearchResult, ProcedureStep};
 use agentos_memory::{EpisodicEntry, EpisodicStore, ProceduralStore};
 use agentos_types::AgentOSError;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -55,6 +55,7 @@ pub struct ConsolidationReport {
     pub patterns_found: usize,
     pub created: usize,
     pub skipped_existing: usize,
+    pub skipped_low_information: usize,
     pub failed: usize,
 }
 
@@ -135,13 +136,20 @@ impl ConsolidationEngine {
         };
 
         for group in patterns {
-            let procedure = distill_group_to_procedure(&group);
+            let Some(procedure) = distill_group_to_procedure(&group) else {
+                report.skipped_low_information += 1;
+                continue;
+            };
             match self
                 .procedural_store
                 .search(&procedure.name, None, 1, 0.0)
                 .await
             {
-                Ok(existing) if !existing.is_empty() && existing[0].rrf_score > 0.90 => {
+                Ok(existing)
+                    if existing
+                        .first()
+                        .is_some_and(|e| is_existing_duplicate(e, &procedure.name)) =>
+                {
                     report.skipped_existing += 1;
                     continue;
                 }
@@ -165,11 +173,25 @@ impl ConsolidationEngine {
     }
 }
 
-fn tokenize(text: &str) -> HashSet<String> {
+/// True when the closest existing procedure should suppress storing a new one
+/// with `candidate_name`. Exact name matches always dedup; otherwise require
+/// near-identical embedding similarity. Compare against `semantic_score` (raw
+/// cosine), NOT `rrf_score`: the hybrid score is `0.7·cosine + 0.3·fts_norm`
+/// whenever FTS matches, which caps it near ~0.74 even for an exact duplicate,
+/// so a 0.9 gate on it can never fire for textually identical names.
+fn is_existing_duplicate(existing: &ProcedureSearchResult, candidate_name: &str) -> bool {
+    existing.procedure.name == candidate_name || existing.semantic_score > 0.90
+}
+
+/// Sorted, deduplicated tokens. Deterministic order so the cluster key and the
+/// procedure name agree across runs and across word-order permutations.
+fn tokenize(text: &str) -> Vec<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() > 2)
         .map(|w| w.to_string())
+        .collect::<BTreeSet<String>>()
+        .into_iter()
         .collect()
 }
 
@@ -180,10 +202,11 @@ fn cluster_by_keywords(
     let mut groups: HashMap<String, Vec<EpisodicEntry>> = HashMap::new();
     for ep in episodes {
         let text = ep.summary.clone().unwrap_or(ep.content.clone());
-        let tokens = tokenize(&text);
-        let mut key_parts = tokens.into_iter().take(4).collect::<Vec<_>>();
-        key_parts.sort();
-        let key = key_parts.join("|");
+        let key = tokenize(&text)
+            .into_iter()
+            .take(4)
+            .collect::<Vec<_>>()
+            .join("|");
         groups.entry(key).or_default().push(ep);
     }
 
@@ -193,7 +216,10 @@ fn cluster_by_keywords(
         .collect()
 }
 
-fn distill_group_to_procedure(group: &[EpisodicEntry]) -> Procedure {
+/// Returns `None` when the group carries too little information to be a useful
+/// procedure (no tool metadata to derive steps from) — storing a generic
+/// one-step "follow the prior approach" SOP only pollutes retrieval.
+fn distill_group_to_procedure(group: &[EpisodicEntry]) -> Option<Procedure> {
     let first = &group[0];
     let text = first.summary.clone().unwrap_or(first.content.clone());
     let title_tokens = tokenize(&text).into_iter().take(3).collect::<Vec<_>>();
@@ -222,15 +248,10 @@ fn distill_group_to_procedure(group: &[EpisodicEntry]) -> Procedure {
         });
     }
     if steps.is_empty() {
-        steps.push(ProcedureStep {
-            order: 0,
-            action: "Follow the repeated successful approach from prior tasks".to_string(),
-            tool: None,
-            expected_outcome: Some("Task completes successfully".to_string()),
-        });
+        return None;
     }
 
-    Procedure {
+    Some(Procedure {
         id: String::new(),
         name,
         description: format!("Auto-consolidated from {} successful episodes", group.len()),
@@ -244,5 +265,119 @@ fn distill_group_to_procedure(group: &[EpisodicEntry]) -> Procedure {
         tags: vec!["auto-consolidated".to_string()],
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        last_used_at: None,
+        use_count: 0,
+        confidence: agentos_memory::types::default_confidence(),
+        status: agentos_memory::MemoryStatus::Active,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentos_memory::types::EpisodeType;
+    use agentos_types::{AgentID, TaskID, TraceID};
+
+    fn episode(summary: &str, metadata: Option<serde_json::Value>) -> EpisodicEntry {
+        EpisodicEntry {
+            id: 0,
+            task_id: TaskID::new(),
+            agent_id: AgentID::new(),
+            entry_type: EpisodeType::SystemEvent,
+            content: summary.to_string(),
+            summary: Some(summary.to_string()),
+            metadata,
+            timestamp: Utc::now(),
+            trace_id: TraceID::new(),
+        }
+    }
+
+    fn search_result(name: &str, semantic_score: f32, rrf_score: f32) -> ProcedureSearchResult {
+        let group = vec![episode(
+            name,
+            Some(serde_json::json!({"tool": "file-read"})),
+        )];
+        let mut procedure = distill_group_to_procedure(&group).unwrap();
+        procedure.name = name.to_string();
+        ProcedureSearchResult {
+            procedure,
+            semantic_score,
+            fts_score: 5.0,
+            rrf_score,
+        }
+    }
+
+    #[test]
+    fn tokenize_is_sorted_and_deduped() {
+        assert_eq!(
+            tokenize("Task completed successfully task"),
+            vec!["completed", "successfully", "task"]
+        );
+    }
+
+    #[test]
+    fn word_order_permutations_produce_identical_names() {
+        let meta = Some(serde_json::json!({"tool": "file-read"}));
+        let a = distill_group_to_procedure(&[episode("task completed successfully", meta.clone())])
+            .unwrap();
+        let b = distill_group_to_procedure(&[episode("completed task successfully", meta.clone())])
+            .unwrap();
+        let c =
+            distill_group_to_procedure(&[episode("successfully completed task", meta)]).unwrap();
+        assert_eq!(a.name, b.name);
+        assert_eq!(b.name, c.name);
+    }
+
+    #[test]
+    fn permuted_summaries_cluster_together() {
+        let eps = vec![
+            episode("task completed successfully", None),
+            episode("completed task successfully", None),
+            episode("successfully completed task", None),
+        ];
+        let groups = cluster_by_keywords(eps, 3);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 3);
+    }
+
+    #[test]
+    fn low_information_group_is_rejected() {
+        let group = vec![episode("task completed successfully", None); 3];
+        assert!(distill_group_to_procedure(&group).is_none());
+    }
+
+    #[test]
+    fn group_with_tool_metadata_distills_steps() {
+        let meta = Some(serde_json::json!({"tool": "file-read"}));
+        let group = vec![
+            episode("read config file", meta.clone()),
+            episode("read config file", meta),
+        ];
+        let procedure = distill_group_to_procedure(&group).unwrap();
+        assert_eq!(procedure.steps.len(), 1);
+        assert_eq!(procedure.steps[0].tool.as_deref(), Some("file-read"));
+    }
+
+    #[test]
+    fn exact_name_match_dedups_despite_capped_hybrid_score() {
+        // The hybrid rrf_score caps near ~0.74 when FTS matches — the old
+        // `rrf_score > 0.90` gate could never fire for an identical name.
+        let existing = search_result("completed-successfully-task", 1.0, 0.73);
+        assert!(is_existing_duplicate(
+            &existing,
+            "completed-successfully-task"
+        ));
+    }
+
+    #[test]
+    fn near_identical_embedding_dedups_without_name_match() {
+        let existing = search_result("completed-successfully-task", 0.95, 0.69);
+        assert!(is_existing_duplicate(&existing, "task-finished-cleanly"));
+    }
+
+    #[test]
+    fn dissimilar_procedure_is_not_deduped() {
+        let existing = search_result("completed-successfully-task", 0.42, 0.31);
+        assert!(!is_existing_duplicate(&existing, "deploy-staging-rollout"));
     }
 }

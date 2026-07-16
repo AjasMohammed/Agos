@@ -71,6 +71,11 @@ const HAL_TOOL_NAMES: &[&str] = &[
 ];
 
 const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
+    // IoT twin tools need the kernel's shared TwinRegistry/SafetyEngine Arcs
+    // (attached to the in-process HAL at boot) — a sandbox child rebuilds the
+    // HAL without them, so these must never be sandbox-dispatched.
+    "hardware-get-twin",
+    "hardware-set-desired",
     "agent-message",
     "task-delegate",
     "task-spawn-async",
@@ -120,6 +125,11 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "schedule-control",
     "cancel-once-job",
     "list-once-jobs",
+    // Schedule self-inspection — emit _kernel_action, dispatched by the kernel
+    // against its schedule store; never sandboxed.
+    "list-my-schedules",
+    "get-schedule-runs",
+    "get-task-logs",
     // Agent inbox + agent-to-agent message inboxes — kernel-context, mutate
     // SQLite state owned by the kernel; never sandboxed.
     "agent-inbox-list",
@@ -130,7 +140,8 @@ const KERNEL_CONTEXT_TOOL_NAMES: &[&str] = &[
     "agent-messages-dismiss",
 ];
 
-const SPECIAL_CONTEXT_TOOL_NAMES: &[&str] = &["agent-manual", "agent-self"];
+const SPECIAL_CONTEXT_TOOL_NAMES: &[&str] =
+    &["agent-manual", "agent-self", "skill-prompt", "skill-create"];
 
 /// Discovery / introspection tools whose calls should NOT be replayed into the
 /// LLM history on subsequent chat turns. They are scaffolding the model uses
@@ -148,7 +159,6 @@ pub const META_TOOL_NAMES: &[&str] = &[
     "describe-tool",
     "list-tools",
     "tool-detail",
-    "tool-info",
 ];
 
 /// Default tool inventory exposed inline to the LLM in the chat (webui) flow.
@@ -165,8 +175,11 @@ pub const CHAT_DEFAULT_TOOL_NAMES: &[&str] = &[
     "list-tools",
     "search-tools",
     "describe-tool",
+    "skill-prompt",
+    "skill-create",
     // Filesystem
     "file-reader",
+    "user-file-reader",
     "file-writer",
     "file-editor",
     "file-glob",
@@ -195,10 +208,22 @@ pub const CHAT_DEFAULT_TOOL_NAMES: &[&str] = &[
     "notify-user",
     "ask-user",
     "agent-message",
+    "schedule-once",
     "schedule-recurring",
     "schedule-control",
     "list-my-schedules",
     "get-schedule-runs",
+    "get-task-logs",
+    // Scratchpad — agent working memory. Required for any recipe that
+    // needs dedup state across recurring schedule fires (see alert-builder).
+    "scratch-read",
+    "scratch-write",
+    // Kernel event subscriptions — required for "notify me when X" flows
+    // that prefer event-driven over polling. Mirrors what alert-builder needs.
+    "event-list-available",
+    "event-subscribe",
+    "event-list-subscriptions",
+    "event-unsubscribe",
     // Agent inbox — async callbacks (scheduled tasks, sub-agents, events)
     "agent-inbox-list",
     "agent-inbox-read",

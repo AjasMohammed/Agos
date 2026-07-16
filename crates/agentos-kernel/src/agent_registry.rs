@@ -156,6 +156,15 @@ impl AgentRegistry {
         }
     }
 
+    /// Refresh an agent's `last_active` to now. Used by the heartbeat runner to
+    /// restart the wake interval after firing a check turn.
+    pub fn touch_last_active(&mut self, id: &AgentID) {
+        if let Some(agent) = self.agents.get_mut(id) {
+            agent.last_active = chrono::Utc::now();
+            self.save_to_disk();
+        }
+    }
+
     /// Mark an agent as intentionally offline so auto-reactivation skips it on restart.
     pub fn set_manually_offline(&mut self, id: &AgentID, value: bool) {
         if let Some(agent) = self.agents.get_mut(id) {

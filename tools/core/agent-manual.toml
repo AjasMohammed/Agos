@@ -17,18 +17,30 @@ outputs = ["content.structured"]
 input  = "ManualQuery"
 output = "ManualSection"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["section"]
 
-[input_schema.properties.section]
+[payload_schema.properties.section]
 type = "string"
-enum = ["index", "tools", "tool-detail", "permissions", "memory", "events", "commands", "errors", "feedback", "agents", "tasks", "procedural", "escalation", "coordination", "suggest", "scratchpad", "channels", "mcp", "hal", "plugins", "skills", "notifications", "containers", "webhooks", "capabilities", "channel-telegram"]
+enum = ["index", "tools", "tool-detail", "permissions", "memory", "events", "commands", "errors", "feedback", "agents", "tasks", "procedural", "escalation", "coordination", "suggest", "scratchpad", "channels", "mcp", "hal", "plugins", "skills", "notifications", "containers", "webhooks", "capabilities", "scheduling", "channel-telegram"]
 description = "Manual section to return"
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 type = "string"
 description = "Tool name required when section is tool-detail"
+
+[payload_schema.properties.skill]
+type = "string"
+description = "Skill name for drill-down. Pass with section=\"skills\" to see one skill's required tools, permissions, triggers, and budget."
+
+[payload_schema.properties.server]
+type = "string"
+description = "MCP server name for drill-down. Pass with section=\"mcp\" to see that server's tools."
+
+[payload_schema.properties.query]
+type = "string"
+description = "Free-text query for section=\"suggest\" — ranks tools by keyword/semantic match."
 
 [sandbox]
 network       = false

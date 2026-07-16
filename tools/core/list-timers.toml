@@ -19,7 +19,7 @@ outputs = ["timer_list"]
 input  = "ListTimersIntent"
 output = "ListTimersResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 description = "No input required"
 

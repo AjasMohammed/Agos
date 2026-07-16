@@ -25,85 +25,85 @@ outputs = ["hardware.raw-usb"]
 input  = "RawUsbIntent"
 output = "RawUsbResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 description = "Raw USB operation"
 
-[input_schema.properties.action]
+[payload_schema.properties.action]
 type = "string"
 enum = ["list", "open", "read", "write", "control", "close"]
 default = "list"
 description = "Operation to perform."
 
-[input_schema.properties.vendor_id]
+[payload_schema.properties.vendor_id]
 description = "USB vendor ID as an integer or hex string like '0x2341'. Required for open/read/write/control/close."
 oneOf = [{ type = "integer", minimum = 0, maximum = 65535 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]{1,4}$" }]
 
-[input_schema.properties.product_id]
+[payload_schema.properties.product_id]
 description = "USB product ID as an integer or hex string like '0x0043'. Required for open/read/write/control/close."
 oneOf = [{ type = "integer", minimum = 0, maximum = 65535 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]{1,4}$" }]
 
-[input_schema.properties.interface]
+[payload_schema.properties.interface]
 description = "Interface number to claim. Defaults to 0."
 oneOf = [{ type = "integer", minimum = 0, maximum = 255 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]{1,2}$" }]
 
-[input_schema.properties.endpoint]
+[payload_schema.properties.endpoint]
 description = "Endpoint address for read/write, as an integer or hex string like '0x81'."
 oneOf = [{ type = "integer", minimum = 0, maximum = 255 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]{1,2}$" }]
 
-[input_schema.properties.transfer_kind]
+[payload_schema.properties.transfer_kind]
 type = "string"
 enum = ["bulk", "interrupt"]
 default = "bulk"
 description = "Transfer type for read/write."
 
-[input_schema.properties.length]
+[payload_schema.properties.length]
 description = "Requested byte count for read or control IN."
 oneOf = [{ type = "integer", minimum = 1, maximum = 1048576 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]+$" }]
 
-[input_schema.properties.data]
+[payload_schema.properties.data]
 type = "array"
 description = "Byte-array payload for write or control OUT."
 items = { type = "integer", minimum = 0, maximum = 255 }
 
-[input_schema.properties.data_base64]
+[payload_schema.properties.data_base64]
 type = "string"
 description = "Base64 payload alternative for write or control OUT."
 
-[input_schema.properties.timeout_ms]
+[payload_schema.properties.timeout_ms]
 type = "integer"
 minimum = 1
 maximum = 120000
 description = "Transfer timeout in milliseconds."
 
-[input_schema.properties.request_type]
+[payload_schema.properties.request_type]
 type = "string"
 enum = ["standard", "class", "vendor"]
 description = "Control request type for control transfers."
 
-[input_schema.properties.recipient]
+[payload_schema.properties.recipient]
 type = "string"
 enum = ["device", "interface", "endpoint", "other"]
 description = "Control transfer recipient."
 
-[input_schema.properties.direction]
+[payload_schema.properties.direction]
 type = "string"
 enum = ["in", "out"]
 description = "Control transfer direction."
 
-[input_schema.properties.request]
+[payload_schema.properties.request]
 description = "Control request byte."
 oneOf = [{ type = "integer", minimum = 0, maximum = 255 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]{1,2}$" }]
 
-[input_schema.properties.value]
+[payload_schema.properties.value]
 description = "Control transfer wValue field."
 oneOf = [{ type = "integer", minimum = 0, maximum = 65535 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]{1,4}$" }]
 
-[input_schema.properties.index]
+[payload_schema.properties.index]
 description = "Control transfer wIndex field. Defaults to the interface number for interface recipients."
 oneOf = [{ type = "integer", minimum = 0, maximum = 65535 }, { type = "string", pattern = "^(0x)?[0-9a-fA-F]{1,4}$" }]
 
-[input_schema.properties.detach_kernel_driver]
+[payload_schema.properties.detach_kernel_driver]
 type = "boolean"
 description = "Request kernel-driver detach before claiming the interface. Blocked unless the driver was configured to allow it."
 
@@ -115,46 +115,18 @@ max_memory_mb = 128
 max_cpu_ms    = 10000
 syscalls      = []
 
-[examples]
-"List accessible USB devices" = """
-{
-  "action": "list"
-}
-"""
+[[examples]]
+description = "List accessible USB devices"
+payload = { action = "list" }
 
-"Open a whitelisted device" = """
-{
-  "action": "open",
-  "vendor_id": "0x2341",
-  "product_id": "0x0043",
-  "interface": 0
-}
-"""
+[[examples]]
+description = "Open a whitelisted device"
+payload = { action = "open", vendor_id = "0x2341", product_id = "0x0043", interface = 0 }
 
-"Bulk read from endpoint 0x81" = """
-{
-  "action": "read",
-  "vendor_id": "0x2341",
-  "product_id": "0x0043",
-  "interface": 0,
-  "endpoint": "0x81",
-  "transfer_kind": "bulk",
-  "length": 64
-}
-"""
+[[examples]]
+description = "Bulk read from endpoint 0x81"
+payload = { action = "read", vendor_id = "0x2341", product_id = "0x0043", interface = 0, endpoint = "0x81", transfer_kind = "bulk", length = 64 }
 
-"Vendor control OUT transfer" = """
-{
-  "action": "control",
-  "vendor_id": "0x2341",
-  "product_id": "0x0043",
-  "interface": 0,
-  "direction": "out",
-  "request_type": "vendor",
-  "recipient": "interface",
-  "request": 1,
-  "value": 0,
-  "index": 0,
-  "data": [1, 2, 3, 4]
-}
-"""
+[[examples]]
+description = "Vendor control OUT transfer"
+payload = { action = "control", vendor_id = "0x2341", product_id = "0x0043", interface = 0, direction = "out", request_type = "vendor", recipient = "interface", request = 1, value = 0, index = 0, data = [1, 2, 3, 4] }

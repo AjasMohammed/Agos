@@ -1,12 +1,40 @@
 {% extends "base.html" %}
 {% block content %}
-<div x-data="{ showModal: false }">
+<div x-data="agentFilter()" x-init="init()">
     <div class="page-header">
         <div>
             <h1>Agent Manager</h1>
-            <p class="page-meta">{{ agents|length }} connected</p>
+            <p class="page-meta">
+                <span x-text="visibleCount"></span> / {{ agents|length }} agents
+                <span x-show="statusFilter !== 'all' || query.length > 0" class="muted">· filtered</span>
+            </p>
         </div>
         <button @click="showModal = true">Connect New Agent</button>
+    </div>
+
+    <div class="filter-bar">
+        <input type="search" placeholder="Search by name, provider, or model…"
+               x-model="query" @input="apply()" aria-label="Search agents">
+        <div class="status-chips" role="tablist" aria-label="Filter by status">
+            <button type="button" class="status-chip"
+                    :class="{ 'status-chip-active': statusFilter === 'all' }"
+                    @click="statusFilter = 'all'; apply()" role="tab">All</button>
+            <button type="button" class="status-chip"
+                    :class="{ 'status-chip-active': statusFilter === 'online' }"
+                    @click="statusFilter = 'online'; apply()" role="tab">
+                <span class="dot dot-online" aria-hidden="true"></span> Online
+            </button>
+            <button type="button" class="status-chip"
+                    :class="{ 'status-chip-active': statusFilter === 'busy' }"
+                    @click="statusFilter = 'busy'; apply()" role="tab">
+                <span class="dot dot-busy" aria-hidden="true"></span> Busy
+            </button>
+            <button type="button" class="status-chip"
+                    :class="{ 'status-chip-active': statusFilter === 'offline' }"
+                    @click="statusFilter = 'offline'; apply()" role="tab">
+                <span class="dot dot-offline" aria-hidden="true"></span> Offline
+            </button>
+        </div>
     </div>
 
     <dialog :open="showModal" @close="showModal = false"
@@ -76,5 +104,50 @@
     {% include "partials/empty_state.html" %}
     {% endwith %}
     {% endif %}
+
+    <div class="empty-state" role="status" x-show="visibleCount === 0 && {{ agents|length }} > 0" x-cloak>
+        <p class="empty-state-title">No agents match your filter</p>
+        <p class="empty-state-message muted">Clear the search box or pick a different status.</p>
+        <button type="button" class="outline" @click="query=''; statusFilter='all'; apply()">Reset filters</button>
+    </div>
 </div>
+
+<script>
+function agentFilter() {
+    return {
+        showModal: false,
+        query: '',
+        statusFilter: 'all',
+        visibleCount: 0,
+        init: function() {
+            var self = this;
+            // Re-apply on HTMX SSE swaps (new agent cards arrive)
+            document.body.addEventListener('htmx:afterSwap', function(ev) {
+                if (ev.target && ev.target.id === 'agent-grid') self.apply();
+            });
+            this.apply();
+        },
+        apply: function() {
+            var q = this.query.trim().toLowerCase();
+            var status = this.statusFilter;
+            var cards = document.querySelectorAll('#agent-grid > article');
+            var shown = 0;
+            cards.forEach(function(card) {
+                var text = (card.innerText || '').toLowerCase();
+                var s = (card.getAttribute('data-status') || '').toLowerCase();
+                var hasTask = card.getAttribute('data-busy') === '1';
+                var matchesQuery = !q || text.indexOf(q) !== -1;
+                var matchesStatus = (status === 'all')
+                    || (status === 'online' && (s === 'online' || s === 'active') && !hasTask)
+                    || (status === 'busy' && hasTask)
+                    || (status === 'offline' && s !== 'online' && s !== 'active');
+                var visible = matchesQuery && matchesStatus;
+                card.style.display = visible ? '' : 'none';
+                if (visible) shown++;
+            });
+            this.visibleCount = shown;
+        }
+    };
+}
+</script>
 {% endblock %}

@@ -37,7 +37,17 @@ fn feed_token_fields(mac: &mut HmacSha256, token: &CapabilityToken) {
     mac.update(&(sorted_entries.len() as u32).to_le_bytes());
     for entry in &sorted_entries {
         update_length_prefixed(mac, entry.resource.as_bytes());
-        mac.update(&[entry.read as u8, entry.write as u8, entry.execute as u8]);
+        mac.update(&[
+            entry.read as u8,
+            entry.write as u8,
+            entry.execute as u8,
+            // query/observe must be signed too — otherwise these permission bits
+            // are forgeable on a token at rest (checkpoints) or in transit
+            // (IntentMessage.sender_token), silently elevating Query/Observe
+            // access the kernel never issued.
+            entry.query as u8,
+            entry.observe as u8,
+        ]);
         // Sign expires_at so time-limited permissions can't be made permanent
         match &entry.expires_at {
             Some(dt) => {
@@ -63,7 +73,9 @@ fn feed_token_fields(mac: &mut HmacSha256, token: &CapabilityToken) {
 
 /// Compute the HMAC-SHA256 signature for a token.
 /// Signs over ALL security-relevant fields with length-prefixed encoding:
-/// task_id | agent_id | allowed_tools | allowed_intents | permissions (entries + deny_entries) | issued_at | expires_at
+/// task_id | agent_id | allowed_tools | allowed_intents | permissions (entries
+/// incl. read/write/execute/query/observe + expires_at, plus deny_entries) |
+/// issued_at | expires_at
 pub fn compute_signature(signing_key: &[u8; 32], token: &CapabilityToken) -> Vec<u8> {
     let mut mac = HmacSha256::new_from_slice(signing_key).expect("HMAC can take any size key");
     feed_token_fields(&mut mac, token);

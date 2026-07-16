@@ -20,15 +20,15 @@ outputs = ["content.json"]
 input = "EnvCreateIntent"
 output = "EnvCreateResult"
 
-[input_schema]
+[payload_schema]
 required = ["name"]
 type = "object"
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 description = "Workspace name (alphanumeric + hyphens/underscores, max 64 chars)"
 type = "string"
 
-[input_schema.properties.ecosystem]
+[payload_schema.properties.ecosystem]
 description = "Package ecosystem: python, nodejs, rust, or generic (default: generic)"
 type = "string"
 default = "generic"

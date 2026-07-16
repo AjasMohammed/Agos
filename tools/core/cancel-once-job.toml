@@ -19,11 +19,11 @@ outputs = ["cancelled", "job_name"]
 input  = "CancelOnceJobIntent"
 output = "CancelOnceJobResult"
 
-[input_schema]
+[payload_schema]
 type     = "object"
 required = ["name"]
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 type        = "string"
 description = "Name of the once-job to cancel"
 

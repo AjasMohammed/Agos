@@ -19,6 +19,29 @@ outputs = ["published"]
 input = "IotMqttPublishIntent"
 output = "IotMqttPublishResult"
 
+[payload_schema]
+type     = "object"
+required = ["topic", "payload"]
+
+[payload_schema.properties.topic]
+type        = "string"
+description = "MQTT topic to publish to (e.g. 'home/livingroom/lamp/set')."
+
+[payload_schema.properties.payload]
+type        = "string"
+description = "Message payload as a UTF-8 string. Use JSON for structured data."
+
+[payload_schema.properties.qos]
+type        = "integer"
+enum        = [0, 1, 2]
+default     = 0
+description = "MQTT quality-of-service level."
+
+[payload_schema.properties.retain]
+type        = "boolean"
+default     = false
+description = "Whether the broker should retain this message as the topic's last known value."
+
 [sandbox]
 network = false
 fs_write = false

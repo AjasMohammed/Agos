@@ -18,20 +18,20 @@ outputs = ["content.text"]
 input  = "ToolResultPageQuery"
 output = "ToolResultPage"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["page_id"]
 
-[input_schema.properties.page_id]
+[payload_schema.properties.page_id]
 type = "string"
 description = "The page_id from the truncated tool result, e.g. 'overflow-1234-...'."
 
-[input_schema.properties.offset]
+[payload_schema.properties.offset]
 type = "integer"
 default = 0
 description = "Character offset to start reading from (default 0)."
 
-[input_schema.properties.length]
+[payload_schema.properties.length]
 type = "integer"
 default = 4000
 description = "Number of characters to return (max 8000)."

@@ -18,8 +18,11 @@ const MAX_TRANSCRIPT_ENTRIES: usize = 256;
 /// Maximum chars stored per user message or assistant answer in transcript history.
 /// Prevents a single large exchange from consuming unbounded heap.
 const MAX_MSG_CHARS: usize = 2_000;
-/// Per-call inference timeout for channel chat.
-const CHANNEL_CHAT_TIMEOUT_SECS: u64 = 60;
+/// Per-call inference timeout for channel chat. Sized to accommodate slower
+/// backends (e.g. the Claude Code subprocess adapter, which spawns a process
+/// and re-sends the full context per turn). Leaner context (see the claude-code
+/// adapter's capped window) keeps most replies well under this.
+const CHANNEL_CHAT_TIMEOUT_SECS: u64 = 180;
 
 type TranscriptKey = (ChannelInstanceID, String);
 
@@ -126,6 +129,7 @@ impl KernelChatBridge {
         channel_id: ChannelInstanceID,
         agent_name: &str,
         user_message: &str,
+        user_parts: Option<Vec<agentos_types::ContentPart>>,
     ) -> Result<String, String> {
         let k = self
             .upgrade_kernel()
@@ -139,7 +143,7 @@ impl KernelChatBridge {
 
         let result = tokio::time::timeout(
             Duration::from_secs(CHANNEL_CHAT_TIMEOUT_SECS),
-            k.chat_infer_with_tools(agent_name, &hist, user_message, None, None),
+            k.chat_infer_with_tools(agent_name, &hist, user_message, user_parts, None),
         )
         .await
         .map_err(|_| {

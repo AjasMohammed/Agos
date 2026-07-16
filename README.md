@@ -58,7 +58,7 @@ AgentOS is a purpose-built operating environment where **LLMs are the primary us
 
 ### Prerequisites
 
-- **Rust 1.75+** ([rustup.rs](https://rustup.rs/))
+- **Rust 1.91+** (or latest stable) ([rustup.rs](https://rustup.rs/))
 - **Linux** (seccomp sandboxing is Linux-only)
 - **Ollama** (optional, for local LLM inference) — [ollama.com](https://ollama.com/)
 - **PipeWire user tools** (optional, for `audio` feature) — `pw-cli`, `pw-record`, `pw-play`, `wpctl`
@@ -66,7 +66,7 @@ AgentOS is a purpose-built operating environment where **LLMs are the primary us
 ### Build
 
 ```bash
-git clone https://github.com/agentos/agentos.git
+git clone https://github.com/AjasMohammed/Agos.git
 cd agos
 cargo build --workspace
 ```
@@ -290,10 +290,6 @@ cargo test -p agentos-kernel --test security_acceptance_test  # 7/7 security sce
 ```
 
 Plus: Docker build succeeds, health endpoint responds 200, production config reviewed for no `/tmp` paths.
-
-See [`obsidian-vault/reference/Release Process.md`](obsidian-vault/reference/Release%20Process.md) for the full release workflow, sign-off template, and rollback procedure.
-
-See [`obsidian-vault/reference/First Deployment Runbook.md`](obsidian-vault/reference/First%20Deployment%20Runbook.md) for the first-boot smoke checklist and deployment sign-off.
 
 ---
 

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="light">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,16 +7,17 @@
     <meta name="csrf-token" content="{{ csrf_token }}">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="icon" type="image/png" href="/static/logo.png">
     <link rel="stylesheet" href="/static/css/pico.min.css">
-    <link rel="stylesheet" href="/static/css/app.css?v=17">
+    <link rel="stylesheet" href="/static/css/app.css?v=21">
     <script src="/static/js/csrf.js" defer></script>
     <script src="/static/js/htmx.min.js" defer></script>
     <script src="/static/js/sse.js" defer></script>
     <script src="/static/js/app.js" defer></script>
     <script src="/static/js/nav-active.js" defer></script>
     <script src="/static/js/notification-bell.js" defer></script>
+    <script src="/static/js/command-palette.js" defer></script>
     <script src="/static/js/alpine.min.js" defer></script>
     {% block head_extra %}{% endblock %}
 </head>
@@ -46,66 +47,67 @@
         </div>
         <nav>
             <ul class="sidebar-nav">
-                <li><a href="/" data-nav="/">Dashboard</a></li>
+                    <li><a href="/" data-nav="/" data-nav-icon="D">Dashboard</a></li>
             </ul>
 
             <details class="nav-section" open>
                 <summary>Operations</summary>
                 <ul class="sidebar-nav">
-                    <li><a href="/agents" data-nav="/agents">Agents</a></li>
-                    <li><a href="/tasks" data-nav="/tasks">Tasks</a></li>
-                    <li><a href="/chat" data-nav="/chat">Chat</a></li>
-                    <li><a href="/agent-chat" data-nav="/agent-chat">Agent Chat</a></li>
-                    <li><a href="/files" data-nav="/files">Files</a></li>
-                    <li><a href="/workflows" data-nav="/workflows">Workflows</a></li>
-                    <li><a href="/pipelines" data-nav="/pipelines">Pipelines</a></li>
-                    <li><a href="/escalations" data-nav="/escalations">Escalations</a></li>
+                    <li><a href="/agents" data-nav="/agents" data-nav-icon="A">Agents</a></li>
+                    <li><a href="/tasks" data-nav="/tasks" data-nav-icon="T">Tasks</a></li>
+                    <li><a href="/chat" data-nav="/chat" data-nav-icon="C">Chat</a></li>
+                    <li><a href="/agent-chat" data-nav="/agent-chat" data-nav-icon="M">Agent Chat</a></li>
+                    <li><a href="/files" data-nav="/files" data-nav-icon="F">Files</a></li>
+                    <li><a href="/workflows" data-nav="/workflows" data-nav-icon="W">Workflows</a></li>
+                    <li><a href="/pipelines" data-nav="/pipelines" data-nav-icon="P">Pipelines</a></li>
+                    <li><a href="/escalations" data-nav="/escalations" data-nav-icon="E">Escalations</a></li>
+                    <li><a href="/prefs" data-nav="/prefs" data-nav-icon="R">Pref Proposals</a></li>
                 </ul>
             </details>
 
             <details class="nav-section">
                 <summary>Capabilities</summary>
                 <ul class="sidebar-nav">
-                    <li><a href="/tools" data-nav="/tools">Tools</a></li>
-                    <li><a href="/manual" data-nav="/manual">Manual</a></li>
-                    <li><a href="/marketplace" data-nav="/marketplace">Marketplace</a></li>
-                    <li><a href="/schedules" data-nav="/schedules">Schedules</a></li>
-                    <li><a href="/roles" data-nav="/roles">Roles</a></li>
-                    <li><a href="/teams" data-nav="/teams">Teams</a></li>
-                    <li><a href="/scratchpad" data-nav="/scratchpad">Scratchpad</a></li>
+                    <li><a href="/tools" data-nav="/tools" data-nav-icon="X">Tools</a></li>
+                    <li><a href="/manual" data-nav="/manual" data-nav-icon="B">Manual</a></li>
+                    <li><a href="/marketplace" data-nav="/marketplace" data-nav-icon="K">Marketplace</a></li>
+                    <li><a href="/schedules" data-nav="/schedules" data-nav-icon="S">Schedules</a></li>
+                    <li><a href="/roles" data-nav="/roles" data-nav-icon="L">Roles</a></li>
+                    <li><a href="/teams" data-nav="/teams" data-nav-icon="G">Teams</a></li>
+                    <li><a href="/scratchpad" data-nav="/scratchpad" data-nav-icon="N">Scratchpad</a></li>
                 </ul>
             </details>
 
             <details class="nav-section">
                 <summary>Integrations</summary>
                 <ul class="sidebar-nav">
-                    <li><a href="/plugins" data-nav="/plugins">Plugins</a></li>
-                    <li><a href="/channels" data-nav="/channels">Channels</a></li>
-                    <li><a href="/mcp" data-nav="/mcp">MCP Servers</a></li>
-                    <li><a href="/webhooks" data-nav="/webhooks">Webhooks</a></li>
-                    <li><a href="/connectors" data-nav="/connectors">Connectors</a></li>
-                    <li><a href="/a2a" data-nav="/a2a">A2A</a></li>
+                    <li><a href="/plugins" data-nav="/plugins" data-nav-icon="I">Plugins</a></li>
+                    <li><a href="/channels" data-nav="/channels" data-nav-icon="H">Channels</a></li>
+                    <li><a href="/mcp" data-nav="/mcp" data-nav-icon="M">MCP Servers</a></li>
+                    <li><a href="/webhooks" data-nav="/webhooks" data-nav-icon="U">Webhooks</a></li>
+                    <li><a href="/connectors" data-nav="/connectors" data-nav-icon="O">Connectors</a></li>
+                    <li><a href="/a2a" data-nav="/a2a" data-nav-icon="2">A2A</a></li>
                 </ul>
             </details>
 
             <details class="nav-section">
                 <summary>System</summary>
                 <ul class="sidebar-nav">
-                    <li><a href="/audit" data-nav="/audit">Audit Log</a></li>
-                    <li><a href="/costs" data-nav="/costs">Costs</a></li>
-                    <li><a href="/secrets" data-nav="/secrets">Secrets</a></li>
-                    <li><a href="/config" data-nav="/config">Config</a></li>
-                    <li><a href="/notifications" data-nav="/notifications">Notifications</a></li>
-                    <li><a href="/doctor" data-nav="/doctor">Doctor</a></li>
-                    <li><a href="/events" data-nav="/events">Events</a></li>
-                    <li><a href="/logs" data-nav="/logs">Logs</a></li>
-                    <li><a href="/resources" data-nav="/resources">Resources</a></li>
-                    <li><a href="/hal" data-nav="/hal">HAL</a></li>
+                    <li><a href="/audit" data-nav="/audit" data-nav-icon="Q">Audit Log</a></li>
+                    <li><a href="/costs" data-nav="/costs" data-nav-icon="$">Costs</a></li>
+                    <li><a href="/secrets" data-nav="/secrets" data-nav-icon="Z">Secrets</a></li>
+                    <li><a href="/config" data-nav="/config" data-nav-icon="Y">Config</a></li>
+                    <li><a href="/notifications" data-nav="/notifications" data-nav-icon="!">Notifications</a></li>
+                    <li><a href="/doctor" data-nav="/doctor" data-nav-icon="+">Doctor</a></li>
+                    <li><a href="/events" data-nav="/events" data-nav-icon="V">Events</a></li>
+                    <li><a href="/logs" data-nav="/logs" data-nav-icon="J">Logs</a></li>
+                    <li><a href="/resources" data-nav="/resources" data-nav-icon="R">Resources</a></li>
+                    <li><a href="/hal" data-nav="/hal" data-nav-icon="H">HAL</a></li>
                 </ul>
             </details>
         </nav>
         <div class="sidebar-footer">
-            <small>AgentOS v3</small>
+            <small>Enterprise control plane</small>
         </div>
     </aside>
 
@@ -128,7 +130,7 @@
                         @click="sidebarCollapsed = !sidebarCollapsed; localStorage.setItem('aosSidebarCollapsed', sidebarCollapsed ? 'true' : 'false')"
                         :aria-expanded="(!sidebarCollapsed).toString()"
                         aria-label="Toggle sidebar width">
-                    <span aria-hidden="true">Menu</span>
+                    <span aria-hidden="true">Navigation</span>
                 </button>
                 {% if breadcrumbs %}
                 <nav aria-label="Breadcrumb" class="breadcrumb-nav">
@@ -144,6 +146,15 @@
                 {% endif %}
             </div>
             <div class="topbar-right">
+                <!-- Command palette trigger (Cmd/Ctrl+K) -->
+                <button type="button" class="outline topbar-btn topbar-cmdk"
+                        @click="$dispatch('show-command-palette')"
+                        aria-label="Open command palette"
+                        title="Open command palette (Cmd/Ctrl+K)">
+                    <span aria-hidden="true">Search</span>
+                    <kbd class="cmdk-trigger-hint">⌘K</kbd>
+                </button>
+
                 <!-- SSE connection status indicator -->
                 <span class="connection-indicator" x-data="sseStatus()" x-init="init()" @destroy="destroy()">
                     <span class="connection-dot" :class="state" :title="label"></span>
@@ -159,7 +170,7 @@
                         <span x-show="unreadCount > 0"
                               x-cloak
                               x-text="unreadCount"
-                              style="position:absolute;top:-6px;right:-10px;background:var(--aos-red);color:#fff;border:2px solid var(--aos-black);border-radius:0;padding:1px 5px;font-size:0.7rem;font-weight:700;min-width:1.1rem;text-align:center;box-shadow:2px 2px 0 0 var(--aos-black)"
+                              style="position:absolute;top:-6px;right:-10px;background:var(--aos-red);color:#fff;border:2px solid var(--pico-card-background-color);border-radius:var(--aos-radius-pill);padding:1px 5px;font-size:0.7rem;font-weight:700;min-width:1.1rem;text-align:center;box-shadow:var(--aos-shadow-sm)"
                               aria-live="polite"
                               aria-label="unread notifications"></span>
                     </a>
@@ -182,6 +193,9 @@
 
     <!-- Keyboard shortcuts help modal -->
     {% include "partials/shortcuts_modal.html" %}
+
+    <!-- Command palette (Cmd/Ctrl+K) -->
+    {% include "partials/command_palette.html" %}
 
 </body>
 </html>

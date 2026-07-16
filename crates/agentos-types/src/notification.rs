@@ -38,6 +38,60 @@ pub struct UserMessage {
     /// For channels that support reply threading (Telegram message_id, email In-Reply-To).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_external_id: Option<String>,
+    /// Optional outbound media attachment (image/document). Channels that
+    /// support media render it natively (Telegram sendPhoto/sendDocument);
+    /// others fall back to appending the URL to the body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<MessageAttachment>,
+}
+
+/// An outbound media attachment carried by a [`UserMessage`].
+///
+/// Two sources: a public `url` the channel fetches directly (Telegram passes it
+/// to `sendPhoto`/`sendDocument`), or `inline` bytes uploaded via multipart
+/// (resolved kernel-side from a stored `file_id`). When `inline` is set, `url`
+/// is ignored. Inline upload is Telegram-only today; URL works on all channels.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageAttachment {
+    /// Public URL the receiving channel fetches directly (empty when `inline`).
+    #[serde(default)]
+    pub url: String,
+    /// Whether the channel treats this as an inline image or a document.
+    pub kind: AttachmentKind,
+    /// Optional download filename (documents).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    /// Optional caption shown with the media (markdown, rendered per-platform).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+    /// Inline bytes (base64) to upload directly instead of fetching `url` —
+    /// resolved kernel-side from a `file_id`. Telegram uploads via multipart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline: Option<InlineAttachment>,
+    /// Additional media URLs of the same `kind` forming a multi-item album
+    /// (Telegram `sendMediaGroup`). `url` is the first item; these are the rest
+    /// (2–10 total). Empty for single attachments. URL-based only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_urls: Vec<String>,
+}
+
+/// Inline media bytes (base64-encoded) for direct multipart upload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InlineAttachment {
+    /// Detected MIME type.
+    pub mime: String,
+    /// Base64-encoded file bytes.
+    pub data_base64: String,
+}
+
+/// How a [`MessageAttachment`] should be presented by the channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    /// Inline image (Telegram `sendPhoto`).
+    Image,
+    /// Generic file/document (Telegram `sendDocument`).
+    Document,
 }
 
 /// Who produced the message.
@@ -147,6 +201,7 @@ impl DeliveryChannel {
     pub const TELEGRAM: &'static str = "telegram";
     pub const NTFY: &'static str = "ntfy";
     pub const EMAIL: &'static str = "email";
+    pub const WHATSAPP: &'static str = "whatsapp";
 
     pub fn cli() -> Self {
         Self(Self::CLI.to_string())

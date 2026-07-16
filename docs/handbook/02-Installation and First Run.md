@@ -17,7 +17,7 @@ status: complete
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| **Rust** | 1.75+ | Edition 2021. Install via [rustup](https://rustup.rs/) |
+| **Rust** | stable (latest) — install via rustup | Edition 2021. Pinned via `rust-toolchain.toml` (`channel = "stable"`) |
 | **Cargo** | (bundled with Rust) | Workspace resolver v2 |
 | **Linux** | x86_64 | Required for seccomp sandboxing. Other platforms build but skip sandbox features |
 | **SQLite** | (bundled) | `rusqlite` compiles SQLite from source via the `bundled` feature |
@@ -32,10 +32,10 @@ Clone the repository and build the entire workspace:
 
 ```bash
 # Clone
-git clone https://github.com/agentos/agentos.git
+git clone https://github.com/AjasMohammed/Agos.git
 cd agentos
 
-# Build all 16 workspace crates (debug mode)
+# Build all 28 workspace crates (debug mode)
 cargo build --workspace
 
 # Run all tests
@@ -65,9 +65,9 @@ The default development configuration lives at `config/default.toml`. All paths 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `max_concurrent_tasks` | `4` | Maximum agent tasks running in parallel |
-| `default_task_timeout_secs` | `60` | Seconds before a task is forcibly terminated |
-| `context_window_max_entries` | `100` | Maximum entries per context window before eviction |
-| `context_window_token_budget` | `8000` | Token budget per context window. Compress at 80%, checkpoint at 95% |
+| `default_task_timeout_secs` | `3600` | Seconds before a task is forcibly terminated |
+| `context_window_max_entries` | `500` | Maximum entries per context window before eviction |
+| `context_window_token_budget` | `32000` | Token budget per context window. Compress at 80%, checkpoint at 95% |
 
 ### `[secrets]` — Encrypted secrets store
 
@@ -327,7 +327,7 @@ $ cd agentos
 $ cargo build --workspace
    Compiling agentos-types v0.1.0
    Compiling agentos-audit v0.1.0
-   ... (16 crates)
+   ... (28 crates)
    Compiling agentos-cli v0.1.0
     Finished `dev` profile [unoptimized + debuginfo]
 
@@ -340,7 +340,7 @@ $ ./target/debug/agentos start
 Enter vault passphrase: ********
 [INFO] Audit log initialized at /tmp/agentos/audit.db
 [INFO] Secrets vault opened
-[INFO] Loaded 8 core tools
+[INFO] Loaded 132 core tools
 [INFO] Bus server listening on /tmp/agentos/agentos.sock
 [INFO] Kernel started successfully
 

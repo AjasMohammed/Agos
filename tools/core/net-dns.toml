@@ -18,11 +18,11 @@ outputs = ["content.json"]
 input = "NetDnsIntent"
 output = "NetDnsResult"
 
-[input_schema]
+[payload_schema]
 required = ["hostname"]
 type = "object"
 
-[input_schema.properties.hostname]
+[payload_schema.properties.hostname]
 description = "Hostname to resolve"
 type = "string"
 

@@ -18,15 +18,15 @@ outputs = ["content.json"]
 input = "ProcSignalIntent"
 output = "ProcSignalResult"
 
-[input_schema]
+[payload_schema]
 required = ["process_id"]
 type = "object"
 
-[input_schema.properties.process_id]
+[payload_schema.properties.process_id]
 description = "ID of the process to signal (from proc-spawn)"
 type = "string"
 
-[input_schema.properties.signal]
+[payload_schema.properties.signal]
 description = "Signal name: SIGTERM (default), SIGKILL, SIGHUP, SIGINT"
 type = "string"
 default = "SIGTERM"

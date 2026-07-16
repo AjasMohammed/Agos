@@ -21,6 +21,29 @@ pub fn handle_get(key: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether a dotted config key names a raw secret (so its value must not be
+/// echoed to the terminal or persisted in plaintext to the revision DB).
+///
+/// `*_env` / `*_ref` keys hold an env-var NAME or a `@vault` reference, not the
+/// secret itself, so they are deliberately NOT treated as secrets.
+fn key_holds_secret(key: &str) -> bool {
+    let leaf = key.rsplit('.').next().unwrap_or(key).to_ascii_lowercase();
+    if leaf.ends_with("_env") || leaf.ends_with("_ref") || leaf.ends_with("_envvar") {
+        return false;
+    }
+    const SECRET_MARKERS: &[&str] = &[
+        "api_key",
+        "apikey",
+        "secret",
+        "password",
+        "passwd",
+        "token",
+        "credential",
+        "private_key",
+    ];
+    SECRET_MARKERS.iter().any(|m| leaf.contains(m))
+}
+
 /// Set a dotted key in the config file, preserving comments and formatting.
 pub fn handle_set(key: &str, value: &str) -> anyhow::Result<()> {
     let path = config_path();
@@ -30,12 +53,94 @@ pub fn handle_set(key: &str, value: &str) -> anyhow::Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("Config parse error: {}", e))?;
 
+    let is_secret = key_holds_secret(key);
+    if is_secret {
+        eprintln!(
+            "warning: '{key}' looks like a secret. Storing secrets in the config \
+             file is plaintext on disk — prefer `agentos secret set {key}` (vault) \
+             and reference it via a `*_env` key. The value below is redacted in \
+             output and revision history."
+        );
+    }
+
+    // Snapshot the PRE-WRITE file content so this change can be rolled back.
+    // Revisioning is a safety sidecar, not a gate: a snapshot failure (e.g. an
+    // unwritable DB) is logged but must NOT block the config write. Secret
+    // values are redacted in the revision record so the DB never holds a
+    // second plaintext copy.
+    let old = resolve_dotted_key(&doc, key).ok();
+    let (snap_old, snap_new) = if is_secret {
+        (old.as_deref().map(|_| "***"), "***")
+    } else {
+        (old.as_deref(), value)
+    };
+    if let Err(e) = super::config_revision_store::snapshot(&content, key, snap_old, snap_new) {
+        eprintln!("warning: could not record config revision: {e}");
+    }
+
     set_dotted_key(&mut doc, key, value)?;
 
     std::fs::write(&path, doc.to_string())
         .map_err(|e| anyhow::anyhow!("Cannot write config: {}", e))?;
 
-    println!("{} = {}", key, value);
+    if is_secret {
+        println!("{} = ***", key);
+    } else {
+        println!("{} = {}", key, value);
+    }
+    Ok(())
+}
+
+/// Print config revision history, newest first.
+pub fn handle_history(limit: usize) -> anyhow::Result<()> {
+    let rows = super::config_revision_store::list(limit)?;
+    if rows.is_empty() {
+        println!("No config revisions recorded yet.");
+        return Ok(());
+    }
+    println!("{:>5}  {:<25}  {:<30}  change", "rev", "created_at", "key");
+    for r in rows {
+        let key = r.key.unwrap_or_default();
+        let change = match (r.old_value, r.new_value) {
+            (Some(o), Some(n)) => format!("{o} → {n}"),
+            (None, Some(n)) => format!("(unset) → {n}"),
+            _ => String::new(),
+        };
+        println!(
+            "{:>5}  {:<25}  {:<30}  {}",
+            r.rev, r.created_at, key, change
+        );
+    }
+    Ok(())
+}
+
+/// Roll the config file back to a stored revision's content. The running
+/// kernel's `ConfigWatcher` hot-reloads the write automatically.
+pub fn handle_rollback(rev: i64) -> anyhow::Result<()> {
+    let content = super::config_revision_store::get(rev)?
+        .ok_or_else(|| anyhow::anyhow!("Revision {rev} not found"))?;
+
+    // Refuse to write a snapshot that doesn't parse — never restore a broken config.
+    content
+        .parse::<DocumentMut>()
+        .map_err(|e| anyhow::anyhow!("Revision {rev} is not valid TOML, refusing rollback: {e}"))?;
+
+    let path = config_path();
+
+    // Snapshot the CURRENT file first so the rollback is itself reversible.
+    if let Ok(current) = std::fs::read_to_string(&path) {
+        if let Err(e) = super::config_revision_store::snapshot(
+            &current,
+            &format!("rollback->{rev}"),
+            None,
+            "rollback",
+        ) {
+            eprintln!("warning: could not record pre-rollback revision: {e}");
+        }
+    }
+
+    std::fs::write(&path, &content).map_err(|e| anyhow::anyhow!("Cannot write config: {}", e))?;
+    println!("Rolled back to revision {rev}");
     Ok(())
 }
 
@@ -193,5 +298,128 @@ mod tests {
         let doc: DocumentMut = content.parse().unwrap();
         assert!(resolve_dotted_key(&doc, "llm.nonexistent").is_err());
         assert!(resolve_dotted_key(&doc, "missing_section.key").is_err());
+    }
+
+    // ---- Revisioning / rollback integration (mutate global env → run serially) ----
+
+    use serial_test::serial;
+
+    /// Point AGENTOS_CONFIG + AGENTOS_CONFIG_REVISIONS at a temp dir; restore on drop.
+    struct EnvGuard {
+        dir: tempfile::TempDir,
+    }
+    impl EnvGuard {
+        fn new(initial_config: &str) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = dir.path().join("config.toml");
+            std::fs::write(&cfg, initial_config).unwrap();
+            std::env::set_var("AGENTOS_CONFIG", &cfg);
+            std::env::set_var("AGENTOS_CONFIG_REVISIONS", dir.path().join("rev.db"));
+            Self { dir }
+        }
+        fn config_file(&self) -> std::path::PathBuf {
+            self.dir.path().join("config.toml")
+        }
+        fn read_config(&self) -> String {
+            std::fs::read_to_string(self.config_file()).unwrap()
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("AGENTOS_CONFIG");
+            std::env::remove_var("AGENTOS_CONFIG_REVISIONS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn set_records_pre_write_content() {
+        let g = EnvGuard::new("[kernel]\ndefault_task_timeout_secs = 300\n");
+        let before = g.read_config();
+        handle_set("kernel.default_task_timeout_secs", "1").unwrap();
+        // The file is now changed...
+        assert!(g.read_config().contains("= 1"));
+        // ...but the recorded revision holds the PRE-write content.
+        let rows = super::super::config_revision_store::list(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        let stored = super::super::config_revision_store::get(rows[0].rev)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored, before);
+        assert_eq!(rows[0].new_value.as_deref(), Some("1"));
+        assert_eq!(rows[0].old_value.as_deref(), Some("300"));
+    }
+
+    #[test]
+    #[serial]
+    fn rollback_restores_prior_content() {
+        let g = EnvGuard::new("[llm]\nprimary = \"old\"\n");
+        let original = g.read_config();
+        handle_set("llm.primary", "new").unwrap();
+        assert!(g.read_config().contains("new"));
+        // Revision 1 holds the pre-set ("old") content.
+        handle_rollback(1).unwrap();
+        assert_eq!(g.read_config(), original);
+        let doc: DocumentMut = g.read_config().parse().unwrap();
+        assert_eq!(resolve_dotted_key(&doc, "llm.primary").unwrap(), "old");
+    }
+
+    #[test]
+    #[serial]
+    fn rollback_refuses_unparseable_revision() {
+        let g = EnvGuard::new("[llm]\nprimary = \"keep\"\n");
+        // Inject a revision whose stored content is invalid TOML.
+        let rev = super::super::config_revision_store::snapshot("= = not valid =", "x", None, "y")
+            .unwrap();
+        let before = g.read_config();
+        let err = handle_rollback(rev).unwrap_err();
+        assert!(err.to_string().contains("not valid TOML"));
+        // The live config must be untouched.
+        assert_eq!(g.read_config(), before);
+    }
+
+    #[test]
+    fn secret_key_detection() {
+        assert!(key_holds_secret("llm.api_key"));
+        assert!(key_holds_secret("providers.anthropic.token"));
+        assert!(key_holds_secret("db.password"));
+        assert!(key_holds_secret("x.client_secret"));
+        // Reference keys hold a name/handle, not the secret itself.
+        assert!(!key_holds_secret("llm.api_key_env"));
+        assert!(!key_holds_secret("x.token_ref"));
+        // Ordinary keys are not secrets.
+        assert!(!key_holds_secret("kernel.max_concurrent_tasks"));
+        assert!(!key_holds_secret("llm.primary"));
+    }
+
+    #[test]
+    #[serial]
+    fn secret_value_redacted_in_revision_history() {
+        let g = EnvGuard::new("[llm]\nprimary = \"x\"\n");
+        handle_set("llm.api_key", "sk-supersecret-value").unwrap();
+        // The config file holds the value (user's explicit intent)...
+        assert!(g.read_config().contains("sk-supersecret-value"));
+        // ...but the revision DB's new_value must be redacted, not plaintext.
+        let rows = super::super::config_revision_store::list(10).unwrap();
+        assert_eq!(rows[0].new_value.as_deref(), Some("***"));
+        assert_ne!(
+            rows[0].new_value.as_deref(),
+            Some("sk-supersecret-value"),
+            "secret must never land in the revision new_value column"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn snapshot_failure_does_not_block_set() {
+        let g = EnvGuard::new("[kernel]\nx = 1\n");
+        // Point the revisions DB at a path whose parent doesn't exist → open fails.
+        std::env::set_var(
+            "AGENTOS_CONFIG_REVISIONS",
+            g.dir.path().join("no_such_dir").join("rev.db"),
+        );
+        // The set must still succeed despite the snapshot failure.
+        handle_set("kernel.x", "2").unwrap();
+        assert!(g.read_config().contains("= 2"));
     }
 }

@@ -1,3 +1,13 @@
+[target.x86_64-unknown-linux-gnu]
+# Use gcc (`cc`) as the linker driver so the GCC library search path is
+# included automatically — `ort-sys` links libstdc++, and clang+mold on
+# distros that ship libstdc++.so.6 without the unversioned `libstdc++.so`
+# symlink (no libstdc++-dev installed) cannot resolve `-lstdc++` otherwise.
+# If you have libstdc++-dev (or `g++`) installed and want the faster
+# clang+mold path back, set RUSTFLAGS=`-C link-arg=-fuse-ld=mold` and
+# CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang.
+linker = "cc"
+
 [target.x86_64-unknown-linux-musl]
 rustflags = ["-C", "target-feature=+crt-static"]
 

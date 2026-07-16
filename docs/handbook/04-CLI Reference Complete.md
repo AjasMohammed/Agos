@@ -100,6 +100,8 @@ Connect a new LLM agent to the kernel.
 | `--base-url` | `Option<String>` | — | Custom base URL for the LLM provider endpoint |
 | `--role` | `Vec<String>` | `["general"]` | Role(s) for the agent. May be repeated. Supported: `orchestrator`, `security-monitor`, `sysops`, `memory-manager`, `tool-manager`, `general` |
 | `--grant` | `Vec<String>` | `[]` | Extra permissions to grant at connect time (format: `resource:flags`). May be repeated. |
+| `--root` | flag | `false` | Mark the agent/task as a root agent (top of the spawn hierarchy) |
+| `--no-health-check` | flag | `false` | Skip the LLM health probe performed on connect |
 | `--test` | flag | `false` | Connect in test mode: agent receives an ecosystem-evaluation prompt asking for usability feedback |
 
 **Example:**
@@ -1460,28 +1462,28 @@ Each agent has an Ed25519 keypair generated at connection time for signing and a
 
 Show an agent's cryptographic identity: public key and signing key status.
 
-| Flag | Type | Description |
+| Argument | Type | Description |
 |------|------|-------------|
-| `--agent` | `String` | Agent name |
+| `<agent>` | `String` | Agent name (positional) |
 
 **Example:**
 
 ```bash
-agentos identity show --agent analyst-1
+agentos identity show analyst-1
 ```
 
 ### `identity revoke`
 
 Revoke an agent's cryptographic identity and all associated permissions. This is a destructive operation.
 
-| Flag | Type | Description |
+| Argument | Type | Description |
 |------|------|-------------|
-| `--agent` | `String` | Agent name |
+| `<agent>` | `String` | Agent name (positional) |
 
 **Example:**
 
 ```bash
-agentos identity revoke --agent compromised-agent
+agentos identity revoke compromised-agent
 ```
 
 ---
@@ -1560,33 +1562,6 @@ Revoke a specific agent's access to a device.
 ```bash
 agentos hal revoke gpu:0 --agent worker
 ```
-
-### `hal query`
-
-Query a HAL driver directly. The driver dispatches the request based on the JSON parameters. Currently available drivers: `usb-storage` (requires the `usb-storage` feature flag at build time).
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `driver` | `String` | Driver name (positional, e.g. `usb-storage`) |
-| `params` | `String` | JSON object with driver-specific parameters |
-
-**Examples:**
-
-```bash
-# List USB filesystems
-agentos hal query usb-storage '{"action": "list"}'
-
-# Mount a USB partition
-agentos hal query usb-storage '{"action": "mount", "device": "sdb1"}'
-
-# Unmount
-agentos hal query usb-storage '{"action": "unmount", "device": "sdb1"}'
-
-# Eject (power off the drive)
-agentos hal query usb-storage '{"action": "eject", "device": "sdb1"}'
-```
-
-> **Permission:** Requires `hardware.usb-storage:x` and the device `usb-storage:<device>` must be approved in the HAL device registry. See [[18-Advanced Operations#USB Storage Driver]] for full details.
 
 ---
 
@@ -1847,16 +1822,16 @@ Run a coordinator + workers agent team. The coordinator orchestrates a set of wo
 | `--workers` | `Vec<String>` | *required* | Worker agent names (repeat flag) |
 | `--task` | `String` | *required* | Task description |
 
-### `team status`
+### `team list`
 
-Show the current status of a running team — coordinator state, per-worker progress, and partial results.
+List configured agent teams.
 
 ```bash
 agentos team run --coordinator orchestrator \
   --workers researcher --workers coder --workers reviewer \
   --task "Build a CSV importer"
 
-agentos team status <team-id>
+agentos team list
 ```
 
 ---
@@ -1983,7 +1958,10 @@ Lists every LLM provider known to the kernel. Built-in adapters (Ollama, OpenAI,
 | Subcommand | Description |
 |---|---|
 | `provider list` | List built-in adapters and catalog entries |
-| `provider show <name>` | Show endpoint, default model, and headers for one provider |
+| `provider set-url <name> <url>` | Override the base URL for a provider |
+| `provider add <name> <url>` | Add a new OpenAI-compatible provider to the catalog |
+| `provider remove <name>` | Remove a provider from the catalog |
+| `provider probe <name>` | Probe `<base_url><models_path>` and refresh the provider's model list |
 
 ---
 
@@ -2059,21 +2037,21 @@ agentos init my-project --template secure-agent
 
 ## `workspace` — Manage agent filesystem access
 
-Controls which host directories agents can read and write beyond the default `data_dir`. Changes are runtime-only (in-memory) unless the path is also added to `tools.workspace.allowed_paths` in the config file.
+Controls which host directories agents can read, write, or execute in beyond the default `data_dir`. Grants are **persistent** — they are stored by the kernel and survive restarts. A grant can target a single agent or all agents.
 
 | Subcommand | Description |
 |---|---|
-| `workspace add <path>` | Add an absolute path to the workspace allowlist |
-| `workspace remove <path>` | Remove a path from the allowlist |
-| `workspace list` | List all currently allowed workspace paths |
+| `workspace grant <path> [--mode rw] [--agent <name>] [--yes]` | Grant an agent (or all agents) r/w/x access to a host directory |
+| `workspace revoke <path> [--agent <name>]` | Revoke a grant |
+| `workspace list [--agent <name>]` | List active grants |
 
 ```bash
-agentos workspace add /home/user/my-repo
+agentos workspace grant ~/project --mode rw
 agentos workspace list
-agentos workspace remove /home/user/old-repo
+agentos workspace revoke ~/project
 ```
 
-> Paths added via `workspace add` are canonicalized and take effect immediately for all new tool calls. To persist across restarts, add the path to `tools.workspace.allowed_paths` in `config/default.toml`.
+> Granted paths are canonicalized and take effect immediately for all new tool calls. Grants are stored persistently by the kernel, so they remain in effect across restarts without editing the config file.
 
 ---
 
@@ -2122,15 +2100,15 @@ agentos perm grant monitor hardware.gpu:r
 
 ## Quick Reference: All Command Groups
 
-All **38** top-level command groups (an asterisk marks subcommands that work offline without a kernel connection):
+All **39** top-level command groups (an asterisk marks subcommands that work offline without a kernel connection):
 
 | Group | Description | Subcommands |
 |-------|-------------|-------------|
 | `start` | Boot the kernel | — |
 | `stop` | Shut down the kernel | — |
-| `agent` | Manage LLM agents | `connect`, `list`, `disconnect`, `message`, `messages`, `group create`, `broadcast`, `memory show`, `memory history`, `memory rollback`, `memory clear`, `memory set` |
+| `agent` | Manage LLM agents | `connect`, `list`, `disconnect`, `ping`, `remove`, `set-url`, `message`, `messages`, `group create`, `broadcast`, `memory show`, `memory history`, `memory rollback`, `memory clear`, `memory set` |
 | `task` | Manage tasks | `run`, `list`, `logs`, `trace`, `traces`, `cancel`, `resume`, `checkpoints` |
-| `tool` | Manage tools | `list`, `install`, `remove`, `keygen`*, `sign`*, `verify`* |
+| `tool` | Manage tools | `list`, `search`, `install`, `add`, `publish`, `remove`, `keygen`*, `sign`*, `verify`* |
 | `secret` | Manage encrypted vault | `set`, `list`, `revoke`, `rotate`, `lockdown` |
 | `perm` | Manage permissions | `grant`, `revoke`, `show`, `profile create`, `profile delete`, `profile list`, `profile assign` |
 | `role` | Manage OS roles | `create`, `delete`, `list`, `grant`, `revoke`, `assign`, `remove` |
@@ -2139,7 +2117,7 @@ All **38** top-level command groups (an asterisk marks subcommands that work off
 | `status` | Show system status | — |
 | `audit` | View audit logs | `logs`, `verify`, `snapshots`, `export`, `rollback` |
 | `pipeline` | Manage pipelines | `install`, `list`, `run`, `status`, `logs`, `remove` |
-| `team` | Coordinator + worker teams | `run`, `status` |
+| `team` | Coordinator + worker teams | `run`, `list` |
 | `cost` | View cost reports | `show`, `retrieval` |
 | `resource` | Manage resource locks | `list`, `release`, `contention`, `release-all` |
 | `escalation` | Human approval requests | `list`, `get`, `resolve` |
@@ -2147,21 +2125,23 @@ All **38** top-level command groups (an asterisk marks subcommands that work off
 | `scratchpad` | Agent scratchpad pages | `list`, `read`, `delete`, `graph` |
 | `event` | Event subscriptions | `subscribe`, `unsubscribe`, `subscriptions list`, `subscriptions show`, `subscriptions enable`, `subscriptions disable`, `history` |
 | `identity` | Agent identities | `show`, `revoke` |
-| `hal` | Hardware device access | `list`, `register`, `approve`, `deny`, `revoke`, `query` |
+| `hal` | Hardware device access | `list`, `register`, `approve`, `deny`, `revoke` |
 | `healthz` | Kernel health check | — |
 | `log` | Control runtime logging | — |
 | `notifications` | User notification inbox | `list`, `read`, `respond`, `watch` |
-| `channel` | External delivery channels | `connect`, `list`, `test`, `disconnect` |
-| `skill` | Autonomous skill packages | `list`, `install`, `remove`, `run`, `status` |
+| `channel` | External delivery channels | `connect`, `list`, `test`, `set-agent`, `disconnect` |
+| `skill` | Autonomous skill packages | `list`, `new`, `validate`, `install`, `publish`, `search`, `remove`, `run`, `status` |
 | `mcp` | MCP integration | `serve`*, `list`*, `tools`*, `call`*, `status`, `attach`, `detach`, `oauth-store`, `a2a-discover`, `a2a-delegate`, `a2a-card` |
 | `a2a` | Agent-to-Agent protocol | `card`, `discover`, `delegate`, `tasks` |
-| `provider` | LLM provider catalog | `list`, `show` |
+| `provider` | LLM provider catalog | `list`, `set-url`, `add`, `remove`, `probe` |
 | `plugin` | Plugin lifecycle | `list`, `enable`, `disable`, `info` |
 | `onboard` | Interactive setup wizard | — |
 | `doctor` | Diagnose / auto-repair | — (`--fix` flag) |
 | `config` | Read/write configuration | `get`, `set`, `list` |
 | `init` | Scaffold new project | — (`--template`) |
-| `workspace` | Runtime filesystem allowlist | `add`, `remove`, `list` |
+| `workspace` | Persistent agent filesystem grants | `grant`, `revoke`, `list` |
+| `prefs` | Review user-preference adaptation proposals | `review`, `accept`, `reject`, `stats` |
+| `approval` | Tool-call approval mode + learned allow-policy | `mode get`, `mode set`, `mode clear`, `allow`, `list`, `revoke` |
 | `web` | Web UI server | `serve` |
 
 *\* Offline commands — do not require a running kernel.*

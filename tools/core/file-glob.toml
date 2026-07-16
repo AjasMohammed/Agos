@@ -17,15 +17,15 @@ outputs = ["file_list"]
 input  = "FileGlobIntent"
 output = "FileGlobResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["pattern"]
 
-[input_schema.properties.pattern]
+[payload_schema.properties.pattern]
 type = "string"
 description = "Glob pattern relative to the search base path"
 
-[input_schema.properties.path]
+[payload_schema.properties.path]
 type = "string"
 default = "."
 description = "Optional subdirectory inside data_dir to search from"
@@ -37,3 +37,8 @@ gpu           = false
 max_memory_mb = 32
 max_cpu_ms    = 10000
 syscalls      = []
+
+[[examples]]
+description = "Find all Rust source files recursively"
+[examples.payload]
+pattern = "**/*.rs"

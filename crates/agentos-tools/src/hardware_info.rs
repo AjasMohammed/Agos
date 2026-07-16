@@ -40,13 +40,13 @@ impl AgentTool for HardwareInfoTool {
                     .to_string(),
             })?;
 
-        let mut perms = agentos_types::PermissionSet::new();
-        perms.grant("hardware.system".to_string(), true, false, false, None);
-
+        // Forward the agent's real grant (default agent permissions include
+        // hardware.system:r) — the HAL-internal check then re-verifies the
+        // agent's actual authority instead of a self-minted set.
         hal.query(
             "system",
             serde_json::json!({}),
-            &perms,
+            &context.permissions,
             Some(&context.agent_id),
             Some(&context.task_id),
         )

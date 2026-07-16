@@ -9,8 +9,7 @@ use std::sync::Arc;
 
 use agentos_bus::{BusClient, KernelCommand, KernelResponse};
 use agentos_mcp::{
-    A2AClient, AgentCard, AuthRequirement, McpAuthValidator, McpServer, McpToolDef,
-    McpToolExecutor, NoAuth,
+    A2AClient, AgentCard, AuthRequirement, McpAuthValidator, McpServer, McpToolDef, McpToolExecutor,
 };
 use agentos_tools::runner::ToolRunner;
 use async_trait::async_trait;
@@ -43,7 +42,9 @@ pub enum McpCommands {
         port: u16,
 
         /// Bearer token required for HTTP clients (HTTP transport only).
-        /// If omitted, no authentication is required.
+        /// REQUIRED for `--transport http` (may also be set via AGENTOS_MCP_TOKEN);
+        /// the server refuses to start the HTTP transport without it. Ignored for
+        /// stdio.
         #[arg(long)]
         token: Option<String>,
     },
@@ -228,6 +229,64 @@ pub enum McpCommands {
 
     /// Show this agent's A2A card (what external agents would see).
     A2aCard,
+
+    /// Browse the curated MCP server catalog (requires a running kernel).
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogSubcommand,
+    },
+
+    /// Install an MCP server from the catalog in one step.
+    ///
+    /// Examples:
+    ///   agentos mcp install filesystem --yes
+    ///   agentos mcp install github --yes      # seed GITHUB token first: agentos secret set github_token <PAT>
+    Install {
+        /// Catalog entry id (e.g. `filesystem`).
+        id: String,
+        /// Proceed without interactive confirmation.
+        #[arg(long)]
+        yes: bool,
+        /// Allow installing a community-tier entry.
+        #[arg(long)]
+        unsafe_allow_community: bool,
+        /// Use a specific runtime binary instead of auto-resolving.
+        #[arg(long, value_name = "PATH")]
+        runtime_binary: Option<String>,
+        /// Skip auth-credential injection.
+        #[arg(long)]
+        no_auth: bool,
+    },
+
+    /// Uninstall (detach) a previously-installed catalog server.
+    Uninstall {
+        /// Catalog entry id.
+        id: String,
+        /// Also purge any cached package/credential artifacts.
+        #[arg(long)]
+        purge: bool,
+    },
+}
+
+/// `mcp catalog …` subcommands.
+#[derive(Debug, clap::Subcommand)]
+pub enum CatalogSubcommand {
+    /// List all catalog entries.
+    List {
+        /// Filter by trust tier (core | verified | community).
+        #[arg(long, value_name = "TIER")]
+        trust: Option<String>,
+    },
+    /// Search catalog entries by id, name, or description.
+    Search {
+        /// Search query.
+        query: String,
+    },
+    /// Show full details for a single catalog entry as JSON.
+    Info {
+        /// Catalog entry id (e.g. `filesystem`).
+        id: String,
+    },
 }
 
 /// Run the requested MCP subcommand.
@@ -256,7 +315,10 @@ pub async fn handle(command: McpCommands, config_path: &str) -> anyhow::Result<(
         McpCommands::Status
         | McpCommands::Attach { .. }
         | McpCommands::Detach { .. }
-        | McpCommands::OauthStore { .. } => {
+        | McpCommands::OauthStore { .. }
+        | McpCommands::Catalog { .. }
+        | McpCommands::Install { .. }
+        | McpCommands::Uninstall { .. } => {
             anyhow::bail!("this mcp subcommand requires a running kernel")
         }
     }
@@ -320,13 +382,25 @@ async fn cmd_serve(
             server.serve_stdio().await?;
         }
         "http" => {
-            let auth: Arc<dyn McpAuthValidator> = if let Some(t) = token {
-                Arc::new(BearerTokenAuth(t))
-            } else {
-                Arc::new(NoAuth)
+            // The HTTP transport exposes full tool execution (shell, filesystem,
+            // network) over the network and binds 0.0.0.0. Refuse to start
+            // without a bearer token — otherwise this is unauthenticated remote
+            // code execution for anyone who can reach the port. The token may be
+            // supplied via --token or the AGENTOS_MCP_TOKEN env var.
+            let token = token.or_else(|| std::env::var("AGENTOS_MCP_TOKEN").ok());
+            let token = match token {
+                Some(t) if !t.trim().is_empty() => t,
+                _ => anyhow::bail!(
+                    "Refusing to start MCP HTTP transport without authentication. \
+                     Pass --token <secret> (or set AGENTOS_MCP_TOKEN). Use --transport stdio \
+                     for local, unauthenticated use."
+                ),
             };
+            let auth: Arc<dyn McpAuthValidator> = Arc::new(BearerTokenAuth(token));
             let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-            eprintln!("AgentOS MCP HTTP server on http://0.0.0.0:{port}/mcp");
+            eprintln!(
+                "AgentOS MCP HTTP server on http://0.0.0.0:{port}/mcp (bearer auth required)"
+            );
             agentos_mcp::serve_http(executor, auth, addr).await?;
         }
         other => anyhow::bail!("Unknown transport '{}'. Use 'stdio' or 'http'.", other),
@@ -567,6 +641,146 @@ pub async fn cmd_mcp_detach(bus: &mut BusClient, name: String) -> anyhow::Result
     Ok(())
 }
 
+// ── catalog ─────────────────────────────────────────────────────────────────
+
+/// Print a table of catalog entries from a `McpCatalogList` response, applying
+/// an optional client-side trust-tier filter.
+fn print_catalog_list(
+    entries: Vec<agentos_bus::CatalogSummary>,
+    trust: Option<String>,
+) -> anyhow::Result<()> {
+    let entries: Vec<_> = match trust {
+        Some(t) => {
+            let t = t.to_lowercase();
+            entries
+                .into_iter()
+                .filter(|e| e.trust_tier.to_lowercase() == t)
+                .collect()
+        }
+        None => entries,
+    };
+
+    if entries.is_empty() {
+        println!("No catalog entries.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<16} {:<24} {:<10} {:<8} RUNTIME",
+        "ID", "NAME", "TIER", "TRANSPORT"
+    );
+    println!("{}", "-".repeat(72));
+    for e in &entries {
+        println!(
+            "{:<16} {:<24} {:<10} {:<8} {}",
+            truncate(&e.id, 16),
+            truncate(&e.display_name, 24),
+            truncate(&e.trust_tier, 10),
+            truncate(&e.transport, 8),
+            e.runtime.as_deref().unwrap_or("-"),
+        );
+    }
+    Ok(())
+}
+
+/// `mcp catalog list` — list all catalog entries, optionally filtered by tier.
+pub async fn cmd_catalog_list(bus: &mut BusClient, trust: Option<String>) -> anyhow::Result<()> {
+    match bus.send_command(KernelCommand::McpCatalogList).await? {
+        KernelResponse::McpCatalogList(entries) => print_catalog_list(entries, trust),
+        KernelResponse::Error { message } => anyhow::bail!("Kernel error: {message}"),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+}
+
+/// `mcp catalog search <query>` — search entries by id/name/description.
+pub async fn cmd_catalog_search(bus: &mut BusClient, query: String) -> anyhow::Result<()> {
+    match bus
+        .send_command(KernelCommand::McpCatalogSearch { query })
+        .await?
+    {
+        KernelResponse::McpCatalogList(entries) => print_catalog_list(entries, None),
+        KernelResponse::Error { message } => anyhow::bail!("Kernel error: {message}"),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+}
+
+/// `mcp catalog info <id>` — print the full entry as pretty JSON.
+pub async fn cmd_catalog_info(bus: &mut BusClient, id: String) -> anyhow::Result<()> {
+    match bus
+        .send_command(KernelCommand::McpCatalogInfo { id })
+        .await?
+    {
+        KernelResponse::McpCatalogInfo(value) => {
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
+        KernelResponse::Error { message } => anyhow::bail!("Kernel error: {message}"),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+}
+
+// ── install / uninstall ──────────────────────────────────────────────────────
+
+/// `mcp install <id>` — one-command catalog install.
+pub async fn cmd_mcp_install(
+    bus: &mut BusClient,
+    id: String,
+    yes: bool,
+    allow_community: bool,
+    runtime_binary: Option<String>,
+    no_auth: bool,
+) -> anyhow::Result<()> {
+    match bus
+        .send_command(KernelCommand::McpInstall {
+            id: id.clone(),
+            assume_yes: yes,
+            allow_community,
+            runtime_binary_override: runtime_binary,
+            no_auth,
+        })
+        .await?
+    {
+        KernelResponse::McpAttached { tool_count, tools } => {
+            println!("Installed '{id}' — {tool_count} tool(s) registered.");
+            if !tools.is_empty() {
+                println!("  {}", tools.join(", "));
+            }
+            Ok(())
+        }
+        KernelResponse::Error { message } => anyhow::bail!("Kernel error: {message}"),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+}
+
+/// `mcp uninstall <id>` — detach a catalog server.
+pub async fn cmd_mcp_uninstall(bus: &mut BusClient, id: String, purge: bool) -> anyhow::Result<()> {
+    match bus
+        .send_command(KernelCommand::McpUninstall {
+            id: id.clone(),
+            purge,
+        })
+        .await?
+    {
+        KernelResponse::McpDetached => {
+            println!("Uninstalled '{id}'.");
+            Ok(())
+        }
+        KernelResponse::Error { message } => anyhow::bail!("Kernel error: {message}"),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+}
+
+/// Truncate a string to `max` chars, appending `…` if it was cut.
+fn truncate(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let out: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{out}…")
+    } else {
+        out
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Build a broad `PermissionSet` suitable for the `mcp serve` operator context.
@@ -776,6 +990,8 @@ impl McpToolExecutor for ToolRunnerExecutor {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,

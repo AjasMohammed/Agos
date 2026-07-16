@@ -17,42 +17,42 @@ outputs = ["search_results"]
 input  = "FileGrepIntent"
 output = "FileGrepResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["pattern"]
 
-[input_schema.properties.pattern]
+[payload_schema.properties.pattern]
 type = "string"
 description = "Regular expression to search for"
 
-[input_schema.properties.path]
+[payload_schema.properties.path]
 type = "string"
 default = "."
 description = "Search root relative to data_dir"
 
-[input_schema.properties.glob]
+[payload_schema.properties.glob]
 type = "string"
 description = "Optional filename glob filter, e.g. *.rs"
 
-[input_schema.properties.context_lines]
+[payload_schema.properties.context_lines]
 type = "integer"
 default = 0
 minimum = 0
 description = "Context lines before/after matches in content mode"
 
-[input_schema.properties.output_mode]
+[payload_schema.properties.output_mode]
 type = "string"
 enum = ["content", "files_with_matches", "count"]
 default = "files_with_matches"
 description = "Result aggregation mode"
 
-[input_schema.properties.max_results]
+[payload_schema.properties.max_results]
 type = "integer"
 default = 50
 minimum = 1
 description = "Maximum matches or files returned"
 
-[input_schema.properties.case_insensitive]
+[payload_schema.properties.case_insensitive]
 type = "boolean"
 default = false
 description = "Use case-insensitive regex matching"
@@ -64,3 +64,9 @@ gpu           = false
 max_memory_mb = 128
 max_cpu_ms    = 30000
 syscalls      = []
+
+[[examples]]
+description = "Search for TODO comments in Rust files"
+[examples.payload]
+pattern = "TODO"
+path = "src"

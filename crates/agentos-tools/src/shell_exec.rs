@@ -74,11 +74,26 @@ impl AgentTool for ShellExec {
         // Check if bwrap is available (at runtime)
         let bwrap_check = Command::new("bwrap").arg("--version").output().await;
 
-        // Determine whether network access is explicitly requested
+        // Determine whether network access is explicitly requested. Network
+        // egress from a sandboxed command is itself a capability: requesting it
+        // requires the `network.outbound` permission, exactly like web-fetch and
+        // http-client. Without this gate `allow_network:true` would be a free
+        // SSRF/egress escape hatch for any agent holding only `process.exec`.
         let allow_network = payload
             .get("allow_network")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        if allow_network
+            && !context
+                .permissions
+                .check("network.outbound", PermissionOp::Execute)
+        {
+            return Err(AgentOSError::PermissionDenied {
+                resource: "network.outbound".into(),
+                operation: "shell-exec allow_network=true requires the network.outbound permission"
+                    .into(),
+            });
+        }
 
         let mut cmd = if bwrap_check.is_ok() {
             // Build the bwrap command
@@ -114,16 +129,54 @@ impl AgentTool for ShellExec {
                 .arg("/home")
                 .arg("--tmpfs")
                 .arg("/tmp")
-                // Bind the data dir as the only writable place (after /home tmpfs
-                // so it isn't shadowed when data_dir lives under /home/<user>).
+                // Bind the data dir as the always-writable place (after the
+                // /home tmpfs so it isn't shadowed when data_dir lives under
+                // /home/<user>).
                 .arg("--bind")
                 .arg(&data_dir_str)
-                .arg(&data_dir_str)
-                .arg("--dev")
+                .arg(&data_dir_str);
+
+            // Bind every `workspace_paths_executable` entry as writable. These
+            // are user-granted directories with `--mode rwx` — the sandbox
+            // child sees them at their real on-disk path so commands like
+            // `ls`, `cargo build`, `python` act on real files. Bindings come
+            // AFTER the tmpfs steps so they survive being shadowed. Skip any
+            // path under data_dir (already bound) to avoid bwrap "already
+            // bound" errors.
+            let data_dir_canon = std::path::Path::new(&data_dir_str);
+            for exec_path in &context.workspace_paths_executable {
+                if exec_path.starts_with(data_dir_canon) {
+                    continue;
+                }
+                proc.arg("--bind").arg(exec_path).arg(exec_path);
+            }
+
+            proc.arg("--dev")
                 .arg("/dev")
                 .arg("--proc")
                 .arg("/proc")
                 .arg("--unshare-all");
+
+            // SECURITY: scrub the environment. bwrap inherits the parent process
+            // environment by default, which on the kernel host contains every
+            // provider/API secret (OPENAI_API_KEY, ANTHROPIC_API_KEY, BRAVE/…,
+            // cloud creds). `--clearenv` drops all of it inside the sandbox; we
+            // then re-inject only a minimal, non-sensitive set so ordinary
+            // commands still work. `env`/`printenv` in the sandbox now sees only
+            // these, never the kernel's secrets.
+            proc.arg("--clearenv")
+                .arg("--setenv")
+                .arg("PATH")
+                .arg("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                .arg("--setenv")
+                .arg("HOME")
+                .arg(&data_dir_str)
+                .arg("--setenv")
+                .arg("TMPDIR")
+                .arg("/tmp")
+                .arg("--setenv")
+                .arg("LANG")
+                .arg("C.UTF-8");
 
             // Only share network if explicitly requested — default is isolated
             if allow_network {
@@ -254,6 +307,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,

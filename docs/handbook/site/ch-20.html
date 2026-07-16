@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Agent Testing · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-07.html"><span class="ch-num">07</span> Tool System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a><div class="nav-subs"><a class="nav-sub" href="#overview" data-target="overview">Overview</a><a class="nav-sub" href="#quick-start" data-target="quick-start">Quick Start</a><a class="nav-sub" href="#cli-reference" data-target="cli-reference">CLI Reference</a><a class="nav-sub" href="#built-in-scenarios" data-target="built-in-scenarios">Built-in Scenarios</a><a class="nav-sub" href="#how-a-scenario-run-works" data-target="how-a-scenario-run-works">How a Scenario Run Works</a><a class="nav-sub" href="#feedback-system" data-target="feedback-system">Feedback System</a><a class="nav-sub" href="#consensus-and-multi-run-results" data-target="consensus-and-multi-run-results">Consensus and Multi-Run Results</a><a class="nav-sub" href="#report-format" data-target="report-format">Report Format</a><a class="nav-sub" href="#provider-selection-guide" data-target="provider-selection-guide">Provider Selection Guide</a><a class="nav-sub" href="#environment-variables" data-target="environment-variables">Environment Variables</a><a class="nav-sub" href="#ci-integration" data-target="ci-integration">CI Integration</a><a class="nav-sub" href="#isolation-model" data-target="isolation-model">Isolation Model</a><a class="nav-sub" href="#adding-custom-scenarios" data-target="adding-custom-scenarios">Adding Custom Scenarios</a><a class="nav-sub" href="#interpreting-results" data-target="interpreting-results">Interpreting Results</a><a class="nav-sub" href="#related" data-target="related">Related</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 20 · LLM Agent Testing</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 20</div><h1 class="ch-title">LLM Agent Testing</h1><p class="ch-summary">`agent-tester` binary — LLM-driven scenario testing, feedback protocol, report format, CI integration</p></div>
+    <article class="prose"><h1 id="llm-agent-testing" class="anchored"><a class="hanchor" href="#llm-agent-testing" aria-label="link">#</a>LLM Agent Testing</h1>
+<blockquote><p><code>agent-tester</code> is a binary that boots a real AgentOS kernel in-process and drives it with an actual LLM to evaluate how well the system behaves from an AI agent's perspective — covering usability, correctness, security, and ergonomics across every major subsystem.</p></blockquote>
+<hr>
+<h2 id="overview" class="anchored"><a class="hanchor" href="#overview" aria-label="link">#</a>Overview</h2>
+<p>Traditional unit and integration tests verify that code behaves correctly for known inputs. LLM agent testing asks a different question: <em>does the system behave correctly when a real language model is operating it?</em></p>
+<p>The <code>agent-tester</code> binary (<code>crates/agentos-agent-tester</code>) works by:</p>
+<ol><li>Booting a full <code>Kernel</code> in a temporary directory (isolated, no config files required)</li><li>Registering a test agent wired to a real or mock LLM backend</li><li>Running structured <strong>scenarios</strong> — each describing a task, required permissions, and success criteria</li><li>Collecting <strong>structured feedback</strong> emitted by the LLM in <code>[FEEDBACK]...[/FEEDBACK]</code> blocks</li><li>Generating a <strong>Markdown report</strong> (and optionally JSON) with per-scenario outcomes, consensus across runs, and categorized feedback</li></ol>
+<p>This surfaces issues that static tests cannot: confusing tool APIs, unhelpful error messages, unclear documentation strings, missing feedback on failure, and security behaviours that only emerge when an LLM is reasoning about them.</p>
+<hr>
+<h2 id="quick-start" class="anchored"><a class="hanchor" href="#quick-start" aria-label="link">#</a>Quick Start</h2>
+<h3 id="mock-mode-no-api-key-runs-in-ci" class="anchored"><a class="hanchor" href="#mock-mode-no-api-key-runs-in-ci" aria-label="link">#</a>Mock mode (no API key — runs in CI)</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>cargo<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span>agentos-agent-tester<span class="w"> </span>--<span class="w"> </span>--provider<span class="w"> </span>mock
+</pre></div>
+</div>
+<p>The mock provider uses canned, deterministic responses. All 10 scenarios complete in seconds with zero cost.</p>
+<h3 id="real-llm-anthropic-recommended-for-weekly-evaluation" class="anchored"><a class="hanchor" href="#real-llm-anthropic-recommended-for-weekly-evaluation" aria-label="link">#</a>Real LLM — Anthropic (recommended for weekly evaluation)</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">AGENTOS_TEST_API_KEY</span><span class="o">=</span>sk-ant-...
+
+cargo<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span>agentos-agent-tester<span class="w"> </span>--<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>anthropic<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>claude-haiku-4-5-20251001<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--runs<span class="w"> </span><span class="m">1</span>
+</pre></div>
+</div>
+<h3 id="real-llm-ollama-free-local" class="anchored"><a class="hanchor" href="#real-llm-ollama-free-local" aria-label="link">#</a>Real LLM — Ollama (free, local)</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>cargo<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span>agentos-agent-tester<span class="w"> </span>--<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>ollama<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>llama3.2<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--runs<span class="w"> </span><span class="m">3</span>
+</pre></div>
+</div>
+<p>Reports are written to <code>reports/agent-test-YYYY-MM-DD-HHmmss.md</code>.</p>
+<hr>
+<h2 id="cli-reference" class="anchored"><a class="hanchor" href="#cli-reference" aria-label="link">#</a>CLI Reference</h2>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>cargo run -p agentos-agent-tester -- [OPTIONS]
+</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--provider &lt;name&gt;</code></td><td><code>mock</code></td><td>LLM backend: <code>mock</code>, <code>anthropic</code>, <code>openai</code>, <code>ollama</code>, <code>gemini</code></td></tr><tr><td><code>--model &lt;name&gt;</code></td><td><code>mock-model</code></td><td>Model identifier (e.g. <code>claude-sonnet-4-6</code>, <code>gpt-4o</code>, <code>llama3.2</code>)</td></tr><tr><td><code>--api-key &lt;key&gt;</code></td><td>—</td><td>API key (or use <code>AGENTOS_TEST_API_KEY</code> env var)</td></tr><tr><td><code>--scenarios &lt;list&gt;</code></td><td>all</td><td>Comma-separated scenario names to run</td></tr><tr><td><code>--output-dir &lt;path&gt;</code></td><td><code>reports</code></td><td>Directory for output reports (no <code>..</code> allowed)</td></tr><tr><td><code>--max-turns &lt;n&gt;</code></td><td><code>10</code></td><td>Turn budget per scenario (minimum 1)</td></tr><tr><td><code>--runs &lt;n&gt;</code></td><td><code>3</code></td><td>Runs per scenario for consensus (minimum 1)</td></tr><tr><td><code>--json</code></td><td>off</td><td>Also write a JSON report alongside the Markdown report</td></tr></tbody></table></div>
+<h3 id="examples" class="anchored"><a class="hanchor" href="#examples" aria-label="link">#</a>Examples</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># Run only two scenarios, one run each</span>
+cargo<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span>agentos-agent-tester<span class="w"> </span>--<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>anthropic<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>claude-sonnet-4-6<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--scenarios<span class="w"> </span><span class="s2">&quot;tool-discovery,permission-denial&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--runs<span class="w"> </span><span class="m">1</span>
+
+<span class="c1"># Full evaluation with consensus (3 runs per scenario) and JSON output</span>
+cargo<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span>agentos-agent-tester<span class="w"> </span>--<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>anthropic<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>claude-sonnet-4-6<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--runs<span class="w"> </span><span class="m">3</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--output-dir<span class="w"> </span>reports/weekly
+
+<span class="c1"># Quick smoke test against a local Ollama instance</span>
+cargo<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span>agentos-agent-tester<span class="w"> </span>--<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>ollama<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model<span class="w"> </span>llama3.2<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--max-turns<span class="w"> </span><span class="m">5</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--runs<span class="w"> </span><span class="m">1</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="built-in-scenarios" class="anchored"><a class="hanchor" href="#built-in-scenarios" aria-label="link">#</a>Built-in Scenarios</h2>
+<p>Ten scenarios ship out of the box, covering every major AgentOS subsystem.</p>
+<div class="table-wrap"><table><thead><tr><th>Scenario Name</th><th>What It Tests</th></tr></thead><tbody><tr><td><code>agent-lifecycle</code></td><td>Agent registration, connection, status, shutdown</td></tr><tr><td><code>tool-discovery</code></td><td>Tool listing, manifest reading, capability inspection</td></tr><tr><td><code>file-io</code></td><td>File read/write/delete operations and path safety</td></tr><tr><td><code>memory-rw</code></td><td>Writing and retrieving entries across memory tiers</td></tr><tr><td><code>pipeline-exec</code></td><td>Creating and executing a multi-step pipeline</td></tr><tr><td><code>secret-management</code></td><td>Vault storage, retrieval, rotation, and scoping</td></tr><tr><td><code>permission-denial</code></td><td>Capability enforcement — actions blocked without permission</td></tr><tr><td><code>audit-inspection</code></td><td>Querying, filtering, and exporting the audit log</td></tr><tr><td><code>error-handling</code></td><td>Recovery after tool errors, invalid inputs, and timeouts</td></tr><tr><td><code>web-ui</code></td><td>Web interface availability and response correctness</td></tr></tbody></table></div>
+<p>Each scenario has:</p>
+<ul><li>A <strong>system prompt</strong> establishing the agent's role</li><li>An <strong>initial user message</strong> describing the task</li><li>A set of <strong>required permissions</strong> granted before the run starts</li><li><strong>Goal keywords</strong> — if any appear in the LLM's response, the scenario is <code>Complete</code></li><li>A <strong>turn budget</strong> (controlled by <code>--max-turns</code>)</li></ul>
+<hr>
+<h2 id="how-a-scenario-run-works" class="anchored"><a class="hanchor" href="#how-a-scenario-run-works" aria-label="link">#</a>How a Scenario Run Works</h2>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>boot Kernel (TempDir)
+  │
+  ▼
+register test-agent → grant required permissions
+  │
+  ▼
+turn 1: inject system_prompt + initial_user_message
+  │
+  ├─→ LLM responds → parse [TOOL_CALL] block?
+  │     ├─ yes → execute tool → inject [TOOL_RESULT] → loop
+  │     └─ no  → check goal_keywords → if met → Complete
+  │
+  ├─→ goal keyword found in any response → Complete
+  ├─→ turn budget exhausted → Incomplete
+  └─→ kernel/LLM error → Errored
+  │
+  ▼
+collect FEEDBACK blocks → auto_feedback for errors/timeouts
+  │
+  ▼
+write report → shutdown kernel
+</pre></div>
+</div>
+<h3 id="tool-call-format" class="anchored"><a class="hanchor" href="#tool-call-format" aria-label="link">#</a>Tool Call Format</h3>
+<p>The LLM calls tools using a structured block that the harness parses:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>[TOOL_CALL]
+{&quot;tool&quot;: &quot;memory-write&quot;, &quot;intent_type&quot;: &quot;write&quot;, &quot;payload&quot;: {&quot;key&quot;: &quot;foo&quot;, &quot;value&quot;: &quot;bar&quot;, &quot;tier&quot;: &quot;working&quot;}}
+[/TOOL_CALL]
+</pre></div>
+</div>
+<p>The harness executes the tool against the real kernel, then injects the result:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>[TOOL_RESULT]
+{&quot;success&quot;: true, &quot;output&quot;: &quot;Written to working memory.&quot;}
+[/TOOL_RESULT]
+</pre></div>
+</div>
+<h3 id="outcome-states" class="anchored"><a class="hanchor" href="#outcome-states" aria-label="link">#</a>Outcome States</h3>
+<div class="table-wrap"><table><thead><tr><th>Outcome</th><th>Meaning</th></tr></thead><tbody><tr><td><code>Complete</code></td><td>A goal keyword appeared in one of the LLM's responses</td></tr><tr><td><code>Incomplete</code></td><td>Turn budget exhausted without a goal keyword being detected</td></tr><tr><td><code>Errored</code></td><td>Kernel error, permission grant failure, or unrecoverable inference error</td></tr></tbody></table></div>
+<hr>
+<h2 id="feedback-system" class="anchored"><a class="hanchor" href="#feedback-system" aria-label="link">#</a>Feedback System</h2>
+<p>Feedback is how the LLM communicates observations about the AgentOS API during a test run. This is the primary signal for improving usability, ergonomics, and error messaging.</p>
+<h3 id="emitting-feedback" class="anchored"><a class="hanchor" href="#emitting-feedback" aria-label="link">#</a>Emitting Feedback</h3>
+<p>The LLM includes a <code>[FEEDBACK]...[/FEEDBACK]</code> block anywhere in its response:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>[FEEDBACK]
+{
+  &quot;category&quot;: &quot;usability&quot;,
+  &quot;severity&quot;: &quot;warning&quot;,
+  &quot;observation&quot;: &quot;The memory-write tool returns no confirmation of what tier was used, making it hard to verify the write succeeded.&quot;,
+  &quot;suggestion&quot;: &quot;Include the tier name in the success response.&quot;,
+  &quot;context&quot;: &quot;Turn 2 — tried to write to episodic tier&quot;
+}
+[/FEEDBACK]
+</pre></div>
+</div>
+<h3 id="feedback-fields" class="anchored"><a class="hanchor" href="#feedback-fields" aria-label="link">#</a>Feedback Fields</h3>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Required</th><th>Values</th></tr></thead><tbody><tr><td><code>category</code></td><td>yes</td><td><code>usability</code>, <code>correctness</code>, <code>ergonomics</code>, <code>security</code>, <code>performance</code></td></tr><tr><td><code>severity</code></td><td>yes</td><td><code>info</code>, <code>warning</code>, <code>error</code></td></tr><tr><td><code>observation</code></td><td>yes</td><td>Free-text description of the issue</td></tr><tr><td><code>suggestion</code></td><td>no</td><td>How to fix it</td></tr><tr><td><code>context</code></td><td>no</td><td>When/where it happened</td></tr></tbody></table></div>
+<h3 id="feedback-categories" class="anchored"><a class="hanchor" href="#feedback-categories" aria-label="link">#</a>Feedback Categories</h3>
+<div class="table-wrap"><table><thead><tr><th>Category</th><th>Covers</th></tr></thead><tbody><tr><td><code>usability</code></td><td>Tool APIs that are confusing, poorly named, or lacking clear documentation</td></tr><tr><td><code>correctness</code></td><td>Unexpected tool behaviour, wrong outputs, silent failures</td></tr><tr><td><code>ergonomics</code></td><td>Friction points: verbose inputs, missing defaults, awkward patterns</td></tr><tr><td><code>security</code></td><td>Permission denials that were too strict, too lenient, or uninformative</td></tr><tr><td><code>performance</code></td><td>Slow responses, excessive turns needed to complete simple tasks</td></tr></tbody></table></div>
+<h3 id="auto-feedback" class="anchored"><a class="hanchor" href="#auto-feedback" aria-label="link">#</a>Auto-Feedback</h3>
+<p>In addition to LLM-emitted feedback, the harness generates automatic feedback entries for:</p>
+<div class="table-wrap"><table><thead><tr><th>Trigger</th><th>Category</th><th>Severity</th></tr></thead><tbody><tr><td>Tool execution error</td><td><code>correctness</code></td><td><code>error</code></td></tr><tr><td>Inference error (LLM call failed)</td><td><code>correctness</code></td><td><code>error</code></td></tr><tr><td>Turn budget exhausted (Incomplete outcome)</td><td><code>usability</code></td><td><code>warning</code></td></tr><tr><td>Permission grant failure during setup</td><td><code>security</code></td><td><code>warning</code></td></tr></tbody></table></div>
+<h3 id="deduplication" class="anchored"><a class="hanchor" href="#deduplication" aria-label="link">#</a>Deduplication</h3>
+<p>After all runs complete, the feedback collector deduplicates entries using Jaccard word similarity (case-insensitive). Entries in the same category with &gt;80% word overlap are merged and annotated with <code>(observed N times)</code>. This prevents noise from repeated identical observations across multiple runs drowning out distinct findings.</p>
+<hr>
+<h2 id="consensus-and-multi-run-results" class="anchored"><a class="hanchor" href="#consensus-and-multi-run-results" aria-label="link">#</a>Consensus and Multi-Run Results</h2>
+<p>Running each scenario multiple times (default <code>--runs 3</code>) reveals whether failures are systematic or intermittent.</p>
+<p>The consensus table in the report classifies each scenario as:</p>
+<div class="table-wrap"><table><thead><tr><th>Verdict</th><th>Condition</th></tr></thead><tbody><tr><td><code>PASS</code></td><td>≥ 2/3 runs are <code>Complete</code></td></tr><tr><td><code>PARTIAL</code></td><td>Some runs <code>Complete</code>, some <code>Incomplete</code> or <code>Errored</code></td></tr><tr><td><code>FAIL</code></td><td>All runs <code>Incomplete</code> or <code>Errored</code></td></tr></tbody></table></div>
+<p>Example report section:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>## Consensus (3 runs per scenario)
+| Scenario | Run 1 | Run 2 | Run 3 | Verdict |
+|---|---|---|---|---|
+| agent-lifecycle   | ✓ | ✓ | ✓ | PASS    |
+| tool-discovery    | ✓ | ✓ | ✗ | PARTIAL |
+| permission-denial | ✗ | ✗ | ✗ | FAIL    |
+</pre></div>
+</div>
+<p>Use <code>--runs 1</code> for fast development feedback loops and <code>--runs 3</code> (the default) for meaningful pre-release evaluations.</p>
+<hr>
+<h2 id="report-format" class="anchored"><a class="hanchor" href="#report-format" aria-label="link">#</a>Report Format</h2>
+<h3 id="markdown-report" class="anchored"><a class="hanchor" href="#markdown-report" aria-label="link">#</a>Markdown Report</h3>
+<p>Written to <code>&lt;output-dir&gt;/agent-test-YYYY-MM-DD-HHmmss.md</code>. Sections:</p>
+<ol><li><strong>Summary</strong> — provider, model, date, total scenarios, outcomes breakdown</li><li><strong>Results table</strong> — per-run outcome, turns used, tool calls, feedback count, tokens, cost, duration</li><li><strong>Consensus table</strong> — shown when <code>--runs &gt; 1</code></li><li><strong>Feedback by category</strong> — deduplicated feedback grouped by category, severity-sorted</li><li><strong>Per-run turn metrics</strong> — inference ms, tool execution ms, tokens, cost per turn (shown for Errored/Incomplete scenarios)</li></ol>
+<h3 id="json-report---json" class="anchored"><a class="hanchor" href="#json-report---json" aria-label="link">#</a>JSON Report (<code>--json</code>)</h3>
+<p>Written alongside the Markdown as <code>.json</code>. Structure:</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;provider&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;anthropic&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;claude-haiku-4-5-20251001&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;generated_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-18T10:30:00Z&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;results&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="cm">/* ScenarioResult[] */</span><span class="w"> </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;feedback&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="cm">/* FeedbackEntry[] */</span><span class="w"> </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;stats&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;total_entries&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">12</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;by_category&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;usability&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;correctness&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;by_severity&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;error&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;warning&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">7</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;info&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;by_scenario&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;tool-discovery&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>The JSON report is suitable for diff tracking across releases, feeding into dashboards, or automated regression gates.</p>
+<hr>
+<h2 id="provider-selection-guide" class="anchored"><a class="hanchor" href="#provider-selection-guide" aria-label="link">#</a>Provider Selection Guide</h2>
+<div class="table-wrap"><table><thead><tr><th>Provider</th><th>Cost</th><th>Speed</th><th>Best For</th></tr></thead><tbody><tr><td><code>mock</code></td><td>Free</td><td>Instant</td><td>CI, smoke tests, development</td></tr><tr><td><code>ollama</code> + <code>llama3.2</code></td><td>Free</td><td>~2–5s/turn</td><td>Frequent local evaluation</td></tr><tr><td><code>anthropic</code> + <code>claude-haiku-4-5-20251001</code></td><td>Low (~$0.01–$0.10/run)</td><td>Fast</td><td>Pre-release evaluation</td></tr><tr><td><code>anthropic</code> + <code>claude-sonnet-4-6</code></td><td>Medium</td><td>Moderate</td><td>Deep quality evaluation</td></tr><tr><td><code>openai</code> + <code>gpt-4o</code></td><td>Medium</td><td>Fast</td><td>Cross-model comparison</td></tr></tbody></table></div>
+<p><strong>Recommended cadence:</strong></p>
+<ul><li><strong>Every commit (CI):</strong> <code>--provider mock --runs 1</code></li><li><strong>Weekly or pre-release:</strong> <code>--provider anthropic --model claude-haiku-4-5-20251001 --runs 3</code></li><li><strong>Major releases:</strong> <code>--provider anthropic --model claude-sonnet-4-6 --runs 3 --json</code></li></ul>
+<hr>
+<h2 id="environment-variables" class="anchored"><a class="hanchor" href="#environment-variables" aria-label="link">#</a>Environment Variables</h2>
+<div class="table-wrap"><table><thead><tr><th>Variable</th><th>Purpose</th></tr></thead><tbody><tr><td><code>AGENTOS_TEST_API_KEY</code></td><td>API key for the selected provider (alternative to <code>--api-key</code>)</td></tr><tr><td><code>RUST_LOG</code></td><td>Log level (e.g. <code>RUST_LOG=info</code> for progress, <code>RUST_LOG=debug</code> for full traces)</td></tr></tbody></table></div>
+<hr>
+<h2 id="ci-integration" class="anchored"><a class="hanchor" href="#ci-integration" aria-label="link">#</a>CI Integration</h2>
+<p>Add mock-mode testing to your CI pipeline:</p>
+<div class="code-block" data-lang="yaml"><div class="code-bar"><span class="code-lang">yaml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># .github/workflows/ci.yml</span>
+<span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">LLM Agent Tests (mock)</span>
+<span class="w">  </span><span class="nt">run</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cargo run -p agentos-agent-tester -- --provider mock --runs 1</span>
+</pre></div>
+</div>
+<p>Mock mode guarantees:</p>
+<ul><li>Zero external dependencies</li><li>Deterministic outcomes (canned responses per scenario)</li><li>Sub-second execution</li><li>All 10 scenarios exercise the real kernel code paths</li></ul>
+<hr>
+<h2 id="isolation-model" class="anchored"><a class="hanchor" href="#isolation-model" aria-label="link">#</a>Isolation Model</h2>
+<p>Each test run boots a completely isolated environment:</p>
+<ul><li><strong>Temporary directory</strong> — created by <code>tempfile::TempDir</code>, deleted on shutdown</li><li><strong>Unique vault passphrase</strong> — derived from the temp dir path (no shared state between runs)</li><li><strong>No config files required</strong> — the harness creates a minimal in-memory kernel config</li><li><strong>No network calls</strong> — all tool execution hits the in-process kernel; the only network traffic is the LLM API call itself (absent in mock mode)</li></ul>
+<p>Runs do not interfere with each other or with a running production kernel.</p>
+<hr>
+<h2 id="adding-custom-scenarios" class="anchored"><a class="hanchor" href="#adding-custom-scenarios" aria-label="link">#</a>Adding Custom Scenarios</h2>
+<p>New scenarios are Rust modules in <code>crates/agentos-agent-tester/src/scenarios/</code>. Each must export:</p>
+<div class="code-block" data-lang="rust"><div class="code-bar"><span class="code-lang">rust</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="sd">/// The scenario definition.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">scenario</span><span class="p">(</span><span class="n">max_turns</span><span class="p">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">TestScenario</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"> </span><span class="p">}</span>
+
+<span class="sd">/// Canned mock responses for CI / mock-mode runs.</span>
+<span class="sd">/// Every response must contain at least one goal keyword.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">mock_responses</span><span class="p">()</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="nb">String</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<p>Register the module in <code>scenarios/mod.rs</code>:</p>
+<div class="code-block" data-lang="rust"><div class="code-bar"><span class="code-lang">rust</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">pub</span><span class="w"> </span><span class="k">mod</span><span class="w"> </span><span class="nn">my_new_scenario</span><span class="p">;</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">builtin_scenarios</span><span class="p">(</span><span class="n">max_turns</span><span class="p">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">TestScenario</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="fm">vec!</span><span class="p">[</span>
+<span class="w">        </span><span class="c1">// ... existing scenarios ...</span>
+<span class="w">        </span><span class="n">my_new_scenario</span><span class="p">::</span><span class="n">scenario</span><span class="p">(</span><span class="n">max_turns</span><span class="p">),</span>
+<span class="w">    </span><span class="p">]</span>
+<span class="p">}</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">mock_responses_for</span><span class="p">(</span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="kt">str</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="nb">String</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">match</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// ... existing arms ...</span>
+<span class="w">        </span><span class="s">&quot;my-new-scenario&quot;</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">my_new_scenario</span><span class="p">::</span><span class="n">mock_responses</span><span class="p">(),</span>
+<span class="w">        </span><span class="n">_</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="fm">vec!</span><span class="p">[],</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Required fields for <code>TestScenario</code>:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Purpose</th></tr></thead><tbody><tr><td><code>name</code></td><td>Kebab-case identifier used with <code>--scenarios</code> flag</td></tr><tr><td><code>description</code></td><td>One-line summary shown in the report header</td></tr><tr><td><code>system_prompt</code></td><td>Role and context given to the LLM at the start</td></tr><tr><td><code>initial_user_message</code></td><td>The task the LLM is asked to perform</td></tr><tr><td><code>max_turns</code></td><td>Maximum turns before marking <code>Incomplete</code></td></tr><tr><td><code>required_permissions</code></td><td>Permissions granted to the test agent before the scenario starts</td></tr><tr><td><code>goal_keywords</code></td><td>If any appear (case-insensitive) in the LLM's response, the scenario is <code>Complete</code></td></tr></tbody></table></div>
+<hr>
+<h2 id="interpreting-results" class="anchored"><a class="hanchor" href="#interpreting-results" aria-label="link">#</a>Interpreting Results</h2>
+<h3 id="complete-scenarios-with-zero-feedback" class="anchored"><a class="hanchor" href="#complete-scenarios-with-zero-feedback" aria-label="link">#</a>Complete scenarios with zero feedback</h3>
+<p>The LLM completed the task without any observations. Either the scenario is well-covered, or the model didn't engage with the feedback protocol. Check the turn count — a completion in 1–2 turns with no feedback is suspicious.</p>
+<h3 id="incomplete-scenarios" class="anchored"><a class="hanchor" href="#incomplete-scenarios" aria-label="link">#</a>Incomplete scenarios</h3>
+<p>The LLM could not complete the task within the turn budget. Check:</p>
+<ul><li>The feedback for <code>usability</code> warnings (confusing API?)</li><li>The turn metrics for inference errors</li><li>Whether the <code>goal_keywords</code> are too specific (the LLM solved the task but with different wording)</li></ul>
+<h3 id="errored-scenarios" class="anchored"><a class="hanchor" href="#errored-scenarios" aria-label="link">#</a>Errored scenarios</h3>
+<p>A kernel error or permission grant failure blocked execution. The <code>error_message</code> field in the result and the auto-generated <code>correctness/error</code> feedback entry will point to the cause.</p>
+<h3 id="partial-consensus" class="anchored"><a class="hanchor" href="#partial-consensus" aria-label="link">#</a>PARTIAL consensus</h3>
+<p>The scenario succeeds sometimes but not always. This typically indicates:</p>
+<ul><li>Non-deterministic LLM behaviour (increase <code>--runs</code> to characterise)</li><li>A flaky tool response (check the <code>correctness</code> feedback)</li><li>A turn budget that is too tight for the task (increase <code>--max-turns</code>)</li></ul>
+<hr>
+<h2 id="related" class="anchored"><a class="hanchor" href="#related" aria-label="link">#</a>Related</h2>
+<ul><li><a class="wikilink" href="ch-15.html">LLM Configuration</a> — configuring the LLM providers used by <code>agent-tester</code></li><li><a class="wikilink" href="ch-07.html">Tool System</a> — the tools that scenarios exercise</li><li><a class="wikilink" href="ch-08.html">Security Model</a> — permission enforcement validated by the <code>permission-denial</code> scenario</li><li><a class="wikilink" href="ch-14.html">Audit Log</a> — the <code>audit-inspection</code> scenario queries this directly</li><li><a class="wikilink" href="ch-19.html">Troubleshooting and FAQ</a> — common errors during test runs</li></ul></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-19.html"><span class="pn-dir">← Previous</span><span class="pn-title">Troubleshooting and FAQ</span></a><a class="pn pn-next" href="ch-21.html"><span class="pn-dir">Next →</span><span class="pn-title">User Notifications and Channels</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#overview" data-target="overview">Overview</a></li><li class="toc-h2"><a href="#quick-start" data-target="quick-start">Quick Start</a></li><li class="toc-h3"><a href="#mock-mode-no-api-key-runs-in-ci" data-target="mock-mode-no-api-key-runs-in-ci">Mock mode (no API key — runs in CI)</a></li><li class="toc-h3"><a href="#real-llm-anthropic-recommended-for-weekly-evaluation" data-target="real-llm-anthropic-recommended-for-weekly-evaluation">Real LLM — Anthropic (recommended for weekly evaluation)</a></li><li class="toc-h3"><a href="#real-llm-ollama-free-local" data-target="real-llm-ollama-free-local">Real LLM — Ollama (free, local)</a></li><li class="toc-h2"><a href="#cli-reference" data-target="cli-reference">CLI Reference</a></li><li class="toc-h3"><a href="#examples" data-target="examples">Examples</a></li><li class="toc-h2"><a href="#built-in-scenarios" data-target="built-in-scenarios">Built-in Scenarios</a></li><li class="toc-h2"><a href="#how-a-scenario-run-works" data-target="how-a-scenario-run-works">How a Scenario Run Works</a></li><li class="toc-h3"><a href="#tool-call-format" data-target="tool-call-format">Tool Call Format</a></li><li class="toc-h3"><a href="#outcome-states" data-target="outcome-states">Outcome States</a></li><li class="toc-h2"><a href="#feedback-system" data-target="feedback-system">Feedback System</a></li><li class="toc-h3"><a href="#emitting-feedback" data-target="emitting-feedback">Emitting Feedback</a></li><li class="toc-h3"><a href="#feedback-fields" data-target="feedback-fields">Feedback Fields</a></li><li class="toc-h3"><a href="#feedback-categories" data-target="feedback-categories">Feedback Categories</a></li><li class="toc-h3"><a href="#auto-feedback" data-target="auto-feedback">Auto-Feedback</a></li><li class="toc-h3"><a href="#deduplication" data-target="deduplication">Deduplication</a></li><li class="toc-h2"><a href="#consensus-and-multi-run-results" data-target="consensus-and-multi-run-results">Consensus and Multi-Run Results</a></li><li class="toc-h2"><a href="#report-format" data-target="report-format">Report Format</a></li><li class="toc-h3"><a href="#markdown-report" data-target="markdown-report">Markdown Report</a></li><li class="toc-h3"><a href="#json-report---json" data-target="json-report---json">JSON Report (<code>--json</code>)</a></li><li class="toc-h2"><a href="#provider-selection-guide" data-target="provider-selection-guide">Provider Selection Guide</a></li><li class="toc-h2"><a href="#environment-variables" data-target="environment-variables">Environment Variables</a></li><li class="toc-h2"><a href="#ci-integration" data-target="ci-integration">CI Integration</a></li><li class="toc-h2"><a href="#isolation-model" data-target="isolation-model">Isolation Model</a></li><li class="toc-h2"><a href="#adding-custom-scenarios" data-target="adding-custom-scenarios">Adding Custom Scenarios</a></li><li class="toc-h2"><a href="#interpreting-results" data-target="interpreting-results">Interpreting Results</a></li><li class="toc-h3"><a href="#complete-scenarios-with-zero-feedback" data-target="complete-scenarios-with-zero-feedback">Complete scenarios with zero feedback</a></li><li class="toc-h3"><a href="#incomplete-scenarios" data-target="incomplete-scenarios">Incomplete scenarios</a></li><li class="toc-h3"><a href="#errored-scenarios" data-target="errored-scenarios">Errored scenarios</a></li><li class="toc-h3"><a href="#partial-consensus" data-target="partial-consensus">PARTIAL consensus</a></li><li class="toc-h2"><a href="#related" data-target="related">Related</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

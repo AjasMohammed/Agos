@@ -17,33 +17,33 @@ outputs = ["content.text"]
 input  = "LogReaderIntent"
 output = "LogReaderResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["source"]
 
-[input_schema.properties.source]
+[payload_schema.properties.source]
 type = ["string", "object"]
 description = 'Log source: "SystemLog", "KernelLog", or { "AppLog": "<name>" }'
 
-[input_schema.properties.last_n_lines]
+[payload_schema.properties.last_n_lines]
 type = "integer"
 minimum = 1
 description = "Return only the last N matching lines"
 
-[input_schema.properties.since]
+[payload_schema.properties.since]
 type = "string"
 format = "date-time"
 description = "RFC3339 lower time bound"
 
-[input_schema.properties.grep_pattern]
+[payload_schema.properties.grep_pattern]
 type = "string"
 description = "Regex filter applied to each log line"
 
-[input_schema.properties.level_filter]
+[payload_schema.properties.level_filter]
 type = "array"
 description = "Optional log level filter"
 
-[input_schema.properties.level_filter.items]
+[payload_schema.properties.level_filter.items]
 type = "string"
 enum = ["Error", "Warn", "Info", "Debug", "Trace", "error", "warn", "warning", "info", "debug", "trace"]
 

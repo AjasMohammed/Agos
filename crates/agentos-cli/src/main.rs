@@ -34,6 +34,17 @@ pub enum ConfigSubcommand {
     },
     /// List all top-level config sections
     List,
+    /// Show config revision history (most recent first)
+    History {
+        /// Maximum number of revisions to show
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Roll the config back to a prior revision (see `config history`)
+    Rollback {
+        /// Revision id to restore
+        rev: i64,
+    },
 }
 
 use commands::{
@@ -41,10 +52,12 @@ use commands::{
     channel::ChannelCommands, cost::CostCommands, escalation::EscalationCommands,
     event::EventCommands, hal::HalCommands, identity::IdentityCommands, init::InitTemplate,
     log::LogCommands, mcp::McpCommands, notifications::NotificationCommands, perm::PermCommands,
-    pipeline::PipelineCommands, provider::ProviderCommands, resource::ResourceCommands,
-    role::RoleCommands, schedule::ScheduleCommands, scratchpad::ScratchpadCommands,
-    secret::SecretCommands, skill::SkillCommands, snapshot::SnapshotCommands, task::TaskCommands,
-    team::TeamCommands, tool::ToolCommands, web::WebCommands,
+    personalization::PersonalizationCommands, pipeline::PipelineCommands, prefs::PrefsCommands,
+    profile::ProfileCommands, provider::ProviderCommands, recommendations::RecommendationsCommands,
+    resource::ResourceCommands, role::RoleCommands, schedule::ScheduleCommands,
+    scratchpad::ScratchpadCommands, secret::SecretCommands, skill::SkillCommands,
+    snapshot::SnapshotCommands, task::TaskCommands, team::TeamCommands, tool::ToolCommands,
+    web::WebCommands,
 };
 
 #[derive(Parser)]
@@ -64,6 +77,12 @@ pub struct Cli {
 pub enum Commands {
     /// Boot the AgentOS kernel
     Start,
+
+    /// Run AgentOS as a long-lived messaging gateway ("run as a bot")
+    Gateway {
+        #[command(subcommand)]
+        command: commands::gateway::GatewayCommands,
+    },
 
     /// Gracefully shut down the running kernel
     Stop,
@@ -96,6 +115,29 @@ pub enum Commands {
     Perm {
         #[command(subcommand)]
         command: PermCommands,
+    },
+    /// Review user preference adaptation proposals
+    Prefs {
+        #[command(subcommand)]
+        command: PrefsCommands,
+    },
+
+    /// Manage learned user-profile facts
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommands,
+    },
+
+    /// View and respond to proactive recommendations (accept or dismiss)
+    Recommendations {
+        #[command(subcommand)]
+        command: RecommendationsCommands,
+    },
+
+    /// Manage personalization data — status, export, and right-to-forget
+    Personalization {
+        #[command(subcommand)]
+        command: PersonalizationCommands,
     },
 
     /// Manage OS roles
@@ -141,6 +183,12 @@ pub enum Commands {
     Cost {
         #[command(subcommand)]
         command: CostCommands,
+    },
+
+    /// Manage the durable agent org chart (reporting lines + capability scopes)
+    Org {
+        #[command(subcommand)]
+        command: commands::org::OrgCommands,
     },
 
     /// Manage resource locks (arbitration)
@@ -246,6 +294,30 @@ pub enum Commands {
         command: commands::plugin::PluginCommands,
     },
 
+    /// Grant, revoke, or list user filesystem workspace grants.
+    ///
+    /// A grant lets one agent (or every agent) read, write, and/or execute
+    /// commands inside a specific host directory tree. Without a grant, file
+    /// tools that target an absolute path outside `data_dir` return
+    /// `PermissionDenied`.
+    Workspace {
+        #[command(subcommand)]
+        command: commands::workspace::WorkspaceCommands,
+    },
+
+    /// Manage tool-call approval mode and learned "allow always" policy.
+    ///
+    /// Modes control when the kernel auto-approves vs. escalates a tool call
+    /// for human review:
+    ///   auto       — approve everything except ControlPlane operations
+    ///   ask_edit   — approve readonly; prompt for writes/exec/control-plane
+    ///   ask_always — prompt for everything except trivially-cheap reads
+    ///   deny       — hard-deny anything that would otherwise prompt
+    Approval {
+        #[command(subcommand)]
+        command: commands::approval::ApprovalCommands,
+    },
+
     /// Interactive setup wizard — configure providers, agents, and data paths.
     Onboard,
 
@@ -349,8 +421,14 @@ async fn tokio_main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Start => {
-            cmd_start(&cli.config).await?;
+            cmd_start(&cli.config, false).await?;
         }
+
+        Commands::Gateway { command } => match command {
+            commands::gateway::GatewayCommands::Run => {
+                cmd_start(&cli.config, true).await?;
+            }
+        },
 
         Commands::Web { command } => {
             let config_path = Path::new(&cli.config);
@@ -461,6 +539,65 @@ async fn tokio_main() -> anyhow::Result<()> {
             )
             .await?;
         }
+        Commands::Mcp {
+            command: McpCommands::Catalog { command },
+        } => {
+            use commands::mcp::CatalogSubcommand;
+            let config_path = Path::new(&cli.config);
+            if !config_path.exists() {
+                anyhow::bail!("Config file not found: {}", cli.config);
+            }
+            let config = agentos_kernel::config::load_config(config_path)?;
+            let mut bus_client = BusClient::connect(Path::new(&config.bus.socket_path)).await?;
+            match command {
+                CatalogSubcommand::List { trust } => {
+                    commands::mcp::cmd_catalog_list(&mut bus_client, trust).await?
+                }
+                CatalogSubcommand::Search { query } => {
+                    commands::mcp::cmd_catalog_search(&mut bus_client, query).await?
+                }
+                CatalogSubcommand::Info { id } => {
+                    commands::mcp::cmd_catalog_info(&mut bus_client, id).await?
+                }
+            }
+        }
+        Commands::Mcp {
+            command:
+                McpCommands::Install {
+                    id,
+                    yes,
+                    unsafe_allow_community,
+                    runtime_binary,
+                    no_auth,
+                },
+        } => {
+            let config_path = Path::new(&cli.config);
+            if !config_path.exists() {
+                anyhow::bail!("Config file not found: {}", cli.config);
+            }
+            let config = agentos_kernel::config::load_config(config_path)?;
+            let mut bus_client = BusClient::connect(Path::new(&config.bus.socket_path)).await?;
+            commands::mcp::cmd_mcp_install(
+                &mut bus_client,
+                id,
+                yes,
+                unsafe_allow_community,
+                runtime_binary,
+                no_auth,
+            )
+            .await?;
+        }
+        Commands::Mcp {
+            command: McpCommands::Uninstall { id, purge },
+        } => {
+            let config_path = Path::new(&cli.config);
+            if !config_path.exists() {
+                anyhow::bail!("Config file not found: {}", cli.config);
+            }
+            let config = agentos_kernel::config::load_config(config_path)?;
+            let mut bus_client = BusClient::connect(Path::new(&config.bus.socket_path)).await?;
+            commands::mcp::cmd_mcp_uninstall(&mut bus_client, id, purge).await?;
+        }
         Commands::Mcp { command } => {
             commands::mcp::handle(command, &cli.config).await?;
         }
@@ -476,21 +613,38 @@ async fn tokio_main() -> anyhow::Result<()> {
 
         // Doctor — offline diagnostics
         Commands::Doctor { fix } => {
+            // Bridge the global `--config` flag into the env the offline doctor
+            // resolves (`AGENTOS_CONFIG`), so `agentos --config <path> doctor`
+            // diagnoses the install you pointed at — not `config/default.toml`.
+            std::env::set_var("AGENTOS_CONFIG", &cli.config);
             commands::doctor::handle(fix).await?;
         }
 
         // Config get/set/list — offline TOML editing
-        Commands::Config { command } => match command {
-            ConfigSubcommand::Get { key } => {
-                commands::config_cmd::handle_get(&key)?;
+        Commands::Config { command } => {
+            // The offline config handlers resolve the file via `AGENTOS_CONFIG`
+            // (config_cmd::config_path). Bridge the global `--config` flag into it
+            // so `agentos --config <path> config ...` operates on the right file
+            // (and writes its revisions DB beside it), matching every other command.
+            std::env::set_var("AGENTOS_CONFIG", &cli.config);
+            match command {
+                ConfigSubcommand::Get { key } => {
+                    commands::config_cmd::handle_get(&key)?;
+                }
+                ConfigSubcommand::Set { key, value } => {
+                    commands::config_cmd::handle_set(&key, &value)?;
+                }
+                ConfigSubcommand::List => {
+                    commands::config_cmd::handle_list(None)?;
+                }
+                ConfigSubcommand::History { limit } => {
+                    commands::config_cmd::handle_history(limit)?;
+                }
+                ConfigSubcommand::Rollback { rev } => {
+                    commands::config_cmd::handle_rollback(rev)?;
+                }
             }
-            ConfigSubcommand::Set { key, value } => {
-                commands::config_cmd::handle_set(&key, &value)?;
-            }
-            ConfigSubcommand::List => {
-                commands::config_cmd::handle_list(None)?;
-            }
-        },
+        }
 
         // A2A commands are offline (direct HTTP to A2A server, no kernel bus needed)
         Commands::A2a { command } => {
@@ -771,6 +925,8 @@ async fn run_sandbox_exec(request_path: &str) -> anyhow::Result<()> {
         task_registry: None,
         escalation_query: None,
         workspace_paths: workspace_paths.unwrap_or_default(),
+        workspace_paths_writable: vec![],
+        workspace_paths_executable: vec![],
         capability_registry: None,
         capability_dispatcher: None,
         storage_zone_query: None,
@@ -802,7 +958,7 @@ fn build_sandbox_hal() -> Arc<HardwareAbstractionLayer> {
     Arc::new(hal)
 }
 
-async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
+async fn cmd_start(config_str: &str, gateway: bool) -> anyhow::Result<()> {
     let config_path = Path::new(config_str);
     if !config_path.exists() {
         anyhow::bail!("Config file not found: {}", config_str);
@@ -825,9 +981,17 @@ async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
 
     let kernel = Arc::new(Kernel::boot(config_path, &passphrase).await?);
     kernel.wire_inbound_chat_bridge();
+    kernel.wire_process_crash_emission().await;
 
     // Start the webhook wake-up loop now that kernel is wrapped in Arc.
     kernel.start_webhook_wakeup().await;
+
+    // Gateway mode ("run as a bot"): connect every channel declared in the
+    // [gateway] config block before entering the supervisor loop.
+    if gateway {
+        println!("🤖 Gateway mode: connecting configured channels...");
+        kernel.connect_configured_channels().await?;
+    }
 
     println!("✅ Kernel started");
     println!("   Bus: {}", kernel.config.bus.socket_path);
@@ -840,6 +1004,9 @@ async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
     if kernel.config.api.enabled {
         let api_host = kernel.config.api.host.clone();
         let api_port = kernel.config.api.port;
+        let api_docs_enabled = kernel.config.api.docs_enabled;
+        let api_cors_origins = kernel.config.api.cors_allowed_origins.clone();
+        let api_refresh_enabled = kernel.config.api.refresh_enabled;
         let api_addr: std::net::SocketAddr = format!("{api_host}:{api_port}")
             .parse()
             .map_err(|e| anyhow::anyhow!("Invalid API bind address: {e}"))?;
@@ -876,9 +1043,29 @@ async fn cmd_start(config_str: &str) -> anyhow::Result<()> {
 
         let service: Arc<dyn agentos_api::KernelService> = kernel.clone();
         let broadcaster = agentos_api::ws::broadcaster::WsBroadcaster::new();
+        // Wire kernel task-status updates into the WS broadcaster. Without this
+        // relay, the `tasks` / `tasks:{id}` WebSocket channels broadcast nothing
+        // (the relay task is spawned internally and runs for the process lifetime).
+        broadcaster
+            .clone()
+            .start_status_relay(kernel.status_update_sender.subscribe());
+        // Fan out coarse kernel events (agents/audit/schedules/system/...) to WS.
+        broadcaster
+            .clone()
+            .start_realtime_relay(kernel.realtime_event_sender.subscribe());
+        let api_shutdown = kernel.cancellation_token.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                agentos_api::run_api_server(service, key_store, broadcaster, api_addr).await
+            if let Err(e) = agentos_api::run_api_server(
+                service,
+                key_store,
+                broadcaster,
+                api_addr,
+                api_docs_enabled,
+                api_cors_origins,
+                api_refresh_enabled,
+                api_shutdown,
+            )
+            .await
             {
                 tracing::error!("API server exited with error: {e}");
             }
@@ -1003,6 +1190,7 @@ mod tests {
                         autonomous: _,
                         no_checkpoint: _,
                         thinking: _,
+                        interactive: _,
                     },
             } => {
                 assert_eq!(agent, Some("analyst".to_string()));
@@ -1026,10 +1214,11 @@ mod tests {
 
         match cli.command {
             Commands::Secret {
-                command: SecretCommands::Set { name, scope },
+                command: SecretCommands::Set { name, scope, value },
             } => {
                 assert_eq!(name, "SLACK_TOKEN");
                 assert_eq!(scope, "agent:notifier");
+                assert_eq!(value, None);
             }
             _ => panic!("Wrong command parsed"),
         }

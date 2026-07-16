@@ -82,14 +82,35 @@ impl ChannelAdapter for LineAdapter {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
-        let text = msg.content.as_text();
         // channel_instance_id carries the LINE reply token for this request.
         let reply_token = &msg.channel_instance_id;
 
-        let body = json!({
-            "replyToken": reply_token,
-            "messages": [{ "type": "text", "text": text }]
-        });
+        // Native image messages when the content has images; otherwise a text
+        // message (which still includes any file URL via render_for_delivery).
+        // LINE has no generic file-push API for bot-hosted URLs, so documents
+        // intentionally fall through to the text path. LINE requires HTTPS image
+        // URLs and caps a reply at 5 messages.
+        let images = msg.content.image_urls();
+        let body = if images.is_empty() {
+            json!({
+                "replyToken": reply_token,
+                "messages": [{ "type": "text", "text": msg.content.render_for_delivery() }]
+            })
+        } else {
+            let mut messages: Vec<serde_json::Value> = Vec::new();
+            let caption = msg.content.text_caption();
+            if !caption.trim().is_empty() {
+                messages.push(json!({ "type": "text", "text": caption }));
+            }
+            for url in images.iter().take(4) {
+                messages.push(json!({
+                    "type": "image",
+                    "originalContentUrl": url,
+                    "previewImageUrl": url
+                }));
+            }
+            json!({ "replyToken": reply_token, "messages": messages })
+        };
 
         let response = self
             .client

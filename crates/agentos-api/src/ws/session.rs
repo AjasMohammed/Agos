@@ -9,19 +9,34 @@ use crate::service::KernelService;
 use super::broadcaster::WsBroadcaster;
 use super::protocol::{ClientFrame, ServerFrame};
 
+/// Maximum channels a single connection may subscribe to (fail-closed against
+/// fan-out abuse / memory growth).
+const MAX_SUBSCRIPTIONS: usize = 64;
+
 /// Per-connection state for a WebSocket client.
 pub struct WsSession {
     subscriptions: HashMap<String, String>, // sub_id → channel
+    /// Per-connection unique prefix so subscription IDs never collide with those
+    /// of another connection in the process-wide broadcaster map.
+    connection_id: String,
     next_sub_id: u64,
     outbound_tx: mpsc::Sender<ServerFrame>,
+    /// Scopes of the API key that authenticated this connection (e.g. `"audit:r"`,
+    /// `"*"`). Empty = NO access (fail-closed); the bootstrap/admin key carries the
+    /// explicit `"*"` wildcard. Gates both `subscribe` and the action frames
+    /// (chat/task-cancel/notification-respond) so the WS transport enforces the
+    /// same per-scope authorization as REST.
+    permissions: Vec<String>,
 }
 
 impl WsSession {
-    pub fn new(outbound_tx: mpsc::Sender<ServerFrame>) -> Self {
+    pub fn new(outbound_tx: mpsc::Sender<ServerFrame>, permissions: Vec<String>) -> Self {
         Self {
             subscriptions: HashMap::new(),
+            connection_id: uuid::Uuid::new_v4().to_string(),
             next_sub_id: 0,
             outbound_tx,
+            permissions,
         }
     }
 
@@ -39,6 +54,32 @@ impl WsSession {
     ) {
         match frame {
             ClientFrame::Subscribe { channel, .. } => {
+                // Cap per-connection subscriptions.
+                if self.subscriptions.len() >= MAX_SUBSCRIPTIONS {
+                    let _ = self
+                        .send(ServerFrame::Error {
+                            code: "SUBSCRIPTION_LIMIT".into(),
+                            message: format!("Subscription limit ({MAX_SUBSCRIPTIONS}) reached"),
+                        })
+                        .await;
+                    return;
+                }
+                // Scope check: subscribing to a channel requires the matching read
+                // scope (e.g. `audit` needs `audit:r`). Empty key permissions =
+                // NO access (fail-closed); the admin key uses the `"*"` wildcard.
+                // Mirrors REST `require_permission`.
+                let required = channel_required_scope(&channel);
+                if !permissions_grant(&self.permissions, &required) {
+                    let _ = self
+                        .send(ServerFrame::Error {
+                            code: "FORBIDDEN".into(),
+                            message: format!(
+                                "Missing permission '{required}' for channel '{channel}'"
+                            ),
+                        })
+                        .await;
+                    return;
+                }
                 let sub_id = self.alloc_sub_id();
                 self.subscriptions.insert(sub_id.clone(), channel.clone());
                 broadcaster
@@ -73,6 +114,13 @@ impl WsSession {
                 message,
                 agent_name,
             } => {
+                // Action frames carry the same authorization weight as their REST
+                // equivalents (POST /v1/chat/completions requires `chat:w`). Without
+                // this gate a read-only or empty-scope key could drive inference and
+                // tool execution over the WS transport.
+                if !self.require_scope("chat:w").await {
+                    return;
+                }
                 // Non-streaming for now — send the full response as ChatDone.
                 let req = crate::types::ChatRequest {
                     session_id: session_id.clone(),
@@ -102,11 +150,17 @@ impl WsSession {
             }
 
             ClientFrame::ChatCancel { session_id } => {
+                if !self.require_scope("chat:w").await {
+                    return;
+                }
                 // Cancellation not yet wired — acknowledge and move on.
                 let _ = self.send(ServerFrame::ChatCancelled { session_id }).await;
             }
 
             ClientFrame::TaskCancel { task_id } => {
+                if !self.require_scope("tasks:w").await {
+                    return;
+                }
                 let parsed: Result<agentos_types::TaskID, _> = task_id.parse();
                 match parsed {
                     Ok(id) => match service.cancel_task(id).await {
@@ -140,6 +194,9 @@ impl WsSession {
             }
 
             ClientFrame::NotificationRespond { id, text } => {
+                if !self.require_scope("notifications:w").await {
+                    return;
+                }
                 let parsed: Result<agentos_types::NotificationID, _> = id.parse();
                 match parsed {
                     Ok(nid) => match service.respond_to_notification(nid, text).await {
@@ -178,6 +235,23 @@ impl WsSession {
         }
     }
 
+    /// Check that this connection's API key grants `required` (`resource:op`).
+    /// On failure, sends a FORBIDDEN error frame to the client and returns false
+    /// so the caller can bail. Mirrors REST `require_permission` semantics so the
+    /// WS transport enforces the same per-scope authorization as REST.
+    async fn require_scope(&self, required: &str) -> bool {
+        if permissions_grant(&self.permissions, required) {
+            return true;
+        }
+        let _ = self
+            .send(ServerFrame::Error {
+                code: "FORBIDDEN".into(),
+                message: format!("Missing permission '{required}'"),
+            })
+            .await;
+        false
+    }
+
     /// Send a frame to the client. Returns Err if the channel is closed.
     async fn send(&self, frame: ServerFrame) -> Result<(), ApiError> {
         self.outbound_tx
@@ -187,8 +261,79 @@ impl WsSession {
     }
 
     fn alloc_sub_id(&mut self) -> String {
-        let id = format!("sub_{}", self.next_sub_id);
+        // Prefix with the per-connection id so two connections' counters can
+        // never produce the same key in the shared broadcaster map.
+        let id = format!("{}:{}", self.connection_id, self.next_sub_id);
         self.next_sub_id += 1;
         id
+    }
+}
+
+/// The read scope required to subscribe to `channel`. The base (before any
+/// `:id` suffix) maps to a `<resource>:r` scope; `agent-chat` maps to `chat`.
+/// Shared by the WS subscribe path and the SSE handler so both gate identically.
+pub(crate) fn channel_required_scope(channel: &str) -> String {
+    let base = channel.split(':').next().unwrap_or(channel);
+    let resource = match base {
+        "agent-chat" => "chat",
+        other => other,
+    };
+    format!("{resource}:r")
+}
+
+/// Whether `permissions` grant `required` (`resource:op`). An empty scope list
+/// grants NO access (fail-closed); the bootstrap/admin key uses the explicit
+/// `"*"` wildcard. Mirrors `handlers::require_permission`.
+fn permissions_grant(permissions: &[String], required: &str) -> bool {
+    if permissions.is_empty() {
+        return false;
+    }
+    let req_res = required.split(':').next().unwrap_or(required);
+    let req_op = required
+        .split(':')
+        .nth(1)
+        .and_then(|o| o.chars().next())
+        .unwrap_or('r');
+    permissions.iter().any(|p| {
+        // A bare `"*"` is the admin wildcard: all resources AND all ops.
+        if p == "*" {
+            return true;
+        }
+        let res = p.split(':').next().unwrap_or(p);
+        let op = p.split(':').nth(1).unwrap_or("r");
+        (res == req_res || res == "*") && (op == "*" || op.contains(req_op))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sub_ids_do_not_collide_across_connections() {
+        let (tx_a, _ra) = mpsc::channel(4);
+        let (tx_b, _rb) = mpsc::channel(4);
+        let mut a = WsSession::new(tx_a, vec![]);
+        let mut b = WsSession::new(tx_b, vec![]);
+        // Two connections both start their counter at 0; the per-connection UUID
+        // prefix is what keeps their sub_ids distinct in the shared broadcaster map.
+        let a0 = a.alloc_sub_id();
+        let b0 = b.alloc_sub_id();
+        assert_ne!(a0, b0, "sub_ids from distinct connections must not collide");
+        assert!(a0.starts_with(&a.connection_id));
+        assert!(b0.starts_with(&b.connection_id));
+        // And they remain unique as each connection allocates more.
+        assert_ne!(a.alloc_sub_id(), b.alloc_sub_id());
+    }
+
+    #[test]
+    fn channel_scope_mapping_matches_ws_and_sse() {
+        assert_eq!(channel_required_scope("audit"), "audit:r");
+        assert_eq!(channel_required_scope("tasks"), "tasks:r");
+        // agent-chat is gated on the `chat` resource…
+        assert_eq!(channel_required_scope("agent-chat"), "chat:r");
+        // …and a parameterized channel uses its base resource, not the id.
+        assert_eq!(channel_required_scope("chat:abc-123"), "chat:r");
+        assert_eq!(channel_required_scope("agent-chat:xyz"), "chat:r");
     }
 }

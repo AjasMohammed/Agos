@@ -17,29 +17,29 @@ outputs = ["notification_id", "status"]
 input  = "NotifyUserIntent"
 output = "NotifyUserResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["subject", "body"]
 
-[input_schema.properties.subject]
+[payload_schema.properties.subject]
 type        = "string"
 description = "Short summary ≤80 chars — shown as the notification headline"
 
-[input_schema.properties.body]
+[payload_schema.properties.body]
 type        = "string"
 description = "Full notification body (Markdown supported)"
 
-[input_schema.properties.priority]
+[payload_schema.properties.priority]
 type        = "string"
 enum        = ["info", "warning", "urgent", "critical"]
 description = "Notification importance level (default: info)"
 
-[input_schema.properties.channels]
+[payload_schema.properties.channels]
 type        = "array"
 description = "Optional restrict-list of delivery targets. Each entry is a registered channel display name, ChannelInstanceID, or kind id (telegram, whatsapp, slack, webhook, desktop, cli, web, ntfy, email, discord). Omit field entirely to fan out to all channels. Passing an empty array `[]` is rejected — the field must contain at least one selector when present."
 minItems    = 1
 
-[input_schema.properties.channels.items]
+[payload_schema.properties.channels.items]
 type = "string"
 
 [sandbox]

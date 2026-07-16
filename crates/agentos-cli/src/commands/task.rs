@@ -22,6 +22,11 @@ pub enum TaskCommands {
         /// Higher levels give better reasoning at increased token cost and latency.
         #[arg(long, default_value = "off")]
         thinking: String,
+        /// If the kernel pauses for human approval, prompt inline at the
+        /// terminal instead of returning to the shell. Requires a TTY on
+        /// stdin; non-interactive runs fall back to the existing behaviour.
+        #[arg(long, short = 'i', default_value_t = false)]
+        interactive: bool,
         /// The task prompt
         prompt: String,
     },
@@ -73,6 +78,7 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
             autonomous,
             no_checkpoint,
             thinking,
+            interactive,
             prompt,
         } => {
             use agentos_types::ThinkingLevel;
@@ -139,6 +145,25 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                                 .unwrap_or("No reason provided");
                             println!("\n⏸️ Task paused: {}", task_id);
                             println!("   Reason: {}", reason);
+
+                            // Interactive inline approval flow (requires
+                            // both `--interactive` and a stdin TTY). Parses
+                            // the escalation id baked into the reason
+                            // (`approval_pending:<id>:...`), fetches the
+                            // escalation, prompts dialoguer, and resolves
+                            // over the bus. Non-interactive runs and
+                            // non-approval pauses fall through unchanged.
+                            use std::io::IsTerminal;
+                            if interactive && std::io::stdin().is_terminal() {
+                                if let Some(escalation_id) = parse_escalation_id(reason) {
+                                    handle_interactive_approval(client, escalation_id).await?;
+                                } else {
+                                    println!(
+                                        "   (interactive mode skipped: pause was not an \
+                                         approval-pending escalation)"
+                                    );
+                                }
+                            }
                             return Ok(());
                         }
                         println!("\n✅ Task completed:\n");
@@ -426,5 +451,125 @@ fn print_trace(trace: &agentos_types::TaskTrace, only_iter: Option<u32>) {
             println!("│ {} {} — {}{}", prefix, tc.tool_name, status, inj);
         }
         println!("└{}", "─".repeat(70));
+    }
+}
+
+/// Parse the escalation id out of the kernel's `approval_pending:<id>: ...`
+/// pause reason. Mirrors the kernel-side parser in
+/// `crates/agentos-kernel/src/task_executor.rs::extract_approval_pending_id`.
+fn parse_escalation_id(reason: &str) -> Option<u64> {
+    let rest = reason.strip_prefix("approval_pending:")?;
+    let (id_str, _) = rest.split_once(':')?;
+    id_str.parse::<u64>().ok()
+}
+
+/// Inline TTY prompt that fetches an escalation, asks the user to approve
+/// or deny, and surfaces the resolution back to the kernel. Best-effort —
+/// any bus error is reported and the CLI returns to the shell so the user
+/// can fall back to `agentos escalation list/resolve`.
+async fn handle_interactive_approval(
+    client: &mut BusClient,
+    escalation_id: u64,
+) -> anyhow::Result<()> {
+    use dialoguer::theme::ColorfulTheme;
+    use dialoguer::Select;
+
+    println!();
+    println!("──── Approval requested ────");
+    println!("Escalation #{escalation_id}");
+
+    // Fetch the escalation so we can surface tool name, decision point,
+    // and any auto-action that would fire on timeout.
+    let resp = client
+        .send_command(KernelCommand::GetEscalation { id: escalation_id })
+        .await?;
+    if let KernelResponse::Success { data: Some(data) } = &resp {
+        if let Some(s) = data.get("decision_point").and_then(|v| v.as_str()) {
+            println!("Decision: {s}");
+        }
+        if let Some(s) = data.get("context_summary").and_then(|v| v.as_str()) {
+            println!("Context : {s}");
+        }
+        if let Some(arr) = data.get("options").and_then(|v| v.as_array()) {
+            let opts: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            if !opts.is_empty() {
+                println!("Options : {}", opts.join(", "));
+            }
+        }
+    } else if let KernelResponse::Error { message } = &resp {
+        eprintln!("(could not fetch escalation details: {message})");
+    }
+
+    let choices = ["allow", "deny", "skip (leave pending)"];
+    let pick = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("How should this be resolved?")
+        .items(&choices)
+        .default(1) // safest default — deny
+        .interact()?;
+
+    let decision = match pick {
+        0 => "approve",
+        1 => "deny",
+        _ => {
+            println!(
+                "Skipped. Resolve later with: agentos escalation resolve {escalation_id} \
+                 approve|deny"
+            );
+            return Ok(());
+        }
+    };
+
+    let resp = client
+        .send_command(KernelCommand::ResolveEscalation {
+            id: escalation_id,
+            decision: decision.to_string(),
+        })
+        .await?;
+    match resp {
+        KernelResponse::Success { data } => {
+            println!("Escalation #{escalation_id} resolved: {decision}");
+            if let Some(d) = data {
+                if d.get("task_resumed").and_then(|v| v.as_bool()) == Some(true) {
+                    let task_id = d.get("task_id").and_then(|v| v.as_str()).unwrap_or("-");
+                    println!("Task {task_id} resumed.");
+                }
+            }
+            Ok(())
+        }
+        KernelResponse::Error { message } => {
+            anyhow::bail!("Failed to resolve escalation: {message}");
+        }
+        other => anyhow::bail!("Unexpected resolve response: {other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_escalation_id;
+
+    #[test]
+    fn parses_well_formed_reason() {
+        assert_eq!(
+            parse_escalation_id("approval_pending:42: tool 'file-writer' requires human review"),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn rejects_missing_prefix() {
+        assert_eq!(parse_escalation_id("task_paused: something"), None);
+    }
+
+    #[test]
+    fn rejects_non_numeric_id() {
+        assert_eq!(parse_escalation_id("approval_pending:abc: ..."), None);
+    }
+
+    #[test]
+    fn rejects_empty_id() {
+        assert_eq!(parse_escalation_id("approval_pending::nope"), None);
     }
 }

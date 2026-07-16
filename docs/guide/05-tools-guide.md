@@ -86,6 +86,64 @@ AgentOS ships with 41 core tools (compiled into the kernel as native Rust). Use 
 
 > **Warning:** `shell-exec` requires `bwrap` (bubblewrap) for sandbox isolation. It will refuse to run without it.
 
+### Managed Environments (KMC)
+
+Per-agent workspaces for installing and running language packages **without touching the host system**. Packages go into an isolated directory at `{data_dir}/workspaces/{agent_id}/{name}/` (Python venv, Node `node_modules`, or cargo `--root`). State persists across kernel restarts via `{data_dir}/workspaces.db`.
+
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `env-create` | `env.create:x` | Create a workspace (`{name, ecosystem}` — `python` / `nodejs` / `rust` / `generic`) |
+| `env-install` | `env.install:x`, `net.outbound:x` | Install a package into a workspace; validated against operator allowlist |
+| `env-list` | `env.list:r` | List the agent's workspaces; optionally drill into installed packages |
+| `env-destroy` | `env.destroy:x` | Delete a workspace and its directory tree |
+| `build-run` | `build.run:x` | Run a build/test command. Pass `workspace = "<name>"` to activate `VIRTUAL_ENV` and prepend `{ws}/venv/bin:{ws}/node_modules/.bin:{ws}/bin` to `PATH` |
+| `build-test` | `build.test:x` | Auto-detect ecosystem and run its test command |
+| `build-lint` | `build.lint:x` | Auto-detect ecosystem and run its linter |
+| `proc-spawn` | `proc.spawn:x` | Spawn a long-running process. With `workspace = "<name>"` the binary is resolved inside the workspace and `VIRTUAL_ENV` / `PATH` are activated |
+| `proc-list` / `proc-output` / `proc-signal` / `proc-wait` | `proc.*` | Inspect, capture output from, signal, or wait on managed processes |
+
+#### Workflow: install once, use many
+
+To run code that imports an installed package you **must** pass `workspace` to `build-run` or `proc-spawn`. Without it the child inherits the host `PATH` and the import fails.
+
+```text
+# 1. Create the workspace (one-shot)
+env-create { name: "scrape", ecosystem: "python" }
+
+# 2. Install a curated package (operator allowlist in [env].python_allowlist)
+env-install { workspace: "scrape", package: "requests" }
+env-install { workspace: "scrape", package: "beautifulsoup4" }
+
+# 3a. One-shot command — venv is activated for this child only
+build-run {
+  workspace: "scrape",
+  command: "python -c 'import requests; print(requests.__version__)'"
+}
+
+# 3b. Long-running server — binary resolved from {ws}/venv/bin/
+proc-spawn {
+  workspace: "scrape",
+  binary: "uvicorn",
+  args: ["app:app", "--port", "8000"]
+}
+```
+
+Forgetting the `workspace` field means the spawn falls back to the host PATH — useful for system tools (`git`, `make`), broken for anything installed via `env-install`.
+
+#### Operator policy
+
+Workspaces are governed by the `[env]` block in `default.toml`:
+
+- `python_policy` / `nodejs_policy` / `rust_policy`: `"curated"` (default — package must be on the allowlist), `"open"` (any package), or `"locked"` (no installs).
+- `python_allowlist` / `nodejs_allowlist` / `rust_allowlist`: verbatim package-name lists.
+- `system_policy`: locked by default — host packages go through `host-package-install` instead.
+
+See `docs/guide/07-configuration.md` for the full schema.
+
+#### Host-level installs
+
+When a runtime is missing from the host entirely (e.g. `python3` isn't installed), use `host-package-install` — it runs **outside** the bwrap sandbox via `pkexec` or a setuid helper, is disabled by default (`[tools.host_package].enabled = true` to opt in), requires an operator-curated allowlist, AND requires per-call user approval. Prefer `env-install` whenever possible.
+
 ### Agent Coordination
 
 | Tool | Permission | Description |
@@ -159,7 +217,7 @@ AgentOS supports two kinds of custom tools:
 ### Installing a WASM Tool
 
 ```bash
-agentctl tool install /path/to/my-tool.toml
+agentos tool install /path/to/my-tool.toml
 ```
 
 The kernel will:
@@ -171,13 +229,13 @@ The kernel will:
 ### Listing Installed Tools
 
 ```bash
-agentctl tool list
+agentos tool list
 ```
 
 ### Removing a Tool
 
 ```bash
-agentctl tool remove my-tool
+agentos tool remove my-tool
 ```
 
 ---
@@ -293,7 +351,7 @@ max_cpu_ms    = 5000
 Then install it:
 
 ```bash
-agentctl tool install /path/to/weather-lookup.toml
+agentos tool install /path/to/weather-lookup.toml
 ```
 
 ---

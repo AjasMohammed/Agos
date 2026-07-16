@@ -187,6 +187,9 @@ impl Kernel {
             thinking_level: ThinkingLevel::Off,
             spawner_agent_id: None,
             tool_categories: None,
+            // Coordinators orchestrate across domains and need the full toolset;
+            // exempt them from category scoping (the field's intended use).
+            disable_tool_scoping: true,
         };
 
         self.scheduler.enqueue(coordinator_task).await;

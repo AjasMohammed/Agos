@@ -4,19 +4,36 @@ default_task_timeout_secs = 300
 context_window_max_entries = 200
 context_window_token_budget = 128000
 health_port = 9091
+# Containers must bind all interfaces: k8s/docker probes hit the pod/container IP.
+health_bind = "0.0.0.0"
 state_db_path = "/var/lib/agentos/data/kernel_state.db"
 
 [kernel.tool_calls]
 allow_parallel = true
 max_parallel = 5
 
+[kernel.tool_execution]
+# Without this, in-process (non-sandboxed) tool calls fall back to the 60s code
+# default — 5x lower than default/production (300s) — silently truncating long
+# legitimate tool calls in containers. Keep it aligned with the other profiles.
+default_timeout_seconds = 300
+
 [bus]
 socket_path = "/var/lib/agentos/data/agentos.sock"
 
 [audit]
 log_path = "/var/lib/agentos/data/audit.db"
+# Cap audit-log growth in the persistent Docker volume. Older rows are pruned by
+# the TimeoutChecker sweep once this many are retained. 0 = unlimited (would grow
+# the DB without bound in a long-running container).
+max_audit_entries = 500000
 
 [secrets]
+# Vault stays under /var/lib/agentos/data because that is the only path backed
+# by a persistent Docker volume (see docker-compose.yml). systemd/production use
+# /var/lib/agentos/vault/secrets.db instead — the drift is intentional.
+# Passphrase: set AGENTOS_VAULT_PASSPHRASE or AGENTOS_VAULT_PASSPHRASE_FILE
+# (mount a Docker/K8s secret). See docs/guide/07-configuration.md.
 vault_path = "/var/lib/agentos/data/vault.db"
 
 [tools]
@@ -39,6 +56,9 @@ ollama_context_window = 32768
 
 [memory]
 model_cache_dir = "/var/lib/agentos/data/models"
+# Sweep memory entries older than this so the three memory DBs on the persistent
+# volume don't grow without bound. 0 = unlimited (the code default).
+retention_days = 90
 
 [memory.extraction]
 enabled = true
@@ -64,6 +84,14 @@ task_pct = 0.12
 
 [logging]
 log_dir = "/var/log/agentos"
+# JSON logs to stdout so `docker logs` / log drivers stay machine-parseable.
+log_format = "json"
+log_level = "info"
+
+# Boot pre-flight — fail fast before subsystem init (see kernel preflight_checks).
+[preflight]
+min_free_disk_mb = 512
+check_db_writable = true
 
 [memory.context]
 db_path = "/var/lib/agentos/data/context_memory.db"
@@ -71,6 +99,8 @@ db_path = "/var/lib/agentos/data/context_memory.db"
 [scratchpad]
 db_path = "/var/lib/agentos/data/scratchpad.db"
 
+# [api] applies to `agentos start`, not `web serve` (the container default);
+# under `web serve` this block is ignored.
 [api]
 enabled = true
 host = "0.0.0.0"
@@ -86,3 +116,19 @@ memory_warning_percent = 80.0
 disk_warning_percent = 85.0
 disk_critical_percent = 95.0
 gpu_vram_warning_percent = 90.0
+
+# Gateway ("run as a bot") — `agentos gateway run` boots the kernel and connects
+# every channel listed here. This is a TEMPLATE: uncomment and fill in so
+# docker-compose.gateway.yml has a starting point. Tokens are referenced by a
+# VAULT key (credential_key), never inline — seed with
+# `agentos secret set <key> <token>`.
+# [gateway]
+# enabled = false
+#
+# One [[gateway.channels]] table per bot. Example (uncomment + set credential_key):
+# [[gateway.channels]]
+# kind = "telegram"                  # telegram | ntfy | email | discord | slack | whatsapp | webhook
+# display_name = "Ops Bot"
+# credential_key = "telegram_bot_token"   # vault key holding the token
+# active_agent = "assistant"         # default agent for inbound chat
+# # external_id omitted for Telegram → auto-discovered from the first /start

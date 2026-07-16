@@ -8,6 +8,8 @@ use serde_json::Value;
 use sysinfo::Networks;
 
 use crate::registry::{DeviceStatus, HardwareRegistry};
+use crate::safety::SafetyEngine;
+use crate::twin::TwinRegistry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredDevice {
@@ -219,6 +221,12 @@ pub struct HardwareAbstractionLayer {
     registry: Option<Arc<HardwareRegistry>>,
     device_access_gate: Option<Arc<dyn DeviceAccessGate>>,
     event_sink: Option<Arc<dyn HalEventSink>>,
+    /// Device twin registry (desired vs reported IoT state). Attached at
+    /// kernel boot; `None` in lightweight contexts — twin tools fail closed.
+    twin_registry: Option<Arc<TwinRegistry>>,
+    /// Operator-defined safety rules evaluated before IoT actuation. Attached
+    /// at kernel boot; `None` in lightweight contexts — twin tools fail closed.
+    safety_engine: Option<Arc<SafetyEngine>>,
 }
 
 impl Default for HardwareAbstractionLayer {
@@ -234,6 +242,8 @@ impl HardwareAbstractionLayer {
             registry: None,
             device_access_gate: None,
             event_sink: None,
+            twin_registry: None,
+            safety_engine: None,
         }
     }
 
@@ -246,21 +256,21 @@ impl HardwareAbstractionLayer {
             crate::drivers::network_sockets::NetworkSocketsDriver::new(),
         ));
         hal.register(Box::new(crate::drivers::storage::StorageDriver::new()));
-        #[cfg(feature = "bluetooth")]
+        #[cfg(all(feature = "bluetooth", target_os = "linux"))]
         hal.register(Box::new(crate::drivers::bluetooth::BluetoothDriver::new()));
-        #[cfg(feature = "audio")]
+        #[cfg(all(feature = "audio", target_os = "linux"))]
         hal.register(Box::new(crate::drivers::audio::AudioDriver::new()));
-        #[cfg(feature = "display")]
+        #[cfg(all(feature = "display", target_os = "linux"))]
         hal.register(Box::new(crate::drivers::display::DisplayDriver::new()));
-        #[cfg(feature = "printer")]
+        #[cfg(all(feature = "printer", target_os = "linux"))]
         hal.register(Box::new(crate::drivers::printer::PrinterDriver::new()));
-        #[cfg(feature = "raw-usb")]
+        #[cfg(all(feature = "raw-usb", target_os = "linux"))]
         hal.register(Box::new(crate::drivers::raw_usb::RawUsbDriver::new()));
-        #[cfg(feature = "usb-storage")]
+        #[cfg(all(feature = "usb-storage", target_os = "linux"))]
         hal.register(Box::new(
             crate::drivers::usb_storage::UsbStorageDriver::new(),
         ));
-        #[cfg(feature = "webcam")]
+        #[cfg(all(feature = "webcam", target_os = "linux"))]
         hal.register(Box::new(crate::drivers::webcam::WebcamDriver::new()));
         hal.register(Box::new(crate::drivers::mounts::MountsDriver::new()));
         hal.register(Box::new(crate::drivers::open_files::OpenFilesDriver::new()));
@@ -292,6 +302,28 @@ impl HardwareAbstractionLayer {
     pub fn with_event_sink(mut self, event_sink: Arc<dyn HalEventSink>) -> Self {
         self.event_sink = Some(event_sink);
         self
+    }
+
+    /// Attach the device twin registry. Call during kernel boot; the
+    /// `hardware-get-twin` / `hardware-set-desired` tools fail closed without it.
+    pub fn with_twin_registry(mut self, twin_registry: Arc<TwinRegistry>) -> Self {
+        self.twin_registry = Some(twin_registry);
+        self
+    }
+
+    /// Attach the operator safety engine. Call during kernel boot; the
+    /// `hardware-set-desired` tool fails closed without it.
+    pub fn with_safety_engine(mut self, safety_engine: Arc<SafetyEngine>) -> Self {
+        self.safety_engine = Some(safety_engine);
+        self
+    }
+
+    pub fn twin_registry(&self) -> Option<&Arc<TwinRegistry>> {
+        self.twin_registry.as_ref()
+    }
+
+    pub fn safety_engine(&self) -> Option<&Arc<SafetyEngine>> {
+        self.safety_engine.as_ref()
     }
 
     pub fn register(&mut self, driver: Box<dyn HalDriver>) {

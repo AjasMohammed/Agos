@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 agentos-api = { path = "../agentos-api" }
+agentos-bus = { path = "../agentos-bus" }
 agentos-kernel = { path = "../agentos-kernel" }
 agentos-tools = { path = "../agentos-tools" }
 agentos-types = { path = "../agentos-types" }
@@ -21,6 +22,7 @@ tower-http = { version = "0.6", features = ["cors", "trace", "fs", "compression-
 tower_governor = "0.8"
 minijinja = { version = "2", features = ["loader", "json"] }
 tokio = { workspace = true }
+async-trait = { workspace = true }
 tokio-util = { workspace = true }
 tokio-stream = "0.1"
 tracing = { workspace = true }

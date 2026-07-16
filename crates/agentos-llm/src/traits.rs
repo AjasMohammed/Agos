@@ -7,6 +7,23 @@ use tokio::sync::mpsc;
 
 #[async_trait]
 pub trait LLMCore: Send + Sync {
+    /// Whether the adapter primarily uses provider-native tool-calling
+    /// protocol (tool_calls/tool_use/functionCall) instead of relying on
+    /// JSON-in-markdown tool instructions in the system prompt.
+    fn supports_native_tool_calling(&self) -> bool {
+        false
+    }
+
+    /// Seconds the kernel waits on a single `infer*` call before opening the
+    /// inference user-gate (watchdog). Defaults to the kernel's standard
+    /// threshold. Adapters whose one `infer` call encompasses an entire internal
+    /// tool loop (e.g. the claude-code MCP subprocess, which discovers + invokes
+    /// + reasons in one shot) should return a larger value so legitimate
+    /// long-running turns are not aborted prematurely.
+    fn inference_watchdog_secs(&self) -> u64 {
+        120
+    }
+
     /// Send a context window to the LLM and get a complete response.
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError>;
 
@@ -192,7 +209,8 @@ mod tests {
                 input: "Any".to_string(),
                 output: "Any".to_string(),
             },
-            input_schema: None,
+            payload_schema: None,
+            examples: vec![],
             sandbox: ToolSandbox {
                 network: false,
                 fs_write: false,

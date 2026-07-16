@@ -26,11 +26,11 @@ AgentOS is designed for AI agents that operate autonomously — without per-acti
 - **Rogue tasks** — long-running tasks drift out of their original scope
 - **Supply chain attacks** — compromised tools attempt to exfiltrate data or expand access
 
-The answer is **defense in depth**: eight independent security layers stacked so that bypassing any single layer does not compromise the system.
+The answer is **defense in depth**: eight core security layers, plus Kernel-Mediated Capabilities as a ninth mediation layer, stacked so that bypassing any single layer does not compromise the system.
 
 ---
 
-## Defense in Depth — 8 Layers
+## Defense in Depth — 8 Core Layers (+ KMC)
 
 ### Layer 1: Capability-Based Access Control
 
@@ -106,7 +106,7 @@ The agent's standing system prompt includes an instruction to treat any content 
 
 Every security-relevant event is written to an **append-only SQLite database** (`audit.db`) protected by a **Merkle hash chain**. Each entry includes the SHA-256 hash of the previous entry, making log tampering detectable.
 
-83+ event types are defined, including `CapabilityIssued`, `PermissionGranted`, `ToolExecuted`, `InjectionDetected`, `EscalationCreated`, `EscalationResolved`, `SecretAccessed`, and `VaultLockdown`.
+146 event types are defined, including `PermissionGranted`, `TokenIssued`, `CapabilityGranted`, `ToolExecutionCompleted`, `McpInjectionDetected`, `RiskEscalation`, `SecretAccessed`, and `SecretRotated`.
 
 ### Layer 6: Secrets Isolation
 
@@ -285,7 +285,7 @@ Network resource checks automatically block **Server-Side Request Forgery** (SSR
 - IPv6-mapped IPv4 private: `::ffff:192.168.x.x`
 - Case-variation bypasses: `LOCALHOST`, `LocalHost`, `HTTP://127.0.0.1/`
 
-**DNS rebinding protection:** The implementation performs `lookup_host` on hostnames to verify that resolved IP addresses are not internal, preventing DNS rebinding attacks where a public hostname initially resolves to a public IP but later resolves to a private/loopback address.
+**DNS rebinding protection:** The static IP and loopback-prefix blocklist above is enforced synchronously in `PermissionSet.check()`. Hostname resolution via `lookup_host` (which verifies that resolved IP addresses are not internal, the DNS-rebinding defense) happens at the network layer — `network_safety` / `http_client` / `managed_network` — not in `PermissionSet.check()`.
 
 ---
 
@@ -511,7 +511,7 @@ The receiving agent (or kernel) verifies the signature against the sender's regi
 
 **View an agent's public key:**
 ```bash
-agentos identity show --agent worker
+agentos identity show worker
 
 # Output:
 # Agent: worker
@@ -521,7 +521,7 @@ agentos identity show --agent worker
 
 **Revoke an agent's identity:**
 ```bash
-agentos identity revoke --agent compromised-worker
+agentos identity revoke compromised-worker
 
 # Effect: removes signing key from vault, revokes all permissions,
 # prevents the agent from establishing any new sessions.

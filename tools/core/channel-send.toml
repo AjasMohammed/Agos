@@ -19,19 +19,19 @@ outputs = ["message_id", "channel", "kind", "delivered_at"]
 input  = "ChannelSendIntent"
 output = "ChannelSendResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["channel", "text"]
 
-[input_schema.properties.channel]
+[payload_schema.properties.channel]
 type        = "string"
 description = "Display name (e.g. 'telegram-main') or ChannelInstanceID. Channels are listed in the system prompt and via 'agent-manual section=channels'."
 
-[input_schema.properties.text]
+[payload_schema.properties.text]
 type        = "string"
 description = "Message body. Markdown rendering is platform-aware: Telegram converts to HTML, Slack uses mrkdwn, Discord/Matrix pass through. See 'agent-manual section=channel-<kind>' for platform-specific syntax."
 
-[input_schema.properties.thread_id]
+[payload_schema.properties.thread_id]
 type        = "string"
 description = "Optional thread or reply target — platform-specific format (Slack ts, Discord thread id, Matrix event id)."
 
@@ -42,3 +42,9 @@ gpu           = false
 max_memory_mb = 16
 max_cpu_ms    = 5000
 syscalls      = []
+
+[[examples]]
+description = "Send a message to a connected Slack channel"
+[examples.payload]
+channel = "general"
+text = "Build completed successfully"

@@ -128,7 +128,35 @@ pub fn normalize_tool_input_schema(input_schema: Option<&Value>) -> Value {
     };
     sanitize_schema_node(&mut schema);
     ensure_object_has_properties(&mut schema);
-    add_object_additional_properties_false(&mut schema);
+    // NOTE: `additionalProperties: false` is intentionally NOT added here.
+    // It is only required by OpenAI *strict* function calling, and closed
+    // object schemas (especially empty `properties: {}`) are a known irritant
+    // for guided-decoding backends on other OpenAI-compatible hosts — NVIDIA's
+    // NIM gateway intermittently 500s with `unhashable type: 'dict'` on
+    // tool-calling payloads. The OpenAI adapter closes objects itself, but only
+    // when it actually emits `strict: true`. See `add_object_additional_properties_false`.
+    schema
+}
+
+/// Like [`normalize_tool_input_schema`] but also injects the manifest's worked
+/// examples into the JSON-Schema `"examples"` keyword inside the returned
+/// object. This keeps the examples inside `input_schema`/`parameters` (where
+/// every provider passes them through verbatim) instead of adding a sibling
+/// `"examples"` key to the tool definition — the Anthropic API would 400 on
+/// a sibling key.
+///
+/// Passes `&[]` for the common case of tools without examples.
+pub fn normalize_tool_input_schema_with_examples(
+    input_schema: Option<&Value>,
+    examples: &[agentos_types::tool::PayloadExample],
+) -> Value {
+    let mut schema = normalize_tool_input_schema(input_schema);
+    if !examples.is_empty() {
+        if let Some(obj) = schema.as_object_mut() {
+            let arr: Vec<Value> = examples.iter().map(|e| e.payload.clone()).collect();
+            obj.insert("examples".to_string(), Value::Array(arr));
+        }
+    }
     schema
 }
 
@@ -645,6 +673,43 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_tool_input_schema_does_not_close_objects() {
+        // `additionalProperties: false` must NOT be added by the shared
+        // normalizer — closed object schemas (especially empty `properties`)
+        // trip some OpenAI-compatible guided-decoding backends (NVIDIA NIM
+        // 500s with `unhashable type: 'dict'`). Only the OpenAI adapter closes
+        // schemas, and only when it emits `strict: true`.
+        let schema = json!({"type": "object", "properties": {"path": {"type": "string"}}});
+        let normalized = normalize_tool_input_schema(Some(&schema));
+        assert!(normalized.get("additionalProperties").is_none());
+        assert!(normalized["properties"]["path"]
+            .get("additionalProperties")
+            .is_none());
+
+        // The empty-object case (e.g. the `datetime` tool) also stays open.
+        let empty = normalize_tool_input_schema(Some(&json!({"type": "object"})));
+        assert!(empty.get("additionalProperties").is_none());
+    }
+
+    #[test]
+    fn test_add_object_additional_properties_false_closes_explicitly() {
+        // The OpenAI strict path calls this directly; it must still close every
+        // object node recursively.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "nested": {"type": "object", "properties": {"x": {"type": "string"}}},
+            },
+        });
+        add_object_additional_properties_false(&mut schema);
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["nested"]["additionalProperties"],
+            false
+        );
+    }
+
+    #[test]
     fn test_check_payload_size_within_limit() {
         let payload = json!({"key": "value"});
         assert!(check_payload_size("test-tool", &payload));
@@ -675,5 +740,49 @@ mod tests {
     fn test_validate_payload_object_none() {
         let result = validate_payload_object("tool", "test", None);
         assert_eq!(result, json!({}));
+    }
+
+    // ── Phase-5: examples injected inside input_schema ──────────────────────
+
+    #[test]
+    fn examples_land_inside_input_schema_not_as_sibling() {
+        use agentos_types::tool::PayloadExample;
+        let schema = json!({"type": "object", "properties": {"path": {"type": "string"}}});
+        let examples = vec![PayloadExample {
+            description: Some("Read a file".into()),
+            payload: json!({"path": "config.toml"}),
+        }];
+        let result = normalize_tool_input_schema_with_examples(Some(&schema), &examples);
+        // Examples must be INSIDE input_schema, not a sibling key.
+        assert!(
+            result.get("examples").is_some(),
+            "examples must be inside input_schema"
+        );
+        assert_eq!(result["examples"][0], json!({"path": "config.toml"}));
+    }
+
+    #[test]
+    fn empty_examples_does_not_add_key() {
+        let schema = json!({"type": "object", "properties": {}});
+        let result = normalize_tool_input_schema_with_examples(Some(&schema), &[]);
+        // No spurious "examples" key when there are no examples.
+        assert!(result.get("examples").is_none());
+    }
+
+    #[test]
+    fn normalize_with_examples_still_sanitizes_schema() {
+        use agentos_types::tool::PayloadExample;
+        // Null-property schemas should still be sanitized (existing behaviour preserved).
+        let schema = json!({"type": "object", "properties": {"x": null}});
+        let examples = vec![PayloadExample {
+            description: None,
+            payload: json!({"x": "val"}),
+        }];
+        let result = normalize_tool_input_schema_with_examples(Some(&schema), &examples);
+        assert_eq!(
+            result["properties"]["x"]["type"], "string",
+            "null property sanitized"
+        );
+        assert!(result.get("examples").is_some());
     }
 }

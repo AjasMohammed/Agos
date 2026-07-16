@@ -1,17 +1,41 @@
 [kernel]
 max_concurrent_tasks = 8
-default_task_timeout_secs = 120
+# 10min ceiling for normal multi-step tasks; autonomous tasks use
+# [kernel.autonomous_mode] limits.
+default_task_timeout_secs = 600
 context_window_max_entries = 200
 context_window_token_budget = 16000
 health_port = 9091
+# Loopback-only: scrape /metrics locally or set "0.0.0.0" behind a trusted boundary.
+health_bind = "127.0.0.1"
 state_db_path = "/var/lib/agentos/data/kernel_state.db"
 
 [kernel.tool_calls]
 allow_parallel = true
 max_parallel = 5
 
+# Explicit limits for production determinism (mirrors config/default.toml) rather
+# than relying on code defaults.
+[kernel.task_limits]
+max_iterations_low = 50
+max_iterations_medium = 200
+max_iterations_high = 1000
+
+[kernel.tool_execution]
+max_output_bytes = 262144    # 256 KiB
+default_timeout_seconds = 300
+
 [secrets]
+# systemd layout: the vault lives at /var/lib/agentos/vault/ (covered by the
+# unit's ReadWritePaths=/var/lib/agentos). Docker uses
+# /var/lib/agentos/data/vault.db instead, because only .../data is a persistent
+# volume there — see config/docker.toml. The drift is intentional.
 vault_path = "/var/lib/agentos/vault/secrets.db"
+# Vault passphrase sourcing (priority order — see docs/guide/07-configuration.md):
+#   1. AGENTOS_VAULT_PASSPHRASE       env var (systemd: EnvironmentFile, mode 0600)
+#   2. AGENTOS_VAULT_PASSPHRASE_FILE  path to a secret file (Docker/K8s mounts)
+#   3. interactive prompt             (dev / first-run only)
+# Never combine AGENTOS_AUTO_INIT_VAULT=true with a baked default passphrase in prod.
 
 [audit]
 log_path = "/var/lib/agentos/data/audit.db"
@@ -26,6 +50,9 @@ user_tools_dir = "/var/lib/agentos/tools/user"
 data_dir = "/var/lib/agentos/data"
 
 [bus]
+# /run/agentos is a tmpfs RuntimeDirectory created by deploy/agentos.service.
+# Docker uses /var/lib/agentos/data/agentos.sock instead — no guaranteed tmpfs
+# /run in a minimal image. The drift is intentional and documented.
 socket_path = "/run/agentos/agentos.sock"
 
 [ollama]
@@ -47,6 +74,9 @@ ollama_context_window = 32768
 
 [memory]
 model_cache_dir = "/var/lib/agentos/data/models"
+# Sweep memory entries older than this so the episodic/semantic/procedural DBs
+# don't grow without bound on a long-running install. 0 = unlimited.
+retention_days = 90
 
 [context_budget]
 total_tokens = 128000
@@ -56,3 +86,57 @@ tools_pct = 0.18
 knowledge_pct = 0.30
 history_pct = 0.25
 task_pct = 0.12
+
+# ── Logging — structured JSON to stdout + /var/log/agentos (see Phase 02) ──────
+[logging]
+log_dir = "/var/log/agentos"
+# JSON for machine-parseable production logs (journald/Loki/ELK). Use "text" for dev.
+log_format = "json"
+log_level = "info"
+
+# ── OpenTelemetry — opt-in trace/metric export (needs a collector) ─────────────
+# Disabled by default. Set enabled = true + point endpoint at your OTLP collector
+# (e.g. Jaeger/Tempo at :4317) to export task/tool spans. Build with --features otel.
+# AGENTOS_OTEL_ENABLED / AGENTOS_OTEL_ENDPOINT override these at runtime.
+[otel]
+enabled = false
+endpoint = "http://localhost:4317"
+protocol = "grpc"
+service_name = "agentos"
+sample_rate = 1.0
+
+# ── Boot pre-flight — fail fast before any subsystem starts ────────────────────
+[preflight]
+# Minimum free disk (MB) on the data-dir partition required to boot.
+# Set to 0 to disable the disk check (not recommended in production).
+min_free_disk_mb = 512
+# Probe audit/vault/state DB dirs, the log dir, and /run/agentos for writability
+# before subsystem init; boot fails fast with one precise diagnostic if not.
+check_db_writable = true
+
+# ── Health monitor ─────────────────────────────────────────────────────────────
+[health_monitor]
+enabled = true
+check_interval_secs = 30
+
+[health_monitor.thresholds]
+cpu_warning_percent = 85.0
+memory_warning_percent = 80.0
+disk_warning_percent = 85.0
+disk_critical_percent = 95.0
+gpu_vram_warning_percent = 90.0
+
+# ── REST API — host 0.0.0.0 is an intentional service bind; front with a proxy ─
+[api]
+enabled = true
+host = "0.0.0.0"
+port = 8080
+# Docs UI disabled — this deployment is internet-exposed.
+docs_enabled = false
+
+# ── Scratchpad + context memory (kept on the data volume) ──────────────────────
+[scratchpad]
+db_path = "/var/lib/agentos/data/scratchpad.db"
+
+[memory.context]
+db_path = "/var/lib/agentos/data/context_memory.db"

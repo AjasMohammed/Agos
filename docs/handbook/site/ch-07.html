@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tool System · AgentOS Handbook</title>
+<link rel="stylesheet" href="assets/handbook.css">
+<script src="assets/search-index.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="menu-toggle" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="index.html"><span class="logo">◆</span> AgentOS <span class="brand-sub">Handbook</span></a>
+  <div class="topbar-spacer"></div>
+  <div class="search-wrap">
+    <input id="search" type="search" placeholder="Search the handbook…  (press /)" autocomplete="off">
+    <div id="search-results" hidden></div>
+  </div>
+  <button id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">🌙</button>
+</header>
+<div id="progress"></div>
+<div id="layout">
+  <nav id="sidebar"><div class="nav-inner"><div class="nav-section-label">Handbook</div><div class="nav-chapter"><a class="nav-link nav-top" href="index.html"><span class="ch-num">★</span> Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-01.html"><span class="ch-num">01</span> Introduction and Philosophy</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-02.html"><span class="ch-num">02</span> Installation and First Run</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-03.html"><span class="ch-num">03</span> Architecture Overview</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-04.html"><span class="ch-num">04</span> CLI Reference Complete</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-05.html"><span class="ch-num">05</span> Agent Management</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-06.html"><span class="ch-num">06</span> Task System</a></div><div class="nav-chapter open"><a class="nav-link nav-top active" href="ch-07.html"><span class="ch-num">07</span> Tool System</a><div class="nav-subs"><a class="nav-sub" href="#how-tools-work" data-target="how-tools-work">How Tools Work</a><a class="nav-sub" href="#built-in-tools-reference" data-target="built-in-tools-reference">Built-in Tools Reference</a><a class="nav-sub" href="#tool-manifests" data-target="tool-manifests">Tool Manifests</a><a class="nav-sub" href="#trust-tiers" data-target="trust-tiers">Trust Tiers</a><a class="nav-sub" href="#tool-signing" data-target="tool-signing">Tool Signing</a><a class="nav-sub" href="#installing-and-removing-tools" data-target="installing-and-removing-tools">Installing and Removing Tools</a><a class="nav-sub" href="#tool-sandboxing" data-target="tool-sandboxing">Tool Sandboxing</a><a class="nav-sub" href="#agent-inbox-tools" data-target="agent-inbox-tools">Agent Inbox Tools</a><a class="nav-sub" href="#schedule-inspection-tools" data-target="schedule-inspection-tools">Schedule Inspection Tools</a><a class="nav-sub" href="#tool-discovery-and-pagination" data-target="tool-discovery-and-pagination">Tool Discovery and Pagination</a><a class="nav-sub" href="#host-introspection-tools" data-target="host-introspection-tools">Host Introspection Tools</a><a class="nav-sub" href="#related" data-target="related">Related</a></div></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-08.html"><span class="ch-num">08</span> Security Model</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-09.html"><span class="ch-num">09</span> Secrets and Vault</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-10.html"><span class="ch-num">10</span> Memory System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-11.html"><span class="ch-num">11</span> Pipeline and Workflows</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-12.html"><span class="ch-num">12</span> Event System</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-13.html"><span class="ch-num">13</span> Cost Tracking</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-14.html"><span class="ch-num">14</span> Audit Log</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-15.html"><span class="ch-num">15</span> LLM Configuration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-16.html"><span class="ch-num">16</span> Configuration Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-17.html"><span class="ch-num">17</span> WASM Tools Development</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-18.html"><span class="ch-num">18</span> Advanced Operations</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-19.html"><span class="ch-num">19</span> Troubleshooting and FAQ</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-20.html"><span class="ch-num">20</span> LLM Agent Testing</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-21.html"><span class="ch-num">21</span> User Notifications and Channels</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-22.html"><span class="ch-num">22</span> MCP Integration</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-23.html"><span class="ch-num">23</span> REST API Reference</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-24.html"><span class="ch-num">24</span> WebSocket Guide</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-25.html"><span class="ch-num">25</span> API Authentication and Keys</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-26.html"><span class="ch-num">26</span> Channel Adapters</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-27.html"><span class="ch-num">27</span> Kernel Mediated Capabilities</a></div><div class="nav-chapter"><a class="nav-link nav-top" href="ch-28.html"><span class="ch-num">28</span> Agent Inbox and Notifications</a></div></div></nav>
+  <div id="scrim"></div>
+  <main id="content">
+    <div class="breadcrumb"><a href="index.html">Handbook</a> <span>/</span> Chapter 07 · Tool System</div>
+    <div class="ch-header"><div class="ch-kicker">Chapter 07</div><h1 class="ch-title">Tool System</h1><p class="ch-summary">All 132 built-in tools across 16 domains — file I/O, memory tiers, scratchpad, multi-agent coordination, task management, HAL device tools, agent inbox (6 tools), schedule inspection (4), tool discovery/pagination (4), host introspection (4), manifests, trust tiers, signing</p></div>
+    <article class="prose"><h1 id="tool-system" class="anchored"><a class="hanchor" href="#tool-system" aria-label="link">#</a>Tool System</h1>
+<blockquote><p>Tools are the programs of AgentOS. They are sandboxed execution units that an agent calls by declaring intent — the kernel validates the request, checks permissions, runs the tool, and injects the result back into the agent's context window.</p></blockquote>
+<hr>
+<h2 id="how-tools-work" class="anchored"><a class="hanchor" href="#how-tools-work" aria-label="link">#</a>How Tools Work</h2>
+<p>The execution path from LLM intent to tool result:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>LLM declares intent
+  → kernel matches tool by name
+  → CapabilityToken validated against required PermissionSet
+  → payload validated against tool&#39;s input_schema (if present)
+  → tool executed in its sandbox (Rust in-process / WASM module / bwrap shell)
+  → result injected into ContextWindow as:
+    [TOOL_RESULT: &lt;name&gt;] { ... } [/TOOL_RESULT]
+  → AuditLog entry written
+</pre></div>
+</div>
+<p>The <code>AgentTool</code> trait every tool must implement:</p>
+<div class="code-block" data-lang="rust"><div class="code-bar"><span class="code-lang">rust</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="cp">#[async_trait]</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">AgentTool</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="kt">str</span><span class="p">;</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">execute</span><span class="p">(</span>
+<span class="w">        </span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span>
+<span class="w">        </span><span class="n">payload</span><span class="p">:</span><span class="w"> </span><span class="nc">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">,</span>
+<span class="w">        </span><span class="n">context</span><span class="p">:</span><span class="w"> </span><span class="nc">ToolExecutionContext</span><span class="p">,</span>
+<span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">,</span><span class="w"> </span><span class="n">AgentOSError</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">required_permissions</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="p">(</span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">PermissionOp</span><span class="p">)</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>At execution time the kernel constructs a <code>ToolExecutionContext</code> containing the task and agent IDs, the agent's verified <code>PermissionSet</code>, an optional reference to the <code>ProxyVault</code> (for secret injection), and an optional reference to the <code>HardwareAbstractionLayer</code>. Permission checks are enforced twice — once at the kernel router level and once inside <code>ToolRunner</code> as defence-in-depth. A tool cannot run unless both checks pass.</p>
+<div class="code-block" data-lang="rust"><div class="code-bar"><span class="code-lang">rust</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">ToolExecutionContext</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">data_dir</span><span class="p">:</span><span class="w"> </span><span class="nc">PathBuf</span><span class="p">,</span><span class="w">      </span><span class="c1">// agent&#39;s data directory</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">workspace_paths</span><span class="p">:</span><span class="w"> </span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">PathBuf</span><span class="o">&gt;</span><span class="p">,</span><span class="w">  </span><span class="c1">// additional dirs beyond data_dir</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">task_id</span><span class="p">:</span><span class="w"> </span><span class="nc">TaskID</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">agent_id</span><span class="p">:</span><span class="w"> </span><span class="nc">AgentID</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">trace_id</span><span class="p">:</span><span class="w"> </span><span class="nc">TraceID</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">permissions</span><span class="p">:</span><span class="w"> </span><span class="nc">PermissionSet</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">vault</span><span class="p">:</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Arc</span><span class="o">&lt;</span><span class="n">ProxyVault</span><span class="o">&gt;&gt;</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">hal</span><span class="p">:</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Arc</span><span class="o">&lt;</span><span class="n">HardwareAbstractionLayer</span><span class="o">&gt;&gt;</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">file_lock_registry</span><span class="p">:</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Arc</span><span class="o">&lt;</span><span class="n">FileLockRegistry</span><span class="o">&gt;&gt;</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">cancellation_token</span><span class="p">:</span><span class="w"> </span><span class="nc">CancellationToken</span><span class="p">,</span><span class="w">  </span><span class="c1">// fires on task cancel/timeout</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h2 id="built-in-tools-reference" class="anchored"><a class="hanchor" href="#built-in-tools-reference" aria-label="link">#</a>Built-in Tools Reference</h2>
+<p>All built-in tools ship as <code>trust_tier = &quot;core&quot;</code> manifests in <code>tools/core/</code>. They are compiled into the kernel as Rust code — no external binary or WASM module is loaded.</p>
+<p>The kernel registers <strong>132 built-in tools</strong> spanning sixteen domains (including 17 KMC capability tools): file I/O, memory (semantic / episodic / archival / procedural / blocks), scratchpad knowledge graph, multi-agent coordination, task management, system &amp; hardware (HAL), data &amp; utilities, agent introspection, user notifications, network family, agent inbox, schedule inspection, tool discovery, and host introspection. Use the <code>list-tools</code> tool to enumerate all tools at runtime, <code>search-tools</code> for keyword search, and <code>describe-tool</code> for the full input schema of any individual tool.</p>
+<h3 id="file-reader" class="anchored"><a class="hanchor" href="#file-reader" aria-label="link">#</a><code>file-reader</code></h3>
+<p>Read files from the agent's data directory with line-based pagination and directory listing.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>fs.user_data:r</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>path</code></td><td>string</td><td>Yes</td><td>—</td><td>Relative to data dir. Absolute paths are re-rooted inside data dir.</td></tr><tr><td><code>mode</code></td><td>string</td><td>No</td><td><code>&quot;read&quot;</code></td><td><code>&quot;read&quot;</code> or <code>&quot;list&quot;</code></td></tr><tr><td><code>offset</code></td><td>u64</td><td>No</td><td><code>0</code></td><td>Start line for pagination</td></tr><tr><td><code>limit</code></td><td>u64</td><td>No</td><td><code>500</code></td><td>Max lines to return; <code>0</code> = no cap</td></tr></tbody></table></div>
+<p><strong>Output (read mode):</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;notes.txt&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;size_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1234</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;total_lines&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;returned_lines&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;offset&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;has_more&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;content_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;text&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Output (list mode):</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;.&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;mode&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;list&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;entries&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="w"> </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;report.txt&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;size_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">512</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;is_dir&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">}],</span>
+<span class="w">  </span><span class="nt">&quot;count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Restrictions:</strong> Path traversal denied — any resolved path outside <code>data_dir</code> returns <code>PermissionDenied</code>. Files larger than 10 MiB are rejected. Reads are blocked while another agent holds a write lock on the file (<code>FileLocked</code> error).</p>
+<hr>
+<h3 id="file-writer" class="anchored"><a class="hanchor" href="#file-writer" aria-label="link">#</a><code>file-writer</code></h3>
+<p>Write files to the agent's data directory.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>fs.user_data:w</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>Yes</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>path</code></td><td>string</td><td>Yes</td><td>—</td><td>Relative to data dir</td></tr><tr><td><code>content</code></td><td>string</td><td>Yes</td><td>—</td><td>Content to write</td></tr><tr><td><code>mode</code></td><td>string</td><td>No</td><td><code>&quot;overwrite&quot;</code></td><td><code>&quot;overwrite&quot;</code>, <code>&quot;append&quot;</code>, or <code>&quot;create_only&quot;</code></td></tr><tr><td><code>max_bytes</code></td><td>u64</td><td>No</td><td>—</td><td>Reject write if content exceeds this limit</td></tr></tbody></table></div>
+<p><strong>Output:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;out.txt&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;mode&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;overwrite&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;bytes_written&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">512</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Restrictions:</strong> Same path traversal enforcement as <code>file-reader</code>. Parent directories are created automatically. <code>create_only</code> fails if the file already exists. Acquires a write lock for the duration of the write — concurrent readers get <code>FileLocked</code>.</p>
+<hr>
+<h3 id="memory-search" class="anchored"><a class="hanchor" href="#memory-search" aria-label="link">#</a><code>memory-search</code></h3>
+<p>Hybrid vector + full-text search across semantic or episodic memory.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>memory.semantic:r</code> (semantic scope), <code>memory.episodic:r</code> (episodic global / cross-task)</td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>query</code></td><td>string</td><td>Yes</td><td>—</td><td>Natural-language search query</td></tr><tr><td><code>scope</code></td><td>string</td><td>No</td><td><code>&quot;semantic&quot;</code></td><td><code>&quot;semantic&quot;</code> or <code>&quot;episodic&quot;</code></td></tr><tr><td><code>top_k</code> / <code>limit</code></td><td>u64</td><td>No</td><td><code>5</code></td><td>Max results; hard cap: 100</td></tr><tr><td><code>min_score</code></td><td>f64</td><td>No</td><td><code>0.3</code></td><td>Minimum relevance score (semantic only)</td></tr><tr><td><code>global</code></td><td>bool</td><td>No</td><td><code>false</code></td><td>Episodic: search across all agents and tasks</td></tr><tr><td><code>since</code></td><td>string</td><td>No</td><td>—</td><td>Episodic global: RFC3339 timestamp lower bound</td></tr><tr><td><code>agent_id</code></td><td>UUID string</td><td>No</td><td>—</td><td>Episodic global: filter by agent UUID</td></tr><tr><td><code>task_id</code></td><td>UUID string</td><td>No</td><td>—</td><td>Episodic: filter by task UUID</td></tr></tbody></table></div>
+<p><strong>Output:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;query&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;revenue forecast&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;results&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;key&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;q1-revenue&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Q1 revenue was 2.5 million&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;semantic_score&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.87</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;fts_score&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;rrf_score&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.05</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;tags&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;revenue&quot;</span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;created_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-01-01T00:00:00Z&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;scope&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;semantic&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h3 id="memory-write" class="anchored"><a class="hanchor" href="#memory-write" aria-label="link">#</a><code>memory-write</code></h3>
+<p>Write content to semantic or episodic memory.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>memory.semantic:w</code> (semantic) or <code>memory.episodic:w</code> (episodic)</td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>content</code></td><td>string</td><td>Yes</td><td>—</td><td>Max 512 KiB</td></tr><tr><td><code>scope</code></td><td>string</td><td>No</td><td><code>&quot;semantic&quot;</code></td><td><code>&quot;semantic&quot;</code> or <code>&quot;episodic&quot;</code></td></tr><tr><td><code>key</code></td><td>string</td><td>No</td><td>auto-generated</td><td>Semantic: lookup key (first 6 words if omitted)</td></tr><tr><td><code>tags</code></td><td>array \</td><td>string</td><td>No</td><td>—</td><td>Semantic: array or comma-separated string</td></tr><tr><td><code>summary</code></td><td>string</td><td>No</td><td>—</td><td>Episodic: short one-line summary</td></tr></tbody></table></div>
+<p><strong>Output:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;success&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;scope&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;semantic&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;uuid-...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Semantic memory entry stored with embedding&quot;</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h3 id="data-parser" class="anchored"><a class="hanchor" href="#data-parser" aria-label="link">#</a><code>data-parser</code></h3>
+<p>Parse JSON, CSV, or TOML text into structured JSON.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td>None</td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Notes</th></tr></thead><tbody><tr><td><code>data</code></td><td>string</td><td>Yes</td><td>Max 4 MiB</td></tr><tr><td><code>format</code></td><td>string</td><td>Yes</td><td><code>&quot;json&quot;</code>, <code>&quot;csv&quot;</code>, or <code>&quot;toml&quot;</code></td></tr></tbody></table></div>
+<p><strong>Output:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;csv&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;parsed&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;headers&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;name&quot;</span><span class="p">,</span><span class="s2">&quot;age&quot;</span><span class="p">],</span><span class="w"> </span><span class="nt">&quot;rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;Alice&quot;</span><span class="p">,</span><span class="nt">&quot;age&quot;</span><span class="p">:</span><span class="s2">&quot;30&quot;</span><span class="p">}],</span><span class="w"> </span><span class="nt">&quot;row_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<p>CSV is capped at 50,000 rows. TOML is converted to JSON using standard key mapping.</p>
+<hr>
+<h3 id="shell-exec" class="anchored"><a class="hanchor" href="#shell-exec" aria-label="link">#</a><code>shell-exec</code></h3>
+<p>Execute a shell command inside a bwrap namespace sandbox.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>process.exec:x</code>, <code>fs.user_data:w</code></td></tr><tr><td><strong>Network</strong></td><td>No (opt-in)</td></tr><tr><td><strong>fs_write</strong></td><td>Yes (data dir only)</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>command</code></td><td>string</td><td>Yes</td><td>—</td><td>Shell command (run via <code>sh -c</code>)</td></tr><tr><td><code>timeout_secs</code></td><td>u64</td><td>No</td><td><code>30</code></td><td>Hard execution timeout</td></tr><tr><td><code>allow_network</code></td><td>bool</td><td>No</td><td><code>false</code></td><td>Pass <code>--share-net</code> to bwrap</td></tr></tbody></table></div>
+<p><strong>Output:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;command&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ls -la&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;exit_code&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;stdout&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;stderr&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;success&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Restrictions:</strong> <code>bwrap</code> (bubblewrap) must be installed — the tool hard-fails without it. Root filesystem is read-only; only <code>data_dir</code> is writable. <code>/etc</code>, <code>/var</code>, <code>/root</code>, <code>/home</code> are hidden behind tmpfs. Fresh <code>/tmp</code>, <code>/dev</code>, <code>/proc</code> are provided. stdout and stderr are each truncated at 50,000 characters.</p>
+<hr>
+<h3 id="agent-message" class="anchored"><a class="hanchor" href="#agent-message" aria-label="link">#</a><code>agent-message</code></h3>
+<p>Send a message to another named agent.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>agent.message:x</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Notes</th></tr></thead><tbody><tr><td><code>to</code></td><td>string</td><td>Yes</td><td>Target agent name</td></tr><tr><td><code>content</code></td><td>string</td><td>Yes</td><td>Message text</td></tr></tbody></table></div>
+<p><strong>Output:</strong> Returns a <code>_kernel_action: &quot;send_agent_message&quot;</code> envelope; the kernel delivers the message.</p>
+<hr>
+<h3 id="task-delegate" class="anchored"><a class="hanchor" href="#task-delegate" aria-label="link">#</a><code>task-delegate</code></h3>
+<p>Delegate a subtask to another agent.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>agent.delegate:x</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>agent</code></td><td>string</td><td>Yes</td><td>—</td><td>Target agent name</td></tr><tr><td><code>task</code></td><td>string</td><td>Yes</td><td>—</td><td>Task description</td></tr><tr><td><code>priority</code></td><td>u64</td><td>No</td><td><code>5</code></td><td>Priority 0–10</td></tr></tbody></table></div>
+<p><strong>Output:</strong> Returns a <code>_kernel_action: &quot;delegate_task&quot;</code> envelope processed by the kernel scheduler.</p>
+<hr>
+<h3 id="spawn-agent" class="anchored"><a class="hanchor" href="#spawn-agent" aria-label="link">#</a><code>spawn-agent</code></h3>
+<p>Spawn a sub-agent to handle a subtask with optional context handoff.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>agent.spawn:x</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr><tr><td><strong>Risk Level</strong></td><td>3 (HardApproval)</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>agent</code></td><td>string</td><td>Yes</td><td>—</td><td>Target agent name (must be connected)</td></tr><tr><td><code>prompt</code></td><td>string</td><td>Yes</td><td>—</td><td>Task prompt for the sub-agent</td></tr><tr><td><code>permissions</code></td><td>array</td><td>No</td><td><code>[]</code></td><td>Additional permission strings for the child</td></tr><tr><td><code>context_messages</code></td><td>integer</td><td>No</td><td><code>10</code></td><td>Number of parent context messages to hand off (max 100)</td></tr></tbody></table></div>
+<p><strong>Output:</strong> Returns a <code>_kernel_action: &quot;spawn_agent&quot;</code> envelope; the kernel creates a child task with <code>parent_task_id</code> linking back to the caller and <code>spawn_depth</code> incremented.</p>
+<p>The kernel enforces a maximum spawn depth. Requests that exceed the limit are rejected.</p>
+<hr>
+<h3 id="await-agents" class="anchored"><a class="hanchor" href="#await-agents" aria-label="link">#</a><code>await-agents</code></h3>
+<p>Wait for spawned sub-agents to complete and retrieve their results.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>agent.spawn:x</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Notes</th></tr></thead><tbody><tr><td><code>task_ids</code></td><td>array of strings</td><td>Yes</td><td>Task IDs returned from <code>spawn-agent</code> calls. Must be non-empty.</td></tr></tbody></table></div>
+<p><strong>Output:</strong> Returns a <code>_kernel_action: &quot;await_agents&quot;</code> envelope; the kernel blocks the parent task until all specified children complete, then injects their results into the parent's context window.</p>
+<hr>
+<h3 id="verify-output" class="anchored"><a class="hanchor" href="#verify-output" aria-label="link">#</a><code>verify-output</code></h3>
+<p>Spawn a critic agent to review an output for correctness, safety, and completeness.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>agent.spawn:x</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>agent</code></td><td>string</td><td>Yes</td><td>—</td><td>Agent to use as the verifier</td></tr><tr><td><code>output</code></td><td>string</td><td>Yes</td><td>—</td><td>The output text to verify</td></tr><tr><td><code>criteria</code></td><td>string</td><td>No</td><td><code>&quot;correctness, safety, and completeness&quot;</code></td><td>Evaluation criteria for the verifier</td></tr></tbody></table></div>
+<p><strong>Output:</strong> The verifier agent responds with a JSON object:</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;verdict&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;pass&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;issues&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span><span class="w"> </span><span class="nt">&quot;summary&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Output is correct and complete&quot;</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<p>Possible verdicts: <code>pass</code>, <code>fail</code>, <code>needs_revision</code>.</p>
+<p>User-supplied content in <code>output</code> and <code>criteria</code> is wrapped in <code>&lt;user_data&gt;</code> tags with tag-boundary escaping to prevent prompt injection attacks.</p>
+<hr>
+<h3 id="log-reader" class="anchored"><a class="hanchor" href="#log-reader" aria-label="link">#</a><code>log-reader</code></h3>
+<p>Read system and application logs via the Hardware Abstraction Layer.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>fs.app_logs:r</code>, <code>fs.system_logs:r</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p>The payload is forwarded to the HAL <code>log</code> query interface. The HAL resolves available log sources on the host (journald, syslog, application log files).</p>
+<hr>
+<h3 id="http-client" class="anchored"><a class="hanchor" href="#http-client" aria-label="link">#</a><code>http-client</code></h3>
+<p>Make outbound HTTP requests with automatic SSRF protection.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>network.outbound:x</code></td></tr><tr><td><strong>Network</strong></td><td>Yes</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>url</code></td><td>string</td><td>Yes</td><td>—</td><td>Absolute URL</td></tr><tr><td><code>method</code></td><td>string</td><td>No</td><td><code>&quot;GET&quot;</code></td><td>GET, POST, PUT, PATCH, DELETE, HEAD</td></tr><tr><td><code>headers</code></td><td>object</td><td>No</td><td>—</td><td>String key-value pairs</td></tr><tr><td><code>secret_headers</code></td><td>object</td><td>No</td><td>—</td><td>Values use <code>$SECRET_NAME</code> syntax resolved from ProxyVault</td></tr><tr><td><code>body</code></td><td>any</td><td>No</td><td>—</td><td>Object/array → JSON body; string → raw body</td></tr><tr><td><code>timeout_ms</code></td><td>u64</td><td>No</td><td><code>10000</code></td><td>Per-request timeout</td></tr><tr><td><code>follow_redirects</code></td><td>bool</td><td>No</td><td><code>false</code></td><td>Follow HTTP redirects (up to 10 hops; SSRF-checked per hop)</td></tr></tbody></table></div>
+<p><strong>Output:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">200</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;headers&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;content-type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;application/json&quot;</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="nt">&quot;body&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{},</span><span class="w"> </span><span class="nt">&quot;latency_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;truncated&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Restrictions:</strong> SSRF protection blocks loopback addresses, RFC1918 private IP ranges, link-local addresses, <code>localhost</code>, and <code>.local</code> hostnames. Response body is capped at 10 MiB (<code>truncated: true</code> flag set when exceeded). Redirects are not followed by default, but the tool accepts an optional <code>follow_redirects</code> parameter (boolean, default <code>false</code>). When enabled, up to 10 redirects are followed with SSRF checks applied on each hop.</p>
+<p><strong>Secret injection:</strong> Headers in <code>secret_headers</code> use <code>$VAR_NAME</code> syntax:</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;secret_headers&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;Authorization&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Bearer $MY_API_TOKEN&quot;</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<p>The kernel resolves <code>$MY_API_TOKEN</code> from the ProxyVault at runtime — the plaintext value is never serialized into the tool's input or the audit log.</p>
+<hr>
+<h3 id="network-monitor" class="anchored"><a class="hanchor" href="#network-monitor" aria-label="link">#</a><code>network-monitor</code></h3>
+<p>Monitor active network connections via the HAL.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>network.logs:r</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p>Payload forwarded to HAL <code>network</code> query interface. Returns active connections, listen sockets, and recent traffic statistics.</p>
+<hr>
+<h3 id="process-manager" class="anchored"><a class="hanchor" href="#process-manager" aria-label="link">#</a><code>process-manager</code></h3>
+<p>List or terminate system processes via the HAL.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>process.list:r</code> (list), <code>process.kill:x</code> (kill)</td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>action</code></td><td>string</td><td>No</td><td><code>&quot;list&quot;</code></td><td><code>&quot;list&quot;</code> or <code>&quot;kill&quot;</code></td></tr></tbody></table></div>
+<p>For <code>kill</code>, additional HAL-specific fields (e.g. <code>pid</code>) are required. Permissions are checked per-action: <code>list</code> requires <code>process.list:r</code>, <code>kill</code> requires <code>process.kill:x</code>.</p>
+<hr>
+<h3 id="hardware-info" class="anchored"><a class="hanchor" href="#hardware-info" aria-label="link">#</a><code>hardware-info</code></h3>
+<p>Query static hardware information via the HAL.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>hardware.system:r</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p>No required input fields. Returns CPU model, core count, total RAM, disk capacity, GPU presence.</p>
+<hr>
+<h3 id="archival-insert" class="anchored"><a class="hanchor" href="#archival-insert" aria-label="link">#</a><code>archival-insert</code></h3>
+<p>Insert a document into archival (semantic) memory with vector embedding.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>memory.semantic:w</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>content</code></td><td>string</td><td>Yes</td><td>—</td><td>Document text</td></tr><tr><td><code>key</code></td><td>string</td><td>No</td><td><code>&quot;archival-note&quot;</code></td><td>Lookup key</td></tr><tr><td><code>tags</code></td><td>array</td><td>No</td><td><code>[]</code></td><td>Metadata tags</td></tr></tbody></table></div>
+<p><strong>Output:</strong> <code>{ &quot;success&quot;: true, &quot;id&quot;: &quot;uuid-...&quot; }</code></p>
+<hr>
+<h3 id="archival-search" class="anchored"><a class="hanchor" href="#archival-search" aria-label="link">#</a><code>archival-search</code></h3>
+<p>Search archival memory using hybrid vector + full-text retrieval.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>memory.semantic:r</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th></tr></thead><tbody><tr><td><code>query</code></td><td>string</td><td>Yes</td><td>—</td></tr><tr><td><code>top_k</code></td><td>u64</td><td>No</td><td><code>5</code></td></tr></tbody></table></div>
+<p><strong>Output:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;results&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="w"> </span><span class="nt">&quot;key&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;report-2026&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;score&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.87</span><span class="w"> </span><span class="p">}]</span><span class="w"> </span><span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h3 id="memory-block-read" class="anchored"><a class="hanchor" href="#memory-block-read" aria-label="link">#</a><code>memory-block-read</code></h3>
+<p>Read a named context memory block (kernel-managed).</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>memory.blocks:r</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong> <code>{ &quot;label&quot;: &quot;persona&quot; }</code></p>
+<p>Returns a <code>_kernel_action: &quot;memory_block_read&quot;</code> envelope; the kernel injects the block's content into the context window.</p>
+<hr>
+<h3 id="memory-block-write" class="anchored"><a class="hanchor" href="#memory-block-write" aria-label="link">#</a><code>memory-block-write</code></h3>
+<p>Write or update a named context memory block.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>memory.blocks:w</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong> <code>{ &quot;label&quot;: &quot;persona&quot;, &quot;content&quot;: &quot;You are a concise analyst...&quot; }</code></p>
+<hr>
+<h3 id="memory-block-list" class="anchored"><a class="hanchor" href="#memory-block-list" aria-label="link">#</a><code>memory-block-list</code></h3>
+<p>List all named memory blocks for the current agent.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>memory.blocks:r</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p>No required input. Returns array of <code>{ label, size_bytes, updated_at }</code>.</p>
+<hr>
+<h3 id="memory-block-delete" class="anchored"><a class="hanchor" href="#memory-block-delete" aria-label="link">#</a><code>memory-block-delete</code></h3>
+<p>Delete a named memory block.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>memory.blocks:w</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong> <code>{ &quot;label&quot;: &quot;old-persona&quot; }</code></p>
+<hr>
+<h3 id="ask-user" class="anchored"><a class="hanchor" href="#ask-user" aria-label="link">#</a><code>ask-user</code></h3>
+<p>Ask the operator a blocking question. The task pauses in <code>Waiting</code> state until the user responds via the CLI, web UI, or any registered notification channel.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>user.interact:x</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>question</code></td><td>string</td><td>Yes</td><td>—</td><td>The question text shown to the operator</td></tr><tr><td><code>options</code></td><td>array of strings</td><td>No</td><td>—</td><td>Optional list of allowed answer choices</td></tr><tr><td><code>timeout_secs</code></td><td>u64</td><td>No</td><td><code>300</code></td><td>Seconds before auto-response fires (0 = no timeout)</td></tr><tr><td><code>auto_action</code></td><td>string</td><td>No</td><td><code>&quot;auto_denied&quot;</code></td><td>Text injected as the answer when the timeout fires with no user response</td></tr><tr><td><code>priority</code></td><td>string</td><td>No</td><td><code>&quot;info&quot;</code></td><td>Notification priority: <code>info</code>, <code>warning</code>, <code>urgent</code>, or <code>critical</code></td></tr></tbody></table></div>
+<p><strong>Output:</strong> Returns a <code>_kernel_action: &quot;ask_user&quot;</code> envelope. The kernel delivers the question to the user inbox and all registered channels, then suspends the task. When the operator responds, the response text is injected into the agent's context window and the task resumes.</p>
+<p><strong>Timeout behaviour:</strong> If <code>timeout_secs</code> elapses without a response, <code>auto_action</code> is injected automatically. The default <code>&quot;auto_denied&quot;</code> is a safe fallback for destructive operations. An agent can have at most 3 concurrent blocking questions (additional questions are downgraded to non-blocking notifications).</p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;question&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Should I delete the 847 duplicate records?&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;options&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;Yes, delete them&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;No, skip&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Archive instead&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;timeout_secs&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">600</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;auto_action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;No, skip&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;priority&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;urgent&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h3 id="notify-user" class="anchored"><a class="hanchor" href="#notify-user" aria-label="link">#</a><code>notify-user</code></h3>
+<p>Fire-and-forget notification to the operator. The task continues immediately.</p>
+<div class="table-wrap"><table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Permission</strong></td><td><code>user.notify:w</code></td></tr><tr><td><strong>Network</strong></td><td>No</td></tr><tr><td><strong>fs_write</strong></td><td>No</td></tr></tbody></table></div>
+<p><strong>Input:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead><tbody><tr><td><code>subject</code></td><td>string</td><td>Yes</td><td>—</td><td>Short summary ≤80 chars — used as the email subject and CLI one-liner</td></tr><tr><td><code>body</code></td><td>string</td><td>Yes</td><td>—</td><td>Full markdown message body</td></tr><tr><td><code>priority</code></td><td>string</td><td>No</td><td><code>&quot;info&quot;</code></td><td><code>info</code>, <code>warning</code>, <code>urgent</code>, or <code>critical</code></td></tr></tbody></table></div>
+<p><strong>Output:</strong> Returns a <code>_kernel_action: &quot;notify_user&quot;</code> envelope. The kernel delivers the message to the user inbox and all registered delivery channels.</p>
+<p><strong>Example:</strong></p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;subject&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Database scan complete&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;body&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Scanned 12,000 rows. Found **3 anomalies** — see `anomalies.json` in the data directory.&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;priority&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;warning&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<hr>
+<h3 id="additional-tools-v3" class="anchored"><a class="hanchor" href="#additional-tools-v3" aria-label="link">#</a>Additional Tools (v3)</h3>
+<p>The following tools were added in v3. Use <code>agent-manual</code> with <code>{&quot;section&quot;: &quot;tool-detail&quot;, &quot;name&quot;: &quot;&lt;tool&gt;&quot;}</code> for full input schemas.</p>
+<h4 id="file-operations" class="anchored"><a class="hanchor" href="#file-operations" aria-label="link">#</a>File Operations</h4>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>file-editor</code></td><td><code>fs.user_data:w</code></td><td>Apply line-range edits (insert, replace, delete) to existing files</td></tr><tr><td><code>file-delete</code></td><td><code>fs.user_data:w</code></td><td>Delete a file from the data directory</td></tr><tr><td><code>file-move</code></td><td><code>fs.user_data:w</code></td><td>Move or rename a file within the data directory</td></tr><tr><td><code>file-diff</code></td><td><code>fs.user_data:r</code></td><td>Compute unified diff between two files or between a file and a string</td></tr><tr><td><code>file-glob</code></td><td><code>fs.user_data:r</code></td><td>Find files matching a glob pattern</td></tr><tr><td><code>file-grep</code></td><td><code>fs.user_data:r</code></td><td>Search file contents by regex pattern</td></tr></tbody></table></div>
+<h4 id="memory-procedural" class="anchored"><a class="hanchor" href="#memory-procedural" aria-label="link">#</a>Memory &amp; Procedural</h4>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>memory-read</code></td><td><code>memory.semantic:r</code></td><td>Read a specific memory entry by key</td></tr><tr><td><code>memory-delete</code></td><td><code>memory.semantic:w</code></td><td>Delete a memory entry by key</td></tr><tr><td><code>memory-stats</code></td><td><code>memory.semantic:r</code></td><td>Memory usage statistics (counts, sizes per tier)</td></tr><tr><td><code>episodic-list</code></td><td><code>memory.episodic:r</code></td><td>List episodic memory entries for a task</td></tr><tr><td><code>procedure-create</code></td><td><code>memory.procedural:w</code></td><td>Record a reusable step-by-step procedure</td></tr><tr><td><code>procedure-search</code></td><td><code>memory.procedural:r</code></td><td>Search procedures by natural language query</td></tr><tr><td><code>procedure-list</code></td><td><code>memory.procedural:r</code></td><td>List all recorded procedures</td></tr><tr><td><code>procedure-delete</code></td><td><code>memory.procedural:w</code></td><td>Delete a procedure by ID</td></tr></tbody></table></div>
+<h4 id="network" class="anchored"><a class="hanchor" href="#network" aria-label="link">#</a>Network</h4>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>web-fetch</code></td><td><code>network.outbound:x</code></td><td>Fetch a web page and extract text content (HTML stripped)</td></tr><tr><td><code>web-search</code></td><td><code>network.outbound:x</code></td><td>Search the web with provider fallback (Brave → Tavily → Serper → DuckDuckGo). SSRF guard on scraped URLs.</td></tr></tbody></table></div>
+<h4 id="scratchpad" class="anchored"><a class="hanchor" href="#scratchpad" aria-label="link">#</a>Scratchpad</h4>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>scratch-read</code></td><td><code>agent.scratch:r</code></td><td>Read a scratchpad page</td></tr><tr><td><code>scratch-write</code></td><td><code>agent.scratch:w</code></td><td>Write/update a scratchpad page</td></tr><tr><td><code>scratch-search</code></td><td><code>agent.scratch:r</code></td><td>Search scratchpad pages</td></tr><tr><td><code>scratch-delete</code></td><td><code>agent.scratch:w</code></td><td>Delete a scratchpad page</td></tr><tr><td><code>scratch-links</code></td><td><code>agent.scratch:r</code></td><td>List wikilinks for a page</td></tr><tr><td><code>scratch-graph</code></td><td><code>agent.scratch:r</code></td><td>Show wikilink graph traversal</td></tr></tbody></table></div>
+<h4 id="agent-coordination" class="anchored"><a class="hanchor" href="#agent-coordination" aria-label="link">#</a>Agent Coordination</h4>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>agent-list</code></td><td><code>agent.registry:r</code></td><td>List registered agents and their status</td></tr><tr><td><code>agent-call</code></td><td><code>agent.rpc:x</code></td><td>Invoke another agent via RPC</td></tr><tr><td><code>task-list</code></td><td><code>task.query:r</code></td><td>List active and recent tasks</td></tr><tr><td><code>task-status</code></td><td><code>task.query:r</code></td><td>Inspect status of a specific task by ID</td></tr><tr><td><code>task-delegate</code></td><td><code>agent.delegate:x</code></td><td>Delegate a sub-task to another agent (non-blocking)</td></tr><tr><td><code>spawn-agent</code></td><td><code>agent.spawn:x</code></td><td>Spawn a child sub-agent task with scoped permissions and context handoff</td></tr><tr><td><code>await-agents</code></td><td><code>agent.spawn:x</code></td><td>Wait for one or more sub-agent tasks and collect their results</td></tr><tr><td><code>verify-output</code></td><td><code>agent.spawn:x</code></td><td>Spawn a critic agent to validate an output against criteria</td></tr><tr><td><code>poll-agent</code></td><td><code>agent.spawn:x</code></td><td>Non-blocking check of sub-agent state and recent messages</td></tr><tr><td><code>cancel-agent</code></td><td><code>agent.spawn:x</code></td><td>Cancel a child sub-agent task; cascades to its descendants</td></tr></tbody></table></div>
+<h4 id="user-communication" class="anchored"><a class="hanchor" href="#user-communication" aria-label="link">#</a>User Communication</h4>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>ask-user</code></td><td><code>user.interact:x</code></td><td>Ask the operator a blocking question; task pauses until answered</td></tr><tr><td><code>notify-user</code></td><td><code>user.notify:w</code></td><td>Send a fire-and-forget notification to the operator</td></tr></tbody></table></div>
+<h4 id="context-memory" class="anchored"><a class="hanchor" href="#context-memory" aria-label="link">#</a>Context Memory</h4>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>context-memory-read</code></td><td><code>agent.context:r</code></td><td>Read agent's context memory</td></tr><tr><td><code>context-memory-update</code></td><td><code>agent.context:w</code></td><td>Update agent's context memory</td></tr></tbody></table></div>
+<h4 id="escalation" class="anchored"><a class="hanchor" href="#escalation" aria-label="link">#</a>Escalation</h4>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>escalation-status</code></td><td><code>escalation.pending:rq</code></td><td>Query pending escalation status</td></tr></tbody></table></div>
+<h4 id="hardware" class="anchored"><a class="hanchor" href="#hardware" aria-label="link">#</a>Hardware</h4>
+<p>These tools wrap the HAL drivers — each one runs through the device approval workflow and emits the corresponding HAL audit events.</p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>hardware-info</code></td><td><code>hardware.system:r</code></td><td>Cross-driver overview: CPU, memory, disk, GPU, sensors</td></tr><tr><td><code>audio</code></td><td><code>hardware.audio:x</code></td><td>Capture and playback via PipeWire/PulseAudio</td></tr><tr><td><code>bluetooth</code></td><td><code>hardware.bluetooth:x</code></td><td>Scan, pair, and connect to Bluetooth devices</td></tr><tr><td><code>display-config</code></td><td><code>hardware.display:x</code></td><td>Apply / revert display output configuration</td></tr><tr><td><code>printer</code></td><td><code>hardware.printer:x</code></td><td>Submit and cancel CUPS print jobs</td></tr><tr><td><code>raw-usb</code></td><td><code>hardware.raw-usb:x</code></td><td>Open USB devices and run bulk/interrupt/control transfers</td></tr><tr><td><code>usb-storage</code></td><td><code>hardware.usb:rx</code></td><td>Mount, unmount, and eject USB mass storage</td></tr><tr><td><code>webcam</code></td><td><code>hardware.webcam:x</code></td><td>Single-frame capture and burst capture via Video4Linux</td></tr><tr><td><code>sys-monitor</code></td><td><code>hardware.system:r</code></td><td>Streaming system metrics (CPU, memory, disk I/O)</td></tr></tbody></table></div>
+<h4 id="utilities" class="anchored"><a class="hanchor" href="#utilities" aria-label="link">#</a>Utilities</h4>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>think</code></td><td>(none)</td><td>Private scratchpad for reasoning — output is NOT shown to the user</td></tr><tr><td><code>datetime</code></td><td>(none)</td><td>Get current date, time, timezone, and Unix timestamp</td></tr><tr><td><code>agent-manual</code></td><td>(none)</td><td>Query structured AgentOS documentation</td></tr><tr><td><code>agent-self</code></td><td>(none)</td><td>View own agent state: permissions, budget, tools, subscriptions</td></tr></tbody></table></div>
+<h3 id="kernel-mediated-capability-tools-kmc" class="anchored"><a class="hanchor" href="#kernel-mediated-capability-tools-kmc" aria-label="link">#</a>Kernel-Mediated Capability Tools (KMC)</h3>
+<p>These 17 tools provide system-level capabilities mediated by the kernel's capability providers. They are bridge tools that dispatch to the kernel's <code>CapabilityProvider</code> implementations. See <a class="wikilink" href="ch-27.html">Kernel Mediated Capabilities</a> for the full reference.</p>
+<p><strong>Managed Environments:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>env-create</code></td><td><code>env.create:x</code></td><td>Create isolated workspace (Python/Node.js/Rust/Generic)</td></tr><tr><td><code>env-install</code></td><td><code>env.install:x</code>, <code>net.outbound:x</code></td><td>Install package (validated against allowlist)</td></tr><tr><td><code>env-list</code></td><td><code>env.list:r</code></td><td>List installed packages in workspace</td></tr><tr><td><code>env-destroy</code></td><td><code>env.destroy:x</code></td><td>Remove workspace and packages</td></tr></tbody></table></div>
+<p><strong>Managed Storage Zones:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>storage-zone-create</code></td><td><code>storage.zone.create:x</code></td><td>Request access to a filesystem directory</td></tr><tr><td><code>storage-zone-list</code></td><td><code>storage.zone.list:r</code></td><td>List active zones</td></tr><tr><td><code>storage-zone-revoke</code></td><td><code>storage.zone.revoke:x</code></td><td>Revoke a zone</td></tr></tbody></table></div>
+<p><strong>Managed Processes:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>proc-spawn</code></td><td><code>proc.spawn:x</code></td><td>Spawn a managed background process</td></tr><tr><td><code>proc-signal</code></td><td><code>proc.signal:x</code></td><td>Send signal to a process</td></tr><tr><td><code>proc-output</code></td><td><code>proc.output:r</code></td><td>Read recent stdout/stderr</td></tr><tr><td><code>proc-list</code></td><td><code>proc.list:r</code></td><td>List agent's processes</td></tr><tr><td><code>proc-wait</code></td><td><code>proc.wait:r</code></td><td>Wait for process to exit</td></tr></tbody></table></div>
+<p><strong>Managed Networking:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>net-http</code></td><td><code>net.http:x</code></td><td>HTTP request through policy proxy</td></tr><tr><td><code>net-dns</code></td><td><code>net.dns:r</code></td><td>DNS resolution with rebinding defense</td></tr></tbody></table></div>
+<p><strong>Managed Builds:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Permission</th><th>Description</th></tr></thead><tbody><tr><td><code>build-run</code></td><td><code>build.run:x</code></td><td>Execute build command with structured output</td></tr><tr><td><code>build-test</code></td><td><code>build.test:x</code></td><td>Run tests (auto-detects ecosystem)</td></tr><tr><td><code>build-lint</code></td><td><code>build.lint:x</code></td><td>Run linter (auto-detects ecosystem)</td></tr></tbody></table></div>
+<hr>
+<h2 id="tool-manifests" class="anchored"><a class="hanchor" href="#tool-manifests" aria-label="link">#</a>Tool Manifests</h2>
+<p>Every tool -- built-in or external -- is described by a TOML manifest. The kernel reads manifests from <code>tools/core/</code> (distribution-shipped) and <code>tools/user/</code> (operator-installed).</p>
+<p><strong>Annotated example (<code>tools/core/file-reader.toml</code>):</strong></p>
+<div class="code-block" data-lang="toml"><div class="code-bar"><span class="code-lang">toml</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">[manifest]</span>
+<span class="n">name</span><span class="w">        </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;file-reader&quot;</span><span class="w">         </span><span class="c1"># Tool name used by LLM and CLI</span>
+<span class="n">version</span><span class="w">     </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;1.1.0&quot;</span><span class="w">               </span><span class="c1"># SemVer</span>
+<span class="n">description</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;Reads files...&quot;</span><span class="w">      </span><span class="c1"># Human-readable summary</span>
+<span class="n">author</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;agentos-core&quot;</span><span class="w">        </span><span class="c1"># Author identifier</span>
+<span class="n">trust_tier</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;core&quot;</span><span class="w">                </span><span class="c1"># core | verified | community | blocked</span>
+
+<span class="c1"># Required for Verified/Community tier:</span>
+<span class="c1"># author_pubkey = &quot;&lt;64 hex chars — Ed25519 public key&gt;&quot;</span>
+<span class="c1"># signature     = &quot;&lt;128 hex chars — Ed25519 signature over canonical JSON payload&gt;&quot;</span>
+
+<span class="k">[capabilities_required]</span>
+<span class="n">permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;fs.user_data:r&quot;</span><span class="p">]</span><span class="w">    </span><span class="c1"># Resources required; format: &quot;resource:ops&quot;</span>
+
+<span class="k">[capabilities_provided]</span>
+<span class="n">outputs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;content.text&quot;</span><span class="p">]</span><span class="w">          </span><span class="c1"># Capabilities this tool produces</span>
+
+<span class="k">[intent_schema]</span>
+<span class="n">input</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;FileReadIntent&quot;</span><span class="w">           </span><span class="c1"># Intent type name (for LLM schema)</span>
+<span class="n">output</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;FileContent&quot;</span><span class="w">              </span><span class="c1"># Output type name</span>
+
+<span class="k">[sandbox]</span>
+<span class="n">network</span><span class="w">       </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="w">               </span><span class="c1"># Outbound network allowed?</span>
+<span class="n">fs_write</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="w">               </span><span class="c1"># Filesystem writes allowed?</span>
+<span class="n">gpu</span><span class="w">           </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="w">               </span><span class="c1"># GPU access allowed? (default false)</span>
+<span class="n">max_memory_mb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">64</span><span class="w">                  </span><span class="c1"># Memory cap in MiB</span>
+<span class="n">max_cpu_ms</span><span class="w">    </span><span class="o">=</span><span class="w"> </span><span class="mi">5000</span><span class="w">                </span><span class="c1"># CPU time cap in milliseconds</span>
+<span class="n">syscalls</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="p">[]</span><span class="w">                  </span><span class="c1"># Optional syscall allowlist (empty = default base set)</span>
+
+<span class="c1"># WASM tools only:</span>
+<span class="c1"># [executor]</span>
+<span class="c1"># type      = &quot;wasm&quot;</span>
+<span class="c1"># wasm_path = &quot;my-tool.wasm&quot;        # Relative to manifest directory</span>
+</pre></div>
+</div>
+<p><strong>All manifest fields:</strong></p>
+<div class="table-wrap"><table><thead><tr><th>Field</th><th>Section</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>manifest</code></td><td>Yes</td><td>Unique tool identifier</td></tr><tr><td><code>version</code></td><td><code>manifest</code></td><td>Yes</td><td>SemVer string</td></tr><tr><td><code>description</code></td><td><code>manifest</code></td><td>Yes</td><td>One-line description</td></tr><tr><td><code>author</code></td><td><code>manifest</code></td><td>Yes</td><td>Author name or organization</td></tr><tr><td><code>trust_tier</code></td><td><code>manifest</code></td><td>Yes</td><td><code>core</code>, <code>verified</code>, <code>community</code>, or <code>blocked</code></td></tr><tr><td><code>author_pubkey</code></td><td><code>manifest</code></td><td>Verified/Community</td><td>Hex-encoded Ed25519 public key (64 chars)</td></tr><tr><td><code>signature</code></td><td><code>manifest</code></td><td>Verified/Community</td><td>Hex-encoded Ed25519 signature (128 chars)</td></tr><tr><td><code>risk_class</code></td><td><code>manifest</code></td><td>No</td><td>Risk classification driving the approval workflow: <code>readonly_scoped</code>, <code>readonly_external</code>, <code>write_scoped</code>, <code>exec_capable</code>, <code>control_plane</code>, or <code>interactive</code></td></tr><tr><td><code>tags</code></td><td><code>manifest</code></td><td>No</td><td>Capability/discovery tags, e.g. <code>[&quot;read&quot;, &quot;network&quot;]</code> (used by <code>search-tools</code>)</td></tr><tr><td><code>permissions</code></td><td><code>capabilities_required</code></td><td>Yes</td><td>Permission strings, e.g. <code>[&quot;fs.user_data:r&quot;]</code></td></tr><tr><td><code>outputs</code></td><td><code>capabilities_provided</code></td><td>Yes</td><td>Capability output labels</td></tr><tr><td><code>input</code></td><td><code>intent_schema</code></td><td>Yes</td><td>Intent schema name</td></tr><tr><td><code>output</code></td><td><code>intent_schema</code></td><td>Yes</td><td>Output schema name</td></tr><tr><td><code>network</code></td><td><code>sandbox</code></td><td>Yes</td><td>Allow outbound network</td></tr><tr><td><code>fs_write</code></td><td><code>sandbox</code></td><td>Yes</td><td>Allow filesystem writes</td></tr><tr><td><code>gpu</code></td><td><code>sandbox</code></td><td>No</td><td>Allow GPU access (default false)</td></tr><tr><td><code>max_memory_mb</code></td><td><code>sandbox</code></td><td>Yes</td><td>Memory cap in MiB</td></tr><tr><td><code>max_cpu_ms</code></td><td><code>sandbox</code></td><td>Yes</td><td>CPU time cap in milliseconds</td></tr><tr><td><code>syscalls</code></td><td><code>sandbox</code></td><td>No</td><td>Explicit syscall allowlist (empty = default)</td></tr><tr><td><code>type</code></td><td><code>executor</code></td><td>No</td><td><code>&quot;inline&quot;</code> (default) or <code>&quot;wasm&quot;</code></td></tr><tr><td><code>wasm_path</code></td><td><code>executor</code></td><td>WASM only</td><td>Path to <code>.wasm</code> file, relative to manifest dir</td></tr></tbody></table></div>
+<hr>
+<h2 id="trust-tiers" class="anchored"><a class="hanchor" href="#trust-tiers" aria-label="link">#</a>Trust Tiers</h2>
+<p>The <code>trust_tier</code> field in <code>[manifest]</code> controls how the kernel verifies a tool at load time. The <code>TrustTier</code> enum in <code>agentos-types/src/tool.rs</code> defines four values, ordered from highest to lowest trust:</p>
+<div class="code-block" data-lang="rust"><div class="code-bar"><span class="code-lang">rust</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="nc">TrustTier</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Core</span><span class="p">,</span><span class="w">       </span><span class="c1">// highest trust</span>
+<span class="w">    </span><span class="n">Verified</span><span class="p">,</span>
+<span class="w">    </span><span class="n">Community</span><span class="p">,</span>
+<span class="w">    </span><span class="n">Blocked</span><span class="p">,</span><span class="w">    </span><span class="c1">// hard-rejected</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<h3 id="core" class="anchored"><a class="hanchor" href="#core" aria-label="link">#</a>Core</h3>
+<ul><li>Distribution-trusted — shipped as part of the AgentOS release</li><li>No runtime signature check required</li><li>Loaded from <code>tools/core/</code></li><li>All built-in tools use this tier</li></ul>
+<h3 id="verified" class="anchored"><a class="hanchor" href="#verified" aria-label="link">#</a>Verified</h3>
+<ul><li>Community tool reviewed and co-signed by AgentOS maintainers</li><li>Requires <code>author_pubkey</code> and <code>signature</code> fields in the manifest</li><li>Ed25519 signature verified over the canonical signing payload on every install</li><li>Suitable for well-tested third-party tools endorsed by the project</li></ul>
+<h3 id="community" class="anchored"><a class="hanchor" href="#community" aria-label="link">#</a>Community</h3>
+<ul><li>Author-signed only — the kernel verifies the author's own signature</li><li>Requires <code>author_pubkey</code> and <code>signature</code> fields in the manifest</li><li>Same Ed25519 signature verification algorithm as Verified</li><li>Operators opt in by running <code>agentos tool install</code>; trust is the operator's responsibility</li></ul>
+<h3 id="blocked" class="anchored"><a class="hanchor" href="#blocked" aria-label="link">#</a>Blocked</h3>
+<ul><li>Hard-rejected — <code>ToolBlocked</code> error returned regardless of signature</li><li>Used for revoked or known-malicious tools</li><li>Tools whose <code>author_pubkey</code> appears in the Certificate Revocation List (CRL) are also blocked</li></ul>
+<p><strong>Signing payload:</strong> Signatures cover only security-relevant fields, serialized with alphabetically sorted keys and no extra whitespace:</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span><span class="nt">&quot;author&quot;</span><span class="p">:</span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="nt">&quot;capabilities&quot;</span><span class="p">:[</span><span class="err">...</span><span class="p">],</span><span class="nt">&quot;max_cpu_ms&quot;</span><span class="p">:</span><span class="err">N</span><span class="p">,</span><span class="nt">&quot;max_memory_mb&quot;</span><span class="p">:</span><span class="err">N</span><span class="p">,</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="nt">&quot;network&quot;</span><span class="p">:</span><span class="err">B</span><span class="p">,</span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="s2">&quot;...&quot;</span><span class="p">}</span>
+</pre></div>
+</div>
+<p>Mutable metadata fields (<code>description</code>, <code>checksum</code>) are excluded, so descriptions can be updated without breaking the existing signature.</p>
+<p><strong>CRL:</strong> The kernel loads a JSON array of revoked author public key hex strings. Any tool whose <code>author_pubkey</code> appears in this list is rejected even if the signature is valid.</p>
+<hr>
+<h2 id="tool-signing" class="anchored"><a class="hanchor" href="#tool-signing" aria-label="link">#</a>Tool Signing</h2>
+<p>Three offline CLI commands handle the complete signing workflow. None of them require a running kernel.</p>
+<h3 id="generate-a-keypair" class="anchored"><a class="hanchor" href="#generate-a-keypair" aria-label="link">#</a>Generate a keypair</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>tool<span class="w"> </span>keygen<span class="w"> </span>--output<span class="w"> </span>tool-keypair.json
+<span class="c1"># Keypair written to tool-keypair.json</span>
+<span class="c1"># Public key: a1b2c3d4...</span>
+<span class="c1"># Keep tool-keypair.json secret — it contains your signing seed.</span>
+</pre></div>
+</div>
+<p>The output file contains:</p>
+<div class="code-block" data-lang="json"><div class="code-bar"><span class="code-lang">json</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;pubkey&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;64 hex chars — Ed25519 public key&gt;&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;seed&quot;</span><span class="p">:</span><span class="w">   </span><span class="s2">&quot;&lt;64 hex chars — Ed25519 private seed&gt;&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;algorithm&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Ed25519&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;note&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Keep seed secret. Only distribute pubkey.&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<blockquote><p><strong>Security:</strong> The <code>seed</code> field is your private key. Never commit it to version control or distribute it. Store it in a hardware key store or secrets manager.</p></blockquote>
+<h3 id="sign-a-manifest" class="anchored"><a class="hanchor" href="#sign-a-manifest" aria-label="link">#</a>Sign a manifest</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>tool<span class="w"> </span>sign<span class="w"> </span>--manifest<span class="w"> </span>my-tool.toml<span class="w"> </span>--key<span class="w"> </span>tool-keypair.json
+<span class="c1"># Signed manifest written to my-tool.toml</span>
+<span class="c1"># Signature: 3f8a...</span>
+
+<span class="c1"># Write to a separate file:</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>sign<span class="w"> </span>--manifest<span class="w"> </span>my-tool.toml<span class="w"> </span>--key<span class="w"> </span>tool-keypair.json<span class="w"> </span>--output<span class="w"> </span>my-tool-signed.toml
+</pre></div>
+</div>
+<p>This command:</p>
+<ol><li>Reads the seed from <code>tool-keypair.json</code></li><li>Injects <code>author_pubkey</code> into the manifest's <code>[manifest]</code> section</li><li>Computes the Ed25519 signature over the canonical payload</li><li>Injects <code>signature</code> into the manifest</li><li>Immediately self-verifies the signature before writing</li><li>Writes the signed manifest (overwrites source by default)</li></ol>
+<h3 id="verify-a-manifest" class="anchored"><a class="hanchor" href="#verify-a-manifest" aria-label="link">#</a>Verify a manifest</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>agentos<span class="w"> </span>tool<span class="w"> </span>verify<span class="w"> </span>my-tool.toml
+<span class="c1"># OK  my-tool (trust_tier=community)</span>
+
+<span class="c1"># Exits with code 1 on failure:</span>
+<span class="c1"># FAIL  my-tool (trust_tier=community): signature verification failed</span>
+</pre></div>
+</div>
+<h3 id="end-to-end-workflow" class="anchored"><a class="hanchor" href="#end-to-end-workflow" aria-label="link">#</a>End-to-end workflow</h3>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># 1. Generate keypair (one-time setup)</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>keygen<span class="w"> </span>--output<span class="w"> </span>my-keypair.json
+
+<span class="c1"># 2. Create or edit the manifest (set trust_tier = &quot;community&quot;)</span>
+<span class="c1"># ... edit my-tool.toml ...</span>
+
+<span class="c1"># 3. Sign it</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>sign<span class="w"> </span>--manifest<span class="w"> </span>my-tool.toml<span class="w"> </span>--key<span class="w"> </span>my-keypair.json
+
+<span class="c1"># 4. Verify (sanity check)</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>verify<span class="w"> </span>my-tool.toml
+
+<span class="c1"># 5. Install</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span>my-tool.toml
+</pre></div>
+</div>
+<hr>
+<h2 id="installing-and-removing-tools" class="anchored"><a class="hanchor" href="#installing-and-removing-tools" aria-label="link">#</a>Installing and Removing Tools</h2>
+<p>These commands require the kernel to be running.</p>
+<div class="code-block" data-lang="bash"><div class="code-bar"><span class="code-lang">bash</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span><span class="c1"># List installed tools</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>list
+
+<span class="c1"># Install from a manifest file (kernel verifies trust tier and signature)</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span>/path/to/my-tool.toml
+
+<span class="c1"># Remove a tool</span>
+agentos<span class="w"> </span>tool<span class="w"> </span>remove<span class="w"> </span>my-tool
+</pre></div>
+</div>
+<p>Example <code>agentos tool list</code> output:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>NAME                 VERSION      TRUST        DESCRIPTION
+----------------------------------------------------------------------
+file-reader          1.1.0        core         Reads files from the data dire...
+http-client          1.0.0        core         Make outbound HTTP requests...
+my-tool              0.2.0        community    Does something useful
+</pre></div>
+</div>
+<p>The kernel validates the manifest's trust tier and signature during <code>install</code>. A <code>Blocked</code> manifest or invalid signature is rejected before being written to the registry. On success, a <code>ToolInstalled</code> audit event is written.</p>
+<hr>
+<h2 id="tool-sandboxing" class="anchored"><a class="hanchor" href="#tool-sandboxing" aria-label="link">#</a>Tool Sandboxing</h2>
+<p>AgentOS uses three distinct sandboxing strategies depending on how a tool is implemented.</p>
+<h3 id="native-rust-tools-inline" class="anchored"><a class="hanchor" href="#native-rust-tools-inline" aria-label="link">#</a>Native Rust tools (inline)</h3>
+<p>Built-in tools run in-process as compiled Rust code. Sandboxing is enforced at the code level:</p>
+<ul><li><strong>Path traversal prevention:</strong> <code>file-reader</code> and <code>file-writer</code> canonicalize the requested path and verify it starts with <code>data_dir</code>. Any traversal (<code>..</code>) returns <code>PermissionDenied</code>.</li><li><strong>Size guards:</strong> file reads capped at 10 MiB; memory writes capped at 512 KiB; HTTP responses capped at 10 MiB.</li><li><strong>Permission enforcement:</strong> <code>ToolRunner</code> checks <code>PermissionSet</code> before calling <code>execute()</code> — defence-in-depth on top of the kernel's router-level check.</li><li><strong>File locking:</strong> A <code>FileLockRegistry</code> coordinates exclusive write access across concurrent agents so readers and writers do not corrupt each other.</li></ul>
+<h3 id="wasm-tools" class="anchored"><a class="hanchor" href="#wasm-tools" aria-label="link">#</a>WASM tools</h3>
+<p>Tools loaded from <code>.wasm</code> modules run inside the Wasmtime runtime:</p>
+<ul><li><strong>Capability isolation:</strong> WASI capabilities are constructed from scratch per invocation. The module receives stdin (payload), stderr (for logging), and the <code>AGENTOS_OUTPUT_FILE</code> environment variable. It does not receive any preopened filesystem directories, network sockets, or other environment variables unless the manifest explicitly enables them.</li><li><strong>Memory limits:</strong> Linear memory growth is capped at 256 MiB via a <code>ResourceLimiter</code> on the Wasmtime <code>Store</code>. Growth requests beyond this cap are denied.</li><li><strong>Epoch interruption:</strong> The kernel sets <code>store.set_epoch_deadline(1)</code> before calling <code>_start</code>. A background Tokio task fires after <code>max_cpu_ms</code> milliseconds and calls <code>engine.increment_epoch()</code>. Wasmtime interrupts the module and the kernel returns a timeout error.</li><li><strong>Output file cleanup:</strong> A RAII guard deletes the output file after the result is read, whether execution succeeded or failed. Stale output files from crashed modules do not accumulate.</li></ul>
+<h3 id="shell-exec-bwrap" class="anchored"><a class="hanchor" href="#shell-exec-bwrap" aria-label="link">#</a>Shell-exec (bwrap)</h3>
+<p><code>shell-exec</code> uses Linux Bubblewrap (<code>bwrap</code>) for Linux namespace isolation:</p>
+<ul><li>Root filesystem mounted read-only (<code>/usr</code>, <code>/lib</code>, <code>/bin</code>, <code>/sbin</code>)</li><li>Only <code>data_dir</code> is writable</li><li>Sensitive directories hidden behind tmpfs: <code>/etc</code>, <code>/var</code>, <code>/root</code>, <code>/home</code></li><li>Fresh <code>/tmp</code>, <code>/dev</code>, <code>/proc</code> provided</li><li>All namespaces unshared (<code>--unshare-all</code>)</li><li>Network isolated by default; opt-in via <code>allow_network: true</code></li></ul>
+<p><code>bwrap</code> is <strong>required</strong> — <code>shell-exec</code> refuses to run and returns an error if bubblewrap is not installed. Running arbitrary shell commands without namespace isolation is never permitted.</p>
+<hr>
+<h2 id="agent-inbox-tools" class="anchored"><a class="hanchor" href="#agent-inbox-tools" aria-label="link">#</a>Agent Inbox Tools</h2>
+<p>Six tools for reading and managing the agent's async notification inbox. Notifications are written by the kernel when scheduled tasks fire, sub-agents complete, timer events trigger, or other kernel events occur. Agent-to-agent direct messages are kept in a separate inbox (same tool family, different DB).</p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Description</th><th>Permissions</th></tr></thead><tbody><tr><td><code>agent-inbox-list</code></td><td>List unread and recent notifications with title and kind</td><td><code>agent.inbox:r</code></td></tr><tr><td><code>agent-inbox-read</code></td><td>Mark a notification as read and return its full body</td><td><code>agent.inbox:r</code></td></tr><tr><td><code>agent-inbox-dismiss</code></td><td>Permanently delete a notification from the inbox</td><td><code>agent.inbox:rw</code></td></tr><tr><td><code>agent-messages-list</code></td><td>List unread messages from other agents, grouped by sender</td><td><code>agent.message:r</code></td></tr><tr><td><code>agent-messages-read</code></td><td>Mark an agent-to-agent message as read and return its body</td><td><code>agent.message:r</code></td></tr><tr><td><code>agent-messages-dismiss</code></td><td>Delete an agent-to-agent message from the inbox</td><td><code>agent.message:rw</code></td></tr></tbody></table></div>
+<p>The agent's system prompt includes a compact awareness segment when either inbox is non-empty:</p>
+<div class="code-block" data-lang="text"><div class="code-bar"><span class="code-lang">text</span><button class="copy-btn" title="Copy">copy</button></div><div class="hl"><pre><span></span>## Notifications
+Unread notifications: 3
+Unread messages from: planner (2), researcher (1)
+
+Use the `agent-inbox-list` tool to view notifications, `agent-messages-list` to view messages.
+</pre></div>
+</div>
+<p>The segment renders nothing when both inboxes are empty — zero prompt overhead for idle agents. See <a class="wikilink" href="ch-28.html">Agent Inbox and Notifications</a> for the full system design.</p>
+<hr>
+<h2 id="schedule-inspection-tools" class="anchored"><a class="hanchor" href="#schedule-inspection-tools" aria-label="link">#</a>Schedule Inspection Tools</h2>
+<p>Four tools for agents to introspect their own scheduled tasks and run history.</p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Description</th></tr></thead><tbody><tr><td><code>list-my-schedules</code></td><td>List all cron, once, and timer schedules owned by this agent</td></tr><tr><td><code>get-schedule-runs</code></td><td>Retrieve per-fire run history for a specific schedule ID</td></tr><tr><td><code>get-task-logs</code></td><td>Fetch execution logs for a task spawned by a schedule</td></tr><tr><td><code>schedule-once</code></td><td>Schedule a task to run exactly once at a specified ISO-8601 time</td></tr></tbody></table></div>
+<hr>
+<h2 id="tool-discovery-and-pagination" class="anchored"><a class="hanchor" href="#tool-discovery-and-pagination" aria-label="link">#</a>Tool Discovery and Pagination</h2>
+<p>Four tools for agents to navigate the full 132-tool inventory without overloading the system prompt. The system prompt delivers a compact tiered manual; use these tools to go deeper.</p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Description</th></tr></thead><tbody><tr><td><code>list-tools</code></td><td>List tools by category or tag; supports pagination via <code>page</code>/<code>page_size</code></td></tr><tr><td><code>search-tools</code></td><td>Full-text and fuzzy search across tool names, descriptions, and tags</td></tr><tr><td><code>describe-tool</code></td><td>Return the complete input schema and usage hints for a named tool</td></tr><tr><td><code>tool-result-page</code></td><td>Retrieve a specific page from a paginated tool result set</td></tr></tbody></table></div>
+<hr>
+<h2 id="host-introspection-tools" class="anchored"><a class="hanchor" href="#host-introspection-tools" aria-label="link">#</a>Host Introspection Tools</h2>
+<p>Four HAL-backed tools for Linux host introspection. All are read-only and degrade gracefully on non-Linux hosts with a <code>platform_unsupported</code> error. Results include a <code>sandbox</code> envelope noting that <code>shell-exec</code> runs in a Bubblewrap PID namespace, so process listings from <code>shell-exec</code> reflect the sandboxed view, not the host.</p>
+<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Description</th><th>Permissions</th></tr></thead><tbody><tr><td><code>network-sockets</code></td><td>List open TCP/UDP sockets from <code>/proc/net/{tcp,udp}</code>; maps inodes to PIDs</td><td><code>hardware.network:r</code></td></tr><tr><td><code>system-mounts</code></td><td>Enumerate mounted filesystems from <code>/proc/mounts</code> with <code>statvfs</code> capacity</td><td><code>hardware.storage:r</code></td></tr><tr><td><code>system-open-files</code></td><td>Walk per-process <code>/proc/&lt;pid&gt;/fd</code> to list open file descriptors</td><td><code>hardware.sensors:r</code></td></tr><tr><td><code>system-services</code></td><td>List and query systemd service units via D-Bus (read-only: list, status, logs)</td><td><code>hardware.sensors:r</code></td></tr></tbody></table></div>
+<hr>
+<h2 id="related" class="anchored"><a class="hanchor" href="#related" aria-label="link">#</a>Related</h2>
+<ul><li><a class="wikilink" href="ch-17.html">WASM Tools Development</a> — Writing custom WASM and native Rust tools</li><li><a class="wikilink" href="ch-03.html">Architecture Overview</a> — Kernel intent flow and capability token system</li><li><a class="wikilink" href="ch-04.html">CLI Reference Complete</a> — Full CLI command reference</li><li><a class="wikilink" href="ch-28.html">Agent Inbox and Notifications</a> — Agent inbox and message inbox system design</li><li><span class="wikilink-dead">Security Reference</span> — Capability tokens, PermissionSet, vault</li></ul></article>
+    <nav class="pagenav"><a class="pn pn-prev" href="ch-06.html"><span class="pn-dir">← Previous</span><span class="pn-title">Task System</span></a><a class="pn pn-next" href="ch-08.html"><span class="pn-dir">Next →</span><span class="pn-title">Security Model</span></a></nav>
+    <footer class="hb-footer">
+      <p>AgentOS User Handbook · generated from <code>docs/handbook/*.md</code>.
+      An LLM-native operating system for AI agents.</p>
+    </footer>
+  </main>
+  <aside id="toc-rail"><div class="toc"><div class="toc-title">On this page</div><ul><li class="toc-h2"><a href="#how-tools-work" data-target="how-tools-work">How Tools Work</a></li><li class="toc-h2"><a href="#built-in-tools-reference" data-target="built-in-tools-reference">Built-in Tools Reference</a></li><li class="toc-h3"><a href="#file-reader" data-target="file-reader"><code>file-reader</code></a></li><li class="toc-h3"><a href="#file-writer" data-target="file-writer"><code>file-writer</code></a></li><li class="toc-h3"><a href="#memory-search" data-target="memory-search"><code>memory-search</code></a></li><li class="toc-h3"><a href="#memory-write" data-target="memory-write"><code>memory-write</code></a></li><li class="toc-h3"><a href="#data-parser" data-target="data-parser"><code>data-parser</code></a></li><li class="toc-h3"><a href="#shell-exec" data-target="shell-exec"><code>shell-exec</code></a></li><li class="toc-h3"><a href="#agent-message" data-target="agent-message"><code>agent-message</code></a></li><li class="toc-h3"><a href="#task-delegate" data-target="task-delegate"><code>task-delegate</code></a></li><li class="toc-h3"><a href="#spawn-agent" data-target="spawn-agent"><code>spawn-agent</code></a></li><li class="toc-h3"><a href="#await-agents" data-target="await-agents"><code>await-agents</code></a></li><li class="toc-h3"><a href="#verify-output" data-target="verify-output"><code>verify-output</code></a></li><li class="toc-h3"><a href="#log-reader" data-target="log-reader"><code>log-reader</code></a></li><li class="toc-h3"><a href="#http-client" data-target="http-client"><code>http-client</code></a></li><li class="toc-h3"><a href="#network-monitor" data-target="network-monitor"><code>network-monitor</code></a></li><li class="toc-h3"><a href="#process-manager" data-target="process-manager"><code>process-manager</code></a></li><li class="toc-h3"><a href="#hardware-info" data-target="hardware-info"><code>hardware-info</code></a></li><li class="toc-h3"><a href="#archival-insert" data-target="archival-insert"><code>archival-insert</code></a></li><li class="toc-h3"><a href="#archival-search" data-target="archival-search"><code>archival-search</code></a></li><li class="toc-h3"><a href="#memory-block-read" data-target="memory-block-read"><code>memory-block-read</code></a></li><li class="toc-h3"><a href="#memory-block-write" data-target="memory-block-write"><code>memory-block-write</code></a></li><li class="toc-h3"><a href="#memory-block-list" data-target="memory-block-list"><code>memory-block-list</code></a></li><li class="toc-h3"><a href="#memory-block-delete" data-target="memory-block-delete"><code>memory-block-delete</code></a></li><li class="toc-h3"><a href="#ask-user" data-target="ask-user"><code>ask-user</code></a></li><li class="toc-h3"><a href="#notify-user" data-target="notify-user"><code>notify-user</code></a></li><li class="toc-h3"><a href="#additional-tools-v3" data-target="additional-tools-v3">Additional Tools (v3)</a></li><li class="toc-h3"><a href="#kernel-mediated-capability-tools-kmc" data-target="kernel-mediated-capability-tools-kmc">Kernel-Mediated Capability Tools (KMC)</a></li><li class="toc-h2"><a href="#tool-manifests" data-target="tool-manifests">Tool Manifests</a></li><li class="toc-h2"><a href="#trust-tiers" data-target="trust-tiers">Trust Tiers</a></li><li class="toc-h3"><a href="#core" data-target="core">Core</a></li><li class="toc-h3"><a href="#verified" data-target="verified">Verified</a></li><li class="toc-h3"><a href="#community" data-target="community">Community</a></li><li class="toc-h3"><a href="#blocked" data-target="blocked">Blocked</a></li><li class="toc-h2"><a href="#tool-signing" data-target="tool-signing">Tool Signing</a></li><li class="toc-h3"><a href="#generate-a-keypair" data-target="generate-a-keypair">Generate a keypair</a></li><li class="toc-h3"><a href="#sign-a-manifest" data-target="sign-a-manifest">Sign a manifest</a></li><li class="toc-h3"><a href="#verify-a-manifest" data-target="verify-a-manifest">Verify a manifest</a></li><li class="toc-h3"><a href="#end-to-end-workflow" data-target="end-to-end-workflow">End-to-end workflow</a></li><li class="toc-h2"><a href="#installing-and-removing-tools" data-target="installing-and-removing-tools">Installing and Removing Tools</a></li><li class="toc-h2"><a href="#tool-sandboxing" data-target="tool-sandboxing">Tool Sandboxing</a></li><li class="toc-h3"><a href="#native-rust-tools-inline" data-target="native-rust-tools-inline">Native Rust tools (inline)</a></li><li class="toc-h3"><a href="#wasm-tools" data-target="wasm-tools">WASM tools</a></li><li class="toc-h3"><a href="#shell-exec-bwrap" data-target="shell-exec-bwrap">Shell-exec (bwrap)</a></li><li class="toc-h2"><a href="#agent-inbox-tools" data-target="agent-inbox-tools">Agent Inbox Tools</a></li><li class="toc-h2"><a href="#schedule-inspection-tools" data-target="schedule-inspection-tools">Schedule Inspection Tools</a></li><li class="toc-h2"><a href="#tool-discovery-and-pagination" data-target="tool-discovery-and-pagination">Tool Discovery and Pagination</a></li><li class="toc-h2"><a href="#host-introspection-tools" data-target="host-introspection-tools">Host Introspection Tools</a></li><li class="toc-h2"><a href="#related" data-target="related">Related</a></li></ul></div></aside>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" onerror="window.__noMermaid=true"></script>
+<script src="assets/handbook.js" defer></script>
+</body>
+</html>

@@ -169,6 +169,32 @@ pub async fn handle() -> anyhow::Result<()> {
     {
         println!("    (no API keys required for local providers)");
     }
+
+    // Vault passphrase — the kernel fail-closes if the vault DB exists but no
+    // passphrase is available. Surface this here so first-time users don't hit
+    // a confusing error on first `agentos start`.  Empty strings count as unset
+    // (a common defensive `export VAR=` doesn't actually configure anything).
+    let passphrase_unset = std::env::var("AGENTOS_VAULT_PASSPHRASE")
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true);
+    if passphrase_unset {
+        let managed_pp = std::path::Path::new(&data_dir).join("vault/secrets.passphrase");
+        if !managed_pp.exists() {
+            println!();
+            println!("  Vault passphrase — required before the first `agentos start`:");
+            println!("    Recommended (systemd / Docker / shared hosts):");
+            println!(
+                "      printf '%s' 'choose-a-strong-passphrase' > {}",
+                managed_pp.display()
+            );
+            println!("      chmod 600 {}", managed_pp.display());
+            println!("      (kernel reads the file at boot; see deploy/agentos.service");
+            println!("       for the systemd LoadCredential= pattern.)");
+            println!("    Or, for one-off testing only (leaks via shell history):");
+            println!("      export AGENTOS_VAULT_PASSPHRASE='choose-a-strong-passphrase'");
+        }
+    }
+
     println!();
     println!("  Next steps:");
     println!("    agentos doctor        — verify configuration");

@@ -25,44 +25,44 @@ outputs = ["hardware.bluetooth", "content.structured"]
 input  = "BluetoothIntent"
 output = "BluetoothResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 description = "Bluetooth operation request"
 
-[input_schema.properties.action]
+[payload_schema.properties.action]
 type = "string"
 enum = ["list_adapters", "scan", "pair", "connect", "disconnect", "gatt_read", "gatt_write"]
 default = "list_adapters"
 description = "Bluetooth action to execute."
 
-[input_schema.properties.adapter]
+[payload_schema.properties.adapter]
 type = "string"
 description = "Optional adapter name (for example hci0)."
 
-[input_schema.properties.duration_seconds]
+[payload_schema.properties.duration_seconds]
 type = "integer"
 minimum = 1
 maximum = 30
 description = "Scan duration in seconds for action='scan'."
 
-[input_schema.properties.address]
+[payload_schema.properties.address]
 type = "string"
 description = "Bluetooth MAC address (AA:BB:CC:DD:EE:FF) for pair/connect/disconnect/GATT actions."
 
-[input_schema.properties.service_uuid]
+[payload_schema.properties.service_uuid]
 type = "string"
 description = "Service UUID for GATT operations."
 
-[input_schema.properties.characteristic_uuid]
+[payload_schema.properties.characteristic_uuid]
 type = "string"
 description = "Characteristic UUID for GATT operations."
 
-[input_schema.properties.value]
+[payload_schema.properties.value]
 type = "array"
 description = "Byte-array payload for gatt_write."
 items = { type = "integer", minimum = 0, maximum = 255 }
 
-[input_schema.properties.value_base64]
+[payload_schema.properties.value_base64]
 type = "string"
 description = "Base64 payload alternative for gatt_write."
 
@@ -74,23 +74,14 @@ max_memory_mb = 256
 max_cpu_ms    = 20000
 syscalls      = []
 
-[examples]
-"List adapters" = """
-{
-  "action": "list_adapters"
-}
-"""
+[[examples]]
+description = "List adapters"
+payload = { action = "list_adapters" }
 
-"Scan for nearby devices" = """
-{
-  "action": "scan",
-  "duration_seconds": 8
-}
-"""
+[[examples]]
+description = "Scan for nearby devices"
+payload = { action = "scan", duration_seconds = 8 }
 
-"Connect to a paired device" = """
-{
-  "action": "connect",
-  "address": "AA:BB:CC:DD:EE:FF"
-}
-"""
+[[examples]]
+description = "Connect to a paired device"
+payload = { action = "connect", address = "AA:BB:CC:DD:EE:FF" }

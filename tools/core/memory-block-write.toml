@@ -17,15 +17,15 @@ outputs = ["content.text"]
 input  = "MemoryBlockWriteIntent"
 output = "MemoryBlockWriteResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["label", "content"]
 
-[input_schema.properties.label]
+[payload_schema.properties.label]
 type = "string"
 description = "Memory block label"
 
-[input_schema.properties.content]
+[payload_schema.properties.content]
 type = "string"
 description = "Block content"
 

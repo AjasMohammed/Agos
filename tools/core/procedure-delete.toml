@@ -17,11 +17,11 @@ outputs = ["status"]
 input  = "ProcedureDeleteIntent"
 output = "DeleteResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["id"]
 
-[input_schema.properties.id]
+[payload_schema.properties.id]
 type = "string"
 description = "Procedure id"
 

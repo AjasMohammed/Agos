@@ -84,9 +84,12 @@ impl Kernel {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn cmd_list_once_jobs(&self) -> KernelResponse {
         KernelResponse::OnceJobList(self.schedule_manager.list_once_jobs().await)
+    }
+
+    pub(crate) async fn cmd_list_timers(&self) -> KernelResponse {
+        KernelResponse::TimerList(self.schedule_manager.list_timers().await)
     }
 
     #[allow(dead_code)]

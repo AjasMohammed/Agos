@@ -57,14 +57,10 @@ impl Kernel {
         }
     }
 
-    pub(crate) async fn cmd_resolve_escalation(&self, id: u64, decision: String) -> KernelResponse {
+    pub async fn cmd_resolve_escalation(&self, id: u64, decision: String) -> KernelResponse {
         match self.escalation_manager.resolve(id, decision.clone()).await {
             Some((task_id, agent_id, blocking)) => {
-                let decision_lower = decision.to_ascii_lowercase();
-                let approved = matches!(
-                    decision_lower.as_str(),
-                    "approve" | "approved" | "allow" | "allowed"
-                );
+                let approved = crate::escalation::resolution_is_approval(&decision);
                 let mut task_resumed = false;
                 let mut infra_failure = false;
                 // If the escalation was blocking, resume the waiting task

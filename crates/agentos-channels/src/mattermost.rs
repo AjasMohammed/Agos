@@ -16,6 +16,72 @@ use tracing::{info, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+/// Build inbound content from a Mattermost `posted` event's parsed `post` plus
+/// any attached files. File bytes live at `{base_url}/api/v4/files/{id}` and
+/// require the bot token to download — which the kernel supplies, gated to the
+/// channel's own server host. Prefers `metadata.files` (has name + mime);
+/// falls back to bare `file_ids` (kernel sniffs the type post-download).
+fn mattermost_message_content(post: &serde_json::Value, base_url: &str) -> Option<MessageContent> {
+    let text = post["message"].as_str().unwrap_or("");
+    let base = base_url.trim_end_matches('/');
+    let mut media: Vec<MessageContent> = Vec::new();
+    if let Some(files) = post["metadata"]["files"]
+        .as_array()
+        .filter(|a| !a.is_empty())
+    {
+        for f in files {
+            let id = match f["id"].as_str() {
+                Some(i) if !i.is_empty() => i,
+                _ => continue,
+            };
+            let url = format!("{base}/api/v4/files/{id}");
+            let filename = f["name"].as_str().unwrap_or("file").to_string();
+            let mime = f["mime_type"].as_str().unwrap_or("");
+            if mime.starts_with("image/") {
+                media.push(MessageContent::Image {
+                    url,
+                    alt: (!filename.is_empty()).then(|| filename.clone()),
+                });
+            } else {
+                media.push(MessageContent::File {
+                    url,
+                    filename,
+                    mime: if mime.is_empty() {
+                        "application/octet-stream".to_string()
+                    } else {
+                        mime.to_string()
+                    },
+                });
+            }
+        }
+    } else if let Some(ids) = post["file_ids"].as_array() {
+        for fid in ids {
+            if let Some(id) = fid.as_str().filter(|s| !s.is_empty()) {
+                // No name/mime in the event — emit as File; the kernel sniffs the
+                // MIME after download and routes images to vision regardless.
+                media.push(MessageContent::File {
+                    url: format!("{base}/api/v4/files/{id}"),
+                    filename: "file".to_string(),
+                    mime: String::new(),
+                });
+            }
+        }
+    }
+    match (text.trim().is_empty(), media.len()) {
+        (true, 0) => None,
+        (false, 0) => Some(MessageContent::Text(text.to_string())),
+        (true, 1) => media.into_iter().next(),
+        _ => {
+            let mut parts = Vec::new();
+            if !text.trim().is_empty() {
+                parts.push(MessageContent::Text(text.to_string()));
+            }
+            parts.extend(media);
+            Some(MessageContent::Mixed(parts))
+        }
+    }
+}
+
 pub struct MattermostAdapter {
     client: Client,
     base_url: String,
@@ -66,7 +132,7 @@ impl ChannelAdapter for MattermostAdapter {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<DeliveryReceipt, AgentOSError> {
-        let text = msg.content.as_text();
+        let text = msg.content.render_for_delivery();
         let channel_id = if msg.channel_instance_id.is_empty() {
             self.default_channel_id.clone()
         } else {
@@ -145,6 +211,26 @@ impl ChannelAdapter for MattermostAdapter {
             .await
             .ok();
 
+        // Resolve our own user id once so we can skip the bot's own posts —
+        // the `posted` event fires for our outbound messages too (echo loop).
+        let self_user_id: Option<String> = match self
+            .client
+            .get(self.api_url("/users/me"))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+        {
+            Ok(r) => r
+                .json::<Value>()
+                .await
+                .ok()
+                .and_then(|v| v["id"].as_str().map(String::from)),
+            Err(_) => None,
+        };
+        if self_user_id.is_none() {
+            warn!("Mattermost: could not resolve own user id; self-echo filtering disabled");
+        }
+
         info!("Mattermost WebSocket listener started");
 
         loop {
@@ -159,24 +245,33 @@ impl ChannelAdapter for MattermostAdapter {
                                     let post: Value = serde_json::from_str(
                                         data.get("post").and_then(|v| v.as_str()).unwrap_or("{}"),
                                     ).unwrap_or_default();
-                                    let inbound = InboundMessage {
-                                        id: post["id"].as_str().unwrap_or("").to_string(),
-                                        channel_type: "mattermost".to_string(),
-                                        channel_instance_id: post["channel_id"].as_str().unwrap_or("").to_string(),
-                                        sender: ChannelIdentity {
-                                            platform_id: post["user_id"].as_str().unwrap_or("").to_string(),
-                                            display_name: None,
-                                        },
-                                        content: MessageContent::Text(
-                                            post["message"].as_str().unwrap_or("").to_string(),
-                                        ),
-                                        thread_id: post["root_id"].as_str()
-                                            .filter(|s| !s.is_empty())
-                                            .map(String::from),
-                                        timestamp: Utc::now(),
-                                        raw: post,
-                                    };
-                                    let _ = tx.send(inbound).await;
+                                    let from_self = matches!(
+                                        self_user_id.as_deref(),
+                                        Some(uid) if post["user_id"].as_str() == Some(uid)
+                                    );
+                                    if from_self {
+                                        continue;
+                                    }
+                                    if let Some(content) =
+                                        mattermost_message_content(&post, &self.base_url)
+                                    {
+                                        let inbound = InboundMessage {
+                                            id: post["id"].as_str().unwrap_or("").to_string(),
+                                            channel_type: "mattermost".to_string(),
+                                            channel_instance_id: post["channel_id"].as_str().unwrap_or("").to_string(),
+                                            sender: ChannelIdentity {
+                                                platform_id: post["user_id"].as_str().unwrap_or("").to_string(),
+                                                display_name: None,
+                                            },
+                                            content,
+                                            thread_id: post["root_id"].as_str()
+                                                .filter(|s| !s.is_empty())
+                                                .map(String::from),
+                                            timestamp: Utc::now(),
+                                            raw: post,
+                                        };
+                                        let _ = tx.send(inbound).await;
+                                    }
                                 }
                             }
                         }
@@ -207,6 +302,58 @@ impl ChannelAdapter for MattermostAdapter {
                 warn!(error = %e, "Mattermost health check failed");
                 ChannelHealth::Disconnected(e.to_string())
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn text_only() {
+        let p = json!({ "message": "hello" });
+        assert!(matches!(
+            mattermost_message_content(&p, "https://mm.example.com"),
+            Some(MessageContent::Text(t)) if t == "hello"
+        ));
+    }
+
+    #[test]
+    fn empty_is_none() {
+        let p = json!({ "message": "" });
+        assert!(mattermost_message_content(&p, "https://mm.example.com").is_none());
+    }
+
+    #[test]
+    fn metadata_image_builds_url() {
+        let p = json!({
+            "message": "",
+            "metadata": { "files": [
+                { "id": "f1", "name": "cat.png", "mime_type": "image/png" }
+            ]}
+        });
+        match mattermost_message_content(&p, "https://mm.example.com/") {
+            Some(MessageContent::Image { url, .. }) => {
+                assert_eq!(url, "https://mm.example.com/api/v4/files/f1");
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_ids_fallback_builds_file_url() {
+        let p = json!({ "message": "doc", "file_ids": ["abc"] });
+        match mattermost_message_content(&p, "https://mm.example.com") {
+            Some(MessageContent::Mixed(parts)) => {
+                assert!(matches!(&parts[0], MessageContent::Text(t) if t == "doc"));
+                assert!(matches!(
+                    &parts[1],
+                    MessageContent::File { url, .. } if url == "https://mm.example.com/api/v4/files/abc"
+                ));
+            }
+            other => panic!("expected Mixed, got {other:?}"),
         }
     }
 }

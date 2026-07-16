@@ -20,11 +20,11 @@ outputs = ["content.json"]
 input = "EnvDestroyIntent"
 output = "EnvDestroyResult"
 
-[input_schema]
+[payload_schema]
 required = ["name"]
 type = "object"
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 description = "Name of the workspace to destroy"
 type = "string"
 

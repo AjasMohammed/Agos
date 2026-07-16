@@ -19,6 +19,28 @@ outputs = ["exit_code", "stdout", "stderr", "duration_ms"]
 input = "ContainerExecIntent"
 output = "ContainerExecResult"
 
+[payload_schema]
+type     = "object"
+required = ["container_id", "command"]
+
+[payload_schema.properties.container_id]
+type        = "string"
+description = "Container ID returned by container-create."
+
+[payload_schema.properties.command]
+type        = "array"
+minItems    = 1
+description = "argv-style command vector to execute inside the container."
+
+[payload_schema.properties.command.items]
+type = "string"
+
+[payload_schema.properties.timeout_ms]
+type        = "integer"
+minimum     = 100
+default     = 60000
+description = "Hard wall-clock timeout in milliseconds; the kernel kills the command on expiry."
+
 [sandbox]
 network = false
 fs_write = false

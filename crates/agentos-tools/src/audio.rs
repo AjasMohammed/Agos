@@ -1,5 +1,5 @@
 use crate::traits::{AgentTool, ToolExecutionContext};
-use agentos_types::{AgentOSError, PermissionOp, PermissionSet};
+use agentos_types::{AgentOSError, PermissionOp};
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -41,7 +41,7 @@ impl AgentTool for AudioTool {
             .unwrap_or("list")
         {
             "list" => vec![("hardware.audio.list".to_string(), PermissionOp::Read)],
-            "capture" | "grant_capture_consent" | "revoke_capture_consent" => {
+            "capture" => {
                 vec![("hardware.audio.capture".to_string(), PermissionOp::Execute)]
             }
             "list_capture_consents" => {
@@ -73,15 +73,37 @@ impl AgentTool for AudioTool {
                     .to_string(),
             })?;
 
-        let mut perms = PermissionSet::new();
-        for (resource, op) in self.required_permissions_for(&payload) {
-            perms.grant_op(resource, op, None);
+        // Consent grants are operator-originated (`agentos hal approve`);
+        // an agent must never grant or revoke its own capture consent.
+        if let Some(action) = payload.get("action").and_then(Value::as_str) {
+            if matches!(action, "grant_capture_consent" | "revoke_capture_consent") {
+                return Err(AgentOSError::PermissionDenied {
+                    resource: "hardware.audio.capture.consent".to_string(),
+                    operation: "operator_approval_required".to_string(),
+                });
+            }
         }
 
+        // Stamp the authenticated identity into the payload under a reserved
+        // key the driver trusts, and strip every agent-supplied identity claim
+        // (including an attempt to forge the reserved key itself).
+        let mut payload = payload;
+        if let Value::Object(map) = &mut payload {
+            map.remove("agent_id");
+            map.remove("session_id");
+            map.insert(
+                "__authenticated_agent_id".to_string(),
+                Value::String(context.agent_id.to_string()),
+            );
+        }
+
+        // Forward the agent's real grant — the kernel validated the token
+        // against the payload-scoped permissions, so the HAL-internal check
+        // re-verifies the same authority instead of a self-minted set.
         hal.query(
             "audio",
             payload,
-            &perms,
+            &context.permissions,
             Some(&context.agent_id),
             Some(&context.task_id),
         )

@@ -1,0 +1,109 @@
+{
+  "title": "AgentOS",
+  "uid": "agentos-overview",
+  "tags": ["agentos"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Task throughput (completed vs failed /s)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "rate(agentos_tasks_completed_total[5m])", "legendFormat": "completed", "refId": "A" },
+        { "expr": "rate(agentos_tasks_failed_total[5m])", "legendFormat": "failed", "refId": "B" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Task queue depth",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "agentos_task_queue_depth", "legendFormat": "queue depth", "refId": "A" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Task duration p95 (ms)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "agentos_task_duration_ms is a histogram rendered as a summary by the Prometheus exporter (quantile labels). If the build configures histogram buckets instead, use histogram_quantile(0.95, rate(agentos_task_duration_ms_bucket[5m])).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "agentos_task_duration_ms{quantile=\"0.95\"}", "legendFormat": "p95", "refId": "A" },
+        { "expr": "agentos_task_duration_ms{quantile=\"0.5\"}", "legendFormat": "p50", "refId": "B" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Tool executions by tool (/s)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "sum by (tool) (rate(agentos_tool_executions_total[5m]))", "legendFormat": "{{tool}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Token throughput (/s)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "sum(rate(agentos_tokens_input_total[5m]))", "legendFormat": "input", "refId": "A" },
+        { "expr": "sum(rate(agentos_tokens_output_total[5m]))", "legendFormat": "output", "refId": "B" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Connected agents",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 16 },
+      "targets": [
+        { "expr": "agentos_connected_agents", "refId": "A" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Dropped events (/s)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 16 },
+      "targets": [
+        { "expr": "rate(agentos_events_dropped_total[5m])", "legendFormat": "dropped", "refId": "A" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Capability denials (/s)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "targets": [
+        { "expr": "rate(agentos_capability_failures_total[5m])", "legendFormat": "failures", "refId": "A" },
+        { "expr": "rate(agentos_rate_limited_total[5m])", "legendFormat": "rate-limited", "refId": "B" }
+      ]
+    }
+  ]
+}

@@ -20,16 +20,20 @@ spec:
       initContainers:
         - name: init-data-dirs
           image: busybox:1.36
+          # fsGroup (podSecurityContext) handles volume ownership, so this runs
+          # as the same non-root user as the main container and only creates dirs.
           command:
             - sh
             - -c
-            - mkdir -p /work/data /work/user-tools && chown -R 65532:65532 /work
+            - mkdir -p /work/data /work/user-tools
+          securityContext:
+{{ toYaml .Values.securityContext | indent 12 }}
           volumeMounts:
             - name: data
               mountPath: /work
       containers:
         - name: agentos
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["agentos"]
           args: ["web", "serve", "--host", "0.0.0.0", "--port", "{{ .Values.service.port }}"]
@@ -68,6 +72,14 @@ spec:
               containerPort: {{ .Values.service.port }}
             - name: health
               containerPort: {{ .Values.service.healthPort }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            # First boot downloads a ~23MB embedding model; allow up to ~5 min
+            # (failureThreshold * periodSeconds) before liveness/readiness apply.
+            failureThreshold: 30
+            periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /healthz

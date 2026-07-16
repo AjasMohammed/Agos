@@ -70,9 +70,507 @@ pub struct KernelConfig {
     /// REST API server configuration.
     #[serde(default)]
     pub api: ApiSettings,
+    /// Web UI server configuration (auth token source).
+    #[serde(default)]
+    pub web: WebConfig,
+    /// User-selectable approval mode for tool calls. Controls when the
+    /// kernel auto-approves vs. escalates a tool call for human review.
+    #[serde(default)]
+    pub approval: ApprovalConfig,
     /// Chat-specific kernel configuration (output filtering, enforcement modes).
     #[serde(default)]
     pub chat: ChatConfig,
+    /// Hardware Abstraction Layer policy (raw-USB allowlist, etc.).
+    #[serde(default)]
+    pub hal: HalSettings,
+    /// Security policy (dynamic capability policy engine, etc.).
+    #[serde(default)]
+    pub security: SecurityConfig,
+    /// User preference adaptation post-task proposer.
+    #[serde(default)]
+    pub user_adaptation: UserAdaptationConfig,
+    /// Structured user-profile store (proactive personalization L0/L1 source).
+    #[serde(default)]
+    pub user_profile: UserProfileConfig,
+    /// Proactive personalization — read-back into context (L0/L1), the
+    /// background interest model, and proactive recommendations (L2).
+    #[serde(default)]
+    pub personalization: PersonalizationConfig,
+    /// Managed environment (`env-install`) policies and allowlists.
+    /// Controls which packages agents may install into per-agent workspaces.
+    #[serde(default)]
+    pub env: EnvSettings,
+    /// Gateway ("run as a bot") config — channels connected automatically at
+    /// `agentos gateway run` boot. See `GatewaySettings`.
+    #[serde(default)]
+    pub gateway: GatewaySettings,
+    /// Scheduler run-history retention.
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
+    /// Inbound voice/audio transcription (speech-to-text) for channel media.
+    #[serde(default)]
+    pub transcription: TranscriptionSettings,
+    /// Per-agent heartbeat wakeups (opt-in; disabled by default).
+    #[serde(default)]
+    pub agent_heartbeat: HeartbeatSettings,
+    /// Per-agent cost budgets bound at connect time. Omit to use built-in defaults.
+    #[serde(default)]
+    pub agent_budget: AgentBudgetSettings,
+}
+
+/// Cost/budget configuration applied to every agent when it connects.
+///
+/// The budget is bound to the agent in the `CostTracker`, which enforces the
+/// `warn_at_pct` / `pause_at_pct` thresholds and `on_hard_limit` action during
+/// task execution. Omit the `[agent_budget]` section entirely to fall back to
+/// `AgentBudget::default()` (5M tokens / $50 / 10k tool-calls per day) — the
+/// historical behavior. Provide `[agent_budget.default]` to change the global
+/// budget, and `[agent_budget.overrides.<agent_name>]` to tune a single agent.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct AgentBudgetSettings {
+    /// Global default applied to all agents. `None` = use `AgentBudget::default()`.
+    #[serde(default)]
+    pub default: Option<AgentBudgetOverride>,
+    /// Per-agent overrides keyed by agent name, merged over the global default.
+    #[serde(default)]
+    pub overrides: std::collections::HashMap<String, AgentBudgetOverride>,
+}
+
+impl AgentBudgetSettings {
+    /// Resolve the effective budget for `agent_name`: start from
+    /// `AgentBudget::default()`, apply the global `default` overrides, then the
+    /// per-agent overrides. Each layer only touches the fields it specifies.
+    pub fn resolve(&self, agent_name: &str) -> agentos_types::AgentBudget {
+        let mut budget = agentos_types::AgentBudget::default();
+        if let Some(global) = &self.default {
+            global.apply_to(&mut budget);
+        }
+        if let Some(per_agent) = self.overrides.get(agent_name) {
+            per_agent.apply_to(&mut budget);
+        }
+        // A misconfigured threshold (e.g. warn above pause, or either above 100%)
+        // silently never fires, since cost percentages cap near 100. Surface it as
+        // a warning rather than failing the connect — the budget is still usable.
+        if budget.warn_at_pct > budget.pause_at_pct
+            || budget.warn_at_pct > 100
+            || budget.pause_at_pct > 100
+        {
+            tracing::warn!(
+                agent_name = %agent_name,
+                warn_at_pct = budget.warn_at_pct,
+                pause_at_pct = budget.pause_at_pct,
+                "agent_budget thresholds are misconfigured (expected warn_at_pct <= pause_at_pct <= 100); some thresholds may never trigger"
+            );
+        }
+        budget
+    }
+}
+
+/// A partial `AgentBudget` — every field optional so config can override just
+/// what it cares about. Applied over a base `AgentBudget` via `apply_to`.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct AgentBudgetOverride {
+    pub max_tokens_per_day: Option<u64>,
+    pub max_cost_usd_per_day: Option<f64>,
+    pub max_tool_calls_per_day: Option<u64>,
+    pub warn_at_pct: Option<u8>,
+    pub pause_at_pct: Option<u8>,
+    pub on_hard_limit: Option<agentos_types::BudgetAction>,
+    pub max_wall_time_seconds: Option<u64>,
+    pub allowed_models: Option<Vec<String>>,
+    pub downgrade_model: Option<agentos_types::ModelDowngradeTier>,
+}
+
+impl AgentBudgetOverride {
+    /// Overwrite only the fields this override specifies on `base`.
+    fn apply_to(&self, base: &mut agentos_types::AgentBudget) {
+        if let Some(v) = self.max_tokens_per_day {
+            base.max_tokens_per_day = v;
+        }
+        if let Some(v) = self.max_cost_usd_per_day {
+            base.max_cost_usd_per_day = v;
+        }
+        if let Some(v) = self.max_tool_calls_per_day {
+            base.max_tool_calls_per_day = v;
+        }
+        if let Some(v) = self.warn_at_pct {
+            base.warn_at_pct = v;
+        }
+        if let Some(v) = self.pause_at_pct {
+            base.pause_at_pct = v;
+        }
+        if let Some(v) = self.on_hard_limit {
+            base.on_hard_limit = v;
+        }
+        if let Some(v) = self.max_wall_time_seconds {
+            base.max_wall_time_seconds = v;
+        }
+        if let Some(v) = &self.allowed_models {
+            base.allowed_models = v.clone();
+        }
+        if let Some(v) = &self.downgrade_model {
+            base.downgrade_model = Some(v.clone());
+        }
+    }
+}
+
+/// Security policy configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SecurityConfig {
+    /// Dynamic capability policy-engine profile, enforced in the KMC dispatch
+    /// path (env/proc/net/storage/build capabilities). One of:
+    /// `off` (default — permissive, no enforcement; preserves prior behavior),
+    /// `development`, `production`, or `restricted`. Enabling a non-`off`
+    /// profile makes the policy engine a live authorization gate: a `Deny`
+    /// rule blocks the capability and an `Escalate`/unmatched result requires
+    /// operator approval.
+    #[serde(default = "default_policy_profile")]
+    pub policy_profile: String,
+}
+
+fn default_policy_profile() -> String {
+    "off".to_string()
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            policy_profile: default_policy_profile(),
+        }
+    }
+}
+
+/// Hardware Abstraction Layer policy.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct HalSettings {
+    /// Raw-USB device policy. The driver is fail-closed: with an empty
+    /// allowlist every open/read/write/control is denied.
+    #[serde(default)]
+    pub raw_usb: RawUsbSettings,
+}
+
+/// Raw-USB allowlist, the only way to make the `raw-usb` driver usable.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct RawUsbSettings {
+    /// Allowed devices as `"vid:pid"` hex strings, e.g. `"0483:5740"`.
+    /// Malformed entries are skipped with a warning at boot.
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
+/// Periodic agent heartbeat: wake idle agents to check their inbox / assigned
+/// work. Disabled by default (`default_interval_secs = 0`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HeartbeatSettings {
+    /// Seconds between wakeups. `0` disables heartbeats globally (default).
+    #[serde(default)]
+    pub default_interval_secs: u64,
+    /// Jitter (0.0–1.0) lengthening each agent's interval by a deterministic
+    /// per-agent fraction, to avoid a thundering-herd wake on a large fleet.
+    #[serde(default = "default_heartbeat_jitter")]
+    pub jitter: f64,
+    /// Cap on agents woken per tick, to avoid an inference storm on an idle fleet.
+    #[serde(default = "default_max_wakes_per_tick")]
+    pub max_wakes_per_tick: usize,
+}
+
+fn default_heartbeat_jitter() -> f64 {
+    0.2
+}
+
+fn default_max_wakes_per_tick() -> usize {
+    4
+}
+
+impl Default for HeartbeatSettings {
+    fn default() -> Self {
+        Self {
+            default_interval_secs: 0,
+            jitter: default_heartbeat_jitter(),
+            max_wakes_per_tick: default_max_wakes_per_tick(),
+        }
+    }
+}
+
+/// Speech-to-text settings for inbound channel voice/audio messages.
+///
+/// When enabled, voice notes received on a channel (e.g. Telegram) are sent to
+/// an OpenAI-compatible `/audio/transcriptions` endpoint and the transcript is
+/// injected into the message text the agent reads. Disabled by default; the API
+/// key is read from the named environment variable (never stored in config).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TranscriptionSettings {
+    /// Master switch. When false, voice/audio is stored but not transcribed.
+    #[serde(default)]
+    pub enabled: bool,
+    /// OpenAI-compatible transcription endpoint (multipart `file` + `model`).
+    #[serde(default = "default_transcription_endpoint")]
+    pub endpoint: String,
+    /// Model name sent in the request (e.g. `whisper-1`, `whisper-large-v3`).
+    #[serde(default = "default_transcription_model")]
+    pub model: String,
+    /// Environment variable holding the API key (Bearer auth). Never the key itself.
+    #[serde(default = "default_transcription_key_env")]
+    pub api_key_env: String,
+}
+
+impl Default for TranscriptionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: default_transcription_endpoint(),
+            model: default_transcription_model(),
+            api_key_env: default_transcription_key_env(),
+        }
+    }
+}
+
+fn default_transcription_endpoint() -> String {
+    "https://api.openai.com/v1/audio/transcriptions".to_string()
+}
+
+fn default_transcription_model() -> String {
+    "whisper-1".to_string()
+}
+
+fn default_transcription_key_env() -> String {
+    "OPENAI_API_KEY".to_string()
+}
+
+/// Configuration for the scheduler's persisted run history.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SchedulerConfig {
+    /// Days of per-fire run history to keep in `schedules.db`. The
+    /// TimeoutChecker prunes completed/failed runs older than this on its
+    /// periodic sweep. `0` disables pruning (unbounded growth — not advised).
+    #[serde(default = "default_run_retention_days")]
+    pub run_retention_days: u32,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            run_retention_days: default_run_retention_days(),
+        }
+    }
+}
+
+fn default_run_retention_days() -> u32 {
+    30
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UserAdaptationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_user_adaptation_model")]
+    pub model: String,
+    #[serde(default = "default_user_adaptation_min_confidence")]
+    pub min_confidence: f32,
+    #[serde(default = "default_user_adaptation_max_proposals_per_task")]
+    pub max_proposals_per_task: usize,
+    /// Days that a pending proposal lives before the TimeoutChecker sweep
+    /// transitions it to `expired` (history is preserved — no DELETE).
+    #[serde(default = "default_user_adaptation_ttl_days")]
+    pub proposal_ttl_days: i64,
+}
+
+impl Default for UserAdaptationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: default_user_adaptation_model(),
+            min_confidence: default_user_adaptation_min_confidence(),
+            max_proposals_per_task: default_user_adaptation_max_proposals_per_task(),
+            proposal_ttl_days: default_user_adaptation_ttl_days(),
+        }
+    }
+}
+
+fn default_user_adaptation_model() -> String {
+    "compact".to_string()
+}
+fn default_user_adaptation_min_confidence() -> f32 {
+    0.5
+}
+fn default_user_adaptation_max_proposals_per_task() -> usize {
+    3
+}
+fn default_user_adaptation_ttl_days() -> i64 {
+    30
+}
+
+/// Structured user-profile store configuration (proactive personalization).
+///
+/// The profile store holds durable, categorized user preferences promoted from
+/// accepted proposals. `max_pinned` and `min_confidence` are *also* enforced as
+/// hard floors inside the store layer (see `user_profile_store`); the values
+/// here are the operator-facing knobs. Enabled by default — the store simply
+/// holds promoted prefs and is harmless empty; the *read-back into context*
+/// (Phase 2) is what carries a separate, default-off `personalization` gate.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UserProfileConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Optional override for the SQLite path; defaults to `{data_dir}/user_profile.db`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_path: Option<String>,
+    /// Maximum number of L0-pinned entries surfaced to context.
+    #[serde(default = "default_user_profile_max_pinned")]
+    pub max_pinned: i64,
+    /// Minimum confidence for an entry to be stored (operator-facing floor).
+    #[serde(default = "default_user_profile_min_confidence")]
+    pub min_confidence: f32,
+}
+
+impl Default for UserProfileConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            db_path: None,
+            max_pinned: default_user_profile_max_pinned(),
+            min_confidence: default_user_profile_min_confidence(),
+        }
+    }
+}
+
+fn default_user_profile_max_pinned() -> i64 {
+    8
+}
+fn default_user_profile_min_confidence() -> f32 {
+    0.30
+}
+
+/// Proactive personalization configuration (shared by Phases 2–6).
+///
+/// Tiered by token cost:
+/// - **L0** (read-back): the `enabled` master switch controls whether a compact
+///   pinned profile block is injected into agent context. `profile_pin_cap` and
+///   `profile_token_budget` bound its size.
+/// - **L2** (background): the interest model + recommendation engine run off the
+///   task path. `interest_*` fields tune the decaying interest aggregator;
+///   `proactive_*` fields gate and rate-limit recommendations.
+///
+/// `enabled` is OFF by default — turning it on is the opt-in for putting profile
+/// data into context. `proactive_enabled` is a *separate*, also-off-by-default
+/// switch for outbound recommendations.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PersonalizationConfig {
+    /// Master switch for read-back-into-context (L0/L1). Opt-in.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Max pinned entries surfaced in the L0 block.
+    #[serde(default = "default_profile_pin_cap")]
+    pub profile_pin_cap: usize,
+    /// Hard token budget for the rendered L0 block.
+    #[serde(default = "default_profile_token_budget")]
+    pub profile_token_budget: usize,
+
+    // --- L2: interest model (Phase 3) ---
+    /// Half-life (hours) for interest-score exponential decay.
+    #[serde(default = "default_interest_decay_half_life_hours")]
+    pub interest_decay_half_life_hours: f64,
+    /// Minimum decayed score below which an interest topic is pruned.
+    #[serde(default = "default_interest_min_score")]
+    pub interest_min_score: f64,
+    /// Trigger: aggregate after this many task completions.
+    #[serde(default = "default_interest_trigger_tasks")]
+    pub interest_aggregation_trigger_tasks: u64,
+    /// Trigger: aggregate after at least this many hours since the last cycle.
+    #[serde(default = "default_interest_trigger_hours")]
+    pub interest_aggregation_trigger_hours: f64,
+
+    // --- L2: proactive recommendations (Phase 4) ---
+    /// Separate opt-in for generating + delivering proactive recommendations.
+    #[serde(default)]
+    pub proactive_enabled: bool,
+    /// Maximum recommendations delivered per day.
+    #[serde(default = "default_max_recommendations_per_day")]
+    pub max_recommendations_per_day: u32,
+    /// Cooldown (hours) before an identical (deduped) recommendation may repeat.
+    #[serde(default = "default_recommendation_dedup_cooldown_hours")]
+    pub recommendation_dedup_cooldown_hours: f64,
+    /// Minimum confidence for a recommendation to be delivered.
+    #[serde(default = "default_recommendation_min_confidence")]
+    pub recommendation_min_confidence: f32,
+
+    // --- Phase 5: feedback loop ---
+    /// Exponential half-life (days) for profile pin_rank decay.
+    /// With 30d default an unused entry halves its rank every month.
+    #[serde(default = "default_pin_rank_decay_half_life_days")]
+    pub pin_rank_decay_half_life_days: f64,
+    /// Archive Active profile entries idle for longer than this many days.
+    #[serde(default = "default_profile_archive_idle_days")]
+    pub profile_archive_idle_days: i64,
+    /// Hours a dismissed recommendation's dedup_hash is suppressed (7d default).
+    #[serde(default = "default_dismiss_cooldown_hours")]
+    pub dismiss_cooldown_hours: i64,
+    /// Confidence boost when the user re-states an existing preference (f32, clamped to 1.0).
+    #[serde(default = "default_restate_confidence_boost")]
+    pub restate_confidence_boost: f32,
+}
+
+impl Default for PersonalizationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            profile_pin_cap: default_profile_pin_cap(),
+            profile_token_budget: default_profile_token_budget(),
+            interest_decay_half_life_hours: default_interest_decay_half_life_hours(),
+            interest_min_score: default_interest_min_score(),
+            interest_aggregation_trigger_tasks: default_interest_trigger_tasks(),
+            interest_aggregation_trigger_hours: default_interest_trigger_hours(),
+            proactive_enabled: false,
+            max_recommendations_per_day: default_max_recommendations_per_day(),
+            recommendation_dedup_cooldown_hours: default_recommendation_dedup_cooldown_hours(),
+            recommendation_min_confidence: default_recommendation_min_confidence(),
+            pin_rank_decay_half_life_days: default_pin_rank_decay_half_life_days(),
+            profile_archive_idle_days: default_profile_archive_idle_days(),
+            dismiss_cooldown_hours: default_dismiss_cooldown_hours(),
+            restate_confidence_boost: default_restate_confidence_boost(),
+        }
+    }
+}
+
+fn default_profile_pin_cap() -> usize {
+    8
+}
+fn default_profile_token_budget() -> usize {
+    300
+}
+fn default_interest_decay_half_life_hours() -> f64 {
+    // ~2 weeks: interests fade but aren't forgotten between sessions.
+    336.0
+}
+fn default_interest_min_score() -> f64 {
+    0.05
+}
+fn default_interest_trigger_tasks() -> u64 {
+    25
+}
+fn default_interest_trigger_hours() -> f64 {
+    24.0
+}
+fn default_max_recommendations_per_day() -> u32 {
+    3
+}
+fn default_recommendation_dedup_cooldown_hours() -> f64 {
+    168.0 // one week
+}
+fn default_recommendation_min_confidence() -> f32 {
+    0.5
+}
+fn default_pin_rank_decay_half_life_days() -> f64 {
+    30.0
+}
+fn default_profile_archive_idle_days() -> i64 {
+    60
+}
+fn default_dismiss_cooldown_hours() -> i64 {
+    168 // 7 days
+}
+fn default_restate_confidence_boost() -> f32 {
+    0.10
 }
 
 /// Chat-specific kernel configuration.
@@ -327,6 +825,11 @@ pub struct KernelSettings {
     pub autonomous_mode: AutonomousModeConfig,
     #[serde(default = "default_health_port")]
     pub health_port: u16,
+    /// Bind address for the health/metrics HTTP server. Loopback by default —
+    /// `/metrics` exposes operational internals, so widen to "0.0.0.0" only
+    /// behind a trusted boundary (containers need it: k8s probes hit the pod IP).
+    #[serde(default = "default_health_bind")]
+    pub health_bind: String,
     /// Maximum commands per second per agent (across all connections). 0 = unlimited.
     #[serde(default = "default_per_agent_rate_limit")]
     pub per_agent_rate_limit: u32,
@@ -496,6 +999,10 @@ fn default_health_port() -> u16 {
     9091
 }
 
+fn default_health_bind() -> String {
+    "127.0.0.1".to_string()
+}
+
 fn default_state_db_path() -> String {
     "data/kernel_state.db".to_string()
 }
@@ -628,6 +1135,53 @@ pub struct ToolsSettings {
     /// `host-package-install` tool configuration. Disabled by default.
     #[serde(default)]
     pub host_package: HostPackageSettings,
+    /// Tool-discovery (Tier-0 index) tuning.
+    #[serde(default)]
+    pub discovery: DiscoverySettings,
+}
+
+/// Tuning for the Tier-0 tool-discovery index (the compact per-turn `Tools`
+/// line). See `obsidian-vault/plans/tool-discovery-architecture`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DiscoverySettings {
+    /// Max usage-ranked tool names shown per category in the Tier-0 line.
+    #[serde(default = "default_l0_max_names")]
+    pub l0_max_names_per_category: usize,
+    /// Soft token budget for the Tier-0 line's names portion (≈4 chars/token);
+    /// categories beyond the budget render counts-only.
+    #[serde(default = "default_l0_max_tokens")]
+    pub l0_max_tokens: usize,
+    /// Scope the native tool array to task-relevant categories (Phase 3).
+    /// Default ON. Anything scoped out stays reachable via `search-tools`.
+    #[serde(default = "default_true")]
+    pub default_scoping: bool,
+    /// Task classifier: "heuristic" | "heuristic+semantic" | "llm".
+    /// Only "heuristic" is implemented today; others degrade to heuristic.
+    #[serde(default = "default_scoping_classifier")]
+    pub scoping_classifier: String,
+}
+
+fn default_l0_max_names() -> usize {
+    5
+}
+
+fn default_l0_max_tokens() -> usize {
+    200
+}
+
+fn default_scoping_classifier() -> String {
+    "heuristic".to_string()
+}
+
+impl Default for DiscoverySettings {
+    fn default() -> Self {
+        Self {
+            l0_max_names_per_category: default_l0_max_names(),
+            l0_max_tokens: default_l0_max_tokens(),
+            default_scoping: true,
+            scoping_classifier: default_scoping_classifier(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -681,6 +1235,118 @@ fn default_host_package_managers() -> Vec<String> {
         "apk".into(),
         "brew".into(),
     ]
+}
+
+/// Managed environments (`env-install`) configuration.
+///
+/// Controls which packages agents may install into per-agent workspaces at
+/// `{data_dir}/workspaces/{agent_id}/{name}/`. Workspaces are isolated per
+/// agent and never touch the host system package set.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EnvSettings {
+    /// Python package policy: `"curated"` (allowlist), `"open"` (any), or `"locked"` (none).
+    #[serde(default = "default_env_policy")]
+    pub python_policy: String,
+    /// Node.js package policy: `"curated"`, `"open"`, or `"locked"`.
+    #[serde(default = "default_env_policy")]
+    pub nodejs_policy: String,
+    /// Rust (cargo install) policy: `"curated"`, `"open"`, or `"locked"`.
+    #[serde(default = "default_env_policy")]
+    pub rust_policy: String,
+    /// System package policy. Locked by default; host packages route through
+    /// `host-package-install` instead.
+    #[serde(default = "default_locked_policy")]
+    pub system_policy: String,
+    /// Per-agent workspace disk quota in bytes (informational; not enforced yet).
+    #[serde(default = "default_env_quota")]
+    pub default_quota_bytes: u64,
+    /// Maximum wall time for a single install command.
+    #[serde(default = "default_env_install_timeout")]
+    pub install_timeout_secs: u64,
+    /// Curated Python allowlist (only consulted when `python_policy = "curated"`).
+    #[serde(default)]
+    pub python_allowlist: Vec<String>,
+    /// Curated Node.js allowlist.
+    #[serde(default)]
+    pub nodejs_allowlist: Vec<String>,
+    /// Curated Rust allowlist.
+    #[serde(default)]
+    pub rust_allowlist: Vec<String>,
+}
+
+fn default_env_policy() -> String {
+    "curated".into()
+}
+fn default_locked_policy() -> String {
+    "locked".into()
+}
+fn default_env_quota() -> u64 {
+    2_147_483_648 // 2 GiB
+}
+fn default_env_install_timeout() -> u64 {
+    120
+}
+
+impl Default for EnvSettings {
+    fn default() -> Self {
+        Self {
+            python_policy: default_env_policy(),
+            nodejs_policy: default_env_policy(),
+            rust_policy: default_env_policy(),
+            system_policy: default_locked_policy(),
+            default_quota_bytes: default_env_quota(),
+            install_timeout_secs: default_env_install_timeout(),
+            python_allowlist: Vec::new(),
+            nodejs_allowlist: Vec::new(),
+            rust_allowlist: Vec::new(),
+        }
+    }
+}
+
+/// Gateway ("run as a bot") configuration. When `enabled`, `agentos gateway
+/// run` connects each channel in `channels` at boot through the same path as
+/// `agentos channel connect`. Tokens are referenced by a vault `credential_key`
+/// — never inline.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct GatewaySettings {
+    /// Master switch. When false, `gateway run` boots the kernel (restoring any
+    /// previously `channel connect`-ed channels) but connects nothing new.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Channels to connect declaratively at gateway boot.
+    #[serde(default)]
+    pub channels: Vec<GatewayChannelConfig>,
+}
+
+/// One channel to connect at gateway boot. Fields map 1:1 to the
+/// `ConnectChannel` command consumed by `build_channel_adapter`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GatewayChannelConfig {
+    /// Channel kind (must be a known `ChannelKind`; an unknown kind fails the
+    /// gateway boot): telegram | ntfy | email | discord | slack | whatsapp | webhook
+    pub kind: String,
+    /// Channel-specific external id (e.g. Telegram chat_id). Omit for Telegram
+    /// to auto-discover from the first `/start`.
+    #[serde(default)]
+    pub external_id: Option<String>,
+    #[serde(default)]
+    pub display_name: String,
+    /// VAULT key holding the token — never an inline token. Seed it first with
+    /// `agentos secret set <key> <token>`.
+    #[serde(default)]
+    pub credential_key: String,
+    #[serde(default)]
+    pub reply_topic: Option<String>,
+    #[serde(default)]
+    pub server_url: Option<String>,
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    /// Default agent for inbound chat on this channel.
+    #[serde(default)]
+    pub active_agent: Option<String>,
+    /// Set false to declare-but-skip this channel.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -738,6 +1404,35 @@ pub struct LlmSettings {
     /// Defaults to 32768. Increase for models with larger context support (e.g. 131072).
     #[serde(default = "default_ollama_context_window")]
     pub ollama_context_window: u32,
+    /// Ordered fallback chain applied to every agent's primary adapter. When the
+    /// primary provider errors (including mid-stream), the kernel fails over to
+    /// these in order via `FallbackAdapter`. Empty by default — no behavior
+    /// change unless configured. Entries that fail to build (e.g. missing key)
+    /// are skipped at construction time with a warning rather than failing the
+    /// agent.
+    #[serde(default)]
+    pub fallback_models: Vec<FallbackModelConfig>,
+    /// Opt-in: let the `claude-code` adapter `--resume` the prior CLI session and
+    /// send only the new turn's delta instead of replaying the full flattened
+    /// context each call. Off by default. Safe to toggle: a prefix fingerprint
+    /// guards every resume and falls back to a full send on any divergence, and
+    /// the stored session is a pure cache (deleted on task completion).
+    #[serde(default)]
+    pub claude_code_resume: bool,
+}
+
+/// One entry in `llm.fallback_models`. Mirrors the `--provider`/`--model`
+/// arguments used when connecting an agent.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FallbackModelConfig {
+    /// Provider name: `ollama` | `openai` | `anthropic` | `gemini`, a catalog
+    /// name like `nvidia`, or `custom:<name>`.
+    pub provider: String,
+    /// Model identifier for that provider.
+    pub model: String,
+    /// Optional base URL override (defaults resolve from the catalog/config).
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 impl Default for LlmSettings {
@@ -749,6 +1444,8 @@ impl Default for LlmSettings {
             gemini_base_url: None,
             max_tokens: default_llm_max_tokens(),
             ollama_context_window: default_ollama_context_window(),
+            fallback_models: Vec::new(),
+            claude_code_resume: false,
         }
     }
 }
@@ -765,12 +1462,59 @@ fn default_ollama_context_window() -> u32 {
 pub struct MemorySettings {
     #[serde(default = "default_model_cache_dir")]
     pub model_cache_dir: String,
+    /// Skip loading the ONNX embedding model at boot.
+    ///
+    /// When `true`, the kernel constructs a no-op embedder that returns
+    /// zero vectors instead of initializing fastembed/onnxruntime. Memory
+    /// stores still operate (FTS5 lexical search keeps working), but
+    /// vector-based retrieval becomes a no-op. Intended for environments
+    /// where onnxruntime crashes during graph optimization (e.g. certain
+    /// Zen 3 / glibc combinations trigger an integer-divide-by-zero in the
+    /// transpose-optimizer hashmap) or for tests that boot the kernel
+    /// without needing semantic retrieval.
+    #[serde(default)]
+    pub disable_embedder: bool,
+    /// Maximum seconds to wait for embedding-model initialization at boot
+    /// (covers the first-boot ~23 MB model download). When exceeded — e.g. a
+    /// stalled CDN connection — the kernel logs a warning and falls back to
+    /// the zero-vector embedder instead of hanging boot indefinitely; lexical
+    /// (FTS5) search keeps working. Default: 120.
+    #[serde(default = "default_embedder_init_timeout_secs")]
+    pub embedder_init_timeout_secs: u64,
     #[serde(default)]
     pub extraction: crate::memory_extraction::ExtractionConfig,
     #[serde(default)]
     pub consolidation: crate::consolidation::ConsolidationConfig,
     #[serde(default)]
     pub context: ContextMemoryConfig,
+    /// Age (days) after which episodic / semantic / procedural memory entries
+    /// are swept by the TimeoutChecker. The three tiers expose
+    /// `sweep_old_entries` but nothing called it, so the memory DBs grew
+    /// unbounded on a long-running install. `0` (default) keeps the prior
+    /// unbounded behavior; set a positive value to enable retention.
+    #[serde(default)]
+    pub retention_days: u32,
+    #[serde(default)]
+    pub lifecycle: MemoryLifecycleSettings,
+}
+
+/// Memory lifecycle (reinforcement / decay) configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MemoryLifecycleSettings {
+    /// When enabled, retrieved memories are touched (`last_used_at`,
+    /// `use_count`) on injection and procedures injected into a task receive
+    /// success/failure feedback (with Laplace-smoothed confidence recompute)
+    /// at task completion.
+    #[serde(default = "default_true")]
+    pub reinforcement_enabled: bool,
+}
+
+impl Default for MemoryLifecycleSettings {
+    fn default() -> Self {
+        Self {
+            reinforcement_enabled: true,
+        }
+    }
 }
 
 /// Per-agent context memory configuration.
@@ -817,15 +1561,23 @@ impl Default for MemorySettings {
     fn default() -> Self {
         Self {
             model_cache_dir: default_model_cache_dir(),
+            disable_embedder: false,
+            embedder_init_timeout_secs: default_embedder_init_timeout_secs(),
             extraction: crate::memory_extraction::ExtractionConfig::default(),
             consolidation: crate::consolidation::ConsolidationConfig::default(),
             context: ContextMemoryConfig::default(),
+            retention_days: 0,
+            lifecycle: MemoryLifecycleSettings::default(),
         }
     }
 }
 
 fn default_model_cache_dir() -> String {
     "models".to_string()
+}
+
+fn default_embedder_init_timeout_secs() -> u64 {
+    120
 }
 
 /// Configuration for boot-time pre-flight system health checks.
@@ -1339,6 +2091,28 @@ pub struct ApiSettings {
     /// TCP port for the API server.
     #[serde(default = "default_api_port")]
     pub port: u16,
+    /// Whether to serve the interactive Scalar API-docs UI at `GET /api/v1/docs`.
+    /// The `GET /api/v1/openapi.json` contract endpoint stays public regardless.
+    /// Disable on internet-exposed deployments.
+    #[serde(default = "default_true")]
+    pub docs_enabled: bool,
+    /// Operator credential for `POST /api/v1/auth/login`. When unset (or empty),
+    /// the login endpoint is disabled and returns `503`. Set this to let a
+    /// browser SPA exchange the operator credential for a scoped, expiring key.
+    #[serde(default)]
+    pub operator_token: Option<String>,
+    /// Cross-origin allowlist for the REST API. Each entry is a full origin
+    /// (scheme + host + optional port), e.g. `http://localhost:5173`. When empty,
+    /// CORS falls back to the API's own bind origin (same-origin only).
+    #[serde(default)]
+    pub cors_allowed_origins: Vec<String>,
+    /// Whether `POST /api/v1/auth/refresh` (key rotation) is enabled.
+    #[serde(default = "default_false")]
+    pub refresh_enabled: bool,
+    /// Whether `PUT /api/v1/config/{key}` may write to the config file at runtime.
+    /// Off by default — enable only on trusted control-plane deployments.
+    #[serde(default = "default_false")]
+    pub config_writable: bool,
 }
 
 impl Default for ApiSettings {
@@ -1347,8 +2121,50 @@ impl Default for ApiSettings {
             enabled: false,
             host: default_api_host(),
             port: default_api_port(),
+            docs_enabled: true,
+            operator_token: None,
+            cors_allowed_origins: Vec::new(),
+            refresh_enabled: false,
+            config_writable: false,
         }
     }
+}
+
+/// `[web]` config block. Controls the Web UI authentication token.
+///
+/// The token is resolved at server startup in this precedence order:
+/// 1. `$AGENTOS_WEB_TOKEN` environment variable (best for systemd/Docker —
+///    never persisted to disk).
+/// 2. `auth_token` set here in config.
+/// 3. A token generated once and persisted to `{data_dir}/web_token` (mode
+///    `0600`) on first boot, then reused on every subsequent restart.
+///
+/// This makes the token *stable across restarts* instead of regenerating a
+/// fresh random token on every boot.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WebConfig {
+    /// Stable Web UI auth token. When unset (or empty), the server falls back
+    /// to `$AGENTOS_WEB_TOKEN`, then to a persisted `{data_dir}/web_token` file.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
+/// `[approval]` config block. Controls when the kernel auto-approves vs.
+/// escalates a tool call for human review.
+///
+/// `mode` is the global default. `agent_overrides` lets the operator dial
+/// up or down for individual agents — e.g. a research-bot in `auto` next to
+/// a writer-bot in `ask_always` inside the same kernel.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ApprovalConfig {
+    /// Global default mode. Defaults to `ask_edit` (Claude-Code-style:
+    /// auto-approve reads, prompt for writes/exec/control-plane).
+    #[serde(default)]
+    pub mode: agentos_types::ApprovalMode,
+    /// Per-agent overrides keyed by display name. Lookup is name-based so
+    /// operators can express the override in TOML without knowing UUIDs.
+    #[serde(default)]
+    pub agent_overrides: std::collections::BTreeMap<String, agentos_types::ApprovalMode>,
 }
 
 fn default_api_host() -> String {
@@ -1398,38 +2214,70 @@ fn validate_mcp_config(mcp: &McpConfig) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Validate that workspace paths are absolute and not forbidden system directories.
-fn validate_workspace_paths(workspace: &WorkspaceConfig) -> Result<(), anyhow::Error> {
-    // Exact paths that are too broad to be safe workspace roots.
-    const FORBIDDEN: &[&str] = &[
-        "/", "/etc", "/var", "/root", "/home", "/proc", "/sys", "/dev", "/boot", "/usr",
-    ];
+/// Roots that are never allowed as a workspace path, not even as a deep subpath.
+/// Mounting any of these would expose security-critical OS state.
+pub(crate) const WORKSPACE_FORBIDDEN_ROOTS: &[&str] = &[
+    "/etc", "/proc", "/sys", "/dev", "/boot", "/usr", "/bin", "/sbin", "/lib", "/lib64",
+];
 
+/// Roots that are too broad as exact paths, but whose subpaths ARE allowed.
+/// For example `/home` is rejected but `/home/alice/project` is fine.
+pub(crate) const WORKSPACE_BARE_FORBIDDEN: &[&str] = &[
+    "/", "/home", "/var", "/root", "/tmp", "/mnt", "/media", "/opt",
+];
+
+/// Validate a single workspace path. Public so the runtime grant store can reuse it.
+pub(crate) fn validate_workspace_path(path_str: &str) -> Result<(), anyhow::Error> {
+    let p = std::path::Path::new(path_str);
+    if !p.is_absolute() {
+        anyhow::bail!(
+            "workspace path '{}' is not absolute; must start with '/'",
+            path_str
+        );
+    }
+    // Reject `..` components defensively; lexical only — caller may also canonicalize.
+    if p.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        anyhow::bail!(
+            "workspace path '{}' contains '..' component; resolve it first",
+            path_str
+        );
+    }
+    for root in WORKSPACE_FORBIDDEN_ROOTS {
+        let root_p = std::path::Path::new(root);
+        if p == root_p || p.starts_with(root_p) {
+            anyhow::bail!(
+                "workspace path '{}' is under forbidden system root '{}'",
+                path_str,
+                root
+            );
+        }
+    }
+    for root in WORKSPACE_BARE_FORBIDDEN {
+        if p == std::path::Path::new(root) {
+            anyhow::bail!(
+                "workspace path '{}' is too broad; grant a specific subdirectory instead",
+                path_str
+            );
+        }
+    }
+    // Must have at least one path component beyond the filesystem root.
+    let components: Vec<_> = p.components().collect();
+    if components.len() < 2 {
+        anyhow::bail!(
+            "workspace path '{}' is too broad — must include at least one subdirectory",
+            path_str
+        );
+    }
+    Ok(())
+}
+
+/// Validate that all workspace paths in config are absolute and not forbidden.
+fn validate_workspace_paths(workspace: &WorkspaceConfig) -> Result<(), anyhow::Error> {
     for path_str in &workspace.allowed_paths {
-        let p = std::path::Path::new(path_str);
-        if !p.is_absolute() {
-            anyhow::bail!(
-                "tools.workspace.allowed_paths: '{}' is not an absolute path; \
-                 workspace paths must start with '/'",
-                path_str
-            );
-        }
-        if FORBIDDEN.contains(&path_str.as_str()) {
-            anyhow::bail!(
-                "tools.workspace.allowed_paths: '{}' is a system directory and \
-                 cannot be used as a workspace root",
-                path_str
-            );
-        }
-        // Must have at least one path component beyond the filesystem root.
-        let components: Vec<_> = p.components().collect();
-        if components.len() < 2 {
-            anyhow::bail!(
-                "tools.workspace.allowed_paths: '{}' is too broad — \
-                 must include at least one subdirectory (e.g. /home/user/project)",
-                path_str
-            );
-        }
+        validate_workspace_path(path_str)
+            .map_err(|e| anyhow::anyhow!("tools.workspace.allowed_paths: {}", e))?;
     }
     Ok(())
 }
@@ -1521,11 +2369,34 @@ fn validate_sandbox_settings(kernel: &KernelSettings) -> Result<(), anyhow::Erro
              values above 1024 may exhaust system resources"
         );
     }
-    if kernel.sandbox_policy == SandboxPolicy::Never {
-        tracing::warn!(
-            "kernel.sandbox_policy is set to 'never' — all tools run unsandboxed. \
-             This is NOT safe for production. Use 'trust_aware' or 'always' instead."
-        );
+    match kernel.sandbox_policy {
+        SandboxPolicy::Never => {
+            tracing::warn!(
+                "kernel.sandbox_policy is set to 'never' — all tools run unsandboxed. \
+                 This is NOT safe for production. Use 'trust_aware' or 'always' instead."
+            );
+        }
+        SandboxPolicy::TrustAware => {
+            // Make the default posture operator-visible and *accurate* (the
+            // seccomp/Landlock layer is not the only line of defense — see
+            // reference/Tool Isolation Model.md). Under trust_aware, Core
+            // (first-party) tools run in-process, but the dangerous ones are
+            // confined by other layers: shell-exec runs inside bwrap; KMC
+            // capabilities (env/proc/net/storage/build) pass the dynamic policy
+            // engine; HAL/control-plane tools require capability + approval.
+            // seccomp/Landlock additionally confines Community/Verified tools.
+            // Use 'always' to also seccomp-sandbox every sandbox-eligible Core
+            // tool (note: tools needing in-process state cannot be sandboxed).
+            tracing::info!(
+                "kernel.sandbox_policy = 'trust_aware': first-party tools run \
+                 in-process but are confined by layered controls (bwrap for \
+                 shell-exec, policy engine for KMC, capability+approval for \
+                 HAL/control-plane); seccomp/Landlock confines Community/Verified \
+                 tools. Set 'always' to also seccomp every eligible Core tool. \
+                 See reference/Tool Isolation Model.md."
+            );
+        }
+        SandboxPolicy::Always => {}
     }
     Ok(())
 }
@@ -1629,6 +2500,11 @@ where
         "AGENTOS_HEALTH_PORT",
         &mut config.kernel.health_port,
     );
+    apply_string_override(
+        &lookup,
+        "AGENTOS_HEALTH_BIND",
+        &mut config.kernel.health_bind,
+    );
 
     if let Some(url) = nonempty_env(&lookup, "AGENTOS_LLM_URL") {
         config.llm.custom_base_url = Some(url);
@@ -1661,6 +2537,15 @@ where
         "AGENTOS_OTEL_SAMPLE_RATE",
         &mut config.otel.sample_rate,
     );
+
+    // Logging overrides — containers/systemd commonly set these via env.
+    // Invalid values are rejected by validate_logging_settings after overrides apply.
+    apply_string_override(
+        &lookup,
+        "AGENTOS_LOG_FORMAT",
+        &mut config.logging.log_format,
+    );
+    apply_string_override(&lookup, "AGENTOS_LOG_LEVEL", &mut config.logging.log_level);
 
     apply_parsed_override(
         &lookup,
@@ -1818,6 +2703,201 @@ fn is_tmp_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_budget_resolve_defaults_to_builtin_when_unconfigured() {
+        let settings = AgentBudgetSettings::default();
+        let resolved = settings.resolve("anyone");
+        let builtin = agentos_types::AgentBudget::default();
+        // Unconfigured deployments keep the historical default budget exactly.
+        assert_eq!(resolved.max_tokens_per_day, builtin.max_tokens_per_day);
+        assert_eq!(resolved.max_cost_usd_per_day, builtin.max_cost_usd_per_day);
+        assert_eq!(resolved.on_hard_limit, builtin.on_hard_limit);
+    }
+
+    #[test]
+    fn agent_budget_resolve_applies_global_then_per_agent_overrides() {
+        let toml = r#"
+            [default]
+            max_cost_usd_per_day = 20.0
+            on_hard_limit = "NotifyOnly"
+
+            [overrides.researcher]
+            max_cost_usd_per_day = 5.0
+            on_hard_limit = "Kill"
+        "#;
+        let settings: AgentBudgetSettings = toml::from_str(toml).expect("parse budget settings");
+
+        // An agent with no override gets the global default layer.
+        let other = settings.resolve("designer");
+        assert_eq!(other.max_cost_usd_per_day, 20.0);
+        assert_eq!(other.on_hard_limit, agentos_types::BudgetAction::NotifyOnly);
+        // Untouched fields fall through to the built-in default.
+        assert_eq!(
+            other.max_tokens_per_day,
+            agentos_types::AgentBudget::default().max_tokens_per_day
+        );
+
+        // The named agent's override merges over the global default.
+        let researcher = settings.resolve("researcher");
+        assert_eq!(researcher.max_cost_usd_per_day, 5.0);
+        assert_eq!(researcher.on_hard_limit, agentos_types::BudgetAction::Kill);
+    }
+
+    #[test]
+    fn hal_raw_usb_allowlist_parses() {
+        let toml = r#"
+            [raw_usb]
+            allow = ["0483:5740", "0x1a86:0x7523"]
+        "#;
+        let settings: HalSettings = toml::from_str(toml).expect("parse hal settings");
+        assert_eq!(settings.raw_usb.allow, vec!["0483:5740", "0x1a86:0x7523"]);
+
+        // Omitting the section entirely yields an empty (fail-closed) list.
+        let empty: HalSettings = toml::from_str("").expect("parse empty hal settings");
+        assert!(empty.raw_usb.allow.is_empty());
+    }
+
+    #[test]
+    fn agent_budget_resolve_applies_downgrade_model() {
+        let toml = r#"
+            [default.downgrade_model]
+            model = "claude-haiku-4-5"
+            provider = "anthropic"
+        "#;
+        let settings: AgentBudgetSettings = toml::from_str(toml).expect("parse budget settings");
+        let resolved = settings.resolve("anyone");
+        let tier = resolved.downgrade_model.expect("downgrade model applied");
+        assert_eq!(tier.model, "claude-haiku-4-5");
+        assert_eq!(tier.provider, "anthropic");
+    }
+
+    #[test]
+    fn validate_workspace_path_accepts_user_subdirs() {
+        assert!(validate_workspace_path("/home/alice/Desktop").is_ok());
+        assert!(validate_workspace_path("/home/alice/projects/foo").is_ok());
+        assert!(validate_workspace_path("/var/log/agentos").is_ok());
+        assert!(validate_workspace_path("/tmp/work").is_ok());
+        assert!(validate_workspace_path("/opt/agentos-data").is_ok());
+        assert!(validate_workspace_path("/mnt/external/data").is_ok());
+    }
+
+    #[test]
+    fn validate_workspace_path_rejects_bare_broad_roots() {
+        assert!(validate_workspace_path("/").is_err());
+        assert!(validate_workspace_path("/home").is_err());
+        assert!(validate_workspace_path("/var").is_err());
+        assert!(validate_workspace_path("/root").is_err());
+        assert!(validate_workspace_path("/tmp").is_err());
+        assert!(validate_workspace_path("/opt").is_err());
+    }
+
+    #[test]
+    fn validate_workspace_path_rejects_forbidden_roots_and_subpaths() {
+        for bad in &[
+            "/etc",
+            "/etc/agentos",
+            "/proc",
+            "/proc/1",
+            "/sys/kernel",
+            "/dev/sda",
+            "/boot/grub",
+            "/usr/bin",
+            "/bin/sh",
+            "/sbin/init",
+            "/lib/x86_64-linux-gnu",
+            "/lib64/ld-linux-x86-64.so.2",
+        ] {
+            assert!(
+                validate_workspace_path(bad).is_err(),
+                "expected '{}' to be rejected",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn validate_workspace_path_rejects_relative_and_traversal() {
+        assert!(validate_workspace_path("relative/path").is_err());
+        assert!(validate_workspace_path("../escape").is_err());
+        assert!(validate_workspace_path("/home/alice/../bob").is_err());
+    }
+
+    #[test]
+    fn production_toml_otel_logging_valid() {
+        // Guards the shipped production profile: structured JSON logs on, OTel
+        // opt-in (disabled), and the preflight block present. Catches a
+        // fat-fingered [logging]/[otel]/[preflight] regression that would still
+        // parse as valid TOML but ship the wrong production defaults.
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/production.toml");
+        // Parse the shipped file directly (NOT load_config) so the assertions test
+        // the file's defaults rather than the resolved process environment — env
+        // overrides like AGENTOS_OTEL_ENABLED must not be able to flip this test.
+        let content = std::fs::read_to_string(&path).expect("config/production.toml must exist");
+        let cfg: KernelConfig =
+            toml::from_str(&content).expect("config/production.toml must parse");
+        assert_eq!(cfg.logging.log_format, "json");
+        assert!(!cfg.otel.enabled, "otel must default to disabled (opt-in)");
+        assert_eq!(cfg.preflight.min_free_disk_mb, 512);
+        assert!(cfg.preflight.check_db_writable);
+    }
+
+    #[test]
+    fn default_config_tools_discovery_parses() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/default.toml");
+        let content = std::fs::read_to_string(&path).expect("config/default.toml must exist");
+        let cfg: KernelConfig = toml::from_str(&content)
+            .expect("config/default.toml must parse with [tools.discovery]");
+        assert_eq!(cfg.tools.discovery.l0_max_names_per_category, 5);
+        assert_eq!(cfg.tools.discovery.l0_max_tokens, 200);
+    }
+
+    #[test]
+    fn discovery_settings_defaults_when_absent() {
+        // A [tools] block without [tools.discovery] must still parse (serde
+        // default), so existing deployments' configs keep working.
+        let toml_str = r#"
+core_tools_dir = "/t/c"
+user_tools_dir = "/t/u"
+data_dir = "/t/d"
+"#;
+        let tools: ToolsSettings =
+            toml::from_str(toml_str).expect("tools without discovery parses");
+        assert_eq!(tools.discovery.l0_max_names_per_category, 5);
+        assert_eq!(tools.discovery.l0_max_tokens, 200);
+    }
+
+    #[test]
+    fn gateway_settings_toml_roundtrip() {
+        // The [gateway] contract: enabled flag + per-channel tables; per-channel
+        // `enabled` defaults to true; absence of [gateway] is valid (disabled).
+        let gw: GatewaySettings = toml::from_str(
+            r#"
+enabled = true
+[[channels]]
+kind = "telegram"
+display_name = "Ops Bot"
+credential_key = "tg_token"
+active_agent = "assistant"
+"#,
+        )
+        .expect("gateway block must parse");
+        assert!(gw.enabled);
+        assert_eq!(gw.channels.len(), 1);
+        assert_eq!(gw.channels[0].kind, "telegram");
+        assert_eq!(gw.channels[0].credential_key, "tg_token");
+        assert!(
+            gw.channels[0].enabled,
+            "per-channel enabled defaults to true"
+        );
+
+        // Absent gateway block → default (disabled, no channels).
+        let def = GatewaySettings::default();
+        assert!(!def.enabled);
+        assert!(def.channels.is_empty());
+    }
 
     #[test]
     fn task_limits_default_when_omitted_from_toml() {
@@ -1982,6 +3062,31 @@ default_model = "llama3.2"
         let config: KernelConfig = toml::from_str(&toml_str).expect("config should parse");
         assert_eq!(config.llm.max_tokens, 16384);
         assert_eq!(config.llm.ollama_context_window, 131072);
+    }
+
+    #[test]
+    fn llm_settings_fallback_models_default_empty() {
+        let config: KernelConfig = toml::from_str(MINIMAL_TOML).expect("config should parse");
+        assert!(config.llm.fallback_models.is_empty());
+    }
+
+    #[test]
+    fn llm_settings_parses_fallback_models() {
+        let toml_str = format!(
+            "{}\n[[llm.fallback_models]]\nprovider = \"ollama\"\nmodel = \"llama3.1:8b\"\n\
+             \n[[llm.fallback_models]]\nprovider = \"anthropic\"\nmodel = \"claude-haiku-4-5\"\nbase_url = \"https://x/v1\"\n",
+            MINIMAL_TOML
+        );
+        let config: KernelConfig = toml::from_str(&toml_str).expect("config should parse");
+        assert_eq!(config.llm.fallback_models.len(), 2);
+        assert_eq!(config.llm.fallback_models[0].provider, "ollama");
+        assert_eq!(config.llm.fallback_models[0].model, "llama3.1:8b");
+        assert_eq!(config.llm.fallback_models[0].base_url, None);
+        assert_eq!(config.llm.fallback_models[1].provider, "anthropic");
+        assert_eq!(
+            config.llm.fallback_models[1].base_url.as_deref(),
+            Some("https://x/v1")
+        );
     }
 
     #[test]

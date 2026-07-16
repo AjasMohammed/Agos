@@ -40,10 +40,14 @@ pub mod file_lock;
 pub mod file_move;
 pub mod file_reader;
 pub mod file_writer;
+pub mod get_schedule_runs;
+pub mod get_task_logs;
 pub mod hardware_info;
+pub mod hardware_twin;
 pub mod host_package;
 pub mod http_client;
 pub mod kmc_tools;
+pub mod list_my_schedules;
 pub mod list_tools;
 pub mod loader;
 pub mod log_reader;
@@ -82,6 +86,8 @@ pub mod search_tools;
 pub mod set_timer;
 pub mod shell_exec;
 pub mod signing;
+pub mod skill_create;
+pub mod skill_prompt;
 pub(crate) mod ssrf;
 pub mod sys_monitor;
 pub mod system_mounts;
@@ -92,6 +98,7 @@ pub mod task_list;
 pub mod task_spawn_async;
 pub mod task_status;
 pub mod think;
+pub mod tool_search_index;
 pub mod traits;
 pub mod usb_storage;
 pub mod user_file_reader;
@@ -142,8 +149,12 @@ pub use file_lock::{FileLockRegistry, WriteLockGuard};
 pub use file_move::FileMove;
 pub use file_reader::FileReader;
 pub use file_writer::FileWriter;
+pub use get_schedule_runs::GetScheduleRunsTool;
+pub use get_task_logs::GetTaskLogsTool;
 pub use hardware_info::HardwareInfoTool;
+pub use hardware_twin::{HardwareGetTwinTool, HardwareSetDesiredTool};
 pub use http_client::HttpClientTool;
+pub use list_my_schedules::ListMySchedulesTool;
 pub use list_tools::ListToolsTool;
 pub use loader::{load_all_manifests, load_manifest};
 pub use log_reader::LogReaderTool;
@@ -179,6 +190,8 @@ pub use scratch_write::ScratchWriteTool;
 pub use search_tools::SearchToolsTool;
 pub use shell_exec::ShellExec;
 pub use signing::{pubkey_hex_from_seed, sign_manifest, signing_payload, verify_manifest};
+pub use skill_create::{SharedSkillInstaller, SkillCreateTool, SkillInstaller};
+pub use skill_prompt::SkillPromptTool;
 pub use sys_monitor::SysMonitorTool;
 pub use system_mounts::SystemMountsTool;
 pub use system_open_files::SystemOpenFilesTool;
@@ -220,6 +233,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -261,6 +276,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -305,6 +322,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -332,6 +351,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -1986,7 +2007,8 @@ mod tests {
                 description: "Read files".into(),
                 version: "1.1.0".into(),
                 permissions: vec!["fs.user_data:r".into()],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec![],
                 category: "core".into(),
@@ -1999,7 +2021,8 @@ mod tests {
                 description: "HTTP requests".into(),
                 version: "1.0.0".into(),
                 permissions: vec!["network.outbound:x".into()],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec![],
                 category: "core".into(),
@@ -2029,9 +2052,10 @@ mod tests {
             description: "Read files from data directory".into(),
             version: "1.1.0".into(),
             permissions: vec!["fs.user_data:r".into()],
-            input_schema: Some(
+            payload_schema: Some(
                 serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
             ),
+            examples: vec![],
             trust_tier: "core".into(),
             capability_tags: vec![],
             category: "core".into(),
@@ -2051,7 +2075,7 @@ mod tests {
         assert_eq!(result["section"], "tool-detail");
         assert_eq!(result["name"], "file-reader");
         assert_eq!(result["version"], "1.1.0");
-        assert!(result["input_schema"].is_object());
+        assert!(result["payload_schema"].is_object());
     }
 
     #[tokio::test]
@@ -2227,7 +2251,8 @@ mod tests {
                 description: "A test".into(),
                 version: "0.1.0".into(),
                 permissions: vec![],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec![],
                 category: "core".into(),

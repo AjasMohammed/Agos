@@ -58,6 +58,13 @@ pub struct ContextWindow {
     /// The caller should take a checkpoint and flush old entries to Tier 2 memory.
     #[serde(default)]
     pub needs_checkpoint: bool,
+    /// Stable key for opt-in adapter session resume (claude-code `--resume`),
+    /// set by the kernel to a value that is constant across the task's turns
+    /// (e.g. the `TaskID`). Unlike [`Self::id`], which the context compiler
+    /// regenerates every turn, this survives recompilation so an adapter can
+    /// key a cached CLI session by conversation. `None` ⇒ resume disabled.
+    #[serde(default)]
+    pub resume_key: Option<String>,
 }
 
 /// A single entry in the context window.
@@ -400,6 +407,7 @@ impl ContextWindow {
             max_entries,
             overflow_strategy: OverflowStrategy::default(),
             needs_checkpoint: false,
+            resume_key: None,
         }
     }
 
@@ -411,6 +419,7 @@ impl ContextWindow {
             max_entries,
             overflow_strategy: strategy,
             needs_checkpoint: false,
+            resume_key: None,
         }
     }
 

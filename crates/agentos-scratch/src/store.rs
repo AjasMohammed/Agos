@@ -34,6 +34,21 @@ impl ScratchpadStore {
     /// Open or create a scratchpad database at the given path.
     pub fn new(db_path: &Path) -> Result<Self, ScratchError> {
         let conn = Connection::open(db_path)?;
+        // Scratchpad pages hold raw agent working notes in plaintext; restrict
+        // the DB file to owner read/write so it is not world-readable under a
+        // default umask. Best-effort.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) =
+                std::fs::set_permissions(db_path, std::fs::Permissions::from_mode(0o600))
+            {
+                eprintln!(
+                    "warning: failed to set 0600 on scratchpad DB {}: {e}",
+                    db_path.display()
+                );
+            }
+        }
         Self::init_schema(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),

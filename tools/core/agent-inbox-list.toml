@@ -18,16 +18,16 @@ outputs = ["entries", "count"]
 input  = "AgentInboxListIntent"
 output = "AgentInboxListResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.limit]
+[payload_schema.properties.limit]
 type        = "integer"
 minimum     = 1
 maximum     = 50
 description = "Maximum number of entries to return (default: 20, max: 50)"
 
-[input_schema.properties.unread_only]
+[payload_schema.properties.unread_only]
 type        = "boolean"
 description = "When true (default), return only unread entries"
 

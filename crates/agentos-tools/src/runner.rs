@@ -36,9 +36,12 @@ use crate::file_lock::FileLockRegistry;
 use crate::file_move::FileMove;
 use crate::file_reader::FileReader;
 use crate::file_writer::FileWriter;
+use crate::get_schedule_runs::GetScheduleRunsTool;
+use crate::get_task_logs::GetTaskLogsTool;
 use crate::hardware_info::HardwareInfoTool;
 use crate::host_package::{resolve_escalator, EscalatorPolicy, HostPackageInstallTool};
 use crate::http_client::HttpClientTool;
+use crate::list_my_schedules::ListMySchedulesTool;
 use crate::log_reader::LogReaderTool;
 use crate::memory_block_delete::MemoryBlockDeleteTool;
 use crate::memory_block_list::MemoryBlockListTool;
@@ -50,6 +53,7 @@ use crate::memory_search::MemorySearch;
 use crate::memory_stats::MemoryStats;
 use crate::memory_write::MemoryWrite;
 use crate::network_monitor::NetworkMonitorTool;
+use crate::network_sockets::NetworkSocketsTool;
 use crate::notify_user::NotifyUserTool;
 use crate::poll_agent::PollAgentTool;
 use crate::printer::PrinterTool;
@@ -65,6 +69,9 @@ use crate::schedule_recurring::ScheduleRecurringTool;
 use crate::set_timer::{CancelTimerTool, ListTimersTool, SetTimerTool};
 use crate::shell_exec::ShellExec;
 use crate::sys_monitor::SysMonitorTool;
+use crate::system_mounts::SystemMountsTool;
+use crate::system_open_files::SystemOpenFilesTool;
+use crate::system_services::SystemServicesTool;
 use crate::task_delegate::TaskDelegate;
 use crate::task_list::TaskListTool;
 use crate::task_spawn_async::TaskSpawnAsyncTool;
@@ -88,6 +95,12 @@ pub struct ToolRunner {
     file_lock_registry: Arc<FileLockRegistry>,
     /// Tools registered at runtime (e.g. via `agentos mcp attach`).
     dynamic_tools: std::sync::RwLock<HashMap<String, Arc<dyn AgentTool>>>,
+    /// Monotonic counter bumped on every dynamic registration or removal.
+    /// `&self` callers use an atomic so no lock is needed. Consumers detect
+    /// stale cached state cheaply. Ordering with the map contents is provided
+    /// by `dynamic_tools`'s own RwLock, not by this atomic — always take the
+    /// read lock before reading the revision if you need a consistent snapshot.
+    dynamic_revision: std::sync::atomic::AtomicU64,
 }
 
 impl ToolRunner {
@@ -103,6 +116,7 @@ impl ToolRunner {
             tools: HashMap::new(),
             file_lock_registry: Arc::new(FileLockRegistry::new()),
             dynamic_tools: std::sync::RwLock::new(HashMap::new()),
+            dynamic_revision: std::sync::atomic::AtomicU64::new(0),
         };
 
         // Initialize shared memory stores
@@ -142,6 +156,7 @@ impl ToolRunner {
             tools: HashMap::new(),
             file_lock_registry: Arc::new(FileLockRegistry::new()),
             dynamic_tools: std::sync::RwLock::new(HashMap::new()),
+            dynamic_revision: std::sync::atomic::AtomicU64::new(0),
         };
         runner.register_memory_tools(semantic, episodic, procedural);
         runner
@@ -218,6 +233,8 @@ impl ToolRunner {
         self.register(Box::new(LogReaderTool::new()));
         self.register(Box::new(NetworkMonitorTool::new()));
         self.register(Box::new(HardwareInfoTool::new()));
+        self.register(Box::new(crate::hardware_twin::HardwareGetTwinTool::new()));
+        self.register(Box::new(crate::hardware_twin::HardwareSetDesiredTool::new()));
         self.register(Box::new(AudioTool::new()));
         self.register(Box::new(BluetoothTool::new()));
         self.register(Box::new(DisplayConfigTool::new()));
@@ -225,6 +242,12 @@ impl ToolRunner {
         self.register(Box::new(RawUsbTool::new()));
         self.register(Box::new(UsbStorageTool::new()));
         self.register(Box::new(WebcamTool::new()));
+        // Host-introspection tools — read real host state via HAL (procfs / D-Bus),
+        // since shell-exec runs in a sandboxed PID/network namespace.
+        self.register(Box::new(NetworkSocketsTool::new()));
+        self.register(Box::new(SystemMountsTool::new()));
+        self.register(Box::new(SystemOpenFilesTool::new()));
+        self.register(Box::new(SystemServicesTool::new()));
         self.register(Box::new(ThinkTool::new()));
         self.register(Box::new(DatetimeTool::new()));
         match WebFetch::new() {
@@ -268,6 +291,11 @@ impl ToolRunner {
         self.register(Box::new(ScheduleControlTool::new()));
         self.register(Box::new(CancelOnceJobTool::new()));
         self.register(Box::new(ListOnceJobsTool::new()));
+        // Schedule self-inspection — agents query their own schedules + run
+        // history; ownership enforced kernel-side via creator_agent_id.
+        self.register(Box::new(ListMySchedulesTool::new()));
+        self.register(Box::new(GetScheduleRunsTool::new()));
+        self.register(Box::new(GetTaskLogsTool::new()));
 
         // KMC bridge tools — route to kernel capability providers.
         for name in crate::kmc_tools::KMC_TOOL_NAMES {
@@ -293,15 +321,30 @@ impl ToolRunner {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(name, Arc::from(tool));
+        self.dynamic_revision
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Remove a dynamically registered tool by name. Returns `true` if removed.
     pub fn unregister_dynamic(&self, name: &str) -> bool {
-        self.dynamic_tools
+        let removed = self
+            .dynamic_tools
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .remove(name)
-            .is_some()
+            .is_some();
+        if removed {
+            self.dynamic_revision
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        removed
+    }
+
+    /// Monotonic counter bumped on every `register_dynamic`/`unregister_dynamic`.
+    /// Callers can detect stale state without holding any lock.
+    pub fn dynamic_revision(&self) -> u64 {
+        self.dynamic_revision
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Register scratchpad tools with a shared `ScratchpadStore`.
@@ -358,6 +401,51 @@ impl ToolRunner {
         ));
     }
 
+    /// Register the agent-manual tool with the full set of live snapshots:
+    /// tool catalogue, connected channels, and installed skills. Mirrors the
+    /// MCP server inventory pattern so the `skills` section can render the
+    /// real inventory + per-skill drill-down.
+    pub fn register_agent_manual_full(
+        &mut self,
+        tool_summaries: crate::agent_manual::SharedToolSummaries,
+        connected_channels: crate::agent_manual::SharedConnectedChannels,
+        installed_skills: crate::agent_manual::SharedInstalledSkills,
+    ) {
+        self.register(Box::new(crate::agent_manual::AgentManualTool::new_full(
+            tool_summaries,
+            connected_channels,
+            installed_skills,
+        )));
+    }
+
+    /// Register the skill-prompt tool. Reads the same `installed_skills`
+    /// snapshot the agent-manual `skills` section uses, so a chat agent can
+    /// fetch a skill's full system prompt + tool allowlist on demand.
+    pub fn register_skill_prompt(
+        &mut self,
+        installed_skills: crate::agent_manual::SharedInstalledSkills,
+    ) {
+        self.register(Box::new(crate::skill_prompt::SkillPromptTool::new(
+            installed_skills,
+        )));
+    }
+
+    /// Register the skill-create tool. Lets an agent author and install a
+    /// skill at runtime; gated by `risk_class = control_plane` in the
+    /// manifest so every call requires explicit human approval.
+    pub fn register_skill_create(
+        &mut self,
+        user_skills_dir: std::path::PathBuf,
+        installer: crate::skill_create::SharedSkillInstaller,
+        installed_skills: crate::agent_manual::SharedInstalledSkills,
+    ) {
+        self.register(Box::new(crate::skill_create::SkillCreateTool::new(
+            user_skills_dir,
+            installer,
+            installed_skills,
+        )));
+    }
+
     /// Register the list-tools tool with a shared tool catalogue.
     pub fn register_list_tools(
         &mut self,
@@ -378,13 +466,17 @@ impl ToolRunner {
         )));
     }
 
-    /// Register the search-tools tool with a shared tool catalogue.
+    /// Register the search-tools tool with a shared tool catalogue and a shared
+    /// embedder for semantic ranking. Pass a no-op embedder to force the
+    /// substring-only fallback.
     pub fn register_search_tools(
         &mut self,
         tool_summaries: crate::agent_manual::SharedToolSummaries,
+        embedder: Arc<Embedder>,
     ) {
         self.register(Box::new(crate::search_tools::SearchToolsTool::new(
             tool_summaries,
+            embedder,
         )));
     }
 
@@ -597,5 +689,151 @@ impl ToolRunner {
             .unwrap_or_else(|e| e.into_inner())
             .get(tool_name)
             .map(|t| t.required_permissions())
+    }
+
+    /// Required permissions for a given tool **and a specific payload**.
+    ///
+    /// Prefer this over `get_required_permissions` for capability validation:
+    /// action-scoped tools (webcam, audio, process) are then checked against
+    /// the action actually requested instead of the union of all actions —
+    /// otherwise a `list`-only grant would implicitly satisfy `capture`.
+    pub fn get_required_permissions_for(
+        &self,
+        tool_name: &str,
+        payload: &serde_json::Value,
+    ) -> Option<Vec<(String, PermissionOp)>> {
+        if let Some(t) = self.tools.get(tool_name) {
+            return Some(t.required_permissions_for(payload));
+        }
+        self.dynamic_tools
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(tool_name)
+            .map(|t| t.required_permissions_for(payload))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct NoopTool(String);
+
+    #[async_trait]
+    impl crate::traits::AgentTool for NoopTool {
+        fn name(&self) -> &str {
+            &self.0
+        }
+        fn required_permissions(&self) -> Vec<(String, agentos_types::PermissionOp)> {
+            vec![]
+        }
+        async fn execute(
+            &self,
+            _payload: serde_json::Value,
+            _ctx: crate::traits::ToolExecutionContext,
+        ) -> Result<serde_json::Value, agentos_types::AgentOSError> {
+            Ok(serde_json::json!({}))
+        }
+    }
+
+    /// A tool whose required permissions differ per action, mirroring webcam/audio.
+    struct ActionScopedTool;
+
+    #[async_trait]
+    impl crate::traits::AgentTool for ActionScopedTool {
+        fn name(&self) -> &str {
+            "action-scoped"
+        }
+        fn required_permissions(&self) -> Vec<(String, agentos_types::PermissionOp)> {
+            vec![
+                ("scoped.list".to_string(), agentos_types::PermissionOp::Read),
+                (
+                    "scoped.capture".to_string(),
+                    agentos_types::PermissionOp::Execute,
+                ),
+            ]
+        }
+        fn required_permissions_for(
+            &self,
+            payload: &serde_json::Value,
+        ) -> Vec<(String, agentos_types::PermissionOp)> {
+            match payload.get("action").and_then(serde_json::Value::as_str) {
+                Some("capture") => vec![(
+                    "scoped.capture".to_string(),
+                    agentos_types::PermissionOp::Execute,
+                )],
+                _ => vec![("scoped.list".to_string(), agentos_types::PermissionOp::Read)],
+            }
+        }
+        async fn execute(
+            &self,
+            _payload: serde_json::Value,
+            _ctx: crate::traits::ToolExecutionContext,
+        ) -> Result<serde_json::Value, agentos_types::AgentOSError> {
+            Ok(serde_json::json!({}))
+        }
+    }
+
+    #[test]
+    fn required_permissions_for_returns_the_action_scoped_subset() {
+        let runner = ToolRunner {
+            tools: std::collections::HashMap::new(),
+            file_lock_registry: Arc::new(crate::file_lock::FileLockRegistry::new()),
+            dynamic_tools: std::sync::RwLock::new(std::collections::HashMap::new()),
+            dynamic_revision: std::sync::atomic::AtomicU64::new(0),
+        };
+        runner.register_dynamic(Box::new(ActionScopedTool));
+
+        let list_perms = runner
+            .get_required_permissions_for("action-scoped", &serde_json::json!({"action": "list"}))
+            .unwrap();
+        assert_eq!(
+            list_perms,
+            vec![("scoped.list".to_string(), agentos_types::PermissionOp::Read)]
+        );
+
+        let capture_perms = runner
+            .get_required_permissions_for(
+                "action-scoped",
+                &serde_json::json!({"action": "capture"}),
+            )
+            .unwrap();
+        assert_eq!(
+            capture_perms,
+            vec![(
+                "scoped.capture".to_string(),
+                agentos_types::PermissionOp::Execute
+            )]
+        );
+
+        // The static union remains a superset of every per-action subset.
+        let union = runner.get_required_permissions("action-scoped").unwrap();
+        for perm in list_perms.iter().chain(capture_perms.iter()) {
+            assert!(union.contains(perm), "union missing {perm:?}");
+        }
+    }
+
+    #[test]
+    fn dynamic_revision_bumps_on_register_and_unregister() {
+        // Build a ToolRunner without touching the file system or embedding model.
+        let runner = ToolRunner {
+            tools: std::collections::HashMap::new(),
+            file_lock_registry: Arc::new(crate::file_lock::FileLockRegistry::new()),
+            dynamic_tools: std::sync::RwLock::new(std::collections::HashMap::new()),
+            dynamic_revision: std::sync::atomic::AtomicU64::new(0),
+        };
+        assert_eq!(runner.dynamic_revision(), 0);
+        runner.register_dynamic(Box::new(NoopTool("dyn-a".into())));
+        assert_eq!(runner.dynamic_revision(), 1);
+        runner.register_dynamic(Box::new(NoopTool("dyn-b".into())));
+        assert_eq!(runner.dynamic_revision(), 2);
+        let removed = runner.unregister_dynamic("dyn-a");
+        assert!(removed);
+        assert_eq!(runner.dynamic_revision(), 3);
+        // Removing a non-existent name doesn't bump.
+        let not_removed = runner.unregister_dynamic("nonexistent");
+        assert!(!not_removed);
+        assert_eq!(runner.dynamic_revision(), 3);
     }
 }

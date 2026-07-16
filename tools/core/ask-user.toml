@@ -17,31 +17,31 @@ outputs = ["response", "channel", "responded_at"]
 input  = "AskUserIntent"
 output = "AskUserResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["question"]
 
-[input_schema.properties.question]
+[payload_schema.properties.question]
 type        = "string"
 description = "The question to present to the user"
 
-[input_schema.properties.options]
+[payload_schema.properties.options]
 type        = "array"
 description = "Optional list of predefined choices (free-text always allowed)"
 items.type  = "string"
 
-[input_schema.properties.timeout_secs]
+[payload_schema.properties.timeout_secs]
 type        = "integer"
 description = "Seconds to wait before auto-denying (default: 300)"
 minimum     = 10
 maximum     = 86400
 
-[input_schema.properties.priority]
+[payload_schema.properties.priority]
 type        = "string"
 enum        = ["info", "warning", "urgent", "critical"]
 description = "Notification importance level (default: info)"
 
-[input_schema.properties.auto_action]
+[payload_schema.properties.auto_action]
 type        = "string"
 description = "Text returned to the agent when the timeout fires (default: auto_denied)"
 

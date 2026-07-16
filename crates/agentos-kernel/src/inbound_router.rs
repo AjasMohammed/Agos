@@ -58,6 +58,16 @@ pub struct InboundRouter {
     /// commands. Without this, anyone who can DM the bot could resolve
     /// pending escalations.
     pairing_manager: Arc<PairingManager>,
+    /// Vault, for resolving a channel's bot-token credential when downloading
+    /// inbound media (Telegram getFile needs the token).
+    vault: Arc<agentos_vault::SecretsVault>,
+    /// Persists downloaded inbound media; shared slot with the kernel so a
+    /// post-boot `set_attachment_sink` is honored.
+    attachment_sink: Arc<std::sync::RwLock<Arc<dyn crate::attachment_sink::AttachmentSink>>>,
+    /// HTTP client for media downloads (getFile + file fetch) and transcription.
+    http_client: reqwest::Client,
+    /// Speech-to-text settings for inbound voice/audio (disabled by default).
+    transcription: crate::config::TranscriptionSettings,
     rx: mpsc::Receiver<InboundMessage>,
     /// Per-channel rate limiter: (message count, window start instant).
     rate_limiter: HashMap<ChannelInstanceID, (u32, Instant)>,
@@ -75,6 +85,9 @@ impl InboundRouter {
         audit: Arc<AuditLog>,
         escalation_manager: Arc<EscalationManager>,
         pairing_manager: Arc<PairingManager>,
+        vault: Arc<agentos_vault::SecretsVault>,
+        attachment_sink: Arc<std::sync::RwLock<Arc<dyn crate::attachment_sink::AttachmentSink>>>,
+        transcription: crate::config::TranscriptionSettings,
         rx: mpsc::Receiver<InboundMessage>,
     ) -> Self {
         Self {
@@ -85,6 +98,13 @@ impl InboundRouter {
             audit,
             escalation_manager,
             pairing_manager,
+            vault,
+            attachment_sink,
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .unwrap_or_default(),
+            transcription,
             rx,
             rate_limiter: HashMap::new(),
             last_prune: Instant::now(),
@@ -100,7 +120,343 @@ impl InboundRouter {
         }
     }
 
-    async fn route(&mut self, msg: InboundMessage) -> Result<(), AgentOSError> {
+    /// Dispatch inbound media enrichment by channel: Telegram downloads via
+    /// `getFile` (bot token); other channels download the platform-provided URLs
+    /// extracted into `pending_media` (SSRF-guarded). Both store via the sink and
+    /// surface images to the vision path.
+    async fn enrich_inbound_media(&self, msg: &mut InboundMessage) {
+        if msg.channel == DeliveryChannel::custom(DeliveryChannel::TELEGRAM) {
+            self.enrich_telegram_media(msg).await;
+        } else if msg.channel == DeliveryChannel::custom(DeliveryChannel::WHATSAPP) {
+            self.enrich_whatsapp_media(msg).await;
+        } else if !msg.pending_media.is_empty() {
+            self.enrich_remote_media(msg).await;
+        }
+    }
+
+    /// WhatsApp media: resolve each media `id` → temporary CDN URL via the Graph
+    /// API (step 1, authenticated), then download the bytes (step 2, SSRF-guarded,
+    /// token gated to `fbsbx.com`). Best-effort per attachment.
+    async fn enrich_whatsapp_media(&self, msg: &mut InboundMessage) {
+        use crate::adapters::telegram::ext_for_mime;
+        use crate::adapters::whatsapp::whatsapp_media_refs;
+        use crate::media_download::MediaAuth;
+
+        let refs = whatsapp_media_refs(&msg.raw);
+        if refs.is_empty() {
+            return;
+        }
+        let credential_key = match self
+            .channel_registry
+            .get_by_id(&msg.channel_instance_id)
+            .await
+        {
+            Ok(Some(ch)) => ch.credential_key,
+            _ => return,
+        };
+        if credential_key.is_empty() {
+            return;
+        }
+        let token = match self.vault.get(&credential_key).await {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+
+        // Dedicated no-redirect client for the token-bearing Graph call, so a
+        // redirect can never carry the access token off graph.facebook.com.
+        let graph_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| self.http_client.clone());
+
+        for r in refs.into_iter().take(5) {
+            // Step 1: media id → temporary URL (Graph API, Bearer token).
+            let meta_url = format!("https://graph.facebook.com/v18.0/{}", r.media_id);
+            let temp_url = match graph_client
+                .get(&meta_url)
+                .bearer_auth(token.as_str())
+                .send()
+                .await
+            {
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Ok(v) => v["url"].as_str().map(String::from),
+                    Err(_) => None,
+                },
+                Err(_) => None,
+            };
+            let Some(temp_url) = temp_url else {
+                tracing::warn!(media_id = %r.media_id, "WhatsApp media id resolution failed");
+                continue;
+            };
+            // Step 2: download bytes, token gated to Meta's CDN host.
+            let auth = MediaAuth {
+                bearer: token.as_str(),
+                trusted_host_suffix: "fbsbx.com",
+            };
+            match crate::media_download::download_remote_media(
+                &temp_url,
+                crate::media_download::MAX_REMOTE_MEDIA_BYTES,
+                Some(auth),
+            )
+            .await
+            {
+                Ok((bytes, sniffed)) => {
+                    let mime = if r.mime.trim().is_empty() {
+                        sniffed
+                    } else {
+                        r.mime.clone()
+                    };
+                    let name = if r.filename.trim().is_empty() {
+                        format!("whatsapp-{}.{}", r.kind, ext_for_mime(&mime))
+                    } else {
+                        r.filename.clone()
+                    };
+                    self.store_media(msg, &name, &mime, bytes, &r.kind).await;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "WhatsApp media download failed");
+                }
+            }
+        }
+    }
+
+    async fn enrich_telegram_media(&self, msg: &mut InboundMessage) {
+        use crate::adapters::telegram::{
+            download_telegram_file, ext_for_mime, telegram_media_ref, TelegramMessage,
+            TELEGRAM_MAX_DOWNLOAD_BYTES,
+        };
+
+        // `raw` holds the serialized TelegramMessage for message updates; for
+        // callback queries it won't deserialize, so this returns early.
+        let tg: TelegramMessage = match serde_json::from_value(msg.raw.clone()) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let media = match telegram_media_ref(&tg) {
+            Some(m) => m,
+            None => return,
+        };
+
+        let credential_key = match self
+            .channel_registry
+            .get_by_id(&msg.channel_instance_id)
+            .await
+        {
+            Ok(Some(ch)) => ch.credential_key,
+            _ => return,
+        };
+        if credential_key.is_empty() {
+            return;
+        }
+        let token = match self.vault.get(&credential_key).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "inbound media: bot token unavailable; skipping download");
+                return;
+            }
+        };
+
+        let (bytes, mime) = match download_telegram_file(
+            &self.http_client,
+            token.as_str(),
+            &media.file_id,
+            TELEGRAM_MAX_DOWNLOAD_BYTES,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "inbound media download failed");
+                return;
+            }
+        };
+
+        let name = media
+            .filename
+            .clone()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| {
+                format!(
+                    "telegram-{}.{}",
+                    media.kind_label.replace(' ', "-"),
+                    ext_for_mime(&mime)
+                )
+            });
+
+        // Transcribe voice/audio when enabled, so the agent reads the words.
+        // (Hermes-style "transcribe, don't drop".) Best-effort: on failure the
+        // media note + stored file still reach the agent.
+        let is_audio = matches!(media.kind_label.as_str(), "voice message" | "audio");
+        if is_audio && self.transcription.enabled {
+            // Self-bounded inner timeout so the transcription call is capped
+            // regardless of the caller's wrapper (the outer enrich timeout).
+            let fut = crate::transcription::transcribe_audio(
+                &self.http_client,
+                &self.transcription,
+                bytes.clone(),
+                &name,
+            );
+            match tokio::time::timeout(std::time::Duration::from_secs(15), fut).await {
+                Ok(Ok(transcript)) => {
+                    msg.text
+                        .push_str(&format!("\n[Voice transcript]: {transcript}"));
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "inbound voice transcription failed");
+                }
+                Err(_) => {
+                    tracing::warn!("inbound voice transcription timed out");
+                }
+            }
+        }
+
+        self.store_media(msg, &name, &mime, bytes, &media.kind_label)
+            .await;
+    }
+
+    /// Download + store remote media URLs (Discord CDN, etc.) extracted into
+    /// `pending_media`, under an SSRF guard. Each entry is best-effort.
+    async fn enrich_remote_media(&self, msg: &mut InboundMessage) {
+        use crate::adapters::telegram::ext_for_mime;
+        use crate::media_download::MediaAuth;
+        /// Cap on remote media downloaded per inbound message — bounds the
+        /// sequential work done on the shared inbound loop within the 20s enrich
+        /// budget (mirrors the multimodal "5 images/turn" cap). Fully off-loop
+        /// enrichment is the planned follow-up for higher volumes.
+        const MAX_INBOUND_MEDIA_PER_MSG: usize = 5;
+
+        // Resolve, for auth-requiring kinds, the channel's bot token plus the
+        // single host suffix the token may be sent to (never leaked elsewhere):
+        //   - Slack: static `slack.com`.
+        //   - Mattermost/Matrix: the channel's own `server_url` host (dynamic,
+        //     self-hosted), so the token only ever reaches that server.
+        let auth_token: Option<(String, String)> = match self
+            .channel_registry
+            .get_by_id(&msg.channel_instance_id)
+            .await
+        {
+            Ok(Some(ch)) if !ch.credential_key.is_empty() => {
+                let suffix: Option<String> = match &ch.kind {
+                    ChannelKind::Slack => Some("slack.com".to_string()),
+                    // WhatsApp media temp URLs live on Meta's CDN (lookaside.fbsbx.com)
+                    // and need the Graph access token to download.
+                    ChannelKind::WhatsApp => Some("fbsbx.com".to_string()),
+                    ChannelKind::Custom(k) if k == "mattermost" || k == "matrix" => ch
+                        .server_url
+                        .as_deref()
+                        .and_then(|u| reqwest::Url::parse(u).ok())
+                        .and_then(|u| u.host_str().map(String::from)),
+                    _ => None,
+                };
+                match suffix {
+                    Some(s) => self
+                        .vault
+                        .get(&ch.credential_key)
+                        .await
+                        .ok()
+                        .map(|t| (t.as_str().to_string(), s)),
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+
+        // Take ownership of the list so we can mutate `msg` while iterating.
+        let pending = std::mem::take(&mut msg.pending_media);
+        for m in pending.into_iter().take(MAX_INBOUND_MEDIA_PER_MSG) {
+            let auth = auth_token.as_ref().map(|(tok, suffix)| MediaAuth {
+                bearer: tok,
+                trusted_host_suffix: suffix,
+            });
+            match crate::media_download::download_remote_media(
+                &m.url,
+                crate::media_download::MAX_REMOTE_MEDIA_BYTES,
+                auth,
+            )
+            .await
+            {
+                Ok((bytes, sniffed_mime)) => {
+                    let mime = m
+                        .mime
+                        .clone()
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or(sniffed_mime);
+                    let name = m
+                        .filename
+                        .clone()
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or_else(|| format!("attachment.{}", ext_for_mime(&mime)));
+                    self.store_media(msg, &name, &mime, bytes, "attachment")
+                        .await;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "inbound remote media download failed");
+                }
+            }
+        }
+    }
+
+    /// Store downloaded media via the attachment sink, audit it, and surface it
+    /// to the agent — images as `media_file_ids` (→ vision), other files as a
+    /// stored-id text note. Best-effort: a declining sink is logged at debug.
+    async fn store_media(
+        &self,
+        msg: &mut InboundMessage,
+        name: &str,
+        mime: &str,
+        bytes: Vec<u8>,
+        media_kind: &str,
+    ) {
+        let sink = self
+            .attachment_sink
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let byte_len = bytes.len();
+        match sink.store(name, mime, bytes).await {
+            Ok(file_id) => {
+                // Audit: external bytes were downloaded and persisted to disk.
+                let _ = self.audit.append(AuditEntry {
+                    timestamp: Utc::now(),
+                    trace_id: TraceID::new(),
+                    event_type: AuditEventType::InboundMessageReceived,
+                    agent_id: None,
+                    task_id: None,
+                    tool_id: None,
+                    details: serde_json::json!({
+                        "kind": "inbound_media_stored",
+                        "channel_id": msg.channel_instance_id.to_string(),
+                        "file_id": file_id.clone(),
+                        "name": name,
+                        "mime": mime,
+                        "bytes": byte_len,
+                        "media_kind": media_kind,
+                    }),
+                    severity: AuditSeverity::Info,
+                    reversible: false,
+                    rollback_ref: None,
+                });
+                if mime.starts_with("image/") {
+                    // Carried into the chat context as a ContentPart::Image so
+                    // vision-capable agents see it (adapter resolves the FileRef;
+                    // non-vision agents get an automatic text stub).
+                    msg.media_file_ids.push((file_id, mime.to_string()));
+                } else {
+                    // Non-image files have no vision path yet — note the stored id
+                    // so the agent can reference it.
+                    msg.text.push_str(&format!(
+                        "\n[Attachment stored — file id: {file_id}, name: {name}, type: {mime}]"
+                    ));
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "attachment sink declined; media not persisted");
+            }
+        }
+    }
+
+    async fn route(&mut self, mut msg: InboundMessage) -> Result<(), AgentOSError> {
         // Prune stale rate-limiter entries at most once per minute regardless of map size.
         if self.last_prune.elapsed().as_secs() >= 60 {
             self.rate_limiter
@@ -154,6 +510,26 @@ impl InboundRouter {
                         .await;
                 }
             }
+        }
+
+        // Download + persist any inbound media (best-effort) and annotate the
+        // message text with a stored file reference. Runs before routing so the
+        // enriched text reaches questions, chat, and the inbox alike. Bounded by
+        // a timeout so a slow/large fetch cannot stall the shared inbound loop
+        // (which also carries /stop, /approve, and question replies); on timeout
+        // the parse-time media note still reaches the agent. (Fully off-loop
+        // enrichment is a planned follow-up — see telegram-media-pipeline.)
+        if tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            self.enrich_inbound_media(&mut msg),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                channel_id = %msg.channel_instance_id,
+                "inbound media enrichment timed out; forwarding text-only note"
+            );
         }
 
         if let Some(notif_id) = msg.reply_to_notification_id {
@@ -253,9 +629,60 @@ impl InboundRouter {
                 if !ch.credential_key.is_empty() {
                     let text = msg.text.trim();
                     if !text.is_empty() {
+                        // Sender authorization: free-text chat spawns a
+                        // tool-capable agent, so the sender MUST be on the
+                        // channel's pairing allowlist — exactly like the
+                        // `/approve` path. Without this, any member of a shared
+                        // Slack/Discord channel the bot is in could drive the
+                        // agent. Unpaired senders get a self-service pairing code
+                        // and the message is dropped (no agent spawned).
+                        let channel_id_str = msg.channel_instance_id.to_string();
+                        if !self
+                            .pairing_manager
+                            .is_allowed(&channel_id_str, &msg.external_sender_id)
+                            .await
+                        {
+                            tracing::warn!(
+                                channel_id = %msg.channel_instance_id,
+                                sender = %msg.external_sender_id,
+                                "Dropping channel chat from unpaired sender"
+                            );
+                            let code = self
+                                .pairing_manager
+                                .generate_code(&channel_id_str, &msg.external_sender_id)
+                                .await;
+                            self.send_reply(
+                                &msg,
+                                format!(
+                                    "🔒 This sender is not paired with AgentOS. Reply \
+                                     `/pair {code}` to start chatting with the agent. \
+                                     Code expires in 10 minutes."
+                                ),
+                            )
+                            .await;
+                            return Ok(());
+                        }
+                        // Carry any stored inbound images into the chat as vision
+                        // parts so a vision-capable agent can see them.
+                        let user_parts = if msg.media_file_ids.is_empty() {
+                            None
+                        } else {
+                            let mut parts = vec![agentos_types::ContentPart::Text {
+                                text: text.to_string(),
+                            }];
+                            for (file_id, mime) in &msg.media_file_ids {
+                                parts.push(agentos_types::ContentPart::Image {
+                                    mime: mime.clone(),
+                                    source: agentos_types::ImageSource::FileRef {
+                                        file_id: file_id.clone(),
+                                    },
+                                });
+                            }
+                            Some(parts)
+                        };
                         match self
                             .chat_bridge
-                            .channel_chat(msg.channel_instance_id, agent, text)
+                            .channel_chat(msg.channel_instance_id, agent, text, user_parts)
                             .await
                         {
                             Ok(answer) => {
@@ -478,7 +905,7 @@ impl InboundRouter {
                 }
                 match self
                     .chat_bridge
-                    .channel_chat(msg.channel_instance_id, agent, prompt)
+                    .channel_chat(msg.channel_instance_id, agent, prompt, None)
                     .await
                 {
                     Ok(answer) => {
@@ -627,7 +1054,10 @@ impl InboundRouter {
                 command = cmd,
                 "Rejecting approval command from unpaired sender"
             );
-            let _ = self.audit.append(AuditEntry {
+            // W10: this is an approval-authorization event — a silently
+            // dropped audit write here would erase the record of a rejected
+            // privileged command. Log on failure rather than swallowing it.
+            if let Err(e) = self.audit.append(AuditEntry {
                 timestamp: Utc::now(),
                 trace_id: TraceID::new(),
                 event_type: AuditEventType::ActionForbidden,
@@ -644,7 +1074,14 @@ impl InboundRouter {
                 severity: AuditSeverity::Warn,
                 reversible: false,
                 rollback_ref: None,
-            });
+            }) {
+                tracing::error!(
+                    error = %e,
+                    escalation_id = id,
+                    "Failed to persist ActionForbidden audit entry for unpaired \
+                     approval command"
+                );
+            }
             // Issue a fresh pairing code so the operator can self-
             // onboard with `/pair <code>` from this same channel.
             // Without this UX, paired-sender enforcement is a dead-end
@@ -704,7 +1141,9 @@ impl InboundRouter {
                 } else {
                     AuditEventType::PermissionDenied
                 };
-                let _ = self.audit.append(AuditEntry {
+                // W10: the audit trail of who approved/denied a privileged
+                // escalation via channel must not vanish on a write failure.
+                if let Err(e) = self.audit.append(AuditEntry {
                     timestamp: Utc::now(),
                     trace_id: TraceID::new(),
                     event_type: event,
@@ -722,7 +1161,14 @@ impl InboundRouter {
                     severity: AuditSeverity::Info,
                     reversible: false,
                     rollback_ref: None,
-                });
+                }) {
+                    tracing::error!(
+                        error = %e,
+                        escalation_id = id,
+                        resolution = %resolution,
+                        "Failed to persist escalation-resolution audit entry"
+                    );
+                }
                 let symbol = if resolution == "approved" {
                     "✅"
                 } else {
@@ -777,6 +1223,7 @@ impl InboundRouter {
             read: false,
             thread_id: Some(format!("channel:{}", original.channel_instance_id)),
             reply_to_external_id: None,
+            attachment: None,
         };
         // Route back to the originating channel only — not all registered adapters.
         let instance_id = original.channel_instance_id.to_string();
@@ -845,6 +1292,7 @@ impl InboundRouter {
             read: false,
             thread_id: Some(format!("channel:{}", original.channel_instance_id)),
             reply_to_external_id: None,
+            attachment: None,
         };
         // Route back to the originating channel only — not all registered adapters.
         let instance_id = original.channel_instance_id.to_string();

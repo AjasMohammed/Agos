@@ -19,54 +19,54 @@ outputs = ["job_id", "job_name", "fires_at"]
 input  = "ScheduleOnceIntent"
 output = "ScheduleOnceResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 type        = "string"
 description = "Optional unique name for this once-job (used to cancel or identify it). When omitted, the kernel auto-generates 'auto-<mode>-<8hex>'."
 
-[input_schema.properties.mode]
+[payload_schema.properties.mode]
 type        = "string"
 enum        = ["task", "notify", "tool"]
 description = "Action to take when the job fires. 'task' runs an LLM prompt (default), 'notify' delivers a user notification without involving the LLM, 'tool' invokes a single tool directly."
 default     = "task"
 
-[input_schema.properties.task_prompt]
+[payload_schema.properties.task_prompt]
 type        = "string"
 description = "Task prompt to run on the agent when the job fires (required when mode='task')"
 
-[input_schema.properties.notify_subject]
+[payload_schema.properties.notify_subject]
 type        = "string"
 description = "Notification subject line (required when mode='notify')"
 
-[input_schema.properties.notify_body]
+[payload_schema.properties.notify_body]
 type        = "string"
 description = "Notification body text (required when mode='notify')"
 
-[input_schema.properties.notify_priority]
+[payload_schema.properties.notify_priority]
 type        = "string"
 enum        = ["info", "warning", "urgent", "critical"]
 description = "Notification priority level (optional when mode='notify', default 'info')"
 default     = "info"
 
-[input_schema.properties.tool]
+[payload_schema.properties.tool]
 type        = "string"
 description = "Name of the tool to invoke when the job fires (required when mode='tool')"
 
-[input_schema.properties.tool_args]
+[payload_schema.properties.tool_args]
 type        = "object"
 description = "Fixed argument payload passed to the tool (optional when mode='tool')"
 
-[input_schema.properties.agent_name]
+[payload_schema.properties.agent_name]
 type        = "string"
 description = "Name of the agent that will run the task. Defaults to the calling agent."
 
-[input_schema.properties.fire_at]
+[payload_schema.properties.fire_at]
 type        = "string"
 description = "Absolute fire time as ISO 8601 / RFC 3339 (e.g. '2026-04-19T15:00:00Z'). Mutually exclusive with delay_secs."
 
-[input_schema.properties.delay_secs]
+[payload_schema.properties.delay_secs]
 type        = "integer"
 description = "Relative delay in seconds from now (1–86400). Mutually exclusive with fire_at."
 minimum     = 1
@@ -79,3 +79,12 @@ gpu           = false
 max_memory_mb = 4
 max_cpu_ms    = 100
 syscalls      = []
+
+[[examples]]
+description = "Send a reminder notification in 1 hour"
+[examples.payload]
+name = "hourly-reminder"
+delay_secs = 3600
+mode = "notify"
+notify_subject = "Reminder"
+notify_body = "Check the build status"

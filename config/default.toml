@@ -7,6 +7,15 @@ context_window_token_budget = 32000
 # SQLite DB for persisted runtime state (tasks, escalations, cost snapshots).
 state_db_path = "/tmp/agentos/data/kernel_state.db"
 
+# Port for the /healthz, /readyz, and /metrics HTTP endpoints (0 = disabled).
+# Used by `agentos healthz` and Docker/k8s probes. Give each kernel instance a
+# distinct port if you run more than one on the same host, or they will collide
+# (the second instance logs a bind error and serves no health endpoint).
+health_port = 9091
+# Bind address for the health/metrics server. Loopback by default — /metrics
+# exposes operational internals. Set "0.0.0.0" to expose beyond this host.
+health_bind = "127.0.0.1"
+
 # Sandbox execution policy for tool calls.
 # "trust_aware" (default): Core tools run in-process, Community/Verified tools sandboxed.
 # "always": All sandbox-eligible tools run in sandbox children (legacy behavior).
@@ -75,7 +84,8 @@ vault_path = "/tmp/agentos/vault/secrets.db"
 # Development default path (ephemeral on many systems).
 log_path = "/tmp/agentos/data/audit.db"
 # Maximum rows to retain (0 = unlimited). Older rows are pruned on each 10-minute sweep.
-max_audit_entries = 0
+# Capped by default so the audit DB can't grow without bound; raise per deployment.
+max_audit_entries = 200000
 # Number of recent entries to verify on startup (0 = full chain, may be slow for large logs).
 verify_last_n_entries = 1000
 
@@ -85,12 +95,26 @@ core_tools_dir = "/tmp/agentos/tools/core"
 user_tools_dir = "/tmp/agentos/tools/user"
 data_dir = "/tmp/agentos/data"
 
+[tools.discovery]
+# Tier-0 tool index shown in every system prompt: category counts plus this many
+# usage-ranked tool names per category, soft-capped by l0_max_tokens.
+l0_max_names_per_category = 5
+l0_max_tokens = 200
+# Scope the native tool array to task-relevant categories (frontier models).
+# Anything scoped out is still reachable via search-tools. Set false to always
+# send every tool. classifier: "heuristic" (default) | "heuristic+semantic" | "llm".
+default_scoping = true
+scoping_classifier = "heuristic"
+
 [tools.workspace]
 # Additional directories the agent can access beyond data_dir.
 # Each entry must be an absolute path pointing to a project or shared directory.
 # System roots (/etc, /var, /root, /home itself, /) are rejected at startup.
 # Example: allowed_paths = ["/home/user/project", "/shared/datasets"]
-allowed_paths = ["/media", "/run/media"]
+# Empty by default: bare mount roots like /media are rejected by startup
+# validation (WORKSPACE_BARE_FORBIDDEN), so shipping them here makes the
+# default config fail to boot. Add a specific project subdirectory instead.
+allowed_paths = []
 
 # host-package-install: install host OS packages via system package manager.
 # DISABLED by default. The tool runs OUTSIDE the bwrap sandbox via `pkexec` or
@@ -123,6 +147,43 @@ allowlist = [
     "docker.io",
 ]
 
+# env-install: install packages into per-agent workspaces (NOT the host).
+# Workspaces live at {data_dir}/workspaces/{agent_id}/{name}/ and are
+# isolated per-agent. Network is permitted only for the install duration.
+#
+# Policy values:
+#   "curated" — package must be on the allowlist below (default)
+#   "open"    — any package allowed (dev/lab use only)
+#   "locked"  — installation disabled
+[env]
+python_policy = "curated"
+nodejs_policy = "curated"
+rust_policy   = "curated"
+system_policy = "locked"          # host packages go through host-package-install
+default_quota_bytes = 2147483648  # 2 GiB (informational, not enforced)
+install_timeout_secs = 120
+
+python_allowlist = [
+    "flask", "requests", "pytest", "numpy", "pandas",
+    "pyyaml", "beautifulsoup4", "httpx", "fastapi",
+    "pydantic", "rich", "typer", "uvicorn", "sqlalchemy",
+]
+nodejs_allowlist = [
+    "express", "jest", "axios", "lodash", "zod",
+    "dotenv", "chalk", "commander",
+]
+rust_allowlist = [
+    "serde", "tokio", "anyhow", "clap", "tracing",
+]
+
+# Hardware Abstraction Layer policy.
+[hal.raw_usb]
+# Allowlist of raw-USB devices agents may open, as "vid:pid" hex strings.
+# The raw-usb driver is fail-closed: with an empty list every
+# open/read/write/control is denied. Requires the `raw-usb` build feature.
+# allow = ["0483:5740"]
+allow = []
+
 [bus]
 # Development default socket path.
 socket_path = "/tmp/agentos/agentos.sock"
@@ -151,9 +212,32 @@ max_tokens = 8192
 # Context window size passed to Ollama as num_ctx. Many modern models support 32K+.
 # Set to match your model's actual context size (e.g. 131072 for llama3.1:8b-instruct-q8_0).
 ollama_context_window = 32768
+# Opt-in: let the `claude-code` adapter --resume the prior CLI session and send
+# only the new turn's delta instead of replaying the full flattened context each
+# call (lower latency/cost on long tasks). Off by default. Safe to enable: every
+# resume is guarded by a prefix fingerprint that falls back to a full send on any
+# divergence, and the cached session is deleted on task completion.
+claude_code_resume = false
+# Optional provider fallback chain applied to every agent's primary adapter.
+# When the primary provider errors (including mid-stream), the kernel fails over
+# to these in order. Empty by default. Useful when the primary is a flaky free
+# tier (e.g. NVIDIA) — fail over to a reliable local or paid model.
+# NOTE: mixing native-tool-calling providers (e.g. Anthropic) with non-native
+# ones (e.g. a local Ollama model) disables native tool calling for the whole
+# chain — every provider then receives JSON-in-markdown tool guidance instead.
+# [[llm.fallback_models]]
+# provider = "ollama"          # ollama | openai | anthropic | gemini | <catalog name> | custom:<name>
+# model = "llama3.1:8b"
+# # base_url = "http://localhost:11434"   # optional; defaults resolve from catalog/config
 
 [memory]
 model_cache_dir = "models"
+# Max seconds for embedding-model init at boot (first boot downloads ~23 MB).
+# On timeout/failure the kernel logs a warning and continues with a zero-vector
+# embedder (semantic retrieval off, FTS5 lexical search unaffected) instead of
+# hanging boot on a stalled download. Set disable_embedder = true to skip
+# the model entirely (e.g. low-RAM hosts, onnxruntime-incompatible CPUs).
+embedder_init_timeout_secs = 120
 
 [memory.extraction]
 enabled = true
@@ -174,6 +258,12 @@ enabled = true
 max_tokens = 4096
 max_versions = 50
 db_path = "context_memory.db"
+
+[memory.lifecycle]
+# Reinforcement: retrieved memories are touched (last_used_at / use_count) on
+# injection, and procedures injected into a task get success/failure feedback
+# (Laplace-smoothed confidence recompute) when the task completes.
+reinforcement_enabled = true
 
 [context_budget]
 total_tokens = 128000
@@ -209,6 +299,17 @@ log_level = "info"
 # Output format: "text" (human-readable, default) or "json" (structured, for log aggregators like
 # Loki, Datadog, or Elasticsearch). In production, set to "json".
 log_format = "text"
+
+# Boot pre-flight checks — run before any subsystem starts so a misconfigured
+# host fails fast with one precise diagnostic instead of crashing deep in init.
+# (Dev defaults below; production profiles raise min_free_disk_mb.)
+[preflight]
+# Minimum free disk (MB) on the data-dir partition required to boot.
+# Set to 0 to disable the disk check.
+min_free_disk_mb = 512
+# Probe that the audit/vault/state DB dirs, the log dir, and the bus-socket dir
+# are writable before subsystem init.
+check_db_writable = true
 
 [otel]
 enabled = false
@@ -301,6 +402,32 @@ url = "https://registry.agentos.dev"
 enabled = false
 host = "127.0.0.1"
 port = 8080
+# Serve the interactive API-docs UI at GET /api/v1/docs. The OpenAPI contract
+# at GET /api/v1/openapi.json stays public regardless. Disable on public deployments.
+docs_enabled = true
+# Operator credential for POST /api/v1/auth/login. When unset/empty, login is
+# disabled (503). Set this to let a browser SPA exchange it for a scoped, expiring
+# key. Prefer an env-substituted value over committing a secret here.
+# operator_token = "change-me"
+# Cross-origin allowlist for the REST API (full origins: scheme + host + port).
+# Empty = same-origin only. Add your SPA dev origin, e.g. "http://localhost:5173".
+cors_allowed_origins = []
+# Enable POST /api/v1/auth/refresh (rotate a valid key for a fresh one).
+refresh_enabled = false
+# Allow PUT /api/v1/config/{key} to write the config file at runtime. Off by
+# default; enable only on trusted control-plane deployments.
+config_writable = false
+
+[web]
+# Web UI authentication. The login token is resolved at startup in this order:
+#   1. $AGENTOS_WEB_TOKEN environment variable (best for systemd/Docker — never
+#      written to disk).
+#   2. auth_token set here.
+#   3. A token generated once on first boot and persisted to {data_dir}/web_token
+#      (mode 0600), then reused on every restart.
+# This makes the token stable across restarts instead of regenerating each boot.
+# Prefer an env-substituted value over committing a secret here.
+# auth_token = "change-me"
 
 [mcp]
 # List of MCP servers to connect at kernel boot.
@@ -315,6 +442,11 @@ port = 8080
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 servers = []
 
+# NOT YET WIRED — keys in [runtime] are parsed but currently IGNORED by the
+# kernel. KernelConfig has no `runtime` field, so editing anything below has no
+# effect yet (the container allowed_images list is hardcoded in kernel.rs).
+# The block is retained to preserve design intent until the runtime backend is
+# wired up.
 [runtime]
 # Container runtime backend: "docker" (default) | "none" (disabled)
 backend = "docker"
@@ -337,6 +469,77 @@ allowed_images = [
     "alpine:3.19",
 ]
 
+[user_adaptation]
+# Deterministic post-task user preference proposal generator.
+# Disabled by default; when enabled, proposals are queued for operator review.
+enabled = false
+model = "compact"
+min_confidence = 0.5
+max_proposals_per_task = 3
+# Pending proposals older than this are auto-expired (status='expired',
+# history preserved) by the TimeoutChecker sweep.
+proposal_ttl_days = 30
+
+[user_profile]
+# Structured user-profile store (proactive personalization). Accepted
+# preference proposals are promoted here as durable, categorized entries that
+# later phases read for L0 (pinned, in-context) and L1 (retrieved) tiers.
+# The store itself is enabled by default (harmless when empty); the separate
+# read-back-into-context gate is default-off (see the personalization plan).
+enabled = true
+# Optional SQLite path override; defaults to {data_dir}/user_profile.db.
+# db_path = "/var/lib/agentos/user_profile.db"
+# Maximum L0-pinned entries surfaced to agent context.
+max_pinned = 8
+# Minimum confidence (0.0..1.0) for an entry to be stored.
+min_confidence = 0.30
+
+[personalization]
+# Proactive personalization. Tiered by token cost:
+#   L0 (read-back): inject a small, prompt-cached profile block into agent
+#                   context. Costs ~20 tok/turn steady-state (cache read).
+#   L2 (background): interest model + proactive recommendations — ZERO
+#                    task-context tokens (run off the task path).
+#
+# Master switch for putting profile data INTO agent context. Opt-in (off by
+# default): the profile store still collects accepted prefs, but nothing is
+# injected into tasks until this is true.
+enabled = false
+# L0 block bounds (also hard-capped in code at 8 / token budget).
+profile_pin_cap = 8
+profile_token_budget = 300
+
+# --- Interest model (background, decaying) ---
+# Half-life in hours for interest-score decay (~2 weeks).
+interest_decay_half_life_hours = 336.0
+# Prune interest topics whose decayed score falls below this.
+interest_min_score = 0.05
+# Aggregate after this many task completions...
+interest_aggregation_trigger_tasks = 25
+# ...or after this many hours, whichever comes first.
+interest_aggregation_trigger_hours = 24.0
+
+# --- Proactive recommendations (separate opt-in) ---
+# Generate + deliver proactive tips. Off by default even when `enabled` is true.
+proactive_enabled = false
+# Daily delivery cap.
+max_recommendations_per_day = 3
+# Hours before an identical (deduped) recommendation may repeat.
+recommendation_dedup_cooldown_hours = 168.0
+# Minimum confidence for a recommendation to be delivered.
+recommendation_min_confidence = 0.5
+
+# --- Feedback loop (Phase 5) ---
+# Exponential half-life (days) for profile pin_rank decay. After one half-life
+# an unused entry's rank halves toward 0 (= higher L0 priority after boost).
+pin_rank_decay_half_life_days = 30.0
+# Archive Active profile entries idle for longer than this many days.
+profile_archive_idle_days = 60
+# Hours a dismissed recommendation's dedup_hash is suppressed (7d = 168h).
+dismiss_cooldown_hours = 168
+# Confidence bump when the user re-states an existing preference (clamped to 1.0).
+restate_confidence_boost = 0.10
+
 # IoT: MQTT broker connection (requires `mqtt` feature)
 # Uncomment to enable MQTT driver for IoT sensor/actuator communication.
 # [hal.mqtt]
@@ -349,3 +552,99 @@ allowed_images = [
 # [hal.homeassistant]
 # base_url = "http://homeassistant.local:8123"
 # token_vault_key = "homeassistant_token"
+
+# ---------------------------------------------------------------------------
+# Approval modes — when does the kernel auto-approve vs. escalate a tool
+# call for human review?
+#
+#   auto        — auto-approve everything except ControlPlane operations.
+#                  ControlPlane (kernel admin: key rotation, audit truncation,
+#                  agent shutdown) always prompts regardless of mode.
+#   ask_edit    — DEFAULT. Auto-approve readonly tools; prompt for writes,
+#                  exec, and control-plane. Mirrors Claude Code defaults.
+#   ask_always  — Prompt for everything except trivially-cheap
+#                  ReadonlyScoped tools.
+#   deny        — Hard-deny anything that would otherwise prompt. For
+#                  high-assurance / unattended agents that must never wait.
+#
+# Per-agent overrides go in `[approval.agent_overrides]`, keyed by agent
+# display name:
+#   [approval.agent_overrides]
+#   research-bot = "auto"
+#   writer-bot   = "ask_always"
+[approval]
+mode = "ask_edit"
+
+# Scheduler run-history retention. The TimeoutChecker prunes completed/failed
+# scheduled-run records older than this many days on its periodic sweep so the
+# run store does not grow without bound. Set to 0 to disable pruning.
+[scheduler]
+run_retention_days = 30
+
+# Inbound voice/audio transcription (speech-to-text) for channel media.
+# When enabled, voice notes received on a channel (e.g. Telegram) are sent to an
+# OpenAI-compatible /audio/transcriptions endpoint and the transcript is injected
+# into the message the agent reads. Disabled by default. The API key is read from
+# the named environment variable — never stored in config.
+[transcription]
+enabled = false
+endpoint = "https://api.openai.com/v1/audio/transcriptions"
+model = "whisper-1"
+api_key_env = "OPENAI_API_KEY"
+
+# Gateway ("run as a bot") — `agentos gateway run` boots the kernel and connects
+# every channel listed here. Disabled by default. Tokens are referenced by a
+# VAULT key (credential_key), never inline — seed with `agentos secret set <key> <token>`.
+[gateway]
+enabled = false
+
+# One [[gateway.channels]] table per bot. Example (uncomment + set credential_key):
+# [[gateway.channels]]
+# kind = "telegram"                  # telegram | ntfy | email | discord | slack | whatsapp | webhook
+# display_name = "Ops Bot"
+# credential_key = "telegram_bot_token"   # vault key holding the token
+# active_agent = "assistant"         # default agent for inbound chat
+# # external_id omitted for Telegram → auto-discovered from the first /start
+
+
+# Agent heartbeat — periodically wake idle agents to check their inbox and any
+# assigned schedules, acting only when there is work. Opt-in: 0 disables it.
+# This reuses the existing scheduler tick, agent inbox, and normal task path —
+# it is not a second scheduler.
+[agent_heartbeat]
+# Seconds between wakeups. 0 disables heartbeats globally (default).
+default_interval_secs = 0
+# Jitter (0.0-1.0): lengthens each agent's interval by a deterministic per-agent
+# fraction so a large idle fleet doesn't wake in lockstep.
+jitter = 0.2
+# Cap on agents woken per tick, to avoid an inference storm on a large idle fleet.
+max_wakes_per_tick = 4
+
+# Per-agent cost budgets, bound to every agent when it connects. The CostTracker
+# enforces these during task execution: it warns at `warn_at_pct`, pauses at
+# `pause_at_pct`, and applies `on_hard_limit` (Suspend | NotifyOnly | Kill) when a
+# limit is exceeded. A value of 0 means "unlimited" for that resource.
+#
+# Leaving this section out entirely keeps the historical built-in default budget
+# (5,000,000 tokens / $50.00 / 10,000 tool-calls per day). Uncomment to customize.
+#
+# [agent_budget.default]
+# max_tokens_per_day = 5000000
+# max_cost_usd_per_day = 50.0
+# max_tool_calls_per_day = 10000
+# warn_at_pct = 80
+# pause_at_pct = 95
+# on_hard_limit = "Suspend"
+# max_wall_time_seconds = 0
+# Restrict which models this budget permits (empty = all allowed):
+# allowed_models = ["claude-sonnet-4-5", "claude-haiku-4-5"]
+#
+# Optional cheaper model to switch to at pause_at_pct instead of pausing:
+# [agent_budget.default.downgrade_model]
+# model = "claude-haiku-4-5"
+# provider = "anthropic"
+#
+# Per-agent overrides (merged over the default) keyed by agent name:
+# [agent_budget.overrides.researcher]
+# max_cost_usd_per_day = 5.0
+# on_hard_limit = "Kill"

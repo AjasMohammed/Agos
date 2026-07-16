@@ -17,19 +17,19 @@ outputs = ["status"]
 input  = "TaskDelegateIntent"
 output = "DelegateResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["agent", "task"]
 
-[input_schema.properties.agent]
+[payload_schema.properties.agent]
 type = "string"
 description = "Target agent name"
 
-[input_schema.properties.task]
+[payload_schema.properties.task]
 type = "string"
 description = "Sub-task prompt for the target agent"
 
-[input_schema.properties.priority]
+[payload_schema.properties.priority]
 type = "integer"
 default = 5
 minimum = 0

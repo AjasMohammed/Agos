@@ -93,11 +93,14 @@ impl AgentTool for FileWriter {
             "file-writer: starting"
         );
 
-        // SECURITY: resolve path, checking workspace paths before falling back to data_dir.
+        // SECURITY: resolve path against the *writable* workspace list. A
+        // grant with mode `r` only does not appear here, so a read-only grant
+        // cannot be written through even if the agent's `PermissionSet`
+        // allows fs.user_data writes.
         let resolved = crate::traits::resolve_tool_path(
             path_str,
             &context.data_dir,
-            &context.workspace_paths,
+            &context.workspace_paths_writable,
         )?;
 
         // Normalize lexically (can't use canonicalize — file may not exist yet).
@@ -112,7 +115,7 @@ impl AgentTool for FileWriter {
                 })?;
 
         let in_workspace = context
-            .workspace_paths
+            .workspace_paths_writable
             .iter()
             .any(|wp| normalized.starts_with(wp));
         // KMC Phase 3: check dynamic storage zones
@@ -187,7 +190,7 @@ impl AgentTool for FileWriter {
                         reason: format!("Cannot resolve parent directory: {}", e),
                     })?;
             let parent_in_workspace = context
-                .workspace_paths
+                .workspace_paths_writable
                 .iter()
                 .any(|wp| canonical_parent.starts_with(wp));
             // KMC Phase 3: check dynamic storage zones

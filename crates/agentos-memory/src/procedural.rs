@@ -42,6 +42,7 @@ impl ProceduralStore {
         let conn = Connection::open(&db_path).map_err(|e| {
             AgentOSError::StorageError(format!("Failed to open procedural memory DB: {}", e))
         })?;
+        crate::restrict_db_permissions(&db_path);
 
         conn.execute_batch(
             "
@@ -101,6 +102,8 @@ impl ProceduralStore {
         .map_err(|e| {
             AgentOSError::StorageError(format!("Failed to init procedural memory tables: {}", e))
         })?;
+
+        crate::lifecycle::migrate_lifecycle_columns(&conn, "procedures")?;
 
         let probe = embedder
             .embed(&["procedural-memory-dimension-probe"])
@@ -188,6 +191,10 @@ impl ProceduralStore {
         let description = procedure.description.clone();
         let success_count = procedure.success_count;
         let failure_count = procedure.failure_count;
+        let last_used_at = procedure.last_used_at.map(|t| t.to_rfc3339());
+        let use_count = procedure.use_count;
+        let confidence = procedure.confidence as f64;
+        let status = procedure.status.as_str();
 
         let embedder = self.embedder.clone();
         let dimension = self.dimension;
@@ -232,8 +239,10 @@ impl ProceduralStore {
                 "INSERT OR REPLACE INTO procedures (
                     id, name, description, preconditions, steps, postconditions,
                     success_count, failure_count, source_episodes, agent_id, tags,
-                    embedding, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    embedding, created_at, updated_at,
+                    last_used_at, use_count, confidence, status
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                           ?15, ?16, ?17, ?18)",
                 params![
                     proc_id,
                     name,
@@ -248,7 +257,11 @@ impl ProceduralStore {
                     tags,
                     blob,
                     created_at,
-                    now
+                    now,
+                    last_used_at,
+                    use_count,
+                    confidence,
+                    status
                 ],
             )
             .map_err(|e| AgentOSError::StorageError(format!("Failed to store procedure: {}", e)))?;
@@ -367,6 +380,8 @@ impl ProceduralStore {
                     let updated_at: String = row.get(12)?;
                     let blob: Vec<u8> = row.get(13)?;
                     let rowid: i64 = row.get(14)?;
+                    let (last_used_at, use_count, confidence, status) =
+                        crate::lifecycle::lifecycle_from_row(row, 15)?;
 
                     let mut embedding = Vec::with_capacity(blob.len() / 4);
                     for bytes in blob.chunks_exact(4) {
@@ -397,6 +412,10 @@ impl ProceduralStore {
                         updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
                             .unwrap_or_else(|_| chrono::Local::now().into())
                             .with_timezone(&Utc),
+                        last_used_at,
+                        use_count,
+                        confidence,
+                        status,
                     };
 
                     Ok((procedure, embedding, rowid))
@@ -415,7 +434,8 @@ impl ProceduralStore {
                 let sql = format!(
                     "SELECT p.id, p.name, p.description, p.preconditions, p.steps, p.postconditions,
                             p.success_count, p.failure_count, p.source_episodes, p.agent_id, p.tags,
-                            p.created_at, p.updated_at, p.embedding, c.rowid
+                            p.created_at, p.updated_at, p.embedding, c.rowid,
+                            p.last_used_at, p.use_count, p.confidence, p.status
                      FROM procedures p
                      JOIN procedures_fts_content c ON c.proc_id = p.id
                      WHERE c.rowid IN ({placeholders})
@@ -442,7 +462,8 @@ impl ProceduralStore {
                 let sql =
                     "SELECT p.id, p.name, p.description, p.preconditions, p.steps, p.postconditions,
                             p.success_count, p.failure_count, p.source_episodes, p.agent_id, p.tags,
-                            p.created_at, p.updated_at, p.embedding, c.rowid
+                            p.created_at, p.updated_at, p.embedding, c.rowid,
+                            p.last_used_at, p.use_count, p.confidence, p.status
                      FROM procedures p
                      JOIN procedures_fts_content c ON c.proc_id = p.id
                      WHERE (?1 IS NULL OR p.agent_id IS NULL OR p.agent_id = ?1)
@@ -507,7 +528,8 @@ impl ProceduralStore {
                 .prepare(
                     "SELECT id, name, description, preconditions, steps, postconditions,
                             success_count, failure_count, source_episodes, agent_id, tags,
-                            created_at, updated_at
+                            created_at, updated_at,
+                            last_used_at, use_count, confidence, status
                      FROM procedures WHERE id = ?1",
                 )
                 .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
@@ -524,7 +546,54 @@ impl ProceduralStore {
         .map_err(|e| AgentOSError::StorageError(format!("Get task panicked: {}", e)))?
     }
 
-    /// Update success/failure statistics for a procedure. Offloads to blocking thread pool.
+    /// Mark procedures as used right now: bump `use_count` and stamp
+    /// `last_used_at`. Fire-and-forget reinforcement — callers must never fail
+    /// a task on a touch error. Returns the number of rows updated.
+    pub async fn touch(&self, ids: &[String]) -> Result<u32, AgentOSError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let db = self.conn.clone();
+        let ids = ids.to_vec();
+        let now = Utc::now().to_rfc3339();
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock procedural db for touch".to_string())
+            })?;
+            let mut total = 0u32;
+            for chunk in ids.chunks(500) {
+                // now is bound as ?1; ids are bound as ?2..?N
+                let placeholders = (2..=chunk.len() + 1)
+                    .map(|i| format!("?{}", i))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "UPDATE procedures
+                     SET last_used_at = ?1, use_count = use_count + 1
+                     WHERE id IN ({placeholders})"
+                );
+                let mut bound: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() + 1);
+                bound.push(rusqlite::types::Value::Text(now.clone()));
+                for id in chunk {
+                    bound.push(rusqlite::types::Value::Text(id.clone()));
+                }
+                total += conn
+                    .execute(&sql, rusqlite::params_from_iter(bound.iter()))
+                    .map_err(|e| {
+                        AgentOSError::StorageError(format!("Failed to touch procedures: {}", e))
+                    })? as u32;
+            }
+            Ok(total)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Touch task panicked: {}", e)))?
+    }
+
+    /// Update success/failure statistics for a procedure and recompute its
+    /// lifecycle confidence as the Laplace-smoothed success rate
+    /// `(success + 1) / (success + failure + 2)` — smoothing keeps a single
+    /// outcome from swinging a fresh procedure to 0 or 1.
+    /// Offloads to blocking thread pool.
     pub async fn update_stats(&self, id: &str, success: bool) -> Result<(), AgentOSError> {
         let db = self.conn.clone();
         let id_owned = id.to_owned();
@@ -535,13 +604,21 @@ impl ProceduralStore {
                 )
             })?;
             let now = Utc::now().to_rfc3339();
+            // RHS column references read the pre-update values, so the
+            // post-increment Laplace numerator is written out explicitly.
             let sql = if success {
                 "UPDATE procedures
-                 SET success_count = success_count + 1, updated_at = ?2
+                 SET success_count = success_count + 1,
+                     confidence = CAST(success_count + 2 AS REAL)
+                                  / (success_count + failure_count + 3),
+                     updated_at = ?2
                  WHERE id = ?1"
             } else {
                 "UPDATE procedures
-                 SET failure_count = failure_count + 1, updated_at = ?2
+                 SET failure_count = failure_count + 1,
+                     confidence = CAST(success_count + 1 AS REAL)
+                                  / (success_count + failure_count + 3),
+                     updated_at = ?2
                  WHERE id = ?1"
             };
             let updated = conn.execute(sql, params![id_owned, now]).map_err(|e| {
@@ -677,7 +754,8 @@ impl ProceduralStore {
                 .prepare(
                     "SELECT id, name, description, preconditions, steps, postconditions,
                             success_count, failure_count, source_episodes, agent_id, tags,
-                            created_at, updated_at
+                            created_at, updated_at,
+                            last_used_at, use_count, confidence, status
                      FROM procedures
                      WHERE (?1 IS NULL OR agent_id IS NULL OR agent_id = ?1)
                      ORDER BY updated_at DESC
@@ -752,6 +830,8 @@ impl ProceduralStore {
         let tags_json: String = row.get(10)?;
         let created_at: String = row.get(11)?;
         let updated_at: String = row.get(12)?;
+        let (last_used_at, use_count, confidence, status) =
+            crate::lifecycle::lifecycle_from_row(row, 13)?;
 
         Ok(Procedure {
             id,
@@ -773,6 +853,10 @@ impl ProceduralStore {
             updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
                 .unwrap_or_else(|_| chrono::Local::now().into())
                 .with_timezone(&Utc),
+            last_used_at,
+            use_count,
+            confidence,
+            status,
         })
     }
 
@@ -814,6 +898,7 @@ impl ProceduralStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::MemoryStatus;
     use tempfile::TempDir;
 
     fn make_test_procedure(name: &str, description: &str) -> Procedure {
@@ -844,13 +929,17 @@ mod tests {
             tags: vec!["ops".to_string()],
             created_at: chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_else(Utc::now),
             updated_at: chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_else(Utc::now),
+            last_used_at: None,
+            use_count: 0,
+            confidence: crate::types::default_confidence(),
+            status: MemoryStatus::Active,
         }
     }
 
     #[tokio::test]
     async fn test_store_and_get_procedure() {
         let dir = TempDir::new().unwrap();
-        let embedder = Arc::new(Embedder::new().unwrap());
+        let embedder = Arc::new(Embedder::noop());
         let store = ProceduralStore::open_with_embedder(dir.path(), embedder).unwrap();
         let proc = make_test_procedure("deploy", "Deploy application safely");
 
@@ -863,7 +952,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_procedure() {
         let dir = TempDir::new().unwrap();
-        let embedder = Arc::new(Embedder::new().unwrap());
+        let embedder = Arc::new(Embedder::noop());
         let store = ProceduralStore::open_with_embedder(dir.path(), embedder).unwrap();
         let deploy = make_test_procedure("deploy", "Deploy application safely");
         let backup = make_test_procedure("backup", "Create full data backup");
@@ -880,7 +969,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_stats_and_delete() {
         let dir = TempDir::new().unwrap();
-        let embedder = Arc::new(Embedder::new().unwrap());
+        let embedder = Arc::new(Embedder::noop());
         let store = ProceduralStore::open_with_embedder(dir.path(), embedder).unwrap();
         let proc = make_test_procedure("deploy", "Deploy application safely");
         let id = store.store(&proc).await.unwrap();
@@ -891,5 +980,129 @@ mod tests {
 
         store.delete(&id).await.unwrap();
         assert!(store.get(&id).await.unwrap().is_none());
+    }
+
+    /// Build a procedural DB with the pre-lifecycle schema and one legacy row.
+    fn seed_legacy_db(dir: &std::path::Path) {
+        let conn = Connection::open(dir.join("procedural_memory.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE procedures (
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL,
+                description     TEXT NOT NULL,
+                preconditions   TEXT NOT NULL,
+                steps           TEXT NOT NULL,
+                postconditions  TEXT NOT NULL,
+                success_count   INTEGER NOT NULL DEFAULT 0,
+                failure_count   INTEGER NOT NULL DEFAULT 0,
+                source_episodes TEXT NOT NULL,
+                agent_id        TEXT,
+                tags            TEXT NOT NULL,
+                embedding       BLOB NOT NULL,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO procedures (id, name, description, preconditions, steps, postconditions,
+                success_count, failure_count, source_episodes, agent_id, tags, embedding,
+                created_at, updated_at)
+             VALUES ('legacy-1', 'legacy-proc', 'old row', '[]', '[]', '[]',
+                3, 1, '[]', NULL, '[]', ?1, ?2, ?2)",
+            params![vec![0u8; 384 * 4], now],
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn migration_adds_lifecycle_columns_to_legacy_db() {
+        let dir = TempDir::new().unwrap();
+        seed_legacy_db(dir.path());
+
+        let embedder = Arc::new(Embedder::noop());
+        let store = ProceduralStore::open_with_embedder(dir.path(), embedder).unwrap();
+
+        let legacy = store.get("legacy-1").await.unwrap().unwrap();
+        assert_eq!(legacy.name, "legacy-proc");
+        assert_eq!(legacy.success_count, 3);
+        assert_eq!(legacy.use_count, 0);
+        assert!(legacy.last_used_at.is_none());
+        assert!((legacy.confidence - 0.6).abs() < f32::EPSILON);
+        assert_eq!(legacy.status, MemoryStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn migration_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        seed_legacy_db(dir.path());
+
+        let embedder = Arc::new(Embedder::noop());
+        drop(ProceduralStore::open_with_embedder(dir.path(), embedder.clone()).unwrap());
+        let store = ProceduralStore::open_with_embedder(dir.path(), embedder).unwrap();
+        assert!(store.get("legacy-1").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn touch_updates_recency_and_count() {
+        let dir = TempDir::new().unwrap();
+        let embedder = Arc::new(Embedder::noop());
+        let store = ProceduralStore::open_with_embedder(dir.path(), embedder).unwrap();
+        let proc = make_test_procedure("deploy", "Deploy application safely");
+        let id = store.store(&proc).await.unwrap();
+
+        assert_eq!(store.touch(std::slice::from_ref(&id)).await.unwrap(), 1);
+        assert_eq!(store.touch(std::slice::from_ref(&id)).await.unwrap(), 1);
+        let loaded = store.get(&id).await.unwrap().unwrap();
+        assert_eq!(loaded.use_count, 2);
+        assert!(loaded.last_used_at.is_some());
+
+        // Empty and unknown ids are harmless no-ops.
+        assert_eq!(store.touch(&[]).await.unwrap(), 0);
+        assert_eq!(store.touch(&["missing".to_string()]).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn update_stats_recomputes_laplace_confidence() {
+        let dir = TempDir::new().unwrap();
+        let embedder = Arc::new(Embedder::noop());
+        let store = ProceduralStore::open_with_embedder(dir.path(), embedder).unwrap();
+        let proc = make_test_procedure("deploy", "Deploy application safely");
+        let id = store.store(&proc).await.unwrap();
+
+        // 1 success, 0 failures → (1+1)/(1+0+2) = 2/3
+        store.update_stats(&id, true).await.unwrap();
+        let p = store.get(&id).await.unwrap().unwrap();
+        assert!(
+            (p.confidence - 2.0 / 3.0).abs() < 1e-6,
+            "got {}",
+            p.confidence
+        );
+
+        // 1 success, 1 failure → (1+1)/(1+1+2) = 0.5
+        store.update_stats(&id, false).await.unwrap();
+        let p = store.get(&id).await.unwrap().unwrap();
+        assert!((p.confidence - 0.5).abs() < 1e-6, "got {}", p.confidence);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_fields_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let embedder = Arc::new(Embedder::noop());
+        let store = ProceduralStore::open_with_embedder(dir.path(), embedder).unwrap();
+
+        let mut proc = make_test_procedure("deploy", "Deploy application safely");
+        proc.last_used_at = Some(Utc::now());
+        proc.use_count = 7;
+        proc.confidence = 0.42;
+        proc.status = MemoryStatus::Stale;
+
+        let id = store.store(&proc).await.unwrap();
+        let loaded = store.get(&id).await.unwrap().unwrap();
+        assert_eq!(loaded.use_count, 7);
+        assert!((loaded.confidence - 0.42).abs() < 1e-6);
+        assert_eq!(loaded.status, MemoryStatus::Stale);
+        assert!(loaded.last_used_at.is_some());
     }
 }

@@ -17,8 +17,8 @@ use crate::handlers::{
     a2a, agent_convo, agent_detail, agents, audit, channels, chat, config_page, connectors, costs,
     dashboard, doctor, escalations, events, events_log, files, hal_page, identity_page, logs,
     management, manual_page, marketplace, mcp_page, notifications, oauth, observability,
-    pipeline_ui, pipelines, plugins, resources_page, roles, schedules, scratchpad, secrets, tasks,
-    teams, tools, webhooks, webhooks_page,
+    pipeline_ui, pipelines, plugins, prefs, profile, resources_page, roles, schedules, scratchpad,
+    secrets, tasks, teams, tools, webhooks, webhooks_page,
 };
 use crate::state::AppState;
 
@@ -113,6 +113,11 @@ pub fn build_router(
         .route(
             "/api/v1/webhooks/telegram/{channel_id}",
             axum::routing::post(agentos_api::handlers::webhooks::telegram_webhook),
+        )
+        .route(
+            "/api/v1/webhooks/whatsapp/{channel_id}",
+            axum::routing::get(agentos_api::handlers::webhooks::whatsapp_webhook_verify)
+                .post(agentos_api::handlers::webhooks::whatsapp_webhook),
         )
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
         .with_state(state.service.clone());
@@ -402,6 +407,12 @@ pub fn build_router(
         .route("/roles/{name}/delete", axum::routing::post(roles::delete))
         .route("/config", axum::routing::get(config_page::page))
         .route("/escalations", axum::routing::get(escalations::list))
+        .route("/prefs", axum::routing::get(prefs::list))
+        .route("/prefs/accept", axum::routing::post(prefs::accept))
+        .route("/prefs/reject", axum::routing::post(prefs::reject))
+        .route("/profile", axum::routing::get(profile::list))
+        .route("/profile/forget", axum::routing::post(profile::forget))
+        .route("/profile/edit", axum::routing::post(profile::edit))
         .route(
             "/escalations/{id}/resolve",
             axum::routing::post(escalations::resolve),
@@ -431,6 +442,18 @@ pub fn build_router(
         .route("/resources", axum::routing::get(resources_page::page))
         .route("/events", axum::routing::get(events_log::page))
         .route("/events-log", axum::routing::get(events_log::page))
+        .route(
+            "/events/subscribe",
+            axum::routing::post(events_log::create_subscription),
+        )
+        .route(
+            "/events/subscriptions/{id}/delete",
+            axum::routing::post(events_log::delete_subscription),
+        )
+        .route(
+            "/events/emit",
+            axum::routing::post(events_log::emit_test_event),
+        )
         .route("/logs", axum::routing::get(logs::page))
         .route("/hal", axum::routing::get(hal_page::page))
         .route("/teams", axum::routing::get(teams::page))

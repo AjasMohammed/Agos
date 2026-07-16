@@ -19,15 +19,15 @@ outputs = ["cancellation_result"]
 input  = "CancelAgentIntent"
 output = "CancelAgentResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["task_id"]
 
-[input_schema.properties.task_id]
+[payload_schema.properties.task_id]
 type = "string"
 description = "Task ID of the spawned sub-agent to cancel."
 
-[input_schema.properties.reason]
+[payload_schema.properties.reason]
 type = "string"
 description = "Reason for cancellation (logged in audit). Default: 'Cancelled by parent agent'."
 

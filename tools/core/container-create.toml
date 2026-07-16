@@ -19,6 +19,38 @@ outputs = ["container_id", "image", "expires_at"]
 input = "ContainerCreateIntent"
 output = "ContainerCreateResult"
 
+[payload_schema]
+type     = "object"
+required = ["image"]
+
+[payload_schema.properties.image]
+type        = "string"
+description = "Docker image reference (e.g. 'python:3.12-slim')."
+
+[payload_schema.properties.memory_mb]
+type        = "integer"
+minimum     = 16
+default     = 256
+description = "Memory limit in MiB."
+
+[payload_schema.properties.cpu]
+type        = "number"
+minimum     = 0.1
+default     = 1.0
+description = "CPU cores (fractional allowed)."
+
+[payload_schema.properties.network]
+type        = "string"
+enum        = ["none", "bridge", "host"]
+default     = "none"
+description = "Network mode."
+
+[payload_schema.properties.ttl_seconds]
+type        = "integer"
+minimum     = 1
+default     = 3600
+description = "Lifetime in seconds before the container is auto-destroyed."
+
 [sandbox]
 network = false
 fs_write = false

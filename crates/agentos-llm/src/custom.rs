@@ -48,6 +48,9 @@ pub struct CustomCore {
     models_path: String,
     /// Static extra headers appended to every request.
     extra_headers: Vec<(String, String)>,
+    /// Explicit native tool-calling mode gate. Kept separate from generic tool
+    /// support because many OpenAI-compatible hosts partially implement tools.
+    native_tool_calling: bool,
 }
 
 impl CustomCore {
@@ -107,6 +110,7 @@ impl CustomCore {
             chat_path: "/chat/completions".to_string(),
             models_path: "/models".to_string(),
             extra_headers: Vec::new(),
+            native_tool_calling: false,
         }
     }
 
@@ -164,6 +168,9 @@ impl CustomCore {
         }
         if let Some(v) = entry.supports_tool_calling {
             self.capabilities.supports_tool_calling = v;
+        }
+        if let Some(v) = entry.supports_native_tool_calling {
+            self.native_tool_calling = v;
         }
         if let Some(v) = entry.supports_streaming {
             self.capabilities.supports_streaming = v;
@@ -337,7 +344,7 @@ impl CustomCore {
                 "function": {
                     "name": tool_name,
                     "description": manifest.manifest.description,
-                    "parameters": tool_helpers::normalize_tool_input_schema(manifest.input_schema.as_ref()),
+                    "parameters": tool_helpers::normalize_tool_input_schema(manifest.payload_schema.as_ref()),
                 }
             }));
         }
@@ -600,6 +607,10 @@ impl CustomCore {
 
 #[async_trait]
 impl LLMCore for CustomCore {
+    fn supports_native_tool_calling(&self) -> bool {
+        self.native_tool_calling && self.capabilities.supports_tool_calling
+    }
+
     async fn infer(&self, context: &ContextWindow) -> Result<InferenceResult, AgentOSError> {
         self.infer_with_tools(context, &[]).await
     }
@@ -862,30 +873,34 @@ impl LLMCore for CustomCore {
             body["tool_choice"] = json!("auto");
         }
 
-        let res = self
-            .auth_header(
-                self.client
-                    .post(&url)
-                    .header("Content-Type", "application/json")
-                    .json(&body),
-            )
-            .send()
-            .await
-            .map_err(|e| AgentOSError::LLMError {
-                provider: "custom".to_string(),
-                reason: format!("Reqwest failed: {}", e),
-            })?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let text = res.text().await.unwrap_or_default();
-            let err_msg = format!("Custom API error {}: {}", status, text);
-            let _ = tx.send(InferenceEvent::Error(err_msg.clone())).await;
-            return Err(AgentOSError::LLMError {
-                provider: "custom".to_string(),
-                reason: err_msg,
-            });
-        }
+        // Retry the initial POST + status check (before any SSE event is
+        // forwarded) so a transient upstream 5xx / network blip doesn't fail
+        // the whole chat turn. NVIDIA's NIM gateway intermittently returns
+        // `500 unhashable type: 'dict'` on identical tool-calling payloads
+        // (observed in kernel logs); a retry recovers it. `send_with_retry`
+        // returns the live `Response` with its body stream intact on 2xx.
+        let res = crate::retry::send_with_retry(
+            "custom",
+            &self.retry_policy,
+            &self.circuit_breaker,
+            Some(&self.concurrency),
+            || {
+                self.auth_header(
+                    self.client
+                        .post(&url)
+                        .header("Content-Type", "application/json")
+                        .json(&body),
+                )
+            },
+        )
+        .await;
+        let res = match res {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(InferenceEvent::Error(e.to_string())).await;
+                return Err(e);
+            }
+        };
 
         let mut full_text = String::new();
         let mut reasoning_text = String::new();
@@ -1382,6 +1397,7 @@ mod tests {
             context_window: Some(128_000),
             supports_images: Some(true),
             supports_tool_calling: Some(false),
+            supports_native_tool_calling: Some(true),
             supports_prompt_caching: Some(true),
             auth_header: Some("api-key".into()),
             auth_prefix: Some(String::new()),
@@ -1393,10 +1409,32 @@ mod tests {
         assert_eq!(adapter.capabilities.context_window_tokens, 128_000);
         assert!(adapter.capabilities.supports_images);
         assert!(!adapter.capabilities.supports_tool_calling);
+        // Native mode must remain off when tool-calling itself is disabled.
+        assert!(!adapter.supports_native_tool_calling());
         assert!(adapter.capabilities.supports_prompt_caching);
         assert_eq!(adapter.auth_header_name, "api-key");
         assert_eq!(adapter.auth_header_prefix, "");
         assert_eq!(adapter.chat_path, "/v2/chat");
         assert_eq!(adapter.models_path, "/v2/models");
+    }
+
+    #[test]
+    fn test_custom_native_tool_calling_is_explicit_opt_in() {
+        use crate::catalog::CatalogEntry;
+        let base = CustomCore::new(None, "m".to_string(), "https://api.example.com".to_string());
+        assert!(!base.supports_native_tool_calling());
+
+        let enabled = base.with_catalog_overrides(&CatalogEntry {
+            name: "x".into(),
+            display_name: "X".into(),
+            base_url: "https://api.example.com".into(),
+            api_key_env: String::new(),
+            compatible_with: "openai".into(),
+            default_model: "m".into(),
+            supports_tool_calling: Some(true),
+            supports_native_tool_calling: Some(true),
+            ..Default::default()
+        });
+        assert!(enabled.supports_native_tool_calling());
     }
 }

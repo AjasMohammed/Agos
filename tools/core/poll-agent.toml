@@ -18,16 +18,16 @@ outputs = ["agent_status"]
 input  = "PollAgentIntent"
 output = "PollAgentResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["task_ids"]
 
-[input_schema.properties.task_ids]
+[payload_schema.properties.task_ids]
 type = "array"
 items = { type = "string" }
 description = "Task IDs of spawned sub-agents to check."
 
-[input_schema.properties.include_progress]
+[payload_schema.properties.include_progress]
 type = "boolean"
 default = true
 description = "Whether to include progress event history. Default: true."

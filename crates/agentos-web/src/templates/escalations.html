@@ -23,7 +23,7 @@
     <p>{{ e.context_summary }}</p>
     <details>
         <summary>Metadata</summary>
-        <pre><code>{{ e.metadata|pretty_json }}</code></pre>
+        <div class="data-panel">{{ e.metadata|structured_data_html }}</div>
     </details>
     {% if not e.resolved %}
     <form method="post" action="/escalations/{{ e.id }}/resolve" class="grid">

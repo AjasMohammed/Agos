@@ -17,20 +17,20 @@ outputs = ["content.text"]
 input  = "ScratchGraphIntent"
 output = "ScratchGraphResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["title"]
 
-[input_schema.properties.title]
+[payload_schema.properties.title]
 type = "string"
 description = "Center page title for graph traversal"
 
-[input_schema.properties.depth]
+[payload_schema.properties.depth]
 type = "integer"
 default = 2
 description = "BFS traversal depth (max 5)"
 
-[input_schema.properties.max_pages]
+[payload_schema.properties.max_pages]
 type = "integer"
 default = 10
 description = "Maximum pages to include in the subgraph (max 50)"

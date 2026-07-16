@@ -2,7 +2,8 @@ use crate::event_bus::default_subscriptions_for_role;
 use crate::kernel::Kernel;
 use agentos_bus::KernelResponse;
 use agentos_llm::{
-    AnthropicCore, CustomCore, GeminiCore, HealthStatus, LLMCore, OllamaCore, OpenAICore,
+    AnthropicCore, ClaudeCodeCore, CustomCore, FallbackAdapter, GeminiCore, HealthStatus, LLMCore,
+    OllamaCore, OpenAICore,
 };
 use agentos_types::*;
 use secrecy::SecretString;
@@ -20,16 +21,107 @@ fn is_valid_agent_name(name: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
+/// Parse a provider string from config (`llm.fallback_models[].provider`) into
+/// an `LLMProvider`, mirroring the CLI's `--provider` parsing: known names map
+/// to their variants; `custom:<name>` and any other bare name map to
+/// `Custom(<name>)` (resolved against the provider catalog at build time). An
+/// empty name (`custom:`) is normalized to `Custom("custom")` rather than an
+/// empty string, since this parser is operator-typed config.
+fn parse_provider_name(s: &str) -> LLMProvider {
+    match s.to_lowercase().as_str() {
+        "ollama" => LLMProvider::Ollama,
+        "openai" => LLMProvider::OpenAI,
+        "anthropic" => LLMProvider::Anthropic,
+        "gemini" => LLMProvider::Gemini,
+        p if p.starts_with("custom:") => {
+            let name = p.strip_prefix("custom:").unwrap_or("").trim();
+            let name = if name.is_empty() { "custom" } else { name };
+            LLMProvider::Custom(name.to_string())
+        }
+        "custom" => LLMProvider::Custom("custom".to_string()),
+        other => LLMProvider::Custom(other.to_string()),
+    }
+}
+
 impl Kernel {
-    /// Build an `LLMCore` adapter for the given provider/model/base_url combination.
+    /// Build the `LLMCore` for an agent: the primary adapter for
+    /// `provider`/`model`/`base_url`, optionally wrapped in a [`FallbackAdapter`]
+    /// when `llm.fallback_models` is configured (failover covers both the
+    /// blocking and streaming inference paths). Shared by `cmd_connect_agent`,
+    /// `cmd_ping_llm`, and auto-reactivation so all paths build identical
+    /// adapters. The returned base URL is always the *primary's* resolved URL
+    /// (persisted on `AgentProfile.base_url`).
+    pub(crate) async fn build_llm_adapter(
+        &self,
+        agent_name: &str,
+        provider: &LLMProvider,
+        model: &str,
+        base_url: Option<String>,
+    ) -> Result<(Arc<dyn LLMCore>, Option<String>), String> {
+        let (primary, resolved_url) = self
+            .build_single_llm_adapter(agent_name, provider, model, base_url)
+            .await?;
+
+        if self.config.llm.fallback_models.is_empty() {
+            return Ok((primary, resolved_url));
+        }
+
+        let mut chain: Vec<Arc<dyn LLMCore>> = vec![primary];
+        for fb in &self.config.llm.fallback_models {
+            let fb_provider = parse_provider_name(&fb.provider);
+            // Skip a fallback that resolves to the same primary endpoint —
+            // failing over to the endpoint that just failed is pointless. Only
+            // dedup when the fallback has no explicit `base_url`; an explicit
+            // URL marks a deliberately distinct target (e.g. a mirror/region)
+            // and is always kept.
+            if &fb_provider == provider && fb.model == model && fb.base_url.is_none() {
+                continue;
+            }
+            match self
+                .build_single_llm_adapter(agent_name, &fb_provider, &fb.model, fb.base_url.clone())
+                .await
+            {
+                Ok((adapter, _)) => chain.push(adapter),
+                Err(e) => tracing::warn!(
+                    agent_name = %agent_name,
+                    provider = %fb.provider,
+                    model = %fb.model,
+                    error = %e,
+                    "Skipping fallback model that failed to build"
+                ),
+            }
+        }
+
+        if chain.len() == 1 {
+            // Every fallback was skipped or failed to build — return the bare
+            // primary rather than a single-element FallbackAdapter.
+            return Ok((chain.pop().expect("chain has one element"), resolved_url));
+        }
+
+        match FallbackAdapter::new(chain) {
+            Ok(fa) => {
+                tracing::info!(
+                    agent_name = %agent_name,
+                    fallbacks = self.config.llm.fallback_models.len(),
+                    "Built agent LLM with provider fallback chain"
+                );
+                Ok((Arc::new(fa), resolved_url))
+            }
+            // `FallbackAdapter::new` only errors on an empty vec, already
+            // excluded above; surface a clear error rather than panic.
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Build a single `LLMCore` adapter for the given provider/model/base_url
+    /// combination (no fallback wrapping).
     ///
     /// Resolves vault-stored API keys (preferring `<agent>_<provider>_api_key` then
     /// the global `<provider>_api_key`), honors env-var fallbacks, and applies
     /// config defaults. Returns the adapter plus the effective base URL that
     /// should be stored on `AgentProfile.base_url` (so `agent set-url` can mutate
-    /// it later). Shared by `cmd_connect_agent` and `cmd_ping_llm` so both
-    /// paths construct identical adapters.
-    pub(crate) async fn build_llm_adapter(
+    /// it later).
+    pub(crate) async fn build_single_llm_adapter(
         &self,
         agent_name: &str,
         provider: &LLMProvider,
@@ -153,6 +245,19 @@ impl Kernel {
                 ))
             }
             LLMProvider::Custom(custom_name) => {
+                // Claude Code subprocess backend: runs the local `claude` CLI on
+                // the user's subscription (no API key). Intercept before the
+                // catalog/HTTP path since it is not an OpenAI-compatible endpoint.
+                if custom_name == "claude-code" || custom_name == "claude-cli" {
+                    let mut core = ClaudeCodeCore::new(model.to_string())
+                        .with_image_resolver(image_resolver.clone());
+                    if let Some(lookup) = &self.claude_session_lookup {
+                        core = core.with_resume_store(
+                            lookup.clone() as Arc<dyn agentos_llm::ClaudeSessionLookup>
+                        );
+                    }
+                    return Ok((Arc::new(core), None));
+                }
                 // Check the provider catalog first for known providers.
                 let catalog_entry_opt = self
                     .provider_catalog
@@ -226,6 +331,126 @@ impl Kernel {
                 }
             }
         }
+    }
+
+    /// Stand up a per-agent Claude MCP tool gateway: build a
+    /// [`KernelMcpExecutor`] bound to this agent's real capability context,
+    /// start the localhost MCP HTTP server, and return the path to the
+    /// generated MCP config file (passed to `ClaudeCodeCore::with_mcp_config`).
+    async fn start_claude_mcp_gateway_for_agent(
+        &self,
+        agent_id: AgentID,
+        permissions: PermissionSet,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        use crate::claude_mcp_gateway::{start_claude_mcp_gateway, KernelMcpExecutor};
+
+        // Shared per-agent tool-call buffer: the executor appends each subprocess
+        // tool call, the chat loop drains it per turn so calls show in the chat UI.
+        let collector: crate::claude_mcp_gateway::GatewayToolCallCollector =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        self.claude_gateway_tool_calls
+            .write()
+            .await
+            .insert(agent_id, Arc::clone(&collector));
+
+        let workspace_paths = self.workspace_paths_for_agent(&agent_id);
+        let executor = Arc::new(KernelMcpExecutor::new(
+            Arc::clone(&self.tool_runner),
+            Arc::clone(&self.agent_registry),
+            Arc::clone(&self.capability_registry),
+            Arc::clone(&self.capability_dispatcher),
+            Arc::clone(&self.hal),
+            self.zone_table.clone(),
+            self.data_dir.clone(),
+            self.cancellation_token.clone(),
+            Arc::clone(&self.hook_registry),
+            agent_id,
+            permissions,
+            workspace_paths,
+            collector,
+        )) as Arc<dyn agentos_mcp::McpToolExecutor>;
+
+        let gateway = start_claude_mcp_gateway(
+            executor,
+            &self.data_dir,
+            agent_id,
+            self.cancellation_token.child_token(),
+        )
+        .await?;
+        Ok(gateway.config_path)
+    }
+
+    /// For `claude-code`/`claude-cli` agents, stand up the per-agent MCP tool
+    /// gateway and return a `ClaudeCodeCore` bound to it, so the `claude`
+    /// subprocess can call AgentOS tools natively (through `ToolRunner` with the
+    /// agent's real permission set — capability enforcement preserved). For any
+    /// other provider it returns `base_adapter` unchanged; if the gateway fails
+    /// to start it falls back to `base_adapter` (non-fatal — the agent still
+    /// works via the markdown tool envelope).
+    ///
+    /// Shared by the interactive connect path AND boot-time auto-reactivation so
+    /// a restarted claude-code agent keeps its native tool plane. Without this on
+    /// the restart path the agent silently loses every AgentOS tool.
+    pub(crate) async fn build_claude_code_adapter(
+        &self,
+        agent_id: AgentID,
+        agent_model: &str,
+        provider: &LLMProvider,
+        permissions: PermissionSet,
+        base_adapter: Arc<dyn LLMCore>,
+    ) -> Arc<dyn LLMCore> {
+        let is_claude_cli = matches!(
+            provider,
+            LLMProvider::Custom(name) if name == "claude-code" || name == "claude-cli"
+        );
+        if !is_claude_cli {
+            return base_adapter;
+        }
+        match self
+            .start_claude_mcp_gateway_for_agent(agent_id, permissions)
+            .await
+        {
+            Ok(config_path) => {
+                let image_resolver = self
+                    .image_resolver
+                    .read()
+                    .expect("image_resolver lock poisoned")
+                    .clone();
+                let mut core = ClaudeCodeCore::new(agent_model.to_string())
+                    .with_image_resolver(image_resolver)
+                    .with_mcp_config(config_path);
+                if let Some(lookup) = &self.claude_session_lookup {
+                    core = core.with_resume_store(
+                        lookup.clone() as Arc<dyn agentos_llm::ClaudeSessionLookup>
+                    );
+                }
+                Arc::new(core) as Arc<dyn LLMCore>
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "Failed to start Claude MCP tool gateway; using plain claude-code adapter"
+                );
+                base_adapter
+            }
+        }
+    }
+
+    /// Resolve the budget to bind to an agent at registration. An org-node budget
+    /// (Phase 2) wins over the global `[agent_budget]` config (Phase 1); a lookup
+    /// failure degrades to the config budget rather than blocking the connect.
+    pub(crate) async fn resolve_agent_budget(&self, agent_name: &str) -> AgentBudget {
+        if let Some(org_store) = &self.org_store {
+            match org_store.budget_for_agent(agent_name).await {
+                Ok(Some(budget)) => return budget,
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(agent_name = %agent_name, error = %e, "org budget lookup failed; using config budget");
+                }
+            }
+        }
+        self.config.agent_budget.resolve(agent_name)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -569,6 +794,22 @@ impl Kernel {
         let agent_name = profile.name.clone();
         let agent_model = profile.model.clone();
 
+        // For the `claude-code`/`claude-cli` subprocess backend, stand up a
+        // per-agent localhost MCP tool gateway and rebuild the adapter with its
+        // config so the `claude` subprocess can call AgentOS tools natively. Done
+        // here (not in `build_llm_adapter`) because the gateway needs the agent's
+        // real `agent_id` and `PermissionSet`, which only exist after
+        // registration. Shared with the boot-time restart path.
+        let llm_adapter = self
+            .build_claude_code_adapter(
+                agent_id,
+                &agent_model,
+                &profile.provider,
+                profile.permissions.clone(),
+                llm_adapter,
+            )
+            .await;
+
         {
             let mut active = self.active_llms.write().await;
             active.insert(agent_id, llm_adapter);
@@ -640,9 +881,19 @@ impl Kernel {
             }
         }
 
-        // Register agent with cost tracker (default budget)
+        // Register agent with cost tracker. An org-node budget (Phase 2) takes
+        // precedence over the global `[agent_budget]` config (Phase 1), which in
+        // turn falls back to AgentBudget::default() when unconfigured.
+        let budget = self.resolve_agent_budget(&agent_name).await;
+        tracing::debug!(
+            agent_name = %agent_name,
+            max_tokens_per_day = budget.max_tokens_per_day,
+            max_cost_usd_per_day = budget.max_cost_usd_per_day,
+            on_hard_limit = ?budget.on_hard_limit,
+            "Binding cost budget to agent"
+        );
         self.cost_tracker
-            .register_agent(agent_id, agent_name.clone(), AgentBudget::default())
+            .register_agent(agent_id, agent_name.clone(), budget)
             .await;
 
         // On reconnect, clear any subscriptions from a prior session or auto-reactivation
@@ -826,6 +1077,7 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         thinking_level: ThinkingLevel::Off,
                         spawner_agent_id: None,
                         tool_categories: None,
+                        disable_tool_scoping: false,
                     };
                     self.scheduler.enqueue(onboarding_task).await;
                     onboarding_task_id_opt = Some(onboarding_task_id);
@@ -1548,6 +1800,21 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                 }
             };
 
+            // Rebuild the per-agent Claude MCP tool gateway on restart, exactly
+            // like the interactive connect path. Without this a restarted
+            // claude-code agent gets a gateway-less adapter and silently loses
+            // every AgentOS tool (and, before `--strict-mcp-config`, fell back to
+            // the host operator's personal MCP servers). No-op for other providers.
+            let llm_adapter = self
+                .build_claude_code_adapter(
+                    agent_id,
+                    &agent_model,
+                    &agent.provider,
+                    agent.permissions.clone(),
+                    llm_adapter,
+                )
+                .await;
+
             // Recover missing Ed25519 identity — edge case where key gen failed at first
             // connect. The boot pre-population loop skips agents without a pubkey, so
             // the bus won't have this agent's key unless we generate and register it now.
@@ -1622,8 +1889,9 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                 );
             }
 
+            let budget = self.resolve_agent_budget(&agent_name).await;
             self.cost_tracker
-                .register_agent(agent_id, agent_name.clone(), AgentBudget::default())
+                .register_agent(agent_id, agent_name.clone(), budget)
                 .await;
 
             let mut default_specs: Vec<(EventTypeFilter, SubscriptionPriority)> = Vec::new();
@@ -1771,4 +2039,42 @@ fn default_permissions_for_agent(name: &str) -> PermissionSet {
     perms.grant("scratchpad".to_string(), true, true, false, None);
 
     perms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_provider_name;
+    use agentos_types::LLMProvider;
+
+    #[test]
+    fn parse_provider_name_known_variants() {
+        assert_eq!(parse_provider_name("ollama"), LLMProvider::Ollama);
+        assert_eq!(parse_provider_name("OpenAI"), LLMProvider::OpenAI);
+        assert_eq!(parse_provider_name("anthropic"), LLMProvider::Anthropic);
+        assert_eq!(parse_provider_name("gemini"), LLMProvider::Gemini);
+    }
+
+    #[test]
+    fn parse_provider_name_custom_and_catalog() {
+        // Bare catalog name → Custom(name); resolved against the catalog at build.
+        assert_eq!(
+            parse_provider_name("nvidia"),
+            LLMProvider::Custom("nvidia".to_string())
+        );
+        // `custom:<name>` form.
+        assert_eq!(
+            parse_provider_name("custom:groq"),
+            LLMProvider::Custom("groq".to_string())
+        );
+        // Bare `custom`.
+        assert_eq!(
+            parse_provider_name("custom"),
+            LLMProvider::Custom("custom".to_string())
+        );
+        // Empty name after the colon normalizes to "custom" rather than "".
+        assert_eq!(
+            parse_provider_name("custom:"),
+            LLMProvider::Custom("custom".to_string())
+        );
+    }
 }

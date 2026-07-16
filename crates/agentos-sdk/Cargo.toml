@@ -9,7 +9,9 @@ agentos-types = { path = "../agentos-types" }
 agentos-tools = { path = "../agentos-tools" }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
+schemars = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+serde = { workspace = true }

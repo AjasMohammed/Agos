@@ -34,6 +34,16 @@ pub enum AuditEventType {
     TokenIssued,
     TokenExpired,
 
+    // REST API / control-plane auth (React control panel)
+    /// An operator authenticated successfully at `POST /api/v1/auth/login`.
+    ApiLoginSucceeded,
+    /// A login attempt failed (bad credential). Rate-limited; never logs the credential.
+    ApiLoginFailed,
+    /// An API key was minted (via login or `POST /api/v1/keys`). Records the key id, never the secret.
+    ApiKeyIssued,
+    /// An API key was revoked (via `DELETE /api/v1/keys/{id}`).
+    ApiKeyRevoked,
+
     // Tool events
     ToolInstalled,
     ToolRemoved,
@@ -135,6 +145,13 @@ pub enum AuditEventType {
     CheckpointRestored,
     CheckpointPruned,
 
+    // Atomic task checkout (single-owner dispatch claim)
+    TaskCheckedOut,
+    TaskCheckoutReclaimed,
+
+    // Periodic agent heartbeat wakeup
+    AgentHeartbeatFired,
+
     // Cost attribution (Spec §4)
     CostAttribution,
 
@@ -228,6 +245,11 @@ pub enum AuditEventType {
     /// Emitted when an agent's context memory is created, updated, rolled back, or cleared.
     ContextMemoryUpdated,
 
+    // Memory lifecycle (reinforcement / decay)
+    /// Emitted at task completion when injected procedures receive outcome
+    /// feedback (success/failure counts + confidence recompute).
+    MemoryReinforced,
+
     // MCP (Model Context Protocol)
     /// Emitted when an MCP tool call is executed (client mode).
     McpToolCall,
@@ -315,6 +337,67 @@ pub enum AuditEventType {
     BuildExecuted,
     /// Emitted when a build command fails.
     BuildFailed,
+
+    // User-preference adaptation proposals
+    /// Emitted when the post-task user-adaptation hook inserts a new
+    /// preference proposal into the review queue.
+    ProposalCreated,
+    /// Emitted when an operator accepts a pending preference proposal
+    /// (followed by `ContextMemoryUpdated` for the actual write).
+    ProposalAccepted,
+    /// Emitted when an operator rejects a pending preference proposal.
+    ProposalRejected,
+    /// Emitted when a pending preference proposal is auto-expired by the
+    /// TimeoutChecker sweep after exceeding the TTL.
+    ProposalExpired,
+
+    // Proactive personalization — structured user profile
+    /// Emitted when an accepted proposal (or explicit edit) inserts a new
+    /// structured profile entry into `user_profile.db`.
+    ProfileEntryAdded,
+    /// Emitted when an existing profile entry is updated (value/confidence/
+    /// category/pin/status) or refreshed via promotion of a re-accepted pref.
+    ProfileEntryUpdated,
+    /// Emitted when a profile entry is forgotten (hard-deleted).
+    ProfileEntryRemoved,
+
+    // User filesystem grants
+    /// Emitted when an operator grants a host directory to one agent or
+    /// globally. Payload: `path`, `agent_id` (or `null` for global), `mode`
+    /// ("rwx" string), `source` ("cli"|"web"|"bus"|"config"), `granted_by`.
+    WorkspaceGranted,
+    /// Emitted when an operator revokes a previously-granted host directory.
+    WorkspaceRevoked,
+
+    // Proactive personalization — feedback loop (Phase 5)
+    /// A personalization signal raised an interest weight, profile pin_rank,
+    /// or restated-preference confidence.
+    PersonalizationReinforced,
+    /// A personalization signal lowered an interest weight (e.g. dismissal),
+    /// or the decay pass reduced a profile pin_rank.
+    PersonalizationDecayed,
+    /// A stale profile entry was archived out of the L0 pinned block.
+    PersonalizationArchived,
+
+    // Proactive personalization — recommendation engine (Phase 4)
+    /// Emitted when a proactive tip is generated and persisted to
+    /// `recommendations.db` before delivery. Payload: id, topics, confidence.
+    RecommendationGenerated,
+    /// Emitted when a generated tip is successfully delivered via the
+    /// notification router. Payload: id, delivery_channel.
+    RecommendationDelivered,
+    /// Emitted when a cycle is skipped before persisting anything (rate-limit,
+    /// dedup, confidence floor, no signal). Payload: reason, dedup_hash (opt).
+    RecommendationSkipped,
+
+    // Proactive personalization — governance (Phase 6)
+    /// Emitted when the operator runs `agentos personalization export`.
+    /// Payload includes counts per store and the export size (bytes).
+    PersonalizationDataExported,
+    /// Emitted when the operator runs `agentos personalization forget`.
+    /// Payload includes per-store cleared counts and a `partial` flag when
+    /// one or more stores could not be fully cleared.
+    PersonalizationDataForgotten,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,6 +460,18 @@ impl AuditLog {
     pub fn open(path: &Path) -> Result<Self, AgentOSError> {
         let conn = Connection::open(path)
             .map_err(|e| AgentOSError::VaultError(format!("AuditLog DB open failed: {}", e)))?;
+
+        // W11: the audit log records secret names, agent IDs, capability
+        // actions, and arbitrary `details` payloads. Restrict it to owner
+        // read/write (matching the vault) so it is not world-readable under a
+        // default umask. The hash chain protects integrity, not confidentiality.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |e| AgentOSError::VaultError(format!("Failed to set audit DB permissions: {}", e)),
+            )?;
+        }
 
         conn.execute_batch(
             "

@@ -53,7 +53,9 @@ user_tools_dir = "/home/pi/.agentos/tools/user"
 data_dir = "/home/pi/.agentos/data"
 
 [tools.workspace]
-allowed_paths = ["/home/pi/projects", "/media", "/run/media"]
+# Bare mount roots (/media, /run/media) are rejected by startup validation —
+# grant a specific subdirectory if external-media access is needed.
+allowed_paths = ["/home/pi/projects"]
 
 [bus]
 socket_path = "/home/pi/.agentos/agentos.sock"
@@ -74,6 +76,9 @@ ollama_context_window = 16384
 
 [memory]
 model_cache_dir = "/home/pi/.agentos/models"
+# Pi/low-RAM: skip the ~23MB ONNX embedder; FTS5 lexical memory search still
+# works, only vector retrieval is a no-op.
+disable_embedder = true
 
 [memory.extraction]
 enabled = true
@@ -112,6 +117,11 @@ summarization_max_input_chars = 4000
 log_dir = "/home/pi/.agentos/logs"
 log_level = "info"
 log_format = "text"
+
+# Boot pre-flight — lean disk threshold for SD-card hosts.
+[preflight]
+min_free_disk_mb = 128
+check_db_writable = true
 
 [otel]
 enabled = false

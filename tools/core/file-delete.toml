@@ -18,11 +18,11 @@ outputs = ["status"]
 input  = "FileDeleteIntent"
 output = "FileDeleteResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["path"]
 
-[input_schema.properties.path]
+[payload_schema.properties.path]
 type = "string"
 description = "Relative file path under data directory"
 

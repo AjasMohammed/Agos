@@ -17,23 +17,23 @@ outputs = ["subscription_id", "status"]
 input  = "EventSubscribeIntent"
 output = "EventSubscribeResult"
 
-[input_schema]
+[payload_schema]
 type     = "object"
 required = ["event_filter"]
 
-[input_schema.properties.event_filter]
+[payload_schema.properties.event_filter]
 type        = "string"
 description = "What to subscribe to. Forms: 'all' (root only), 'category:<Name>' (e.g. 'category:HardwareEvents'), or an exact event type like 'DeviceConnected'."
 
-[input_schema.properties.payload_filter]
+[payload_schema.properties.payload_filter]
 type        = "string"
 description = "Optional predicate evaluated against the event payload, e.g. \"severity == 'critical'\" or \"agent_id == 'agent-7'\"."
 
-[input_schema.properties.throttle]
+[payload_schema.properties.throttle]
 type        = "string"
 description = "Rate-limit policy. Forms: 'none', 'once_per:30s', 'max:5/60s'. Default: 'none'."
 
-[input_schema.properties.priority]
+[payload_schema.properties.priority]
 type        = "string"
 description = "Delivery priority: 'critical', 'high', 'normal' (default), or 'low'."
 

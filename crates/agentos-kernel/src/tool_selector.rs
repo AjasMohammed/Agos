@@ -581,7 +581,8 @@ mod tests {
                 input: String::new(),
                 output: String::new(),
             },
-            input_schema: None,
+            payload_schema: None,
+            examples: vec![],
             sandbox: agentos_types::ToolSandbox {
                 network: false,
                 fs_write: false,

@@ -26,7 +26,7 @@ use agentos_types::{ContentPart, ImageSource};
 
 // ── OpenAI-format request/response types ────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct OpenAIChatRequest {
     pub model: String,
     pub messages: Vec<OpenAIMessage>,
@@ -38,34 +38,34 @@ pub struct OpenAIChatRequest {
     pub max_tokens: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct OpenAIMessage {
     pub role: String,
     pub content: OpenAIContent,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(untagged)]
 pub enum OpenAIContent {
     Text(String),
     Parts(Vec<OpenAIContentPart>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OpenAIContentPart {
     Text { text: String },
     ImageUrl { image_url: OpenAIImageUrl },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct OpenAIImageUrl {
     pub url: String,
     #[serde(default)]
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct OpenAIChatResponse {
     pub id: String,
     pub object: String,
@@ -75,14 +75,14 @@ pub struct OpenAIChatResponse {
     pub usage: OpenAIUsage,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct OpenAIChoice {
     pub index: u32,
     pub message: OpenAIMessage,
     pub finish_reason: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct OpenAIUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -155,7 +155,8 @@ fn openai_image_url_to_part(img: &OpenAIImageUrl) -> Result<ContentPart, String>
     }
     Err(format!(
         "unsupported image_url scheme (allowed: data:image/...;base64,... or http(s)://): {}",
-        &url[..url.len().min(64)]
+        // char-safe truncation — byte slicing can panic mid-UTF-8-sequence
+        url.chars().take(64).collect::<String>()
     ))
 }
 
@@ -324,6 +325,19 @@ fn openai_request_to_chat(req: &OpenAIChatRequest) -> Result<ChatRequest, String
 /// compatibility and does NOT use the standard `{ "data": ... }` envelope.
 ///
 /// When `stream: true`, returns an SSE stream of OpenAI-format chunks.
+#[utoipa::path(
+    post,
+    path = "/api/v1/chat/completions",
+    tag = "chat",
+    operation_id = "chat_completions",
+    request_body = OpenAIChatRequest,
+    responses(
+        (status = 200, description = "OpenAI-compatible chat completion. When request `stream` is true, responds with text/event-stream SSE chunks instead of this JSON body.", body = OpenAIChatResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorBody),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorBody)
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn completions(
     State(svc): State<Arc<dyn KernelService>>,
     Extension(key): Extension<AuthenticatedKey>,

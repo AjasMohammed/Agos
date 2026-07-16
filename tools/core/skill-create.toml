@@ -1,0 +1,91 @@
+tags = ["meta", "write", "control"]
+# `risk_class` is a top-level field on `ToolManifest` (NOT inside [manifest]).
+# Placing it inside [manifest] silently defaults the outer field to
+# `readonly_scoped`, which would let skill authoring bypass the approval hook.
+risk_class = "control_plane"
+
+[manifest]
+name        = "skill-create"
+version     = "1.0.0"
+description = "Author a new skill at runtime: write its SKILL.toml + prompt.md under the user-skills directory and install it into the live registry. Trust tier is forced to 'community' regardless of caller input. Every call is gated by the approval hook (risk_class = control_plane)."
+author      = "agentos-core"
+trust_tier  = "core"
+group       = "skills"
+
+[manifest.usage_hints]
+use_for = [
+    "Creating a new reusable skill the user can later run via 'agentos skill run <name>' or via skill-prompt",
+    "Codifying a multi-step recipe the user just walked through into a permanent skill",
+]
+prefer_over = [
+    "Re-writing the same prompt from scratch every conversation — install it as a skill once",
+]
+quick_example = { name = "weekly-report", description = "Compile and email the weekly status report", system_prompt = "You are the weekly-report skill. Pull events from this week, summarize, and send to the configured recipient.", required_tools = ["memory-search", "notify-user"] }
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = ["name", "version", "manifest_path", "prompt_path", "trust_tier", "status"]
+
+[intent_schema]
+input  = "SkillCreateIntent"
+output = "SkillCreateResult"
+
+[payload_schema]
+type     = "object"
+required = ["name", "description", "system_prompt"]
+
+[payload_schema.properties.name]
+type        = "string"
+description = "Lowercase kebab-case skill identifier (a-z0-9-), 2..64 chars. Becomes the install directory name. Examples: 'alert-builder', 'weekly-report'."
+
+[payload_schema.properties.description]
+type        = "string"
+description = "One-sentence summary of what the skill does. Shown in skill listings and the agent-manual."
+
+[payload_schema.properties.system_prompt]
+type        = "string"
+description = "The skill's recipe — the system prompt an agent will run with when the skill is invoked. Treat as the playbook the agent should follow."
+
+[payload_schema.properties.version]
+type        = "string"
+description = "Semver version. Defaults to '0.1.0'."
+
+[payload_schema.properties.author]
+type        = "string"
+description = "Author name. Defaults to 'agent-authored'."
+
+[payload_schema.properties.required_tools]
+type        = "array"
+description = "Tool names this skill expects to use. Advisory at this layer."
+
+[payload_schema.properties.required_tools.items]
+type = "string"
+
+[payload_schema.properties.optional_tools]
+type        = "array"
+description = "Tool names this skill may optionally use."
+
+[payload_schema.properties.optional_tools.items]
+type = "string"
+
+[payload_schema.properties.max_cost_per_run]
+type        = "number"
+description = "Budget cap in dollars per skill run. Stored in the skill manifest; advisory — NOT yet enforced by `skill run` at this layer. Defaults to 0.10."
+
+[payload_schema.properties.max_tokens_per_run]
+type        = "integer"
+description = "Token budget per skill run. Stored in the skill manifest; advisory — NOT yet enforced by `skill run` at this layer. Defaults to 8000."
+
+[payload_schema.properties.overwrite]
+type        = "boolean"
+description = "When true, replaces an existing skill with the same name. Defaults to false."
+
+[sandbox]
+network       = false
+fs_write      = true
+gpu           = false
+max_memory_mb = 32
+max_cpu_ms    = 500
+syscalls      = []

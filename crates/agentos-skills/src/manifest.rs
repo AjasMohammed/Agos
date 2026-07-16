@@ -21,6 +21,91 @@ pub enum SkillLoadError {
 
     #[error("System prompt file '{path}' not found (referenced by SKILL.toml)")]
     PromptNotFound { path: String },
+
+    #[error(
+        "System prompt path '{path}' escapes the skill directory; \
+         system_prompt_file must be a relative path inside the skill"
+    )]
+    PromptPathEscape { path: String },
+
+    #[error("Invalid skill name '{name}': {reason}")]
+    InvalidName { name: String, reason: String },
+}
+
+/// Validate a skill name from an untrusted SKILL.toml. The name is used as the
+/// `SkillRegistry` map key (and may feed future path/prompt lookups), so it is
+/// restricted to a kebab allowlist — mirroring the `skill-create` tool — to
+/// reject traversal sequences and control characters.
+fn validate_skill_name(name: &str) -> Result<(), SkillLoadError> {
+    let invalid = |reason: &str| SkillLoadError::InvalidName {
+        name: name.to_string(),
+        reason: reason.to_string(),
+    };
+    if name.is_empty() {
+        return Err(invalid("name is empty"));
+    }
+    if !name
+        .bytes()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    {
+        return Err(invalid("allowed characters are a-z, 0-9, '-'"));
+    }
+    if name.len() < 2 || name.len() > 64 {
+        return Err(invalid("must be 2..=64 characters"));
+    }
+    if name.starts_with('-') || name.ends_with('-') {
+        return Err(invalid("may not start or end with '-'"));
+    }
+    Ok(())
+}
+
+/// Resolve `system_prompt_file` (from the untrusted SKILL.toml) against the
+/// skill directory and reject anything that escapes it: absolute paths,
+/// `..` traversal, or symlinks pointing outside `dir`. Without this, a
+/// hand-crafted manifest with `system_prompt_file = "../../../etc/passwd"`
+/// would surface arbitrary host files as the skill's system prompt.
+fn resolve_contained_prompt_path(
+    dir: &Path,
+    system_prompt_file: &str,
+) -> Result<std::path::PathBuf, SkillLoadError> {
+    let rel = Path::new(system_prompt_file);
+    // Absolute paths and explicit parent-dir components are rejected outright,
+    // before touching the filesystem.
+    if rel.is_absolute()
+        || rel
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(SkillLoadError::PromptPathEscape {
+            path: system_prompt_file.to_string(),
+        });
+    }
+
+    let candidate = dir.join(rel);
+    if !candidate.exists() {
+        return Err(SkillLoadError::PromptNotFound {
+            path: candidate.display().to_string(),
+        });
+    }
+
+    // Canonicalize both sides to defeat symlink escapes, then confirm
+    // containment within the skill directory.
+    let canonical_dir = dir.canonicalize().map_err(|e| SkillLoadError::ReadError {
+        path: dir.display().to_string(),
+        source: e,
+    })?;
+    let canonical_prompt = candidate
+        .canonicalize()
+        .map_err(|e| SkillLoadError::ReadError {
+            path: candidate.display().to_string(),
+            source: e,
+        })?;
+    if !canonical_prompt.starts_with(&canonical_dir) {
+        return Err(SkillLoadError::PromptPathEscape {
+            path: system_prompt_file.to_string(),
+        });
+    }
+    Ok(canonical_prompt)
 }
 
 /// Load a skill from a directory containing `SKILL.toml` and the referenced
@@ -45,12 +130,9 @@ pub fn load_skill_from_dir(dir: &Path) -> Result<(SkillManifest, String), SkillL
             source: e,
         })?;
 
-    let prompt_path = dir.join(&manifest.agent.system_prompt_file);
-    if !prompt_path.exists() {
-        return Err(SkillLoadError::PromptNotFound {
-            path: prompt_path.display().to_string(),
-        });
-    }
+    validate_skill_name(&manifest.skill.name)?;
+
+    let prompt_path = resolve_contained_prompt_path(dir, &manifest.agent.system_prompt_file)?;
 
     let prompt_content =
         std::fs::read_to_string(&prompt_path).map_err(|e| SkillLoadError::ReadError {
@@ -132,6 +214,56 @@ system_prompt_file = "nonexistent.md"
 
         let err = load_skill_from_dir(tmp.path()).unwrap_err();
         assert!(matches!(err, SkillLoadError::PromptNotFound { .. }));
+    }
+
+    #[test]
+    fn test_load_skill_rejects_prompt_traversal() {
+        let tmp = TempDir::new().unwrap();
+        // A secret file living OUTSIDE the skill directory.
+        let secret = tmp.path().join("secret.txt");
+        fs::write(&secret, "TOP SECRET").unwrap();
+
+        let skill_dir = tmp.path().join("evil-skill");
+        fs::create_dir(&skill_dir).unwrap();
+        let skill_toml = r#"
+[skill]
+name = "evil"
+version = "0.1.0"
+description = "traversal attempt"
+author = "attacker"
+
+[agent]
+system_prompt_file = "../secret.txt"
+"#;
+        fs::write(skill_dir.join("SKILL.toml"), skill_toml).unwrap();
+
+        let err = load_skill_from_dir(&skill_dir).unwrap_err();
+        assert!(
+            matches!(err, SkillLoadError::PromptPathEscape { .. }),
+            "expected PromptPathEscape, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_load_skill_rejects_absolute_prompt_path() {
+        let tmp = TempDir::new().unwrap();
+        let skill_toml = r#"
+[skill]
+name = "evil-abs"
+version = "0.1.0"
+description = "absolute path attempt"
+author = "attacker"
+
+[agent]
+system_prompt_file = "/etc/passwd"
+"#;
+        fs::write(tmp.path().join("SKILL.toml"), skill_toml).unwrap();
+
+        let err = load_skill_from_dir(tmp.path()).unwrap_err();
+        assert!(
+            matches!(err, SkillLoadError::PromptPathEscape { .. }),
+            "expected PromptPathEscape, got {err:?}"
+        );
     }
 
     #[test]

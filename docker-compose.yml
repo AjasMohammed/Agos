@@ -1,6 +1,6 @@
 services:
   agentos:
-    image: agentos/kernel:latest
+    image: ghcr.io/ajasmohammed/agos:latest
     build:
       context: .
     container_name: agentos-kernel
@@ -9,6 +9,14 @@ services:
       - /tmp
       - /run
       - /var/log/agentos:uid=65532,gid=65532,mode=0755
+    # Hardened defaults: no-new-privileges + read_only root FS combined with
+    # Docker's default seccomp profile and capability set. NOTE: bwrap-based
+    # script/shell-exec tools require user namespaces and additional syscalls,
+    # so they fail with EPERM under this profile. To enable script tools you must
+    # opt in to a relaxation (e.g. `security_opt: [seccomp=unconfined]` and drop
+    # `no-new-privileges:true`), which weakens isolation — see deploy/agentos.service
+    # for the equivalent systemd hardening tradeoff. Do not relax for the web stack
+    # unless script execution is explicitly required.
     security_opt:
       - no-new-privileges:true
     environment:
@@ -28,11 +36,15 @@ services:
       - ./config/docker.toml:/etc/agentos/config.toml:ro
       # Container runtime tools (container-create / container-exec / container-logs).
       # Mounting the host Docker socket gives this container effective root on the
-      # host — keep commented out unless container tooling is required.
-      - /var/run/docker.sock:/var/run/docker.sock
+      # host — keep commented out unless container tooling is required. Uncomment
+      # ONLY if the container-runtime tools are needed (this grants host root).
+      # - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "8080:8080"
-      - "9091:9091"
+      # Health/metrics: bind to loopback on the host so /metrics and /healthz
+      # (operational internals, unauthenticated) are not reachable from other
+      # hosts. Scrape locally or front with a trusted proxy.
+      - "127.0.0.1:9091:9091"
     restart: unless-stopped
     depends_on:
       jaeger:

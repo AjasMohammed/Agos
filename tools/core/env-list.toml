@@ -20,11 +20,11 @@ outputs = ["content.json"]
 input = "EnvListIntent"
 output = "EnvListResult"
 
-[input_schema]
+[payload_schema]
 required = ["workspace"]
 type = "object"
 
-[input_schema.properties.workspace]
+[payload_schema.properties.workspace]
 description = "Name of the workspace to list packages for"
 type = "string"
 

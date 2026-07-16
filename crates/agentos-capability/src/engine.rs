@@ -520,6 +520,67 @@ mod tests {
         }
     }
 
+    /// Mirrors the per-turn token the chat path mints (finding S1): a read-only
+    /// chat turn produces a token whose `allowed_intents` is `{Read}`. Such a
+    /// token must ALLOW an in-scope Read intent and DENY an out-of-scope Execute
+    /// intent — the scoped-intent narrowing that chat previously lacked entirely
+    /// (it ran at the agent's full standing permissions with no token at all).
+    #[test]
+    fn test_chat_style_scoped_intent_token() {
+        let engine = CapabilityEngine::new();
+        let mut perms = PermissionSet::new();
+        perms.grant("fs.user_data".into(), true, false, false, None);
+        let agent_id = AgentID::new();
+        engine.register_agent(agent_id, perms.clone());
+
+        // A read-only turn: allowed_intents scoped to {Read}, exactly as the
+        // chat loop derives from the turn's requested intents.
+        let token = engine
+            .issue_token(
+                TaskID::new(),
+                agent_id,
+                BTreeSet::new(),
+                BTreeSet::from([IntentTypeFlag::Read]),
+                perms.clone(),
+                Duration::from_secs(300),
+            )
+            .unwrap();
+
+        let make_intent = |intent_type: IntentType| IntentMessage {
+            id: MessageID::new(),
+            sender_token: token.clone(),
+            intent_type,
+            target: IntentTarget::Kernel,
+            payload: SemanticPayload {
+                schema: "fs-read".to_string(),
+                data: serde_json::Value::Null,
+            },
+            context_ref: ContextID::new(),
+            priority: 5,
+            timeout_ms: 1000,
+            trace_id: TraceID::new(),
+            timestamp: chrono::Utc::now(),
+        };
+
+        // In-scope Read with a held permission → allowed.
+        assert!(engine
+            .validate_intent(
+                &token,
+                &make_intent(IntentType::Read),
+                &[("fs.user_data".to_string(), PermissionOp::Read)],
+            )
+            .is_ok());
+
+        // Out-of-scope Execute intent → denied on intent_type, even though the
+        // agent's standing permissions might otherwise cover it.
+        match engine.validate_intent(&token, &make_intent(IntentType::Execute), &[]) {
+            Err(AgentOSError::PermissionDenied { resource, .. }) => {
+                assert_eq!(resource, "intent_type")
+            }
+            other => panic!("expected intent_type PermissionDenied, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_deny_entries_tampering_invalidates_signature() {
         let engine = CapabilityEngine::new();

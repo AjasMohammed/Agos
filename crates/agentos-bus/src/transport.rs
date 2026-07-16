@@ -6,18 +6,30 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// Maximum allowed message size (16 MiB).
 pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
-/// Timeout for individual read/write operations on the bus.
-const IO_TIMEOUT: Duration = Duration::from_secs(30);
+/// Timeout for reading the *payload* of a message once its length prefix has
+/// arrived. Bytes that are already in flight should land promptly, so this
+/// bounds a peer that announces a length then stalls mid-message.
+///
+/// NOTE: this is deliberately NOT applied to the initial length-prefix read.
+/// Waiting for the *next* message to begin is an open-ended wait by design — a
+/// CLI blocking on a synchronous `task run` result (which can take minutes of
+/// LLM tool-calling), or the kernel holding an idle connection open during an
+/// interactive approval prompt (escalations live for 5 minutes), must not be
+/// killed by a short deadline. A dead peer still surfaces immediately as EOF.
+const PAYLOAD_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Read a single length-prefixed JSON message from any async stream.
 pub async fn read_message<T: DeserializeOwned>(
     stream: &mut (impl AsyncRead + Unpin),
 ) -> Result<T, AgentOSError> {
-    // Read 4-byte length prefix (big-endian u32) with timeout
+    // Read the 4-byte length prefix (big-endian u32). No timeout: this is the
+    // wait for a message to *start*, which is legitimately unbounded (slow
+    // synchronous responses, idle interactive connections). Disconnect returns
+    // an `UnexpectedEof` error here, so dead peers are still reaped promptly.
     let mut len_buf = [0u8; 4];
-    tokio::time::timeout(IO_TIMEOUT, stream.read_exact(&mut len_buf))
+    stream
+        .read_exact(&mut len_buf)
         .await
-        .map_err(|_| AgentOSError::BusError("Read timed out waiting for message length".into()))?
         .map_err(|e| AgentOSError::BusError(format!("Failed to read message length: {}", e)))?;
     let len = u32::from_be_bytes(len_buf) as usize;
 
@@ -36,9 +48,10 @@ pub async fn read_message<T: DeserializeOwned>(
         )));
     }
 
-    // Read the JSON payload with timeout
+    // Read the JSON payload with a timeout — the bytes are already in flight, so
+    // a stall here means a misbehaving/half-dead peer.
     let mut buf = vec![0u8; len];
-    tokio::time::timeout(IO_TIMEOUT, stream.read_exact(&mut buf))
+    tokio::time::timeout(PAYLOAD_IO_TIMEOUT, stream.read_exact(&mut buf))
         .await
         .map_err(|_| AgentOSError::BusError("Read timed out waiting for message payload".into()))?
         .map_err(|e| AgentOSError::BusError(format!("Failed to read message payload: {}", e)))?;

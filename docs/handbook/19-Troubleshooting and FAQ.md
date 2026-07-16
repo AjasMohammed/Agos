@@ -30,7 +30,7 @@ status: complete
 | # | Problem | Likely Cause | Solution |
 |---|---------|-------------|----------|
 | 5 | `AgentNotFound: <name>` | Agent never registered or was evicted | Verify with `agentos agent list`; re-register if missing |
-| 6 | Agent unresponsive to messages | LLM not connected or overloaded | Check `agentos status`; verify LLM adapter health with `agentos llm status` |
+| 6 | Agent unresponsive to messages | LLM not connected or overloaded | Check `agentos status`; verify the LLM provider config with `agentos provider list` and overall health with `agentos status` |
 | 7 | `NoLLMConnected` | No adapter configured or all health checks failed | Add a provider in `[llm]` section or start Ollama (`ollama serve`) |
 
 ### Tasks
@@ -40,7 +40,7 @@ status: complete
 | 8 | Task stuck in `Running` state | Pending escalation or LLM hang | Check `agentos escalation list`; approve, deny, or cancel the task |
 | 9 | `TaskTimeout: <id>` | Task exceeded configured timeout | Increase `[kernel].task_timeout_secs` or break work into smaller tasks |
 | 10 | `BudgetExceeded` — task stopped | Per-agent cost limit reached | Review with `agentos cost show`; increase budget or switch to a cheaper model |
-| 11 | Task immediately fails with `PermissionDenied` | Agent lacks required capability | Grant the permission: `agentos perm grant <agent> <resource> <op>` |
+| 11 | Task immediately fails with `PermissionDenied` | Agent lacks required capability | Grant the permission: `agentos perm grant <agent> <resource>:<op>` (e.g. `agentos perm grant worker fs.user_data:rw`) |
 
 ### Tools
 
@@ -84,7 +84,7 @@ status: complete
 
 | # | Problem | Likely Cause | Solution |
 |---|---------|-------------|----------|
-| 30 | Resource deadlock detected | Two tasks holding locks in opposite order | Inspect contention: `agentos resource contention`; force-release: `agentos resource release <resource>` |
+| 30 | Resource deadlock detected | Two tasks holding locks in opposite order | Inspect contention: `agentos resource contention`; force-release: `agentos resource release --resource <resource> --agent <agent>` |
 | 31 | Escalation auto-expired | No response within 5 minutes | Escalations expire after `[kernel].escalation_timeout_secs` (default 300 s); respond faster or increase the timeout |
 | 32 | Audit chain verification fails | Possible log corruption or tampering | Export the chain for forensics: `agentos audit export --output audit.json`; then review the broken link |
 | 33 | `SchemaValidation` error on intent | Intent payload does not match declared schema | Validate the JSON against the tool manifest schema before submission |
@@ -118,9 +118,6 @@ agentos audit logs --last 100 | grep <trace_id>
 ```bash
 # Recent audit entries
 agentos audit logs --last 50
-
-# Tail live audit log
-agentos audit logs --follow
 
 # Verify audit chain integrity
 agentos audit verify
@@ -270,14 +267,11 @@ Report bugs and feature requests at the project issue tracker. Include:
 The audit log is the ground truth for what AgentOS did and why. For any unexpected behaviour:
 
 ```bash
-# Last 100 events with full JSON
-agentos audit logs --last 100 --format json
+# Last 100 events
+agentos audit logs --last 100
 
-# Filter to a specific agent
-agentos audit logs --agent <agent-id> --last 50
-
-# Filter to a specific task
-agentos audit logs --task <task-id>
+# Narrow or widen the window with --last <N>
+agentos audit logs --last 50
 ```
 
 Look for `SecurityViolation`, `EscalationRequired`, `BudgetExceeded`, and `ToolExecutionFailed` event types — these are the most common root causes of unexpected stops.

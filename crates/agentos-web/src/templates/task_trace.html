@@ -58,8 +58,8 @@
                         {{ tc.status }}
                     </span>
                     {% if tc.duration_ms > 0 %}<span class="trace-tool-dur muted">{{ tc.duration_ms }}ms</span>{% endif %}
-                    {% if tc.injection_score %}<span class="trace-tool-inj muted" title="Injection score">⚠ {{ tc.injection_score }}</span>{% endif %}
-                    {% if tc.has_snapshot %}<span class="trace-tool-snap muted" title="Snapshot taken">📸</span>{% endif %}
+                    {% if tc.injection_score %}<span class="trace-tool-inj muted" title="Injection score">{{ tc.injection_score }}</span>{% endif %}
+                    {% if tc.has_snapshot %}<span class="trace-tool-snap muted" title="Snapshot taken"></span>{% endif %}
                 </div>
                 {% if tc.input_preview %}
                 <div class="trace-tool-input muted"><code>{{ tc.input_preview }}</code></div>

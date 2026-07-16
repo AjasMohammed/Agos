@@ -18,15 +18,15 @@ outputs = ["status"]
 input  = "FileMoveIntent"
 output = "FileMoveResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["from", "to"]
 
-[input_schema.properties.from]
+[payload_schema.properties.from]
 type = "string"
 description = "Source file path"
 
-[input_schema.properties.to]
+[payload_schema.properties.to]
 type = "string"
 description = "Destination file path"
 

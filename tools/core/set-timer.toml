@@ -19,42 +19,42 @@ outputs = ["timer_id", "timer_name"]
 input  = "SetTimerIntent"
 output = "SetTimerResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["name", "delay_secs"]
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 type        = "string"
 description = "Unique name for this timer (used to cancel or identify it)"
 
-[input_schema.properties.delay_secs]
+[payload_schema.properties.delay_secs]
 type        = "integer"
 description = "Seconds from now until the timer fires (1–86400)"
 minimum     = 1
 maximum     = 86400
 
-[input_schema.properties.agent_name]
+[payload_schema.properties.agent_name]
 type        = "string"
 description = "Name of the agent that will execute the timer action (for run_task). If omitted, defaults to the calling agent."
 
-[input_schema.properties.action]
+[payload_schema.properties.action]
 type        = "string"
 enum        = ["notify", "run_task", "run_task_and_notify"]
 description = "What to do when the timer fires (default: notify)"
 
-[input_schema.properties.subject]
+[payload_schema.properties.subject]
 type        = "string"
 description = "Notification subject (used when action is 'notify' or 'run_task_and_notify')"
 
-[input_schema.properties.body]
+[payload_schema.properties.body]
 type        = "string"
 description = "Notification body (used when action is 'notify' or 'run_task_and_notify')"
 
-[input_schema.properties.prompt]
+[payload_schema.properties.prompt]
 type        = "string"
 description = "Task prompt to run (used when action is 'run_task' or 'run_task_and_notify')"
 
-[input_schema.properties.priority]
+[payload_schema.properties.priority]
 type        = "string"
 enum        = ["info", "warning", "urgent", "critical"]
 description = "Notification priority (default: info)"

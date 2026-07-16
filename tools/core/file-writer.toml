@@ -18,30 +18,30 @@ outputs = ["status"]
 input  = "FileWriteIntent"
 output = "WriteResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["path", "content"]
 
-[input_schema.properties.path]
+[payload_schema.properties.path]
 type = "string"
 description = "Relative file path under data directory"
 
-[input_schema.properties.content]
+[payload_schema.properties.content]
 type = "string"
 description = "Text content to write"
 
-[input_schema.properties.mode]
+[payload_schema.properties.mode]
 type = "string"
 enum = ["overwrite", "append", "create_only"]
 default = "overwrite"
 description = "Write mode"
 
-[input_schema.properties.append]
+[payload_schema.properties.append]
 type = "boolean"
 default = false
 description = "Legacy alias for mode=append"
 
-[input_schema.properties.max_bytes]
+[payload_schema.properties.max_bytes]
 type = "integer"
 default = 10485760
 minimum = 1
@@ -54,3 +54,19 @@ gpu           = false
 max_memory_mb = 64
 max_cpu_ms    = 5000
 syscalls      = []
+
+[usage_hints]
+use_for = [
+  "creating a new file or fully replacing one whose content you've already read",
+]
+prefer_over = [
+  "shell-exec for redirection — typed errors and atomic writes",
+  "file-edit when you intend to overwrite the entire file",
+]
+related_tools = ["file-reader", "file-edit"]
+
+[[examples]]
+description = "Write text content to a new file"
+[examples.payload]
+path = "notes.txt"
+content = "Meeting notes from 2026-06-01"

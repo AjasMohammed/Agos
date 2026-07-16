@@ -19,75 +19,75 @@ outputs = ["schedule_id", "schedule_name", "mode", "action", "message"]
 input  = "ScheduleRecurringIntent"
 output = "ScheduleRecurringResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["name", "cron"]
 
 # Mode-specific requireds. The kernel additionally validates these at runtime;
 # this block lets schema-aware LLMs surface the requirement before invocation.
-[[input_schema.allOf]]
-[input_schema.allOf.if.properties.mode]
+[[payload_schema.allOf]]
+[payload_schema.allOf.if.properties.mode]
 const = "task"
-[input_schema.allOf.then]
+[payload_schema.allOf.then]
 required = ["task_prompt"]
 
-[[input_schema.allOf]]
-[input_schema.allOf.if.properties.mode]
+[[payload_schema.allOf]]
+[payload_schema.allOf.if.properties.mode]
 const = "notify"
-[input_schema.allOf.then]
+[payload_schema.allOf.then]
 required = ["notify_subject", "notify_body"]
 
-[[input_schema.allOf]]
-[input_schema.allOf.if.properties.mode]
+[[payload_schema.allOf]]
+[payload_schema.allOf.if.properties.mode]
 const = "tool"
-[input_schema.allOf.then]
+[payload_schema.allOf.then]
 required = ["tool"]
 
-[input_schema.properties.name]
+[payload_schema.properties.name]
 type = "string"
 description = "Unique schedule name (used for pause/resume/delete via schedule-control)."
 
-[input_schema.properties.cron]
+[payload_schema.properties.cron]
 type = "string"
 description = "Cron expression. 5-field 'min hr dom mon dow' or 6-field 'sec min hr dom mon dow' (5-field is normalized to 6-field). Minimum interval between fires is 60s in production. Alias: 'cron_expression'."
 
-[input_schema.properties.cron_expression]
+[payload_schema.properties.cron_expression]
 type = "string"
 description = "Alias for 'cron'. Either field may be supplied."
 
-[input_schema.properties.mode]
+[payload_schema.properties.mode]
 type = "string"
 enum = ["task", "notify", "tool"]
 default = "task"
 description = "Action when cron fires. 'task' = run an LLM prompt on the target agent. 'notify' = deliver a user notification directly (no LLM). 'tool' = invoke a single tool with fixed args directly (no LLM)."
 
-[input_schema.properties.task_prompt]
+[payload_schema.properties.task_prompt]
 type = "string"
 description = "Required when mode='task'. Prompt the target agent runs."
 
-[input_schema.properties.notify_subject]
+[payload_schema.properties.notify_subject]
 type = "string"
 description = "Required when mode='notify'. Notification subject line."
 
-[input_schema.properties.notify_body]
+[payload_schema.properties.notify_body]
 type = "string"
 description = "Required when mode='notify'. Notification body text."
 
-[input_schema.properties.notify_priority]
+[payload_schema.properties.notify_priority]
 type = "string"
 enum = ["info", "warning", "urgent", "critical"]
 default = "info"
 description = "Optional when mode='notify'. Defaults to 'info'."
 
-[input_schema.properties.tool]
+[payload_schema.properties.tool]
 type = "string"
 description = "Required when mode='tool'. Name of the tool to invoke. Scheduling-meta tools (schedule-once / schedule-recurring / schedule-control / set-timer / cancel-once-job / cancel-timer) are rejected to prevent recursion."
 
-[input_schema.properties.tool_args]
+[payload_schema.properties.tool_args]
 type = "object"
 description = "Optional fixed args passed to the tool when mode='tool'."
 
-[input_schema.properties.agent_name]
+[payload_schema.properties.agent_name]
 type = "string"
 description = "Target agent (name or AgentID) for mode='task' / mode='tool'. Defaults to the calling agent."
 

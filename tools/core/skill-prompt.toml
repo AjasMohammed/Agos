@@ -1,0 +1,51 @@
+tags = ["meta", "read"]
+# `risk_class` is a top-level field on `ToolManifest` (NOT inside [manifest]).
+# Nesting it under [manifest] makes serde silently drop it and default the
+# outer field — kept top-level here so the intent is provable, matching
+# skill-create.toml.
+risk_class = "readonly_scoped"
+
+[manifest]
+name        = "skill-prompt"
+version     = "1.0.0"
+description = "Fetch an installed skill's full system prompt + required-tool allowlist + budget. Use this when the user's request matches an installed skill's purpose: call agent-manual {section: skills} for the inventory, then skill-prompt to pull the recipe into your current context. The skill's required tools are advisory at this layer — stay within them where possible."
+author      = "agentos-core"
+trust_tier  = "core"
+group       = "skills"
+
+[manifest.usage_hints]
+use_for = [
+    "Reading the recipe / playbook for an installed skill",
+    "Loading skill guidance into your context before composing a response",
+    "Looking up which tools a skill expects to use",
+]
+prefer_over = [
+    "agent-manual {section: skills, skill: <name>} when you need the actual prompt text (the manual returns metadata only)",
+]
+quick_example = { name = "alert-builder" }
+
+[capabilities_required]
+permissions = []
+
+[capabilities_provided]
+outputs = ["name", "version", "description", "system_prompt", "tools.required", "tools.optional", "budget"]
+
+[intent_schema]
+input  = "SkillPromptIntent"
+output = "SkillPromptResult"
+
+[payload_schema]
+type     = "object"
+required = ["name"]
+
+[payload_schema.properties.name]
+type        = "string"
+description = "Installed skill name. Match is case-insensitive. Call agent-manual {section: skills} first if you don't know what's installed."
+
+[sandbox]
+network       = false
+fs_write      = false
+gpu           = false
+max_memory_mb = 16
+max_cpu_ms    = 200
+syscalls      = []

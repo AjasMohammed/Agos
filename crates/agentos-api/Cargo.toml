@@ -1,25 +1,45 @@
 [package]
 name = "agentos-api"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
+autobins = false
+
+# Explicit kebab-case name so `cargo run -p agentos-api --bin gen-openapi` works
+# (without this, cargo auto-derives the underscore name `gen_openapi`).
+[[bin]]
+name = "gen-openapi"
+path = "src/bin/gen_openapi.rs"
+
+[[bin]]
+name = "gen-events"
+path = "src/bin/gen_events.rs"
 
 [dependencies]
 agentos-types = { path = "../agentos-types" }
 agentos-kernel = { path = "../agentos-kernel" }
+agentos-memory = { path = "../agentos-memory" }
+agentos-skills = { path = "../agentos-skills" }
 agentos-audit = { path = "../agentos-audit" }
 agentos-vault = { path = "../agentos-vault" }
 agentos-pipeline = { path = "../agentos-pipeline" }
 agentos-llm = { path = "../agentos-llm" }
+agentos-hal = { path = "../agentos-hal" }
+agentos-scratch = { path = "../agentos-scratch" }
+ureq = "2"
+toml_edit = { workspace = true }
+serde_yaml = { workspace = true }
+cron = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = "0.1"
+tokio-util = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
 chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-axum = { workspace = true, features = ["macros", "ws"] }
+axum = { workspace = true, features = ["macros", "ws", "multipart"] }
 agentos-bus = { path = "../agentos-bus" }
 axum-extra = { version = "0.12", features = ["cookie", "typed-header"] }
 tower = "0.5"
@@ -34,12 +54,16 @@ zeroize = { workspace = true }
 rusqlite = { workspace = true }
 futures = "0.3"
 bytes = { workspace = true }
+utoipa = { version = "5", features = ["chrono", "uuid", "axum_extras"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 serial_test = "3.4.0"
 toml = { workspace = true }
+axum = { workspace = true, features = ["macros", "ws", "multipart"] }
+tower = "0.5"
+serde_json = { workspace = true }
 agentos-kernel = { path = "../agentos-kernel" }
 agentos-vault = { path = "../agentos-vault" }
 agentos-types = { path = "../agentos-types" }

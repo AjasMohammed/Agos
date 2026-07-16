@@ -17,7 +17,7 @@ outputs = ["categories", "filter_syntax", "throttle_syntax"]
 input  = "EventListAvailableIntent"
 output = "EventListAvailableResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
 [sandbox]

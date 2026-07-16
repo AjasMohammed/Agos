@@ -3,14 +3,17 @@ use agentos_bus::client::BusClient;
 
 pub mod a2a;
 pub mod agent;
+pub mod approval;
 pub mod audit;
 pub mod bg;
 pub mod channel;
 pub mod config_cmd;
+pub mod config_revision_store;
 pub mod cost;
 pub mod doctor;
 pub mod escalation;
 pub mod event;
+pub mod gateway;
 pub mod hal;
 pub mod healthz;
 pub mod identity;
@@ -19,10 +22,15 @@ pub mod log;
 pub mod mcp;
 pub mod notifications;
 pub mod onboard;
+pub mod org;
 pub mod perm;
+pub mod personalization;
 pub mod pipeline;
 pub mod plugin;
+pub mod prefs;
+pub mod profile;
 pub mod provider;
+pub mod recommendations;
 pub mod resource;
 pub mod role;
 pub mod schedule;
@@ -35,6 +43,7 @@ pub mod task;
 pub mod team;
 pub mod tool;
 pub mod web;
+pub mod workspace;
 
 pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow::Result<()> {
     match command {
@@ -43,6 +52,8 @@ pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow
         Commands::Tool { command } => tool::handle(client, command).await,
         Commands::Secret { command } => secret::handle(client, command).await,
         Commands::Perm { command } => perm::handle(client, command).await,
+        Commands::Prefs { command } => prefs::handle(client, command).await,
+        Commands::Profile { command } => profile::handle(client, command).await,
         Commands::Status => status::handle(client).await,
         Commands::Audit { command } => audit::handle(client, command).await,
         Commands::Role { command } => role::handle(client, command).await,
@@ -50,6 +61,7 @@ pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow
         Commands::Bg { command } => bg::handle(client, command).await,
         Commands::Pipeline { command } => pipeline::handle(client, command).await,
         Commands::Cost { command } => cost::handle(client, command).await,
+        Commands::Org { command } => org::handle(client, command).await,
         Commands::Resource { command } => resource::handle(client, command).await,
         Commands::Escalation { command } => escalation::handle(client, command).await,
         Commands::Snapshot { command } => snapshot::handle(client, command).await,
@@ -64,6 +76,10 @@ pub async fn handle_command(client: &mut BusClient, command: Commands) -> anyhow
         Commands::Provider { command } => provider::handle(client, command).await,
         Commands::Team { command } => team::handle(client, command).await,
         Commands::Plugin { command } => plugin::handle(client, command).await,
+        Commands::Workspace { command } => workspace::handle(client, command).await,
+        Commands::Approval { command } => approval::handle(client, command).await,
+        Commands::Recommendations { command } => recommendations::handle(client, command).await,
+        Commands::Personalization { command } => personalization::handle(client, command).await,
         _ => unreachable!(),
     }
 }

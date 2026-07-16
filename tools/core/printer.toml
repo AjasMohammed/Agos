@@ -17,48 +17,48 @@ outputs = ["hardware.printer", "content.structured"]
 input  = "PrinterIntent"
 output = "PrinterResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 description = "Printer discovery and print job management request"
 
-[input_schema.properties.action]
+[payload_schema.properties.action]
 type = "string"
 enum = ["list", "print", "status", "cancel"]
 default = "list"
 description = "List printers, submit a document, query a job, or cancel a job."
 
-[input_schema.properties.printer]
+[payload_schema.properties.printer]
 type = "string"
 description = "Logical printer name such as 'office-hp'. Required for print unless printer_uri is provided."
 pattern = "^[A-Za-z0-9._-]+$"
 
-[input_schema.properties.printer_uri]
+[payload_schema.properties.printer_uri]
 type = "string"
 description = "Explicit printer IPP/HTTP URI. Optional alternative to printer."
 
-[input_schema.properties.server_uri]
+[payload_schema.properties.server_uri]
 type = "string"
 description = "Optional CUPS server base URI for printer discovery or printer URI construction."
 
-[input_schema.properties.document_path]
+[payload_schema.properties.document_path]
 type = "string"
 description = "Path to a local printable document. Required for action='print'."
 
-[input_schema.properties.format]
+[payload_schema.properties.format]
 type = "string"
 description = "Document MIME type such as application/pdf."
 
-[input_schema.properties.copies]
+[payload_schema.properties.copies]
 type = "integer"
 minimum = 1
 maximum = 99
 description = "Number of copies to print."
 
-[input_schema.properties.job_name]
+[payload_schema.properties.job_name]
 type = "string"
 description = "Optional human-readable job name."
 
-[input_schema.properties.job_id]
+[payload_schema.properties.job_id]
 type = "integer"
 minimum = 1
 description = "Print job id for status or cancel."
@@ -71,35 +71,18 @@ max_memory_mb = 256
 max_cpu_ms    = 15000
 syscalls      = []
 
-[examples]
-"List printers" = """
-{
-  "action": "list"
-}
-"""
+[[examples]]
+description = "List printers"
+payload = { action = "list" }
 
-"Print a PDF" = """
-{
-  "action": "print",
-  "printer": "office-hp",
-  "document_path": "/tmp/report.pdf",
-  "format": "application/pdf",
-  "copies": 1
-}
-"""
+[[examples]]
+description = "Print a PDF"
+payload = { action = "print", printer = "office-hp", document_path = "/tmp/report.pdf", format = "application/pdf", copies = 1 }
 
-"Check job status" = """
-{
-  "action": "status",
-  "job_id": 42,
-  "printer": "office-hp"
-}
-"""
+[[examples]]
+description = "Check job status"
+payload = { action = "status", job_id = 42, printer = "office-hp" }
 
-"Cancel a job" = """
-{
-  "action": "cancel",
-  "job_id": 42,
-  "printer": "office-hp"
-}
-"""
+[[examples]]
+description = "Cancel a job"
+payload = { action = "cancel", job_id = 42, printer = "office-hp" }

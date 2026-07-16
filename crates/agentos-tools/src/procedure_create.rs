@@ -136,6 +136,10 @@ impl AgentTool for ProcedureCreate {
             tags,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            last_used_at: None,
+            use_count: 0,
+            confidence: agentos_memory::types::default_confidence(),
+            status: agentos_memory::MemoryStatus::Active,
         };
 
         let id = self.procedural.store(&procedure).await.map_err(|e| {

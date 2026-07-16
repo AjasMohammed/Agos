@@ -15,6 +15,20 @@ pub enum ResolutionOutcome {
     Denied,
 }
 
+/// Normalize an operator-supplied escalation decision string into approve/deny.
+///
+/// Different surfaces produce different literals for the same intent — the CLI
+/// `escalation resolve` and the interactive TTY prompt send `"approve"`, the
+/// channel `/approve` path sends `"approved"`, and the REST API forwards
+/// whatever the operator passed. Treat the common approval synonyms (any case)
+/// as approval; everything else denies (fail-closed).
+pub(crate) fn resolution_is_approval(resolution: &str) -> bool {
+    matches!(
+        resolution.trim().to_ascii_lowercase().as_str(),
+        "approve" | "approved" | "allow" | "allowed"
+    )
+}
+
 /// What should happen automatically when an escalation expires without human resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AutoAction {
@@ -468,6 +482,11 @@ impl EscalationManager {
 
     /// Resolve an escalation with a human decision.
     /// Returns the task_id, agent_id, and whether it was blocking.
+    ///
+    /// `resolution` is the operator-supplied decision string. It is normalized
+    /// via [`resolution_is_approval`] so that CLI/API decisions like `"approve"`
+    /// and channel decisions like `"approved"` (and `allow`/`allowed`, any case)
+    /// all map to [`ResolutionOutcome::Approved`]. Anything else denies.
     pub async fn resolve(&self, id: u64, resolution: String) -> Option<(TaskID, AgentID, bool)> {
         let mut to_persist = None;
         let mut escalations = self.escalations.write().await;
@@ -501,7 +520,7 @@ impl EscalationManager {
         // from a non-blocking source like CLI `agentos escalation
         // create`).
         if result.is_some() {
-            let outcome = if resolution == "approved" {
+            let outcome = if resolution_is_approval(&resolution) {
                 ResolutionOutcome::Approved
             } else {
                 ResolutionOutcome::Denied
@@ -646,6 +665,42 @@ impl EscalationManager {
         }
 
         expired
+    }
+
+    /// Prune resolved escalations older than `max_age` from the in-memory list,
+    /// and drop any orphaned resolution channels. Without this, a long-running
+    /// kernel accumulates every resolved escalation in the in-memory `Vec` and
+    /// leaks `pending_resolution_{tx,rx}` map entries forever. Full history is
+    /// still retained in SQLite via `persist_escalation`, so dropping the
+    /// in-memory copy of old resolved entries is safe. Returns the count pruned.
+    pub async fn prune_resolved(&self, max_age: chrono::Duration) -> usize {
+        let now = chrono::Utc::now();
+        let mut escalations = self.escalations.write().await;
+        let before = escalations.len();
+        escalations.retain(|e| {
+            if !e.resolved {
+                return true;
+            }
+            match e.resolved_at {
+                Some(at) => now - at < max_age,
+                None => true, // resolved but untimestamped: keep (defensive)
+            }
+        });
+        let pruned = before - escalations.len();
+        // Any resolution channel whose escalation is no longer tracked is
+        // orphaned — drop it so the maps don't grow unbounded.
+        let live_ids: std::collections::HashSet<u64> = escalations.iter().map(|e| e.id).collect();
+        drop(escalations);
+        {
+            let mut tx_map = self.pending_resolution_tx.write().await;
+            tx_map.retain(|id, _| live_ids.contains(id));
+            let mut rx_map = self.pending_resolution_rx.write().await;
+            rx_map.retain(|id, _| live_ids.contains(id));
+        }
+        if pruned > 0 {
+            tracing::debug!(pruned, "Pruned resolved escalations from in-memory list");
+        }
+        pruned
     }
 
     /// Create a soft-approval escalation with a 30-second auto-approve window.

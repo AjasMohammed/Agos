@@ -19,15 +19,15 @@ outputs = ["content.structured"]
 input  = "ToolSearchQuery"
 output = "ToolSearchResults"
 
-[input_schema]
+[payload_schema]
 type = "object"
 required = ["query"]
 
-[input_schema.properties.query]
+[payload_schema.properties.query]
 type = "string"
 description = "Keyword query for tool discovery"
 
-[input_schema.properties.top_k]
+[payload_schema.properties.top_k]
 type = "integer"
 minimum = 1
 maximum = 20

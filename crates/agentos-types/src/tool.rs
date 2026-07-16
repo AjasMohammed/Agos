@@ -99,11 +99,17 @@ pub struct ToolManifest {
     pub capabilities_required: ToolCapabilities,
     pub capabilities_provided: ToolOutputs,
     pub intent_schema: ToolSchema,
-    /// Optional JSON Schema for validating the tool's input payload.
-    /// When present, `SemanticPayload.data` is validated against this schema
-    /// before the tool is executed.
-    #[serde(default)]
-    pub input_schema: Option<serde_json::Value>,
+    /// Optional JSON Schema (draft-07) for validating the tool's input payload.
+    /// During migration, manifests may still use `input_schema`; both names are
+    /// accepted and normalized into this field.
+    #[serde(default, alias = "input_schema")]
+    pub payload_schema: Option<serde_json::Value>,
+    /// Worked example payloads. Validated against `payload_schema` at registry
+    /// load — drift between schema and example is a loud boot failure, not a
+    /// silent corruption. Surfaced by `describe-tool` and by native-tool-call
+    /// adapters as provider-side examples.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<PayloadExample>,
     pub sandbox: ToolSandbox,
     /// Which execution backend should run this tool. Defaults to Inline.
     #[serde(default)]
@@ -134,6 +140,19 @@ pub struct ToolManifest {
 /// for forward-compat; only these surface in pagination filters.
 pub const MANIFEST_TAG_TAXONOMY_V1: &[&str] = &["read", "write", "exec", "network", "fs", "meta"];
 
+/// A worked example payload for a tool. Author supplies a short label and a
+/// concrete JSON value the agent can copy. The kernel validates the payload
+/// against `ToolManifest.payload_schema` at registry load time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PayloadExample {
+    /// Short label describing what this example demonstrates
+    /// (e.g. "Read first 100 lines of a file").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The example payload. Must validate against `payload_schema`.
+    pub payload: serde_json::Value,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct UsageHints {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -142,6 +161,13 @@ pub struct UsageHints {
     pub prefer_over: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quick_example: Option<serde_json::Value>,
+    /// Tools the model commonly chains AFTER this one (next-step suggestions).
+    /// Surfaced as the `_meta.related_tools` field on tool result envelopes so
+    /// the LLM learns the ecosystem from each successful call instead of only
+    /// from the agent manual at task start. Distinct from `prefer_over` (which
+    /// names alternatives this tool replaces).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_tools: Vec<String>,
 }
 
 /// A single fallback rule in a tool manifest's degradation chain.
@@ -190,11 +216,22 @@ pub struct ToolInfo {
     /// Defaults to `Community` if omitted.
     #[serde(default)]
     pub trust_tier: TrustTier,
-    /// Searchable tags for marketplace discovery (e.g. ["github", "code-review"]).
+    /// Marketplace-discovery / MCP-server bucketing tags (e.g. ["github",
+    /// "code-review"]; MCP tools register `["mcp", <server>]`). **Not a filter.**
+    ///
+    /// Tag-field contract (three distinct roles — do not conflate):
+    /// - `ToolInfo.tags` (this field): free-form marketplace + MCP-server
+    ///   bucketing. Load-bearing for category inference (`infer_tool_category`
+    ///   buckets `mcp` from here) and the public registry — keep readable.
+    /// - [`ToolInfo::capability_tags`]: free-text phrases for semantic search.
+    /// - [`ToolManifest::tags`]: the controlled `MANIFEST_TAG_TAXONOMY_V1`
+    ///   taxonomy (read/write/exec/network/fs/meta) used for filtering + scoping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
-    /// Semantic capability tags for agent discoverability.
-    /// Embedded alongside the description for intent-based tool search.
+    /// Free-text capability phrases for intent-based / semantic tool search
+    /// (e.g. ["download webpage", "fetch url"]). Embedded alongside the
+    /// description in the semantic tool index. **Never used for filtering** —
+    /// that is [`ToolManifest::tags`]. See the tag contract on [`ToolInfo::tags`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capability_tags: Vec<String>,
     /// Tool-selector partition (e.g. fs, network). Empty when uncategorized.

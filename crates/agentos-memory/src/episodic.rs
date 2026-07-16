@@ -29,6 +29,7 @@ impl EpisodicStore {
         let conn = Connection::open(&db_path).map_err(|e| {
             AgentOSError::StorageError(format!("Failed to open episodic memory DB: {}", e))
         })?;
+        crate::restrict_db_permissions(&db_path);
 
         conn.execute_batch(
             "
@@ -217,6 +218,46 @@ impl EpisodicStore {
         })
         .await
         .map_err(|e| AgentOSError::StorageError(format!("Task history task panicked: {}", e)))?
+    }
+
+    /// Most-recent episodes for an agent (or all agents when `agent_id` is
+    /// None), newest first — the plain-timeline browse the FTS `recall_*`
+    /// methods don't provide. Read-only; used by the operator memory browser.
+    pub async fn recent(
+        &self,
+        agent_id: Option<&AgentID>,
+        limit: usize,
+    ) -> Result<Vec<EpisodicEntry>, AgentOSError> {
+        let db = self.db.clone();
+        let agent_id_str = agent_id.map(|a| a.as_uuid().to_string());
+        let limit_val = Self::to_i64_limit(limit);
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| {
+                AgentOSError::StorageError("Failed to lock episodic db for reading".to_string())
+            })?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, task_id, agent_id, entry_type, content, summary, metadata, timestamp, trace_id
+                     FROM episodic_events
+                     WHERE (?1 IS NULL OR agent_id = ?1)
+                     ORDER BY timestamp DESC LIMIT ?2",
+                )
+                .map_err(|e| AgentOSError::StorageError(format!("Failed to prepare query: {}", e)))?;
+            let iter = stmt
+                .query_map(params![agent_id_str, limit_val], Self::row_to_episode)
+                .map_err(|e| {
+                    AgentOSError::StorageError(format!("Failed to query recent episodes: {}", e))
+                })?;
+            let mut out = Vec::new();
+            for row in iter {
+                out.push(row.map_err(|e| {
+                    AgentOSError::StorageError(format!("Failed to parse episode row: {}", e))
+                })?);
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Recent episodes task panicked: {}", e)))?
     }
 
     /// Full-text search within a task's event history.

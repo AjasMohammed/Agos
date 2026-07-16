@@ -178,16 +178,17 @@ impl OpenAICore {
                                 }))
                             })
                             .collect();
-                        let content = if entry.text().is_empty() {
-                            Value::Null
-                        } else {
-                            Value::String(entry.text().clone())
-                        };
-                        messages.push(json!({
-                            "role": "assistant",
-                            "content": content,
-                            "tool_calls": openai_tool_calls,
-                        }));
+                        // Some OpenAI-compat providers (Mistral, Azure, Together) reject
+                        // `"content": null` alongside `tool_calls`. Omit the content key
+                        // entirely when the assistant turn has no text — matches the
+                        // shape OpenAI's own spec recommends.
+                        let mut msg = serde_json::Map::new();
+                        msg.insert("role".into(), Value::String("assistant".into()));
+                        if !entry.text().is_empty() {
+                            msg.insert("content".into(), Value::String(entry.text().clone()));
+                        }
+                        msg.insert("tool_calls".into(), Value::Array(openai_tool_calls));
+                        messages.push(Value::Object(msg));
                     } else {
                         messages.push(json!({
                             "role": "assistant",
@@ -223,9 +224,20 @@ impl OpenAICore {
             );
             intent_by_tool.insert(tool_name.to_string(), intent_type);
 
-            let parameters =
-                tool_helpers::normalize_tool_input_schema(manifest.input_schema.as_ref());
+            let mut parameters = tool_helpers::normalize_tool_input_schema_with_examples(
+                manifest.payload_schema.as_ref(),
+                &manifest.examples,
+            );
             let strict = tool_helpers::is_openai_strict_compatible_schema(&parameters);
+            // OpenAI strict mode *requires* `additionalProperties: false` on
+            // every object. Only close the schema when we actually emit
+            // `strict: true` — non-strict OpenAI (and every other
+            // OpenAI-compatible host, via the shared normalizer) gets an open
+            // schema, since closed empty objects trip some guided-decoding
+            // backends. See the note in `normalize_tool_input_schema`.
+            if strict {
+                tool_helpers::add_object_additional_properties_false(&mut parameters);
+            }
 
             openai_tools.push(json!({
                 "type": "function",
@@ -455,6 +467,10 @@ impl OpenAICore {
 
 #[async_trait]
 impl LLMCore for OpenAICore {
+    fn supports_native_tool_calling(&self) -> bool {
+        true
+    }
+
     fn supports_images(&self) -> bool {
         if !self.capabilities.supports_images {
             return false;
@@ -662,32 +678,35 @@ impl LLMCore for OpenAICore {
             body["tool_choice"] = json!("auto");
         }
 
-        let res = self
-            .client
-            .post(&url)
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.api_key.expose_secret()),
-            )
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AgentOSError::LLMError {
-                provider: "openai".to_string(),
-                reason: format!("Reqwest failed: {}", e),
-            })?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let text = res.text().await.unwrap_or_default();
-            let err_msg = format!("OpenAI API error {}: {}", status, text);
-            let _ = tx.send(InferenceEvent::Error(err_msg.clone())).await;
-            return Err(AgentOSError::LLMError {
-                provider: "openai".to_string(),
-                reason: err_msg,
-            });
-        }
+        // Retry the initial POST + status check (before any SSE event is
+        // forwarded) so a transient upstream 5xx / network blip doesn't fail
+        // the whole chat turn — matching the resilience of the non-streaming
+        // path. `send_with_retry` returns the live `Response` with its body
+        // stream intact on 2xx.
+        let res = crate::retry::send_with_retry(
+            "openai",
+            &self.retry_policy,
+            &self.circuit_breaker,
+            Some(&self.concurrency),
+            || {
+                self.client
+                    .post(&url)
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", self.api_key.expose_secret()),
+                    )
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+            },
+        )
+        .await;
+        let res = match res {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(InferenceEvent::Error(e.to_string())).await;
+                return Err(e);
+            }
+        };
 
         // State for accumulating the streamed response.
         let mut full_text = String::new();
@@ -974,7 +993,7 @@ mod tests {
         name: &str,
         description: &str,
         permissions: Vec<&str>,
-        input_schema: Option<Value>,
+        payload_schema: Option<Value>,
     ) -> ToolManifest {
         ToolManifest {
             manifest: ToolInfo {
@@ -998,7 +1017,8 @@ mod tests {
                 input: "Input".to_string(),
                 output: "Output".to_string(),
             },
-            input_schema,
+            payload_schema,
+            examples: vec![],
             sandbox: ToolSandbox {
                 network: false,
                 fs_write: false,
@@ -1513,5 +1533,69 @@ mod tests {
             .parse_response_json(&response, &HashMap::new(), 100)
             .unwrap();
         assert_eq!(result.text, "visible answer");
+    }
+
+    /// Golden-body assertion: OpenAI Chat Completions API requires each entry in
+    /// `tools[]` to have shape `{"type": "function", "function": {"name", "description", "parameters"}}`.
+    /// The `parameters` field carries the JSON Schema (mirrors Anthropic's
+    /// `input_schema` — same role, different key).
+    #[test]
+    fn test_build_openai_tools_payload_uses_parameters_key() {
+        use agentos_types::tool::{
+            ToolCapabilities, ToolExecutor, ToolInfo, ToolOutputs, ToolSchema,
+        };
+        let manifest = ToolManifest {
+            manifest: ToolInfo {
+                name: "file-reader".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Read a file".to_string(),
+                author: "core".to_string(),
+                checksum: None,
+                author_pubkey: None,
+                signature: None,
+                trust_tier: TrustTier::Core,
+                tags: None,
+                capability_tags: vec![],
+                group: String::new(),
+            },
+            capabilities_required: ToolCapabilities {
+                permissions: vec!["fs.user_data:r".to_string()],
+            },
+            capabilities_provided: ToolOutputs { outputs: vec![] },
+            intent_schema: ToolSchema {
+                input: "Input".to_string(),
+                output: "Output".to_string(),
+            },
+            payload_schema: Some(
+                json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            ),
+            examples: vec![],
+            sandbox: ToolSandbox {
+                network: false,
+                fs_write: false,
+                gpu: false,
+                max_memory_mb: 64,
+                max_cpu_ms: 1000,
+                syscalls: vec![],
+                weight: None,
+            },
+            executor: ToolExecutor::default(),
+            fallbacks: vec![],
+            risk_class: Default::default(),
+            usage_hints: None,
+            tags: vec![],
+        };
+
+        let adapter = OpenAICore::new(SecretString::new("fake".into()), "gpt-4o".into());
+        let (tools, _) = adapter.build_openai_tools_payload(&[manifest]);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "file-reader");
+        assert!(
+            tools[0]["function"].get("parameters").is_some(),
+            "OpenAI tool def must use `parameters` key for the JSON Schema; got: {}",
+            tools[0]
+        );
+        assert_eq!(tools[0]["function"]["parameters"]["type"], "object");
     }
 }

@@ -55,11 +55,11 @@ impl AgentTool for FileMove {
                     reason: format!("Data directory error: {}", e),
                 })?;
 
-        // SECURITY: resolve source, checking workspace paths first.
+        // SECURITY: file-move deletes the source — both endpoints need write access.
         let from_resolved = crate::traits::resolve_tool_path(
             from_str,
             &context.data_dir,
-            &context.workspace_paths,
+            &context.workspace_paths_writable,
         )?;
         let canonical_from =
             from_resolved
@@ -70,7 +70,7 @@ impl AgentTool for FileMove {
                 })?;
 
         let from_in_workspace = context
-            .workspace_paths
+            .workspace_paths_writable
             .iter()
             .any(|wp| canonical_from.starts_with(wp));
         // KMC Phase 3: check dynamic storage zones
@@ -99,14 +99,17 @@ impl AgentTool for FileMove {
             });
         }
 
-        // SECURITY: resolve destination, checking workspace paths first.
+        // SECURITY: destination must also be in the writable workspace list.
         // The destination may not exist yet → use lexical normalize_path.
-        let to_resolved =
-            crate::traits::resolve_tool_path(to_str, &context.data_dir, &context.workspace_paths)?;
+        let to_resolved = crate::traits::resolve_tool_path(
+            to_str,
+            &context.data_dir,
+            &context.workspace_paths_writable,
+        )?;
         let normalized_to = normalize_path(&to_resolved);
 
         let to_in_workspace = context
-            .workspace_paths
+            .workspace_paths_writable
             .iter()
             .any(|wp| normalized_to.starts_with(wp));
         // KMC Phase 3: check dynamic storage zones
@@ -200,7 +203,7 @@ impl AgentTool for FileMove {
                         reason: format!("Cannot resolve destination parent: {}", e),
                     })?;
             let parent_in_workspace = context
-                .workspace_paths
+                .workspace_paths_writable
                 .iter()
                 .any(|wp| canonical_parent.starts_with(wp));
             // KMC Phase 3: check dynamic storage zones

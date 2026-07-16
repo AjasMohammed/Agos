@@ -73,7 +73,7 @@ pub fn install_section_embeddings(embedder: Arc<Embedder>) {
     });
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
@@ -243,6 +243,63 @@ pub struct ConnectedChannel {
 /// reality without holding a direct registry reference.
 pub type SharedConnectedChannels = Arc<RwLock<Vec<ConnectedChannel>>>;
 
+/// Snapshot of one installed skill — used by the manual to render the skills
+/// inventory and per-skill drill-down. Mirrors the shape of `ConnectedChannel`:
+/// a flat data record so the manual crate stays decoupled from `agentos-skills`.
+/// The kernel populates this from `SkillRegistry::list()` on install/remove.
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillSummary {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub author: String,
+    pub trust_tier: String,
+    /// Roles the skill agent claims (e.g. "cost-monitor", "alert-builder").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
+    /// Cron expression for autonomous runs, if the skill is scheduled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    /// Kernel events that trigger the skill, if any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<String>,
+    /// Tools the skill requires to function.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools_required: Vec<String>,
+    /// Tools the skill optionally uses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools_optional: Vec<String>,
+    /// Permissions the skill needs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permissions_required: Vec<String>,
+    /// Per-run cost cap (USD).
+    pub max_cost_per_run: f64,
+    /// Per-run token cap.
+    pub max_tokens_per_run: u64,
+    /// Full system prompt text. Carried in the snapshot so `skill-prompt` can
+    /// hand it to a chat agent without a registry round-trip. Skipped on JSON
+    /// serialization for the inventory + drill-down responses (the manual
+    /// renders only a token count, not the prose) — `skill-prompt` reads this
+    /// field directly from the in-memory snapshot.
+    ///
+    /// Wrapped in `Arc<str>` so cloning the snapshot vec is a pointer-bump per
+    /// entry rather than a multi-KB byte copy of every prompt — `agent-manual
+    /// {section: skills}` clones the snapshot on every call.
+    ///
+    /// `#[serde(skip)]` (not `skip_serializing`) is intentional: `Arc<str>`
+    /// has no `Default` impl, so `SkillSummary` deserialization is unsupported
+    /// by design. Nothing in the workspace deserializes this type; if a
+    /// future contributor tries, they'll get a compile error pointing here,
+    /// which is the desired failure mode.
+    #[serde(skip)]
+    pub system_prompt: Arc<str>,
+}
+
+/// Live-refreshable list of installed skills. Updated by the kernel from
+/// `SkillRegistry` on install/remove so the manual reflects reality without
+/// holding a direct registry reference. Mirrors `SharedConnectedChannels`.
+pub type SharedInstalledSkills = Arc<RwLock<Vec<SkillSummary>>>;
+
 /// Capitalize the first character of a kind string for display.
 fn cap_first(s: &str) -> String {
     let mut chars = s.chars();
@@ -371,7 +428,7 @@ impl ManualSection {
             ("mcp", "mcp model-context-protocol attach external tool server"),
             ("hal", "hardware sensor audio display network printer usb camera bluetooth host process-manager system-services system-mounts system-open-files network-sockets"),
             ("plugins", "plugin manifest discord slack telegram teams enable disable"),
-            ("skills", "skill researcher secops cost-optimizer monitor specialist"),
+            ("skills", "skill installed bundle inventory drill-down researcher secops cost-optimizer alert-builder monitor specialist trigger schedule events tools required permissions budget"),
             ("notifications", "notification user message inbox response priority delivery"),
             ("containers", "container docker podman image build run sandbox"),
             ("webhooks", "webhook http inbound external trigger url"),
@@ -408,7 +465,7 @@ impl ManualSection {
             "mcp" => Some("Attach external Model Context Protocol servers; their tools appear in your registry at runtime."),
             "hal" => Some("Hardware Abstraction Layer: process-manager, network-sockets, system-services, system-mounts, audio, display, USB, etc. Use these for HOST inspection — shell-exec is sandboxed."),
             "plugins" => Some("Manifest-driven plugins (Discord, Slack, …). Enable/disable; trust tier governs signature checks."),
-            "skills" => Some("Curated skill bundles (researcher, secops, cost-optimizer) with their own toolsets."),
+            "skills" => Some("Installed skill bundles (inventory). Drill into one with {section: skills, skill: <name>} for its required tools, permissions, triggers, and budget."),
             "notifications" => Some("UserMessage inbox, priorities, response routing, auto-action on timeout."),
             "containers" => Some("Container runtime: provision a Docker image, exec inside it, destroy. Quota-enforced."),
             "webhooks" => Some("Inbound webhook URLs, HMAC signing, and how external systems push events to AgentOS."),
@@ -463,7 +520,13 @@ pub struct ToolSummary {
     /// Permission strings from the manifest, e.g. ["fs.user_data:r"]
     pub permissions: Vec<String>,
     /// Optional JSON Schema for the tool's input payload.
-    pub input_schema: Option<serde_json::Value>,
+    pub payload_schema: Option<serde_json::Value>,
+    /// Author-curated example payloads. Validated against `payload_schema` at
+    /// registry load — drift is a loud boot failure. Surfaced verbatim by
+    /// `describe-tool` so the agent sees real, schema-conformant calls rather
+    /// than only synthesized placeholders.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<agentos_types::tool::PayloadExample>,
     /// Trust tier: "core", "verified", "community"
     pub trust_tier: String,
     /// Semantic capability tags for discoverability.
@@ -485,6 +548,11 @@ pub struct AgentManualTool {
     /// what is connected. When `None` (e.g. tests, embedded usage), the manual
     /// shows the full static catalogue — preserves backward compatibility.
     connected_channels: Option<SharedConnectedChannels>,
+    /// Optional. When present, the `skills` section returns the live skill
+    /// inventory + drill-down (mirrors the MCP server inventory pattern).
+    /// When `None`, `skills` falls back to listing the skill-management tools
+    /// (skill-install / skill-list / etc.) so older callers still work.
+    installed_skills: Option<SharedInstalledSkills>,
 }
 
 impl AgentManualTool {
@@ -685,6 +753,7 @@ impl AgentManualTool {
         Self {
             tool_summaries,
             connected_channels: None,
+            installed_skills: None,
         }
     }
 
@@ -696,6 +765,23 @@ impl AgentManualTool {
         Self {
             tool_summaries,
             connected_channels: Some(connected_channels),
+            installed_skills: None,
+        }
+    }
+
+    /// Construct with tool summaries, the live connected-channels snapshot,
+    /// and the live installed-skills snapshot. Use this from the kernel boot
+    /// path so the `skills` section can render the real inventory and
+    /// drill-down (mirrors the MCP server inventory pattern).
+    pub fn new_full(
+        tool_summaries: SharedToolSummaries,
+        connected_channels: SharedConnectedChannels,
+        installed_skills: SharedInstalledSkills,
+    ) -> Self {
+        Self {
+            tool_summaries,
+            connected_channels: Some(connected_channels),
+            installed_skills: Some(installed_skills),
         }
     }
 
@@ -708,6 +794,16 @@ impl AgentManualTool {
     /// Held briefly — reads under lock, drops before any awaits.
     async fn snapshot_channels(&self) -> Option<Vec<ConnectedChannel>> {
         match &self.connected_channels {
+            Some(arc) => Some(arc.read().await.clone()),
+            None => None,
+        }
+    }
+
+    /// Snapshot the installed-skills inventory. `None` means no registry is
+    /// wired (tests / embedded usage) — callers fall back to legacy behavior.
+    /// Held briefly — reads under lock, drops before any awaits.
+    async fn snapshot_skills(&self) -> Option<Vec<SkillSummary>> {
+        match &self.installed_skills {
             Some(arc) => Some(arc.read().await.clone()),
             None => None,
         }
@@ -949,7 +1045,8 @@ impl AgentManualTool {
                     description: t.manifest.manifest.description.clone(),
                     version: t.manifest.manifest.version.clone(),
                     permissions,
-                    input_schema: t.manifest.input_schema.clone(),
+                    payload_schema: t.manifest.payload_schema.clone(),
+                    examples: t.manifest.examples.clone(),
                     trust_tier: format!("{:?}", t.manifest.manifest.trust_tier).to_lowercase(),
                     capability_tags,
                     category,
@@ -1015,7 +1112,7 @@ impl AgentManualTool {
                 {"name": "mcp", "description": "Attached MCP servers (inventory). Drill into one with {section: mcp, server: <name>} to see its tools."},
                 {"name": "hal", "description": "Hardware abstraction tools (live, this agent's available drivers)"},
                 {"name": "plugins", "description": "Tools contributed by enabled plugins (live)"},
-                {"name": "skills", "description": "Skill-related tools (live)"},
+                {"name": "skills", "description": "Installed skill bundles (inventory). Drill into one with {section: skills, skill: <name>} to see its required tools, permissions, triggers, and budget."},
                 {"name": "notifications", "description": "Tools for talking to the operator: notify-user, ask-user"},
                 {"name": "containers", "description": "Container runtime tools (live)"},
                 {"name": "webhooks", "description": "Webhook endpoint tools (live)"},
@@ -1107,7 +1204,7 @@ impl AgentManualTool {
             .find(|t| t.name == name)
             .ok_or_else(|| AgentOSError::ToolNotFound(name.to_string()))?;
 
-        let input_schema_docs = Self::summarize_input_schema(tool.input_schema.as_ref());
+        let input_schema_docs = Self::summarize_input_schema(tool.payload_schema.as_ref());
 
         let mut result = serde_json::json!({
             "section": "tool-detail",
@@ -1124,7 +1221,10 @@ impl AgentManualTool {
             "usage_hints": tool.usage_hints,
         });
         if verbose {
-            result["input_schema"] = tool.input_schema.clone().unwrap_or(serde_json::Value::Null);
+            result["payload_schema"] = tool
+                .payload_schema
+                .clone()
+                .unwrap_or(serde_json::Value::Null);
         }
         Ok(result)
     }
@@ -1290,7 +1390,7 @@ impl AgentManualTool {
                         {"name": "task-status", "description": "Inspect status of a specific task by ID", "tool": "task-status", "kernel_only": false},
                         {"name": "RunTask", "description": "Start a new task on a specific or auto-routed agent", "kernel_only": true},
                         {"name": "CancelTask", "description": "Cancel a running task by ID", "kernel_only": true},
-                        {"name": "GetTaskLogs", "description": "Get execution logs for a specific task", "kernel_only": true}
+                        {"name": "get-task-logs", "description": "Get the result + audit trail of a scheduled run you own, keyed by run_id (from get-schedule-runs)", "tool": "get-task-logs", "kernel_only": false}
                     ]
                 },
                 {
@@ -1465,7 +1565,9 @@ impl AgentManualTool {
                 {
                     "domain": "Skills",
                     "commands": [
-                        {"name": "SkillInstall", "description": "Install a skill package from a directory or archive", "kernel_only": true},
+                        {"name": "skill-prompt", "description": "Fetch an installed skill's full system prompt + tool allowlist + budget", "tool": "skill-prompt", "kernel_only": false},
+                        {"name": "skill-create", "description": "Author a new skill at runtime (writes SKILL.toml + prompt.md under user-skills dir, installs it; trust tier forced to community; gated by control_plane approval)", "tool": "skill-create", "kernel_only": false},
+                        {"name": "SkillInstall", "description": "Install a skill package from a directory (CLI: agentos skill install <path>)", "kernel_only": true},
                         {"name": "SkillList", "description": "List installed skills", "kernel_only": true},
                         {"name": "SkillRun", "description": "Execute an installed skill against an input prompt", "kernel_only": true},
                         {"name": "SkillStatus", "description": "Inspect the status of a running skill", "kernel_only": true},
@@ -2001,6 +2103,10 @@ impl AgentManualTool {
                 "behavior": "AgentOS converts the body to Telegram HTML before sending: HTML-escapes <, >, & first, then renders **bold**, *italic*/_italic_, ~~strike~~, `code`, ```fenced code```, [label](url). On HTML parse errors the adapter retries the same segment as plain text — agents do NOT need to escape anything."
             },
             "supported_markdown": [
+                {"syntax": "# Heading … ###### Heading", "renders": "<b>Heading</b> (Telegram has no header tag, so ATX headers become bold lines)"},
+                {"syntax": "- item / * item / + item", "renders": "• item (bullet lists; nesting indent preserved)"},
+                {"syntax": "> quoted", "renders": "<blockquote>quoted</blockquote>"},
+                {"syntax": "--- or *** or ___", "renders": "────────── (horizontal rule)"},
                 {"syntax": "**text**", "renders": "<b>text</b> (bold)"},
                 {"syntax": "*text* or _text_", "renders": "<i>text</i> (italic)"},
                 {"syntax": "~~text~~", "renders": "<s>text</s> (strikethrough)"},
@@ -2009,6 +2115,19 @@ impl AgentManualTool {
                 {"syntax": "```rust\ncode\n```", "renders": "<pre><code class=\"language-rust\">…</code></pre> (highlighted block)"},
                 {"syntax": "[label](https://url)", "renders": "<a href=\"…\">label</a> (only http/https/tg/mailto schemes are linked; others are left as text)"}
             ],
+            "media": {
+                "summary": "channel-send can attach one media item by URL. Telegram fetches the URL itself and renders it natively.",
+                "fields": [
+                    {"field": "image_url", "desc": "Public https URL of an image → sent via sendPhoto (inline image)."},
+                    {"field": "document_url", "desc": "Public https URL of a file → sent via sendDocument (downloadable attachment)."},
+                    {"field": "caption", "desc": "Optional short caption (≤1024 chars, markdown-rendered) shown on the media."}
+                ],
+                "rules": [
+                    "image_url and document_url are mutually exclusive — pass at most one.",
+                    "When an attachment is present, 'text' is optional. If both are given, the media is sent first, then 'text' follows as a normal (fully-rendered, un-truncated) message.",
+                    "The URL must be publicly reachable by Telegram's servers; local file paths and file IDs are not yet supported."
+                ]
+            },
             "limits": {
                 "max_message_chars": 4096,
                 "long_message_handling": "Bodies longer than ~3000 source chars are split across multiple sendMessage calls. Question payloads with options are NEVER split — they stay on one message so the inline keyboard remains valid.",
@@ -2221,14 +2340,108 @@ impl AgentManualTool {
         )
     }
 
-    fn section_skills(summaries: &[ToolSummary]) -> Result<serde_json::Value, AgentOSError> {
-        Self::live_tools_section(
-            summaries,
-            "skills",
-            "skills",
-            "Skill-related tools. Skills are pre-bundled prompts with curated tool allowlists; these are the tools used to invoke or manage them.",
-            "No skill tools currently available to this agent.",
-        )
+    /// Skills section.
+    ///
+    /// When the kernel has wired an `installed_skills` snapshot, returns the
+    /// real skill inventory + supports a `skill: <name>` drill-down — the same
+    /// shape `section_mcp` uses for attached MCP servers. When the snapshot is
+    /// missing (tests / embedded usage), falls back to listing skill-prefixed
+    /// management tools (skill-install, skill-list, etc.) so older callers
+    /// keep working unchanged.
+    ///
+    /// Inventory mode mirrors `section_mcp`: name + version + tool_count only.
+    /// Drill-down returns the full SkillSummary for the named skill, including
+    /// required/optional tools, permissions, triggers, and budget — enough for
+    /// an agent to decide whether the skill applies before invoking it.
+    fn section_skills(
+        installed: Option<&[SkillSummary]>,
+        summaries: &[ToolSummary],
+        skill_filter: Option<&str>,
+    ) -> Result<serde_json::Value, AgentOSError> {
+        let Some(skills) = installed else {
+            // Legacy fallback — no live skill registry plumbed (tests etc.).
+            return Self::live_tools_section(
+                summaries,
+                "skills",
+                "skills",
+                "Skill-related tools. Skills are pre-bundled prompts with curated tool allowlists; these are the tools used to invoke or manage them.",
+                "No skill tools currently available to this agent.",
+            );
+        };
+
+        // No skills installed at all — short empty payload, parallel to
+        // `section_mcp`'s "no servers attached" branch.
+        if skills.is_empty() {
+            return Ok(serde_json::json!({
+                "section": "skills",
+                "summary": "No skills currently installed. The operator can install one with 'agentos skill install <path>'.",
+                "skills": [],
+                "total_skills": 0,
+            }));
+        }
+
+        // Drill-down: caller asked for one skill's full record.
+        if let Some(target) = skill_filter {
+            let matched = skills.iter().find(|s| s.name.eq_ignore_ascii_case(target));
+            return match matched {
+                Some(s) => Ok(serde_json::json!({
+                    "section": "skills",
+                    "skill": s.name,
+                    "version": s.version,
+                    "description": s.description,
+                    "author": s.author,
+                    "trust_tier": s.trust_tier,
+                    "roles": s.roles,
+                    "triggers": {
+                        "schedule": s.schedule,
+                        "events": s.events,
+                    },
+                    "tools": {
+                        "required": s.tools_required,
+                        "optional": s.tools_optional,
+                    },
+                    "permissions_required": s.permissions_required,
+                    "budget": {
+                        "max_cost_per_run": s.max_cost_per_run,
+                        "max_tokens_per_run": s.max_tokens_per_run,
+                    },
+                    "usage": "Run via skill-run with {\"name\": \"<skill>\"}. Required tools above must be available to the agent for the skill to execute correctly. Use tool-detail with {\"name\": \"<tool>\"} for any tool's input schema."
+                })),
+                None => {
+                    let known: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+                    Ok(serde_json::json!({
+                        "section": "skills",
+                        "error": format!("Skill '{target}' not installed"),
+                        "installed_skills": known,
+                        "usage": "Call agent-manual {\"section\": \"skills\"} for the inventory, then drill in with {\"section\": \"skills\", \"skill\": \"<name>\"}."
+                    }))
+                }
+            };
+        }
+
+        // Default: skill inventory only. Names + versions + tool counts. No tool lists.
+        let mut sorted: Vec<&SkillSummary> = skills.iter().collect();
+        sorted.sort_by(|a, b| a.name.cmp(&b.name));
+        let inventory: Vec<serde_json::Value> = sorted
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "version": s.version,
+                    "description": s.description,
+                    "trust_tier": s.trust_tier,
+                    "tool_count": s.tools_required.len() + s.tools_optional.len(),
+                    "scheduled": s.schedule.is_some(),
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "section": "skills",
+            "summary": "Installed skill bundles. To see a skill's required tools, permissions, triggers, and budget, call again with {\"section\": \"skills\", \"skill\": \"<name>\"}.",
+            "skills": inventory,
+            "total_skills": skills.len(),
+        }))
     }
 
     fn section_notifications(summaries: &[ToolSummary]) -> Result<serde_json::Value, AgentOSError> {
@@ -2266,7 +2479,11 @@ impl AgentManualTool {
             summaries,
             "capabilities",
             "capabilities",
-            "Kernel-Mediated Capability (KMC) tools: managed environments (env-*), storage zones (storage-zone-*), processes (proc-*), networking (net-*), builds (build-*). Every action is policy-checked and audited. Privileged host actions: see `host-package-install` (risk_class=control_plane) — installs OS packages via apt/dnf/pacman/etc.; requires explicit operator approval per call AND the package must be on the operator-controlled allowlist. See `agent-manual section=escalation` for the approval flow.",
+            "Kernel-Mediated Capability (KMC) tools: managed environments (env-*), storage zones (storage-zone-*), processes (proc-*), networking (net-*), builds (build-*). Every action is policy-checked and audited. \
+             \
+             Managed-environment workflow: (1) env-create {name, ecosystem: python|nodejs|rust} creates an isolated workspace at {data_dir}/workspaces/{agent_id}/{name}/ — does NOT touch the host system. (2) env-install {workspace, package} installs into the workspace (pip into venv, npm into node_modules, cargo --root). Packages are validated against the operator allowlist in [env].python_allowlist / nodejs_allowlist / rust_allowlist. (3) To USE the installed package you MUST pass workspace=<name> to build-run or proc-spawn — otherwise the spawn inherits the host PATH and the import fails. build-run {workspace, command: 'python -c \"import flask\"'} activates VIRTUAL_ENV + prepends {ws}/venv/bin:{ws}/node_modules/.bin:{ws}/bin to PATH for the child. proc-spawn {workspace, binary: 'uvicorn', args: [...]} resolves the binary inside the workspace (venv/bin → node_modules/.bin → bin) so long-running processes (servers, daemons) work. Workspaces survive kernel restart via SQLite-backed state. \
+             \
+             Privileged host actions: see `host-package-install` (risk_class=control_plane) — installs OS packages via apt/dnf/pacman/etc.; requires explicit operator approval per call AND the package must be on the operator-controlled allowlist. Prefer env-install over host-package-install whenever possible. See `agent-manual section=escalation` for the approval flow.",
             "No KMC tools currently available to this agent.",
         )
     }
@@ -2524,6 +2741,9 @@ impl AgentTool for AgentManualTool {
         // call see a consistent view. `None` = no registry wired (tests/embed),
         // fall back to the legacy static catalogue.
         let channels_snapshot: Option<Vec<ConnectedChannel>> = self.snapshot_channels().await;
+        // Same pattern for installed skills — snapshot once so the inventory
+        // and drill-down see a consistent state.
+        let skills_snapshot: Option<Vec<SkillSummary>> = self.snapshot_skills().await;
 
         match section {
             ManualSection::Index => self.section_index(channels_snapshot.as_deref()),
@@ -2607,7 +2827,10 @@ impl AgentTool for AgentManualTool {
             }
             ManualSection::Hal => Self::section_hal(&summaries),
             ManualSection::Plugins => Self::section_plugins(&summaries),
-            ManualSection::Skills => Self::section_skills(&summaries),
+            ManualSection::Skills => {
+                let skill_filter = payload.get("skill").and_then(|v| v.as_str());
+                Self::section_skills(skills_snapshot.as_deref(), &summaries, skill_filter)
+            }
             ManualSection::Notifications => Self::section_notifications(&summaries),
             ManualSection::Containers => Self::section_containers(&summaries),
             ManualSection::Webhooks => Self::section_webhooks(&summaries),
@@ -2913,6 +3136,8 @@ mod tests {
             task_registry: None,
             escalation_query: None,
             workspace_paths: vec![],
+            workspace_paths_writable: vec![],
+            workspace_paths_executable: vec![],
             capability_registry: None,
             capability_dispatcher: None,
             storage_zone_query: None,
@@ -3042,7 +3267,8 @@ mod tests {
                 description: "Read files".into(),
                 version: "1.1.0".into(),
                 permissions: vec!["fs.user_data:r".into()],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec!["file-io".into(), "reading".into()],
                 category: "core".into(),
@@ -3055,7 +3281,8 @@ mod tests {
                 description: "HTTP requests".into(),
                 version: "1.0.0".into(),
                 permissions: vec!["network.outbound:x".into()],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec!["network".into(), "api".into(), "web".into()],
                 category: "core".into(),
@@ -3156,7 +3383,7 @@ mod tests {
             description: "Read files".into(),
             version: "1.1.0".into(),
             permissions: vec!["fs.user_data:r".into()],
-            input_schema: Some(serde_json::json!({
+            payload_schema: Some(serde_json::json!({
                 "type": "object",
                 "required": ["path"],
                 "properties": {
@@ -3164,6 +3391,7 @@ mod tests {
                     "offset": { "type": "integer", "default": 0 }
                 }
             })),
+            examples: vec![],
             trust_tier: "core".into(),
             capability_tags: vec![],
             category: "core".into(),
@@ -3180,7 +3408,7 @@ mod tests {
             .unwrap()
             .iter()
             .any(|f| f["name"] == "path" && f["required"] == true));
-        assert!(result["input_schema"].is_object());
+        assert!(result["payload_schema"].is_object());
     }
 
     #[test]
@@ -3199,7 +3427,8 @@ mod tests {
                 description: "Write to memory".into(),
                 version: "1".into(),
                 permissions: vec!["memory.semantic:w".into()],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec![],
                 category: "memory".into(),
@@ -3212,7 +3441,8 @@ mod tests {
                 description: "Archival search".into(),
                 version: "1".into(),
                 permissions: vec!["memory.semantic:r".into()],
-                input_schema: None,
+                payload_schema: None,
+                examples: vec![],
                 trust_tier: "core".into(),
                 capability_tags: vec![],
                 category: "memory".into(),
@@ -3409,7 +3639,8 @@ mod tests {
             description: format!("{name} (MCP)"),
             version: "0.1.0".into(),
             permissions: vec![],
-            input_schema: None,
+            payload_schema: None,
+            examples: vec![],
             trust_tier: "core".into(),
             capability_tags: vec![],
             category: "mcp".into(),
@@ -3545,7 +3776,8 @@ mod tests {
             description: format!("{name} description"),
             version: "1".into(),
             permissions: vec![],
-            input_schema: None,
+            payload_schema: None,
+            examples: vec![],
             trust_tier: "core".into(),
             capability_tags: vec![],
             category: category.into(),
@@ -3619,7 +3851,7 @@ mod tests {
             let outputs = vec![
                 AgentManualTool::section_hal(summaries).unwrap(),
                 AgentManualTool::section_plugins(summaries).unwrap(),
-                AgentManualTool::section_skills(summaries).unwrap(),
+                AgentManualTool::section_skills(None, summaries, None).unwrap(),
                 AgentManualTool::section_notifications(summaries).unwrap(),
                 AgentManualTool::section_containers(summaries).unwrap(),
                 AgentManualTool::section_webhooks(summaries).unwrap(),
@@ -3650,5 +3882,160 @@ mod tests {
             Some(&["mcp".into(), "spurious".into()]),
         );
         assert_eq!(cat, "memory");
+    }
+
+    // ----- skills section: inventory + drill-down (mirrors section_mcp tests) -----
+
+    fn skill_summary(name: &str, schedule: Option<&str>, tools_required: &[&str]) -> SkillSummary {
+        SkillSummary {
+            name: name.into(),
+            version: "0.1.0".into(),
+            description: format!("{name} skill"),
+            author: "agentos-core".into(),
+            trust_tier: "core".into(),
+            roles: vec![format!("{name}-role")],
+            schedule: schedule.map(str::to_string),
+            events: vec![],
+            tools_required: tools_required.iter().map(|s| s.to_string()).collect(),
+            tools_optional: vec![],
+            permissions_required: vec!["user.notify:w".into()],
+            max_cost_per_run: 0.05,
+            max_tokens_per_run: 8000,
+            system_prompt: format!("You are the {name}.").into(),
+        }
+    }
+
+    #[test]
+    fn section_skills_returns_empty_when_no_skills_installed() {
+        let result = AgentManualTool::section_skills(Some(&[]), &[], None).unwrap();
+        assert_eq!(result["section"], "skills");
+        assert_eq!(result["total_skills"], 0);
+        assert_eq!(result["skills"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn section_skills_default_returns_inventory_without_tool_lists() {
+        let installed = vec![
+            skill_summary(
+                "alert-builder",
+                None,
+                &["schedule-recurring", "notify-user"],
+            ),
+            skill_summary("cost-optimizer", Some("0 8 * * *"), &["file-reader"]),
+        ];
+        let result = AgentManualTool::section_skills(Some(&installed), &[], None).unwrap();
+        assert_eq!(result["total_skills"], 2);
+
+        let inv = result["skills"].as_array().unwrap();
+        assert_eq!(inv.len(), 2);
+        // Sorted alphabetically.
+        assert_eq!(inv[0]["name"], "alert-builder");
+        assert_eq!(inv[1]["name"], "cost-optimizer");
+        // Inventory must surface tool COUNT, not the individual tool names.
+        assert_eq!(inv[0]["tool_count"], 2);
+        assert_eq!(inv[1]["tool_count"], 1);
+        assert_eq!(inv[0]["scheduled"], false);
+        assert_eq!(inv[1]["scheduled"], true);
+
+        // Body must NOT embed required tool names — agent should drill in.
+        let body = result.to_string();
+        assert!(!body.contains("schedule-recurring"));
+        assert!(!body.contains("notify-user"));
+        assert!(!body.contains("file-reader"));
+    }
+
+    #[test]
+    fn section_skills_with_skill_param_returns_full_drill_down() {
+        let installed = vec![skill_summary(
+            "alert-builder",
+            Some("*/5 * * * *"),
+            &["schedule-recurring", "process-manager", "notify-user"],
+        )];
+        let result =
+            AgentManualTool::section_skills(Some(&installed), &[], Some("alert-builder")).unwrap();
+        assert_eq!(result["section"], "skills");
+        assert_eq!(result["skill"], "alert-builder");
+        assert_eq!(result["version"], "0.1.0");
+        assert_eq!(result["triggers"]["schedule"], "*/5 * * * *");
+        let req: Vec<&str> = result["tools"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(req.contains(&"schedule-recurring"));
+        assert!(req.contains(&"process-manager"));
+        assert!(req.contains(&"notify-user"));
+        // No `skills` inventory key on drill-down.
+        assert!(result.get("skills").is_none());
+        // Budget surfaced.
+        assert_eq!(result["budget"]["max_tokens_per_run"], 8000);
+    }
+
+    #[test]
+    fn section_skills_with_unknown_skill_returns_error_with_installed_list() {
+        let installed = vec![
+            skill_summary("alert-builder", None, &["notify-user"]),
+            skill_summary("cost-optimizer", None, &["file-reader"]),
+        ];
+        let result =
+            AgentManualTool::section_skills(Some(&installed), &[], Some("not-a-skill")).unwrap();
+        assert!(result.get("error").is_some());
+        let known: Vec<&str> = result["installed_skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(known.contains(&"alert-builder"));
+        assert!(known.contains(&"cost-optimizer"));
+    }
+
+    #[test]
+    fn section_skills_filter_is_case_insensitive() {
+        let installed = vec![skill_summary("alert-builder", None, &["notify-user"])];
+        let result =
+            AgentManualTool::section_skills(Some(&installed), &[], Some("ALERT-BUILDER")).unwrap();
+        assert_eq!(result["skill"], "alert-builder");
+    }
+
+    #[test]
+    fn section_skills_inventory_and_drill_down_never_leak_system_prompt() {
+        // Security invariant: `system_prompt` is `#[serde(skip)]` on
+        // `SkillSummary`, AND the section_skills response builds the JSON
+        // field-by-field without serializing the struct directly. The two
+        // belt-and-braces lines must hold together — assert no rendered
+        // response contains the prompt prose. Pin the invariant so a future
+        // refactor that drops `#[serde(skip)]` OR starts serializing the
+        // whole struct gets caught here.
+        let mut s = skill_summary("alert-builder", Some("*/5 * * * *"), &["notify-user"]);
+        s.system_prompt = "SECRET-PROMPT-MARKER You are the Alert Builder.".into();
+        let installed = vec![s];
+
+        let inventory = AgentManualTool::section_skills(Some(&installed), &[], None).unwrap();
+        assert!(
+            !inventory.to_string().contains("SECRET-PROMPT-MARKER"),
+            "skills inventory leaked system_prompt: {inventory}"
+        );
+
+        let drill =
+            AgentManualTool::section_skills(Some(&installed), &[], Some("alert-builder")).unwrap();
+        assert!(
+            !drill.to_string().contains("SECRET-PROMPT-MARKER"),
+            "skills drill-down leaked system_prompt: {drill}"
+        );
+    }
+
+    #[test]
+    fn section_skills_falls_back_to_legacy_when_no_snapshot() {
+        // When the kernel hasn't wired an installed-skills snapshot (None),
+        // section_skills delegates to the live-tools listing so older callers
+        // and tests that don't plumb a registry keep working.
+        let result = AgentManualTool::section_skills(None, &[], None).unwrap();
+        assert_eq!(result["section"], "skills");
+        // The legacy live_tools_section returns an `available_tools` field;
+        // the new inventory path returns `skills` + `total_skills`. Confirm
+        // we hit the legacy path.
+        assert!(result.get("total_skills").is_none());
     }
 }

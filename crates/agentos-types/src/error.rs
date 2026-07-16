@@ -25,6 +25,15 @@ pub enum AgentOSError {
     #[error("Kernel is shutting down")]
     KernelShutdown,
 
+    #[error("MCP catalog parse error: {0}")]
+    CatalogParse(String),
+
+    #[error("MCP catalog entry not found: {0}")]
+    CatalogEntryNotFound(String),
+
+    #[error("Runtime '{name}' >= {min_version} not found on this host")]
+    RuntimeNotFound { name: String, min_version: String },
+
     #[error("Kernel error: {reason}")]
     KernelError { reason: String },
 
@@ -61,6 +70,17 @@ pub enum AgentOSError {
 
     #[error("Schema validation failed: {0}")]
     SchemaValidation(String),
+
+    #[error("Tool '{name}' has an invalid JSON Schema: {reason}")]
+    ToolSchemaInvalid { name: String, reason: String },
+
+    #[error("Tool '{tool_name}' payload validation failed: {pointer} - {reason}")]
+    ToolPayloadValidationFailed {
+        tool_name: String,
+        /// RFC 6901 JSON Pointer to the offending field (e.g. "/path", "/").
+        pointer: String,
+        reason: String,
+    },
 
     // LLM errors
     #[error("LLM adapter error: {provider}: {reason}")]
@@ -155,6 +175,9 @@ impl AgentOSError {
             Self::BudgetExceeded { .. } => "BudgetExceeded",
             Self::RateLimited { .. } => "RateLimited",
             Self::KernelShutdown => "KernelShutdown",
+            Self::CatalogParse(_) => "CatalogParse",
+            Self::CatalogEntryNotFound(_) => "CatalogEntryNotFound",
+            Self::RuntimeNotFound { .. } => "RuntimeNotFound",
             Self::KernelError { .. } => "KernelError",
             Self::PermissionDenied { .. } => "PermissionDenied",
             Self::InvalidToken { .. } => "InvalidToken",
@@ -165,6 +188,8 @@ impl AgentOSError {
             Self::ToolBlocked { .. } => "ToolBlocked",
             Self::ToolSignatureInvalid { .. } => "ToolSignatureInvalid",
             Self::SchemaValidation(_) => "SchemaValidation",
+            Self::ToolSchemaInvalid { .. } => "ToolSchemaInvalid",
+            Self::ToolPayloadValidationFailed { .. } => "ToolPayloadValidationFailed",
             Self::LLMError { .. } => "LLMError",
             Self::NoLLMConnected => "NoLLMConnected",
             Self::SecretNotFound(_) => "SecretNotFound",

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
 import struct
 
 import pytest
@@ -27,29 +26,41 @@ def _frame(payload: dict) -> bytes:
     return struct.pack(_LENGTH_FORMAT, len(data)) + data
 
 
-async def _make_stream_pair():
-    """
-    Create two connected asyncio stream pairs via socket.socketpair().
+class _MemoryWriter:
+    """Tiny StreamWriter stand-in that feeds bytes into a peer StreamReader."""
 
-    Returns (client_reader, client_writer, server_reader, server_writer).
-    Python 3.10 compatible — asyncio.create_pipe() is 3.12+.
-    """
-    sock_a, sock_b = socket.socketpair()
-    sock_a.setblocking(False)
-    sock_b.setblocking(False)
-    client_reader, client_writer = await asyncio.open_connection(sock=sock_a)
-    server_reader, server_writer = await asyncio.open_connection(sock=sock_b)
-    return client_reader, client_writer, server_reader, server_writer
+    def __init__(self, peer: asyncio.StreamReader) -> None:
+        self._peer = peer
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        if self.closed:
+            raise ConnectionResetError("Connection lost")
+        self._peer.feed_data(data)
+
+    async def drain(self) -> None:
+        if self.closed:
+            raise ConnectionResetError("Connection lost")
+
+    def close(self) -> None:
+        self.closed = True
+        self._peer.feed_eof()
+
+    async def wait_closed(self) -> None:
+        return None
 
 
 async def _make_client() -> tuple[BusClient, asyncio.StreamReader, asyncio.StreamWriter]:
-    """Return a BusClient wired up to an in-memory socket pair."""
-    client_r, client_w, server_r, server_w = await _make_stream_pair()
+    """Return a BusClient wired up to in-memory framed streams."""
+    client_r = asyncio.StreamReader()
+    server_r = asyncio.StreamReader()
+    client_w = _MemoryWriter(server_r)
+    server_w = _MemoryWriter(client_r)
     client = BusClient.__new__(BusClient)
     client._socket_path = None  # type: ignore[assignment]
     client._reader = client_r
     client._writer = client_w
-    return client, server_r, server_w
+    return client, server_r, server_w  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------

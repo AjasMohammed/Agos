@@ -39,6 +39,7 @@ pub async fn list(
         severity: query.severity.clone().filter(|s| !s.is_empty()),
         from: query.from_ts,
         to: query.to_ts,
+        ..Default::default()
     };
     let entries = match state.service.query_audit(filter).await {
         Ok(e) => e,

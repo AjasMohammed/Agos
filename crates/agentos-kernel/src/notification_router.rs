@@ -48,6 +48,26 @@ pub struct InboundMessage {
     pub received_at: DateTime<Utc>,
     /// Raw adapter-specific payload (for debugging / future use).
     pub raw: serde_json::Value,
+    /// Stored inbound image attachments as `(file_id, mime)`, populated by the
+    /// InboundRouter after download. Carried into the chat context as
+    /// `ContentPart::Image::FileRef` so vision-capable agents can see them.
+    /// Empty for non-image media and channels without media support.
+    pub media_file_ids: Vec<(String, String)>,
+    /// Remote media URLs extracted from a non-Telegram channel's inbound content
+    /// (e.g. Discord CDN attachments), to be downloaded + stored by the
+    /// InboundRouter under an SSRF guard. Empty for Telegram (which downloads via
+    /// `getFile`) and channels whose adapters don't yet emit inbound media.
+    pub pending_media: Vec<InboundMediaUrl>,
+}
+
+/// A remote media URL awaiting download + storage by the InboundRouter.
+#[derive(Debug, Clone)]
+pub struct InboundMediaUrl {
+    pub url: String,
+    /// Original filename, if the platform provided one.
+    pub filename: Option<String>,
+    /// Platform-declared MIME, if any (the downloader sniffs/falls back otherwise).
+    pub mime: Option<String>,
 }
 
 /// Pluggable delivery channel adapter.
@@ -488,6 +508,9 @@ impl NotificationRouter {
         for adapter in adapters.iter() {
             if adapter.adapter_instance_id().as_deref() == Some(target_instance_id) {
                 if adapter.is_available().await {
+                    // Propagate delivery failure so callers (e.g. channel-send)
+                    // report it instead of falsely claiming success — important
+                    // for media sends where sendPhoto/sendDocument can 400.
                     if let Err(e) = adapter.deliver(&msg).await {
                         tracing::warn!(
                             notification_id = %msg.id,
@@ -495,6 +518,10 @@ impl NotificationRouter {
                             error = %e,
                             "Targeted channel delivery failed"
                         );
+                        return Err(AgentOSError::ToolExecutionFailed {
+                            tool_name: "channel-delivery".to_string(),
+                            reason: e.to_string(),
+                        });
                     }
                 }
                 return Ok(());

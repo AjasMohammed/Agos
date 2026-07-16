@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 /// Messages sent over the bus. This is the top-level envelope.
+// BusMessage is a transport envelope created and consumed at Unix-socket boundaries
+// (never stored in a hot collection), so the size difference between variants is
+// immaterial. Suppress the lint rather than boxing the payload behind an Arc.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BusMessage {
     /// CLI/tool sends an intent to the kernel
@@ -184,7 +188,8 @@ pub enum KernelCommand {
     // Secret management
     SetSecret {
         name: String,
-        value: String, // encrypted in transit? No — UDS is local-only
+        /// Zeroized on drop at both ends; transport is a local-only UDS.
+        value: Zeroizing<String>,
         scope: SecretScope,
         /// Raw scope string from CLI (e.g. "agent:notifier") for kernel-side resolution.
         #[serde(default)]
@@ -196,7 +201,7 @@ pub enum KernelCommand {
     },
     RotateSecret {
         name: String,
-        new_value: String,
+        new_value: Zeroizing<String>,
     },
 
     // Permission management
@@ -297,6 +302,8 @@ pub enum KernelCommand {
         permissions: Vec<String>,
     },
     ListSchedules,
+    ListOnceJobs,
+    ListTimers,
     PauseSchedule {
         name: String,
     },
@@ -545,6 +552,17 @@ pub enum KernelCommand {
     TestChannel {
         channel_id: String,
     },
+    /// List approved senders and pending requests in the DM pairing allowlist.
+    ListPairings,
+    /// Approve a pending pairing code, allowlisting the sender that requested it.
+    ApprovePairing {
+        code: String,
+    },
+    /// Revoke an approved sender from a channel's DM allowlist.
+    RevokePairing {
+        channel_id: String,
+        sender_id: String,
+    },
     // Plugin management
     /// List all discovered plugins with their status.
     ListPlugins,
@@ -559,6 +577,40 @@ pub enum KernelCommand {
 
     /// Query the health status of all configured MCP server connections.
     McpStatus,
+    /// List every entry in the MCP catalog (embedded seeds + user overrides).
+    McpCatalogList,
+    /// Search catalog entries by id, display name, or description.
+    McpCatalogSearch {
+        query: String,
+    },
+    /// Fetch the full detail of a single catalog entry as JSON.
+    McpCatalogInfo {
+        id: String,
+    },
+    /// Install an MCP server from the catalog in one step (trust-gate →
+    /// runtime-validate → attach).
+    McpInstall {
+        id: String,
+        /// Proceed without interactive confirmation (one-shot model).
+        #[serde(default)]
+        assume_yes: bool,
+        /// Allow installing a `community`-tier entry.
+        #[serde(default)]
+        allow_community: bool,
+        /// Operator-supplied runtime binary path; skips runtime resolution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_binary_override: Option<String>,
+        /// Skip auth-credential env injection.
+        #[serde(default)]
+        no_auth: bool,
+    },
+    /// Uninstall (detach) a previously-installed catalog server.
+    McpUninstall {
+        id: String,
+        /// Also purge any cached package/credential artifacts.
+        #[serde(default)]
+        purge: bool,
+    },
     /// Attach a new MCP server to the running kernel at runtime.
     ///
     /// Spawns the server process (stdio) or opens an HTTP connection, performs
@@ -653,6 +705,64 @@ pub enum KernelCommand {
     ContextMemorySet {
         agent_id: String,
         content: String,
+    },
+    // User preference proposal review
+    UserPrefsListPending {
+        #[serde(default = "default_user_prefs_limit")]
+        limit: u32,
+    },
+    UserPrefsAccept {
+        proposal_id: String,
+    },
+    UserPrefsReject {
+        proposal_id: String,
+    },
+    UserPrefsStats,
+
+    // Structured user profile (proactive personalization)
+    /// List active profile entries (pin_rank ASC, updated_at DESC).
+    ProfileList {
+        #[serde(default = "default_user_prefs_limit")]
+        limit: u32,
+    },
+    /// Show a single profile entry by id.
+    ProfileShow {
+        id: String,
+    },
+    /// Edit a profile entry's value/confidence/category in place.
+    ProfileEdit {
+        id: String,
+        #[serde(default)]
+        value: Option<String>,
+        #[serde(default)]
+        confidence: Option<f32>,
+        #[serde(default)]
+        category: Option<String>,
+    },
+    /// Forget (hard-delete) a profile entry.
+    ProfileForget {
+        id: String,
+    },
+
+    // Proactive recommendations (Phase 4 / Phase 5 feedback)
+    /// List recommendations (delivered + pending; newest first).
+    RecommendationList {
+        #[serde(default = "default_user_prefs_limit")]
+        limit: u32,
+    },
+    /// Mark a recommendation as accepted and apply the interest-weight boost.
+    RecommendationAccept {
+        id: String,
+    },
+    /// Mark a recommendation as dismissed and apply the interest-weight penalty.
+    RecommendationDismiss {
+        id: String,
+    },
+
+    // Proactive personalization — governance (Phase 6)
+    /// Status / export / forget for the personalization subsystem.
+    PersonalizationGovernance {
+        action: PersonalizationAction,
     },
 
     // Skills management
@@ -768,6 +878,76 @@ pub enum KernelCommand {
     ContainerList {
         agent_name: Option<String>,
     },
+
+    /// Grant a host directory to one agent (by name) or globally (None).
+    /// `mode` is a short string like "r", "rw", or "rwx" (case-insensitive).
+    GrantWorkspace {
+        path: std::path::PathBuf,
+        agent_name: Option<String>,
+        mode: String,
+    },
+    /// Revoke an active workspace grant. `agent_name` must match the original
+    /// scope (None for a global grant).
+    RevokeWorkspace {
+        path: std::path::PathBuf,
+        agent_name: Option<String>,
+    },
+    /// List active workspace grants. If `agent_name` is set, return grants
+    /// that apply to that agent (agent-scoped + global). If None, return all.
+    ListWorkspaceGrants {
+        agent_name: Option<String>,
+    },
+
+    /// Get the current approval mode (global + per-agent overrides snapshot).
+    GetApprovalConfig,
+    /// Set the global approval mode at runtime.
+    /// `mode` is a short string: "auto" | "ask_edit" | "ask_always" | "deny".
+    SetApprovalMode {
+        mode: String,
+    },
+    /// Set a per-agent approval mode override.
+    SetApprovalAgentOverride {
+        agent_name: String,
+        mode: String,
+    },
+    /// Clear a per-agent approval mode override.
+    ClearApprovalAgentOverride {
+        agent_name: String,
+    },
+    /// Add a learned "allow always" policy entry.
+    /// `path_glob` is optional (None = match any payload).
+    /// `agent_name` is optional (None = applies to every agent).
+    AddApprovalPolicy {
+        tool_name: String,
+        path_glob: Option<String>,
+        agent_name: Option<String>,
+    },
+    /// List active learned approval policy entries.
+    ListApprovalPolicies,
+    /// Revoke a learned approval policy entry by `id`.
+    RevokeApprovalPolicy {
+        id: i64,
+    },
+    /// Add (or update) a node in the durable agent org chart. The node's
+    /// capability scope must be a subset of its manager's (enforced kernel-side).
+    OrgAddNode {
+        org_id: String,
+        agent_name: String,
+        manager_node_id: Option<String>,
+        /// "coordinator" or "worker" (case-insensitive; defaults to worker).
+        role: String,
+        title: String,
+        /// Resource grants of the form `resource:rwxqo` (e.g. `fs:/home/u/:r`).
+        scope: Vec<String>,
+    },
+    /// List every node in an org chart.
+    OrgShow {
+        org_id: String,
+    },
+}
+
+fn default_user_prefs_limit() -> u32 {
+    50
 }
 
 impl KernelCommand {
@@ -797,6 +977,18 @@ impl KernelCommand {
             _ => None,
         }
     }
+}
+
+/// Action discriminant for `KernelCommand::PersonalizationGovernance`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PersonalizationAction {
+    /// Return enabled flags, row counts per store, and retention windows.
+    Status,
+    /// Dump all data from all three stores as a single JSON document.
+    Export,
+    /// Atomically wipe all personalization data (profile, interests, recommendations,
+    /// and accepted-preference context-memory entries).
+    Forget,
 }
 
 /// Responses from kernel to CLI.
@@ -871,9 +1063,18 @@ pub enum KernelResponse {
 
     // Channel management (Phase 6)
     ChannelList(Vec<agentos_types::RegisteredChannel>),
+    /// DM pairing allowlist snapshot: approved senders + pending requests.
+    PairingList {
+        approved: Vec<PairingEntry>,
+        pending: Vec<PendingPairingEntry>,
+    },
 
     // MCP server health
     McpServerStatusList(Vec<McpServerStatus>),
+    /// Catalog entries (one-line summaries) for `mcp catalog list/search`.
+    McpCatalogList(Vec<CatalogSummary>),
+    /// Full catalog entry detail (serialized entry) for `mcp catalog info`.
+    McpCatalogInfo(serde_json::Value),
     /// MCP server successfully attached; includes the names of registered tools.
     McpAttached {
         tool_count: usize,
@@ -924,6 +1125,66 @@ pub enum KernelResponse {
     WebhookEndpointList {
         endpoints: Vec<agentos_types::WebhookEndpointMeta>,
     },
+
+    // User filesystem grants
+    WorkspaceGrantCreated(agentos_types::WorkspaceGrant),
+    WorkspaceGrantRevoked {
+        count: u64,
+    },
+    WorkspaceGrantList(Vec<agentos_types::WorkspaceGrant>),
+
+    // Approval mode + learned policy
+    /// Snapshot of the current approval config (global mode + per-agent overrides).
+    ApprovalConfigSnapshot {
+        mode: String,
+        agent_overrides: std::collections::BTreeMap<String, String>,
+    },
+    /// A learned approval policy entry was added.
+    ApprovalPolicyAdded {
+        id: i64,
+        tool_name: String,
+        path_glob: Option<String>,
+        agent_name: Option<String>,
+    },
+    /// A learned approval policy entry was revoked.
+    ApprovalPolicyRevoked {
+        ok: bool,
+    },
+    /// List of active learned approval policy entries.
+    ApprovalPolicyList(Vec<serde_json::Value>),
+}
+
+/// An approved sender on a channel's DM allowlist (transport DTO).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairingEntry {
+    pub channel_id: String,
+    pub sender_id: String,
+    /// RFC 3339 timestamp of when the sender was approved.
+    pub approved_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// A pending (unapproved) pairing request (transport DTO). The pairing code is
+/// intentionally omitted — approval requires the sender to relay it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingPairingEntry {
+    pub channel_id: String,
+    pub sender_id: String,
+    /// RFC 3339 timestamp of when the pending code expires.
+    pub expires_at: String,
+}
+
+/// One-line summary of an MCP catalog entry (transport DTO for `catalog list`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogSummary {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub trust_tier: String,
+    pub transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

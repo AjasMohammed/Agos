@@ -137,7 +137,7 @@
                 <tr>
                     <td>
                         <a href="/files/{{ f.id }}/download" title="{{ f.original_name }}">
-                            {% if f.is_text %}📄{% else %}📎{% endif %}
+                            {% if f.is_text %}{% else %}{% endif %}
                             {{ f.original_name }}
                         </a>
                     </td>

@@ -418,6 +418,46 @@ impl ContextMemoryStore {
         Ok(())
     }
 
+    /// Delete all context-memory history rows whose `reason` matches any of the
+    /// given tags. Used by the Phase 6 `personalization forget` command to wipe
+    /// accepted-preference entries written by the user-adaptation accept flow.
+    ///
+    /// Returns the total number of history rows removed.
+    /// Uses a parameterized `DELETE … WHERE reason IN (…)` — no string interpolation.
+    pub async fn delete_by_tags(&self, tags: &[&str]) -> Result<usize, AgentOSError> {
+        if tags.is_empty() {
+            return Ok(0);
+        }
+        let tags: Vec<String> = tags.iter().map(|s| s.to_string()).collect();
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn
+                .lock()
+                .map_err(|e| AgentOSError::StorageError(format!("Lock poisoned: {}", e)))?;
+
+            // Build parameterized placeholders (?1, ?2, …) — no string interpolation.
+            let placeholders: String = (1..=tags.len())
+                .map(|i| format!("?{}", i))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "DELETE FROM context_memory_history WHERE reason IN ({})",
+                placeholders
+            );
+
+            let params: Vec<&dyn rusqlite::ToSql> =
+                tags.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+
+            let removed = guard
+                .execute(&sql, params.as_slice())
+                .map_err(|e| AgentOSError::StorageError(e.to_string()))?;
+
+            Ok(removed)
+        })
+        .await
+        .map_err(|e| AgentOSError::StorageError(format!("Spawn blocking failed: {}", e)))?
+    }
+
     /// Initialize an empty context memory row for a newly registered agent.
     /// No-op if the agent already has a row.
     pub async fn init_agent(&self, agent_id: &str) -> Result<(), AgentOSError> {

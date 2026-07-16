@@ -18,7 +18,7 @@ outputs = ["content.json"]
 input = "ProcListIntent"
 output = "ProcListResult"
 
-[input_schema]
+[payload_schema]
 type = "object"
 
 [sandbox]

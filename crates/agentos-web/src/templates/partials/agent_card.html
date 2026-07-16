@@ -1,5 +1,7 @@
 {% for agent in agents %}
-<article class="dashboard-card" style="margin:0">
+<article class="dashboard-card" style="margin:0"
+         data-status="{{ agent.status|lower }}"
+         data-busy="{% if agent.current_task %}1{% else %}0{% endif %}">
     <header>
         <strong>
             <span class="agent-status-dot {% if agent.current_task %}busy{% elif agent.status == 'Online' or agent.status == 'Active' %}online{% else %}offline{% endif %}" aria-hidden="true"></span>

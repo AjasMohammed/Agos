@@ -6,6 +6,7 @@ version = "1.0.0"
 description = "Set the desired state for an IoT device (subject to operator-defined safety rules). The safety engine evaluates all applicable rules before the command is dispatched."
 author = "agentos-core"
 trust_tier = "core"
+risk_class = "control_plane"
 tags = ["iot", "hardware", "safety"]
 
 [capabilities_required]
@@ -17,6 +18,19 @@ outputs = ["device_id", "desired_state", "reconciled"]
 [intent_schema]
 input = "HardwareSetDesiredIntent"
 output = "HardwareSetDesiredResult"
+
+[payload_schema]
+type     = "object"
+required = ["device_id", "desired_state"]
+
+[payload_schema.properties.device_id]
+type        = "string"
+description = "Stable device identifier as registered with the kernel's IoT registry."
+
+[payload_schema.properties.desired_state]
+type                 = "object"
+additionalProperties = true
+description          = "Target state map (e.g. {power: 'on', setpoint_c: 21}). Safety rules may reject."
 
 [sandbox]
 network = false

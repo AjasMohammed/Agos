@@ -327,6 +327,19 @@ pub enum EventSeverity {
 
 // ── Event Message ─────────────────────────────────────────────────
 
+/// A coarse realtime event for WebSocket/SSE fan-out to the control panel.
+///
+/// `channel` is the subscription channel (e.g. `"tasks"`, `"agents"`, `"audit"`);
+/// `event` is a stable event name (e.g. `"task.completed"`); `data` is the JSON
+/// payload pushed to subscribers. Distinct from [`EventMessage`] (the internal,
+/// signed, single-consumer kernel event) — this is the lossy broadcast view.
+#[derive(Debug, Clone, Serialize)]
+pub struct RealtimeEvent {
+    pub channel: String,
+    pub event: String,
+    pub data: serde_json::Value,
+}
+
 /// A single event emitted by an OS subsystem.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventMessage {

@@ -34,6 +34,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             tool_execution: Default::default(),
             autonomous_mode: Default::default(),
             health_port: 0,
+            health_bind: "127.0.0.1".to_string(),
             per_agent_rate_limit: 0,
             events: Default::default(),
             sandbox_policy: Default::default(),
@@ -72,6 +73,7 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
             crl_path: None,
             workspace: agentos_kernel::config::WorkspaceConfig::default(),
             host_package: agentos_kernel::config::HostPackageSettings::default(),
+            discovery: Default::default(),
         },
         bus: BusSettings {
             socket_path: temp_dir
@@ -89,6 +91,14 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         llm: LlmSettings::default(),
         memory: MemorySettings {
             model_cache_dir: shared_model_cache_dir(),
+            // E2E harness skips ONNX init — onnxruntime's graph optimizer
+            // crashes (SIGFPE / FPE_INTDIV) on some Zen-class CPUs during
+            // boot. Lexical FTS5 search still works for the assertions that
+            // need memory; semantic retrieval is the only thing degraded.
+            disable_embedder: true,
+            embedder_init_timeout_secs: 120,
+            retention_days: 0,
+            lifecycle: Default::default(),
             extraction: Default::default(),
             consolidation: Default::default(),
             context: Default::default(),
@@ -104,8 +114,21 @@ pub fn create_test_config(temp_dir: &tempfile::TempDir) -> KernelConfig {
         scratchpad: Default::default(),
         skills: Default::default(),
         otel: OtelConfig::default(),
+        approval: Default::default(),
         api: Default::default(),
+        web: Default::default(),
         chat: Default::default(),
+        user_adaptation: Default::default(),
+        env: Default::default(),
+        gateway: Default::default(),
+        scheduler: Default::default(),
+        transcription: Default::default(),
+        agent_heartbeat: Default::default(),
+        agent_budget: Default::default(),
+        hal: Default::default(),
+        security: Default::default(),
+        user_profile: Default::default(),
+        personalization: Default::default(),
     }
 }
 
@@ -120,8 +143,23 @@ pub async fn setup_kernel() -> (
     tempfile::TempDir,
     tokio::task::JoinHandle<()>,
 ) {
+    setup_kernel_with(|_| {}).await
+}
+
+/// Like [`setup_kernel`] but lets the caller mutate the `KernelConfig` before
+/// boot (e.g. to enable the agent heartbeat).
+#[allow(dead_code)]
+pub async fn setup_kernel_with<F: FnOnce(&mut KernelConfig)>(
+    mutate: F,
+) -> (
+    Arc<Kernel>,
+    BusClient,
+    tempfile::TempDir,
+    tokio::task::JoinHandle<()>,
+) {
     let temp_dir = tempfile::TempDir::new().unwrap();
-    let config = create_test_config(&temp_dir);
+    let mut config = create_test_config(&temp_dir);
+    mutate(&mut config);
     let config_path = temp_dir.path().join("config.toml");
     std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
 

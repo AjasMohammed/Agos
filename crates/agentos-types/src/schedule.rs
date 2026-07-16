@@ -359,6 +359,22 @@ mod once_job_action_tests {
     use super::*;
 
     #[test]
+    fn run_state_parse_round_trip_and_rejects_unknown() {
+        for st in [
+            RunState::Running,
+            RunState::Complete,
+            RunState::Failed,
+            RunState::Missed,
+        ] {
+            assert_eq!(RunState::parse(st.as_str()), Some(st));
+        }
+        // parse() is exact (lowercase); callers lowercase before parsing.
+        assert_eq!(RunState::parse("Complete"), None);
+        assert_eq!(RunState::parse("queued"), None);
+        assert_eq!(RunState::parse(""), None);
+    }
+
+    #[test]
     fn run_task_round_trip() {
         let v = OnceJobAction::run_task("hi");
         let json = serde_json::to_string(&v).unwrap();

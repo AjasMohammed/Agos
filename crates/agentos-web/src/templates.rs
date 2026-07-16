@@ -254,16 +254,46 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
     // text.  For streaming chat the client does its own rendering; this
     // filter is used for stored messages and agent descriptions.
     env.add_filter("markdown", |value: String| -> minijinja::Value {
-        use pulldown_cmark::{html, Event, Options, Parser, Tag};
+        use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd};
 
         let mut options = Options::empty();
         options.insert(Options::ENABLE_TABLES);
         options.insert(Options::ENABLE_STRIKETHROUGH);
         options.insert(Options::ENABLE_TASKLISTS);
 
-        let parser = Parser::new_ext(&value, options).filter_map(|event| match event {
+        let mut suppressed_link_depth = 0usize;
+        let parser = Parser::new_ext(&value, options).filter_map(move |event| match event {
             Event::Html(raw) | Event::InlineHtml(raw) => Some(Event::Text(raw)),
-            Event::Start(Tag::HtmlBlock) | Event::End(pulldown_cmark::TagEnd::HtmlBlock) => None,
+            Event::Start(Tag::HtmlBlock) | Event::End(TagEnd::HtmlBlock) => None,
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) => {
+                let trimmed = dest_url.trim();
+                let lower = trimmed.to_ascii_lowercase();
+                let safe = lower.starts_with("http://")
+                    || lower.starts_with("https://")
+                    || lower.starts_with("mailto:");
+                if safe {
+                    Some(Event::Start(Tag::Link {
+                        link_type,
+                        dest_url,
+                        title,
+                        id,
+                    }))
+                } else {
+                    suppressed_link_depth += 1;
+                    Some(Event::Text(CowStr::Boxed(
+                        format!("[link: {trimmed}]").into_boxed_str(),
+                    )))
+                }
+            }
+            Event::End(TagEnd::Link) if suppressed_link_depth > 0 => {
+                suppressed_link_depth -= 1;
+                None
+            }
             _ => Some(event),
         });
         let mut out = String::new();
@@ -391,6 +421,18 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
         render_tool_data_html(&value)
     });
 
+    // Generic structured-data renderer for pages that previously displayed
+    // raw JSON. It reuses the tool-data parser so JSON strings, nested JSON
+    // strings, and plain text all get a readable UI treatment.
+    env.add_filter("structured_data_html", |value: minijinja::Value| {
+        let parsed = parsed_tool_value(&value);
+        let html = format!(
+            "<div class=\"structured-data\">{}</div>",
+            render_tool_json_html(&parsed, 0)
+        );
+        minijinja::Value::from_safe_string(html)
+    });
+
     env.add_template("base.html", include_str!("templates/base.html"))?;
     env.add_template("dashboard.html", include_str!("templates/dashboard.html"))?;
     env.add_template("agents.html", include_str!("templates/agents.html"))?;
@@ -460,6 +502,8 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
         include_str!("templates/escalations.html"),
     )?;
     env.add_template("mcp_page.html", include_str!("templates/mcp_page.html"))?;
+    env.add_template("prefs.html", include_str!("templates/prefs.html"))?;
+    env.add_template("profile.html", include_str!("templates/profile.html"))?;
     env.add_template(
         "webhooks_page.html",
         include_str!("templates/webhooks_page.html"),
@@ -607,6 +651,10 @@ pub fn build_template_engine() -> Result<Environment<'static>, minijinja::Error>
         include_str!("templates/partials/shortcuts_modal.html"),
     )?;
     env.add_template(
+        "partials/command_palette.html",
+        include_str!("templates/partials/command_palette.html"),
+    )?;
+    env.add_template(
         "partials/manual_section.html",
         include_str!("templates/partials/manual_section.html"),
     )?;
@@ -722,5 +770,28 @@ mod tests {
             .expect("manual_section tools should render");
         assert!(rendered.contains("shell-exec"));
         assert!(rendered.contains("/manual/view?section=tool-detail&name=shell-exec"));
+    }
+
+    #[test]
+    fn markdown_filter_rejects_unsafe_link_schemes() {
+        let env = build_template_engine().expect("template engine should initialize");
+        let tpl = env
+            .get_template("partials/chat_assistant_msg.html")
+            .expect("chat assistant partial should exist");
+        let rendered = tpl
+            .render(context! {
+                agent_name => "agent",
+                msg => context! {
+                    id => "m1",
+                    content => "[click](javascript:alert(1))",
+                    created_at => "2026-04-12T00:00:01Z",
+                    tokens_used => 0,
+                    cost_usd => 0.0,
+                },
+            })
+            .expect("chat assistant partial should render");
+
+        assert!(!rendered.contains("href=\"javascript:"));
+        assert!(rendered.contains("[link: javascript:alert(1)]"));
     }
 }
