@@ -351,15 +351,15 @@ fn cost_entry_from_snapshot(s: agentos_types::CostSnapshot) -> CostSummaryEntry 
     }
 }
 
+/// True when a config key name looks secret-bearing and its value must never
+/// leave the process. Shared by the tree redactor and the single-key reader.
+fn is_secret_key(k: &str) -> bool {
+    let k = k.to_ascii_lowercase();
+    k.contains("token") || k.contains("secret") || k.contains("password") || k.contains("api_key")
+}
+
 /// Recursively redact leaves whose key name looks secret-bearing.
 fn redact_secrets(value: &mut serde_json::Value) {
-    fn is_secret_key(k: &str) -> bool {
-        let k = k.to_ascii_lowercase();
-        k.contains("token")
-            || k.contains("secret")
-            || k.contains("password")
-            || k.contains("api_key")
-    }
     match value {
         serde_json::Value::Object(map) => {
             for (k, v) in map.iter_mut() {
@@ -1333,11 +1333,7 @@ impl KernelService for Kernel {
     async fn install_tool(&self, req: InstallToolRequest) -> Result<ToolID, ApiError> {
         self.api_install_tool(req.manifest_path.clone())
             .await
-            .map_err(ApiError::Internal)?;
-
-        // Placeholder ID: `api_install_tool` does not yet return the tool ID
-        // directly. Return a new UUID; the caller can look up the tool by name.
-        Ok(ToolID::new())
+            .map_err(ApiError::Internal)
     }
 
     async fn remove_tool(&self, name: &str) -> Result<(), ApiError> {
@@ -2421,7 +2417,17 @@ impl KernelService for Kernel {
             let doc: toml_edit::DocumentMut = content
                 .parse()
                 .map_err(|e| ApiError::Internal(format!("Config parse error: {e}")))?;
-            resolve_dotted_key(&doc, &key)
+            let mut value = resolve_dotted_key(&doc, &key)?;
+            // Redact nested secret-bearing leaves when the key resolves to a table.
+            redact_secrets(&mut value);
+            // A scalar secret (e.g. `api.operator_token`) resolves to a bare value
+            // with no key context for `redact_secrets` to match, so redact it here
+            // based on the requested key's own leaf name. Without this, a low-privilege
+            // `system:r` caller could read `operator_token` and escalate via /auth/login.
+            if key.rsplit('.').next().is_some_and(is_secret_key) && !value.is_null() {
+                value = serde_json::Value::String("***REDACTED***".to_string());
+            }
+            Ok(value)
         })
         .await
         .map_err(|e| ApiError::Internal(format!("Join error: {e}")))?

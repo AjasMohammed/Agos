@@ -24,7 +24,56 @@ pub(crate) struct FailureDetails {
     pub last_iteration: Option<u32>,
 }
 
+/// Apply one terminal failure to the runaway-breaker streak map.
+///
+/// Returns `Some(streak)` when the breaker should fire — i.e. the agent has now
+/// failed `limit` times in a row, each faster than `fast_ms`. Firing removes the
+/// entry so the pause happens once, not again for every failure that lands
+/// before the queue stops draining.
+///
+/// Split out from [`Kernel::record_failure_streak`] because this is where all
+/// the branching lives; the caller is just lock acquisition and side effects.
+fn apply_failure_streak(
+    streaks: &mut HashMap<AgentID, u32>,
+    agent_id: AgentID,
+    duration_ms: u64,
+    fast_ms: u64,
+    limit: u32,
+) -> Option<u32> {
+    if limit == 0 {
+        return None; // breaker disabled
+    }
+    if duration_ms >= fast_ms {
+        // An ordinary slow failure — not a runaway. Reset.
+        streaks.remove(&agent_id);
+        return None;
+    }
+    let entry = streaks.entry(agent_id).or_insert(0);
+    *entry = entry.saturating_add(1);
+    let streak = *entry;
+    if streak < limit {
+        return None;
+    }
+    streaks.remove(&agent_id);
+    Some(streak)
+}
+
 impl Kernel {
+    /// Scan and taint-wrap a sub-agent's raw output before it crosses the
+    /// child→parent trust boundary. A child may have ingested hostile web/tool
+    /// content and quoted it in its output; without wrapping, that text enters
+    /// the parent's context as raw instructions the parent LLM will act on
+    /// (B4). `taint_wrap` also neutralizes any `</user_data>` breakout in the
+    /// body, so the parent's "content in <user_data> is untrusted" rule holds.
+    fn wrap_sub_agent_output(&self, agent_name: &str, raw: &str) -> String {
+        let scan = self.injection_scanner.scan(raw);
+        crate::injection_scanner::InjectionScanner::taint_wrap(
+            raw,
+            &format!("sub-agent:{agent_name}"),
+            &scan,
+        )
+    }
+
     /// Handle successful task completion: record to episodic memory, update scheduler state,
     /// emit events, notify background pool, wake dependency waiters, and trigger consolidation.
     #[tracing::instrument(skip_all, fields(task_id = %task.id, agent_id = %task.agent_id))]
@@ -37,6 +86,9 @@ impl Kernel {
     ) {
         tracing::info!("Task {} complete: {}", task.id, result.answer);
         crate::metrics::record_task_completed(duration_ms, true);
+
+        // Any success clears the runaway breaker's streak for this agent.
+        self.failure_streaks.write().await.remove(&task.agent_id);
 
         // Release the atomic checkout — task is terminal, so the claim must not
         // linger. Covers the background `execute_task` and sub-agent paths; the
@@ -85,7 +137,7 @@ impl Kernel {
                         "entry_type": "task_completion",
                         "summary": summary_preview.chars().take(200).collect::<String>(),
                     }),
-                    0,
+                    task.event_chain_depth(),
                     Some(task_trace_id),
                     Some(task.agent_id),
                     Some(task.id),
@@ -145,7 +197,7 @@ impl Kernel {
                     "iterations": result.iterations,
                     "tool_calls": result.tool_call_count,
                 }),
-                0,
+                task.event_chain_depth(),
                 Some(task_trace_id),
                 Some(task.agent_id),
                 Some(task.id),
@@ -236,7 +288,7 @@ impl Kernel {
                         "child_agent_id": task.agent_id.to_string(),
                         "outcome": "success",
                     }),
-                    0,
+                    task.event_chain_depth(),
                     Some(task_trace_id),
                     Some(task.agent_id),
                     Some(task.id),
@@ -310,10 +362,11 @@ impl Kernel {
                         .map(|a| a.name.clone())
                         .unwrap_or_else(|| task.agent_id.to_string())
                 };
+                let raw_output: String = result.answer.chars().take(8192).collect();
                 let sub_result = agentos_types::SubAgentResult {
                     child_task_id: task.id,
                     agent_name: agent_name.clone(),
-                    output: result.answer.chars().take(8192).collect(),
+                    output: self.wrap_sub_agent_output(&agent_name, &raw_output),
                     success: true,
                 };
 
@@ -350,6 +403,102 @@ impl Kernel {
             .await;
 
         self.cleanup_task_subscriptions(&task.id).await;
+    }
+
+    /// Count a fast terminal failure toward the agent's runaway streak and
+    /// auto-pause the agent once the streak hits `failure_streak_limit`.
+    ///
+    /// The LLM circuit breaker protects the *provider*; nothing protected the
+    /// kernel from an agent failing thousands of times per minute. Worse, an
+    /// open breaker makes failures *faster*, which makes a trigger loop spin
+    /// *faster*. A slow failure is an ordinary error and resets the streak.
+    ///
+    /// Pausing sets `manually_offline`, which both stops the executor draining
+    /// the agent's queue (see `dequeue_runnable`) and stops it being
+    /// auto-reactivated on the next boot. Recovery is one
+    /// `agentos agent connect <name>`.
+    async fn record_failure_streak(&self, agent_id: AgentID, duration_ms: u64, trace_id: TraceID) {
+        let limit = self.config.kernel.failure_streak_limit;
+
+        let Some(streak) = apply_failure_streak(
+            &mut *self.failure_streaks.write().await,
+            agent_id,
+            duration_ms,
+            self.config.kernel.failure_streak_fast_ms,
+            limit,
+        ) else {
+            return;
+        };
+
+        let agent_name = {
+            let mut registry = self.agent_registry.write().await;
+            registry.set_offline(&agent_id, true);
+            registry
+                .get_by_id(&agent_id)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| agent_id.to_string())
+        };
+
+        tracing::error!(
+            agent_id = %agent_id,
+            agent_name = %agent_name,
+            streak,
+            limit,
+            "Agent auto-paused — {} consecutive fast task failures. Drain with \
+             `agentos task purge --agent {}`, then `agentos agent connect {}`",
+            streak,
+            agent_name,
+            agent_name
+        );
+
+        self.audit_log(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id,
+            event_type: agentos_audit::AuditEventType::AgentDisconnected,
+            agent_id: Some(agent_id),
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({
+                "reason": "failure_streak_breaker",
+                "streak": streak,
+                "limit": limit,
+                "fast_ms": self.config.kernel.failure_streak_fast_ms,
+            }),
+            severity: agentos_audit::AuditSeverity::Error,
+            reversible: true,
+            rollback_ref: None,
+        });
+
+        let msg = UserMessage {
+            id: NotificationID::new(),
+            from: NotificationSource::Kernel,
+            task_id: None,
+            trace_id,
+            kind: UserMessageKind::Notification,
+            priority: NotificationPriority::Critical,
+            subject: format!("Agent '{agent_name}' auto-paused after {streak} fast failures"),
+            body: format!(
+                "Agent **{agent_name}** failed {streak} tasks in a row, each in under \
+                 {fast_ms} ms, and has been paused to stop a runaway loop.\n\n\
+                 Its queued tasks are held, not running. To recover:\n\n\
+                 ```\nagentos task purge --agent {agent_name}\nagentos agent connect {agent_name}\n```\n\n\
+                 Check the provider is reachable first — a tripped LLM circuit breaker \
+                 is the usual cause of fast repeated failures.",
+                fast_ms = self.config.kernel.failure_streak_fast_ms,
+            ),
+            interaction: None,
+            delivery_status: HashMap::new(),
+            response: None,
+            created_at: chrono::Utc::now(),
+            expires_at: None,
+            read: false,
+            thread_id: None,
+            reply_to_external_id: None,
+            attachment: None,
+        };
+        if let Err(e) = self.notification_router.deliver(msg).await {
+            tracing::warn!(agent_id = %agent_id, error = %e, "Failed to deliver auto-pause notification");
+        }
     }
 
     /// Handle task failure: classify the error, record to episodic memory, update scheduler state,
@@ -480,6 +629,10 @@ impl Kernel {
         }
         crate::metrics::record_task_completed(duration_ms, false);
 
+        // Runaway breaker: a genuine terminal failure that happened *fast*.
+        self.record_failure_streak(task.agent_id, duration_ms, task_trace_id)
+            .await;
+
         // Terminal failure (suspended/paused/waiting returned above) — release the
         // atomic checkout so the claim doesn't linger.
         self.release_task_checkout(&task.id).await;
@@ -532,10 +685,11 @@ impl Kernel {
                 task.original_prompt.chars().take(200).collect::<String>(),
                 error_message
             );
+            let raw_failure: String = failure_output.chars().take(8192).collect();
             let sub_result = agentos_types::SubAgentResult {
                 child_task_id: task.id,
                 agent_name: agent_name.clone(),
-                output: failure_output.chars().take(8192).collect(),
+                output: self.wrap_sub_agent_output(&agent_name, &raw_failure),
                 success: false,
             };
 
@@ -625,7 +779,7 @@ impl Kernel {
                     "retry_eligible": true,
                     "action": "failed_without_retry",
                 }),
-                0,
+                task.event_chain_depth(),
                 Some(task_trace_id),
                 Some(task.agent_id),
                 Some(task.id),
@@ -643,7 +797,7 @@ impl Kernel {
                 "reason": reason,
                 "error": error_message,
             }),
-            0,
+            task.event_chain_depth(),
             Some(task_trace_id),
             Some(task.agent_id),
             Some(task.id),
@@ -737,7 +891,7 @@ impl Kernel {
                         "entry_type": "task_failure",
                         "summary": failure_summary.chars().take(200).collect::<String>(),
                     }),
-                    0,
+                    task.event_chain_depth(),
                     Some(task_trace_id),
                     Some(task.agent_id),
                     Some(task.id),
@@ -778,7 +932,7 @@ impl Kernel {
                     "child_agent_id": task.agent_id.to_string(),
                     "outcome": "failure",
                 }),
-                0,
+                task.event_chain_depth(),
                 Some(task_trace_id),
                 Some(task.agent_id),
                 Some(task.id),
@@ -1535,5 +1689,98 @@ mod tests {
         t.parent_task_id = None;
         t.parent_task = Some(TaskID::new());
         assert!(!Kernel::is_root_task(&t), "parent_task alone disqualifies");
+    }
+
+    const FAST_MS: u64 = 5_000;
+    const LIMIT: u32 = 25;
+
+    #[test]
+    fn streak_fires_once_at_the_limit() {
+        let mut streaks = HashMap::new();
+        let agent = AgentID::new();
+
+        for i in 1..LIMIT {
+            assert_eq!(
+                apply_failure_streak(&mut streaks, agent, 10, FAST_MS, LIMIT),
+                None,
+                "failure {i} is below the limit"
+            );
+        }
+        assert_eq!(
+            apply_failure_streak(&mut streaks, agent, 10, FAST_MS, LIMIT),
+            Some(LIMIT),
+            "the {LIMIT}th consecutive fast failure fires the breaker"
+        );
+        assert!(
+            !streaks.contains_key(&agent),
+            "firing must clear the streak so the pause happens once, not on \
+             every failure still in flight"
+        );
+        assert_eq!(
+            apply_failure_streak(&mut streaks, agent, 10, FAST_MS, LIMIT),
+            None,
+            "the next failure starts a fresh streak"
+        );
+    }
+
+    #[test]
+    fn slow_failure_resets_the_streak() {
+        let mut streaks = HashMap::new();
+        let agent = AgentID::new();
+
+        for _ in 0..(LIMIT - 1) {
+            apply_failure_streak(&mut streaks, agent, 10, FAST_MS, LIMIT);
+        }
+        // One ordinary slow failure — an agent hitting real errors, not a loop.
+        assert_eq!(
+            apply_failure_streak(&mut streaks, agent, FAST_MS, FAST_MS, LIMIT),
+            None
+        );
+        assert!(
+            !streaks.contains_key(&agent),
+            "slow failure clears the count"
+        );
+
+        // So the next fast failure must be counted as #1, not #LIMIT.
+        assert_eq!(
+            apply_failure_streak(&mut streaks, agent, 10, FAST_MS, LIMIT),
+            None,
+            "a slow failure in the middle must prevent a false positive"
+        );
+    }
+
+    #[test]
+    fn streak_is_per_agent() {
+        let mut streaks = HashMap::new();
+        let (a, b) = (AgentID::new(), AgentID::new());
+
+        for _ in 0..(LIMIT - 1) {
+            apply_failure_streak(&mut streaks, a, 10, FAST_MS, LIMIT);
+            apply_failure_streak(&mut streaks, b, 10, FAST_MS, LIMIT);
+        }
+        assert_eq!(streaks.get(&a), Some(&(LIMIT - 1)));
+        assert_eq!(streaks.get(&b), Some(&(LIMIT - 1)));
+        assert_eq!(
+            apply_failure_streak(&mut streaks, a, 10, FAST_MS, LIMIT),
+            Some(LIMIT)
+        );
+        assert_eq!(
+            streaks.get(&b),
+            Some(&(LIMIT - 1)),
+            "pausing one agent must not touch another's count"
+        );
+    }
+
+    #[test]
+    fn streak_limit_zero_disables_the_breaker() {
+        let mut streaks = HashMap::new();
+        let agent = AgentID::new();
+        for _ in 0..1_000 {
+            assert_eq!(
+                apply_failure_streak(&mut streaks, agent, 0, FAST_MS, 0),
+                None
+            );
+        }
+        assert!(streaks.is_empty(), "disabled breaker keeps no state");
     }
 }

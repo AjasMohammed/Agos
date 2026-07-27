@@ -106,6 +106,19 @@ pub enum KernelCommand {
     CancelTask {
         task_id: TaskID,
     },
+    /// Bulk-drop an agent's non-running tasks.
+    ///
+    /// Recovery valve for runaway event-trigger loops: `CancelTask` is per-ID
+    /// and cannot drain a six-figure backlog without stopping the kernel and
+    /// hand-editing SQLite.
+    PurgeTasks {
+        /// Agent whose tasks to purge. Required — there is no purge-everything.
+        agent_id: AgentID,
+        /// Task states to purge. Empty means `queued` only. `running` is
+        /// always excluded; cancel those individually so cleanup runs.
+        #[serde(default)]
+        states: Vec<String>,
+    },
     /// Spawn a child task from within a running parent task.
     /// The child inherits a scoped subset of the parent's capabilities.
     SpawnSubAgent {

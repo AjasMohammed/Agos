@@ -3,8 +3,8 @@ use crate::tool_helpers;
 use crate::traits::LLMCore;
 use crate::types::{
     calculate_inference_cost, default_pricing_table, InferenceEvent, InferenceOptions,
-    InferenceResult, InferenceToolCall, ModelCapabilities, ModelPricing, StopReason, TokenUsage,
-    ToolChoice,
+    InferenceResult, InferenceToolCall, ModelCapabilities, ModelPricing, PromptCacheTtl,
+    StopReason, TokenUsage, ToolChoice,
 };
 use agentos_types::*;
 use async_trait::async_trait;
@@ -321,11 +321,44 @@ impl AnthropicCore {
     }
 }
 
+/// Cache marker for the requested TTL. The 5m form omits `ttl` so request
+/// bodies stay byte-identical to the legacy behavior; 1h requires the
+/// `extended-cache-ttl-2025-04-11` beta header on the request.
+fn cache_control_value(ttl: PromptCacheTtl) -> Value {
+    match ttl {
+        PromptCacheTtl::FiveMinutes => json!({ "type": "ephemeral" }),
+        PromptCacheTtl::OneHour => json!({ "type": "ephemeral", "ttl": "1h" }),
+    }
+}
+
+/// Build a cost-weighted `TokenUsage` for pricing. Anthropic bills cache WRITES
+/// at 1.25x and cache READS at 0.1x the base input rate, and `input_tokens`
+/// excludes both. Folding the weighted cache tokens into `prompt_tokens` lets
+/// the flat-rate `calculate_inference_cost` produce the true billed amount
+/// without a schema change across every provider's `TokenUsage` literal (H2).
+/// This value is for COST ONLY — the literal `tokens_used` on the result keeps
+/// the real, unweighted counts.
+fn weighted_usage_for_cost(
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_write_tokens: u64,
+    cache_read_tokens: u64,
+) -> TokenUsage {
+    let billable_input = input_tokens
+        + (cache_write_tokens as f64 * 1.25).round() as u64
+        + (cache_read_tokens as f64 * 0.10).round() as u64;
+    TokenUsage {
+        prompt_tokens: billable_input,
+        completion_tokens: output_tokens,
+        total_tokens: billable_input + output_tokens,
+    }
+}
+
 /// Attach `cache_control: {type: ephemeral}` to the *last* content block of a
 /// message envelope. Anthropic accepts string or array `content`. For string
 /// content the message is rewritten as a single-element text array so the
 /// cache marker can ride on it.
-fn attach_cache_control_to_last_block(message: &mut Value) {
+fn attach_cache_control_to_last_block(message: &mut Value, ttl: PromptCacheTtl) {
     let Some(obj) = message.as_object_mut() else {
         return;
     };
@@ -333,20 +366,18 @@ fn attach_cache_control_to_last_block(message: &mut Value) {
         Some(Value::Array(blocks)) => {
             if let Some(last) = blocks.last_mut() {
                 if let Some(block_obj) = last.as_object_mut() {
-                    block_obj.insert("cache_control".into(), json!({ "type": "ephemeral" }));
+                    block_obj.insert("cache_control".into(), cache_control_value(ttl));
                 }
             }
         }
         Some(Value::String(s)) => {
             let text = std::mem::take(s);
-            obj.insert(
-                "content".into(),
-                json!([{
-                    "type": "text",
-                    "text": text,
-                    "cache_control": { "type": "ephemeral" },
-                }]),
-            );
+            let mut block = json!({
+                "type": "text",
+                "text": text,
+            });
+            block["cache_control"] = cache_control_value(ttl);
+            obj.insert("content".into(), json!([block]));
         }
         _ => {}
     }
@@ -445,13 +476,13 @@ impl LLMCore for AnthropicCore {
                     "text": entry.text(),
                 });
                 if !breakpoint_set && entry.category == ContextCategory::Tools {
-                    block["cache_control"] = json!({ "type": "ephemeral" });
+                    block["cache_control"] = cache_control_value(options.cache_ttl);
                     breakpoint_set = true;
                 }
                 blocks.push(block);
             }
             if !breakpoint_set && !blocks.is_empty() {
-                blocks[0]["cache_control"] = json!({ "type": "ephemeral" });
+                blocks[0]["cache_control"] = cache_control_value(options.cache_ttl);
             }
             Value::Array(blocks)
         } else if !system_entries.is_empty() {
@@ -472,7 +503,7 @@ impl LLMCore for AnthropicCore {
         // to 4 breakpoints; we use #1 system, #2 tools (set below), #3 here.
         if options.enable_prompt_caching && messages.len() >= 2 {
             let idx = messages.len() - 2;
-            attach_cache_control_to_last_block(&mut messages[idx]);
+            attach_cache_control_to_last_block(&mut messages[idx], options.cache_ttl);
         }
 
         let mut body = json!({
@@ -500,7 +531,7 @@ impl LLMCore for AnthropicCore {
             let mut tools_array = anthropic_tools;
             if options.enable_prompt_caching {
                 if let Some(last) = tools_array.last_mut() {
-                    last["cache_control"] = json!({ "type": "ephemeral" });
+                    last["cache_control"] = cache_control_value(options.cache_ttl);
                 }
             }
             body["tools"] = Value::Array(tools_array);
@@ -538,6 +569,16 @@ impl LLMCore for AnthropicCore {
         );
 
         let thinking_enabled = options.thinking_budget_tokens.is_some();
+        // Beta features ride a single comma-joined `anthropic-beta` header.
+        let mut beta_features: Vec<&str> = Vec::new();
+        if thinking_enabled {
+            // Extended thinking requires the interleaved-thinking beta header.
+            beta_features.push("interleaved-thinking-2025-05-14");
+        }
+        if options.enable_prompt_caching && options.cache_ttl == PromptCacheTtl::OneHour {
+            beta_features.push("extended-cache-ttl-2025-04-11");
+        }
+        let beta_header = (!beta_features.is_empty()).then(|| beta_features.join(","));
         let res = crate::retry::send_with_retry(
             "anthropic",
             &self.retry_policy,
@@ -550,9 +591,8 @@ impl LLMCore for AnthropicCore {
                     .header("x-api-key", self.api_key.expose_secret())
                     .header("anthropic-version", "2023-06-01")
                     .header("Content-Type", "application/json");
-                // Extended thinking requires the interleaved-thinking beta header.
-                if thinking_enabled {
-                    req = req.header("anthropic-beta", "interleaved-thinking-2025-05-14");
+                if let Some(ref beta) = beta_header {
+                    req = req.header("anthropic-beta", beta.as_str());
                 }
                 req.json(&body)
             },
@@ -583,13 +623,30 @@ impl LLMCore for AnthropicCore {
         let cached_tokens = json_resp["usage"]["cache_read_input_tokens"]
             .as_u64()
             .unwrap_or(0);
+        let cache_write_tokens = json_resp["usage"]["cache_creation_input_tokens"]
+            .as_u64()
+            .unwrap_or(0);
 
         let tokens_used = TokenUsage {
             prompt_tokens,
             completion_tokens,
             total_tokens,
         };
-        let cost = calculate_inference_cost(&tokens_used, &self.pricing);
+        // Anthropic's `input_tokens` EXCLUDES cached tokens; cache writes are
+        // billed at 1.25x and cache reads at 0.1x the base input rate. Bill cost
+        // on a weighted input count so budget enforcement reflects true spend —
+        // otherwise a long cached task's tracked cost is a fraction of reality
+        // and the hard-limit suspend fires far too late (H2). `tokens_used`
+        // stays literal for accurate token reporting.
+        let cost = calculate_inference_cost(
+            &weighted_usage_for_cost(
+                prompt_tokens,
+                completion_tokens,
+                cache_write_tokens,
+                cached_tokens,
+            ),
+            &self.pricing,
+        );
 
         Ok(InferenceResult {
             text,
@@ -712,7 +769,7 @@ impl LLMCore for AnthropicCore {
         };
         if messages.len() >= 2 {
             let idx = messages.len() - 2;
-            attach_cache_control_to_last_block(&mut messages[idx]);
+            attach_cache_control_to_last_block(&mut messages[idx], PromptCacheTtl::FiveMinutes);
         }
 
         let mut body = json!({
@@ -776,6 +833,7 @@ impl LLMCore for AnthropicCore {
             total_tokens: 0,
         };
         let mut cached_tokens: u64 = 0;
+        let mut cache_write_tokens: u64 = 0;
         let mut stop_reason = StopReason::EndTurn;
 
         // Content block tracking.
@@ -839,6 +897,10 @@ impl LLMCore for AnthropicCore {
                                 u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
                             cached_tokens = u
                                 .get("cache_read_input_tokens")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0);
+                            cache_write_tokens = u
+                                .get("cache_creation_input_tokens")
                                 .and_then(Value::as_u64)
                                 .unwrap_or(0);
                         }
@@ -951,7 +1013,17 @@ impl LLMCore for AnthropicCore {
         }
 
         let duration_ms = start_time.elapsed().as_millis() as u64;
-        let cost = calculate_inference_cost(&usage, &self.pricing);
+        // Weight cache-write/read tokens into the cost basis (see non-streaming
+        // path) so streamed inferences bill true spend for budget enforcement (H2).
+        let cost = calculate_inference_cost(
+            &weighted_usage_for_cost(
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                cache_write_tokens,
+                cached_tokens,
+            ),
+            &self.pricing,
+        );
 
         let result = InferenceResult {
             text: full_text,
@@ -1392,7 +1464,7 @@ mod tests {
                 { "type": "text", "text": "world" }
             ]
         });
-        attach_cache_control_to_last_block(&mut msg);
+        attach_cache_control_to_last_block(&mut msg, PromptCacheTtl::FiveMinutes);
         let blocks = msg["content"].as_array().unwrap();
         assert!(blocks[0].get("cache_control").is_none());
         assert_eq!(blocks[1]["cache_control"]["type"], "ephemeral");
@@ -1404,12 +1476,34 @@ mod tests {
             "role": "user",
             "content": "hello"
         });
-        attach_cache_control_to_last_block(&mut msg);
+        attach_cache_control_to_last_block(&mut msg, PromptCacheTtl::FiveMinutes);
         let blocks = msg["content"].as_array().expect("rewritten to array");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "text");
         assert_eq!(blocks[0]["text"], "hello");
         assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn test_cache_control_value_emits_ttl_only_for_one_hour() {
+        // 5m must stay byte-identical to the legacy marker — no `ttl` key.
+        assert_eq!(
+            cache_control_value(PromptCacheTtl::FiveMinutes),
+            json!({ "type": "ephemeral" })
+        );
+        assert_eq!(
+            cache_control_value(PromptCacheTtl::OneHour),
+            json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+    }
+
+    #[test]
+    fn test_attach_cache_control_one_hour_carries_ttl() {
+        let mut msg = json!({ "role": "user", "content": "hello" });
+        attach_cache_control_to_last_block(&mut msg, PromptCacheTtl::OneHour);
+        let blocks = msg["content"].as_array().expect("rewritten to array");
+        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(blocks[0]["cache_control"]["ttl"], "1h");
     }
 
     /// Test the stop reason mapping used in infer_with_tools.

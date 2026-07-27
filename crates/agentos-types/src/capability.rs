@@ -100,6 +100,129 @@ const PRIVATE_NETWORK_PREFIXES: &[&str] = &[
              // on hostnames like "fdic.gov" that start with "fd".
 ];
 
+/// Extract the bare host from a `net:` target, stripping scheme, userinfo,
+/// port and path. Lowercased, brackets removed.
+///
+/// This is the SSRF hardening boundary: without dropping the `user@` userinfo
+/// component, `http://x@169.254.169.254/` would be range-checked as the host
+/// `x@169.254.169.254` (matching nothing) while the HTTP client connects to the
+/// real host after the `@`.
+fn extract_ssrf_host(target: &str) -> String {
+    let lc = target.to_lowercase();
+    // Strip any scheme:// (not just http/https, so ftp:// etc. can't smuggle a host).
+    let after_scheme = match lc.find("://") {
+        Some(pos) => &lc[pos + 3..],
+        None => lc.as_str(),
+    };
+    // Authority ends at the first '/', '?' or '#'.
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Drop userinfo: everything up to and including the LAST '@'.
+    let host_port = match authority.rsplit_once('@') {
+        Some((_, hp)) => hp,
+        None => authority,
+    };
+    // Bracketed IPv6: take the content between '[' and ']'.
+    if let Some(rest) = host_port.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or("").to_string();
+    }
+    // host:port — strip the port only when the left side is not itself IPv6
+    // (bare IPv6 has multiple ':' and is invalid without brackets, so keep it whole).
+    match host_port.rsplit_once(':') {
+        Some((left, right))
+            if !left.contains(':')
+                && !right.is_empty()
+                && right.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            left.to_string()
+        }
+        _ => host_port.to_string(),
+    }
+}
+
+/// True if `host` (already lowercased, no brackets/port) is a private, loopback,
+/// link-local, or otherwise non-routable target that must not be reachable.
+fn host_is_private(host: &str) -> bool {
+    // Authoritative IP checks first (canonical text, integer-encoded IPv4, IPv6).
+    if let Some(ip) = parse_host_ip(host) {
+        return ip_is_blocked(ip);
+    }
+    // Hostname / dotted-form string-prefix fallbacks (e.g. "localhost").
+    for prefix in PRIVATE_NETWORK_PREFIXES {
+        if host.starts_with(prefix) {
+            return true;
+        }
+    }
+    // IPv6 ULA (fd00::/8): "fd" + hex/':' (avoids matching hostnames like "fdic.gov").
+    if let Some(rest) = host.strip_prefix("fd") {
+        if let Some(c) = rest.chars().next() {
+            if c.is_ascii_hexdigit() || c == ':' {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Parse `host` as an IP, accepting canonical text and integer-encoded IPv4
+/// (decimal `2130706433`, hex `0x7f000001`, leading-zero octal) that an HTTP
+/// client may still resolve into loopback/private space.
+fn parse_host_ip(host: &str) -> Option<std::net::IpAddr> {
+    use std::net::{IpAddr, Ipv4Addr};
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    let n = if let Some(hex) = host.strip_prefix("0x") {
+        u32::from_str_radix(hex, 16).ok()?
+    } else if host.len() > 1 && host.starts_with('0') && host.bytes().all(|b| b.is_ascii_digit()) {
+        u32::from_str_radix(&host[1..], 8).ok()?
+    } else if !host.is_empty() && host.bytes().all(|b| b.is_ascii_digit()) {
+        host.parse::<u32>().ok()?
+    } else {
+        return None;
+    };
+    Some(IpAddr::V4(Ipv4Addr::from(n)))
+}
+
+/// Range-check an IP against private/loopback/link-local/reserved space.
+fn ip_is_blocked(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local() // 169.254/16, incl. cloud metadata 169.254.169.254
+                || v4.is_unspecified() // 0.0.0.0
+                || v4.is_broadcast()
+                || o[0] == 0 // 0.0.0.0/8
+                || (o[0] == 100 && (64..=127).contains(&o[1])) // CGNAT 100.64/10
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() || v6.is_unspecified() {
+                return true;
+            }
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return ip_is_blocked(IpAddr::V4(v4));
+            }
+            let seg0 = v6.segments()[0];
+            (seg0 & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || (seg0 & 0xfe00) == 0xfc00 // ULA fc00::/7
+        }
+    }
+}
+
+/// True if `resource` contains a `..` path segment. Such a resource can
+/// prefix-match a grant while escaping its scope (e.g.
+/// `fs:/home/user/../../etc/passwd` starts with the grant `fs:/home/user/`),
+/// so the enforcement layer fails closed rather than trusting callers to
+/// canonicalize first.
+fn resource_has_traversal(resource: &str) -> bool {
+    resource.split(['/', '\\']).any(|seg| seg == "..")
+}
+
 impl PermissionSet {
     pub fn new() -> Self {
         Self {
@@ -137,44 +260,18 @@ impl PermissionSet {
             }
         }
 
-        // SSRF protection: block private network ranges for network resources
-        if resource.starts_with("net:") || resource.starts_with("network:") {
+        // SSRF protection: block private/loopback/link-local ranges for network
+        // resources. Host extraction strips scheme, userinfo, port and path so
+        // `user@host` and scheme/port noise cannot smuggle a blocked target past
+        // the range check.
+        if is_net {
             let target = resource
                 .strip_prefix("net:")
                 .or_else(|| resource.strip_prefix("network:"))
                 .unwrap_or("");
-            // Lowercase first so protocol-case bypasses like "HTTP://127.0.0.1/" are caught
-            let target_lc = target.to_lowercase();
-            let host_raw = target_lc
-                .strip_prefix("https://")
-                .or_else(|| target_lc.strip_prefix("http://"))
-                .unwrap_or(target_lc.as_str());
-            // Normalize bracketed IPv6 (e.g. "[::1]:8080/path" → "::1")
-            // or strip path from bare hostnames (e.g. "127.0.0.1:8080/path" → "127.0.0.1")
-            let host = if host_raw.starts_with('[') {
-                host_raw
-                    .trim_start_matches('[')
-                    .split(']')
-                    .next()
-                    .unwrap_or("")
-            } else {
-                host_raw.split('/').next().unwrap_or(host_raw)
-            };
-            // Normalize to lowercase to block case-variation bypasses
-            // (e.g. "LOCALHOST", "LocalHost", "HTTP://10.0.0.1/")
-            let host_lower = host.to_lowercase();
-            for prefix in PRIVATE_NETWORK_PREFIXES {
-                if host_lower.starts_with(prefix) {
-                    return true;
-                }
-            }
-            // IPv6 ULA (fd00::/8): "fd" followed by a hex digit or colon.
-            // Checked separately to avoid false-positives on hostnames like "fdic.gov".
-            if host_lower.starts_with("fd") && host_lower.len() > 2 {
-                let next = host_lower.chars().nth(2).unwrap_or(' ');
-                if next.is_ascii_hexdigit() || next == ':' {
-                    return true;
-                }
+            let host = extract_ssrf_host(target);
+            if host_is_private(&host) {
+                return true;
             }
         }
 
@@ -188,6 +285,13 @@ impl PermissionSet {
     /// Deny entries are checked first and take absolute precedence.
     /// Expired permission entries are treated as if they do not exist.
     pub fn check(&self, resource: &str, operation: PermissionOp) -> bool {
+        // Fail closed on unnormalized path traversal: a resource with a `..`
+        // segment can prefix-match a grant while escaping it. Reject before any
+        // grant match so the enforcement layer is self-contained.
+        if resource_has_traversal(resource) {
+            return false;
+        }
+
         // Deny entries take precedence
         if self.is_denied(resource) {
             return false;
@@ -613,6 +717,56 @@ mod tests {
         assert!(!perms.check("net:http://[fd00::1]/", PermissionOp::Read));
         // Public host starting with "fd" must NOT be blocked
         assert!(perms.check("net:https://fdic.gov/", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_ssrf_userinfo_bypass_blocked() {
+        let mut perms = PermissionSet::new();
+        perms.grant("net:".into(), true, false, true, None);
+
+        // The `user@host` userinfo component must not smuggle a blocked host
+        // past the range check — the real target is the part after the '@'.
+        assert!(!perms.check(
+            "net:http://x@169.254.169.254/latest/meta-data/",
+            PermissionOp::Read
+        ));
+        assert!(!perms.check("net:http://user:pass@127.0.0.1/", PermissionOp::Read));
+        assert!(!perms.check("net:http://evil.com@10.0.0.1/", PermissionOp::Read));
+        // A legitimate public host with userinfo is still allowed.
+        assert!(perms.check("net:https://token@api.anthropic.com/v1", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_ssrf_integer_encoded_ip_blocked() {
+        let mut perms = PermissionSet::new();
+        perms.grant("net:".into(), true, false, true, None);
+
+        // Decimal (2130706433 == 127.0.0.1) and hex (0x7f000001) integer IPv4.
+        assert!(!perms.check("net:http://2130706433/", PermissionOp::Read));
+        assert!(!perms.check("net:http://0x7f000001/", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_ssrf_non_http_scheme_blocked() {
+        let mut perms = PermissionSet::new();
+        perms.grant("net:".into(), true, false, true, None);
+
+        // A non-http scheme must not let the host escape the range check.
+        assert!(!perms.check("net:ftp://127.0.0.1/", PermissionOp::Read));
+        assert!(!perms.check("net:gopher://10.0.0.1:70/", PermissionOp::Read));
+    }
+
+    #[test]
+    fn test_path_traversal_rejected() {
+        let mut perms = PermissionSet::new();
+        perms.grant("fs:/home/user/".into(), true, true, false, None);
+
+        // A `..` segment must fail closed even though it prefix-matches the grant.
+        assert!(!perms.check("fs:/home/user/../../etc/passwd", PermissionOp::Read));
+        assert!(!perms.check("fs:/home/user/docs/../../../etc/shadow", PermissionOp::Read));
+        // A filename that merely contains ".." is fine.
+        assert!(perms.check("fs:/home/user/..hidden", PermissionOp::Read));
+        assert!(perms.check("fs:/home/user/a..b.txt", PermissionOp::Read));
     }
 
     #[test]

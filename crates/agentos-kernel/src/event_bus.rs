@@ -370,6 +370,22 @@ pub fn event_observe_permissions_for_role(role: &str) -> Vec<&'static str> {
     }
 }
 
+/// Rate cap applied to every kernel-seeded role subscription.
+///
+/// Defence in depth behind the `causing_agent` self-exclusion guard in
+/// `event_dispatch.rs`. Self-exclusion cannot catch a multi-agent cycle
+/// (A's activity triggers B, B's activity triggers A), and it fails open for
+/// emit sites whose payload carries no recognizable causer key. Without a
+/// throttle those residual cases run at wire speed — the 2026-07-26 incident
+/// produced ~88k tasks/hour from a single self-matching subscription.
+///
+/// 30/minute is far above real orchestration rates. An agent that genuinely
+/// needs a higher ceiling can re-subscribe via `event-subscribe` with its own
+/// explicit policy.
+pub fn default_role_subscription_throttle() -> ThrottlePolicy {
+    ThrottlePolicy::MaxCountPerDuration(30, std::time::Duration::from_secs(60))
+}
+
 /// Default event subscriptions for a role.
 pub fn default_subscriptions_for_role(role: &str) -> Vec<(EventTypeFilter, SubscriptionPriority)> {
     match role.trim().to_ascii_lowercase().as_str() {
@@ -1098,6 +1114,41 @@ mod tests {
     #[test]
     fn test_parse_event_type_filter_rejects_category_event_mismatch() {
         assert_eq!(parse_event_type_filter("TaskLifecycle.AgentAdded"), None);
+    }
+
+    #[test]
+    fn test_default_role_subscription_throttle_is_bounded() {
+        // A `None` throttle here is what let the 2026-07-26 trigger loop run at
+        // ~88k tasks/hour. Any seeded subscription must carry a rate cap.
+        match default_role_subscription_throttle() {
+            ThrottlePolicy::None => panic!("role-seeded subscriptions must be throttled"),
+            ThrottlePolicy::MaxCountPerDuration(count, window) => {
+                assert!(count > 0);
+                assert!(window.as_secs() > 0);
+            }
+            ThrottlePolicy::MaxOncePerDuration(window) => assert!(window.as_secs() > 0),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_seeded_throttle_drops_a_flood() {
+        let bus = EventBus::new();
+        let sub_id = SubscriptionID::new();
+        let policy = default_role_subscription_throttle();
+        let ThrottlePolicy::MaxCountPerDuration(cap, _) = policy else {
+            panic!("expected a count-based cap");
+        };
+
+        for i in 0..cap {
+            assert!(
+                bus.check_throttle_allowed(&sub_id, &policy).await,
+                "delivery {i} should be allowed within the cap"
+            );
+        }
+        assert!(
+            !bus.check_throttle_allowed(&sub_id, &policy).await,
+            "delivery past the cap must be dropped inside the window"
+        );
     }
 
     #[test]

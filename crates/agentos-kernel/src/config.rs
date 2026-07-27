@@ -852,6 +852,54 @@ pub struct KernelSettings {
     /// or disable LLM summarization to reduce per-iteration latency.
     #[serde(default)]
     pub context_compaction: ContextCompactionConfig,
+    /// Maximum *queued* (not running) tasks a single agent may accumulate.
+    /// Further enqueues are rejected and marked `Failed` without emitting any
+    /// event. `max_concurrent_tasks` bounds execution, not queue depth — the
+    /// 2026-07-26 trigger-loop incident piled up 190k queued tasks while never
+    /// exceeding 4 concurrent runs. 0 disables the cap.
+    #[serde(default = "default_max_queued_per_agent")]
+    pub max_queued_per_agent: usize,
+    /// Queued tasks older than this are cancelled at boot instead of replayed.
+    /// Without a cutoff a runaway backlog resurrects itself on every restart.
+    /// 0 disables the cutoff (replay everything).
+    #[serde(default = "default_boot_replay_max_age_hours")]
+    pub boot_replay_max_age_hours: u32,
+    /// Terminal scheduler rows (complete/failed/cancelled) older than this are
+    /// deleted by the 10-minute sweep. They are already excluded from boot
+    /// restore, but without pruning they grow the state DB without bound.
+    /// 0 disables pruning.
+    #[serde(default = "default_task_retention_days")]
+    pub task_retention_days: u32,
+    /// Consecutive *fast* task failures before an agent is auto-paused
+    /// (`manually_offline`). Guards against an agent that fails in
+    /// milliseconds spawning work faster than any human can intervene.
+    /// 0 disables the breaker.
+    #[serde(default = "default_failure_streak_limit")]
+    pub failure_streak_limit: u32,
+    /// A failure counts toward `failure_streak_limit` only if the task took
+    /// less than this. Slow failures are ordinary errors, not a runaway.
+    #[serde(default = "default_failure_streak_fast_ms")]
+    pub failure_streak_fast_ms: u64,
+}
+
+fn default_max_queued_per_agent() -> usize {
+    500
+}
+
+fn default_boot_replay_max_age_hours() -> u32 {
+    24
+}
+
+fn default_task_retention_days() -> u32 {
+    7
+}
+
+fn default_failure_streak_limit() -> u32 {
+    25
+}
+
+fn default_failure_streak_fast_ms() -> u64 {
+    5_000
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1159,6 +1207,13 @@ pub struct DiscoverySettings {
     /// Only "heuristic" is implemented today; others degrade to heuristic.
     #[serde(default = "default_scoping_classifier")]
     pub scoping_classifier: String,
+    /// Re-arm a scoped-out tool's native schema mid-task after the agent
+    /// successfully calls `describe-tool` on it. Without this, category
+    /// scoping is a hard wall for native tool calling: the model cannot emit
+    /// a well-formed `tool_use` for a schema it never received. Costs one
+    /// tools-block cache bust per newly armed tool.
+    #[serde(default = "default_true")]
+    pub rearm_on_describe: bool,
 }
 
 fn default_l0_max_names() -> usize {
@@ -1180,6 +1235,7 @@ impl Default for DiscoverySettings {
             l0_max_tokens: default_l0_max_tokens(),
             default_scoping: true,
             scoping_classifier: default_scoping_classifier(),
+            rearm_on_describe: true,
         }
     }
 }
@@ -1419,6 +1475,14 @@ pub struct LlmSettings {
     /// the stored session is a pure cache (deleted on task completion).
     #[serde(default)]
     pub claude_code_resume: bool,
+    /// Anthropic prompt-cache TTL: `"5m"` (default) or `"1h"`. Long-lived /
+    /// scheduled agents whose turns are more than 5 minutes apart never get a
+    /// cache read on the 5m TTL — they pay a cache write every turn. `"1h"`
+    /// keeps the prefix warm across sparse turns (Anthropic bills 1h cache
+    /// writes at a higher rate; reads are unchanged). Unknown values fall
+    /// back to `"5m"` with a warning. Other providers ignore this.
+    #[serde(default = "default_prompt_cache_ttl")]
+    pub prompt_cache_ttl: String,
 }
 
 /// One entry in `llm.fallback_models`. Mirrors the `--provider`/`--model`
@@ -1446,12 +1510,17 @@ impl Default for LlmSettings {
             ollama_context_window: default_ollama_context_window(),
             fallback_models: Vec::new(),
             claude_code_resume: false,
+            prompt_cache_ttl: default_prompt_cache_ttl(),
         }
     }
 }
 
 fn default_llm_max_tokens() -> u32 {
     8192
+}
+
+fn default_prompt_cache_ttl() -> String {
+    "5m".to_string()
 }
 
 fn default_ollama_context_window() -> u32 {
@@ -1490,9 +1559,11 @@ pub struct MemorySettings {
     /// Age (days) after which episodic / semantic / procedural memory entries
     /// are swept by the TimeoutChecker. The three tiers expose
     /// `sweep_old_entries` but nothing called it, so the memory DBs grew
-    /// unbounded on a long-running install. `0` (default) keeps the prior
-    /// unbounded behavior; set a positive value to enable retention.
-    #[serde(default)]
+    /// unbounded on a long-running install until the disk filled and every
+    /// SQLite write (checkpoints, vault, audit) began to fail. Defaults to 90
+    /// days so a fresh or upgraded install is bounded out of the box; set `0`
+    /// to explicitly opt into the old unbounded behavior.
+    #[serde(default = "default_memory_retention_days")]
     pub retention_days: u32,
     #[serde(default)]
     pub lifecycle: MemoryLifecycleSettings,
@@ -1566,7 +1637,7 @@ impl Default for MemorySettings {
             extraction: crate::memory_extraction::ExtractionConfig::default(),
             consolidation: crate::consolidation::ConsolidationConfig::default(),
             context: ContextMemoryConfig::default(),
-            retention_days: 0,
+            retention_days: default_memory_retention_days(),
             lifecycle: MemoryLifecycleSettings::default(),
         }
     }
@@ -1574,6 +1645,12 @@ impl Default for MemorySettings {
 
 fn default_model_cache_dir() -> String {
     "models".to_string()
+}
+
+/// Default memory retention (days). Non-zero so memory DBs are bounded out of
+/// the box; `0` in config explicitly restores unbounded growth.
+fn default_memory_retention_days() -> u32 {
+    90
 }
 
 fn default_embedder_init_timeout_secs() -> u64 {
@@ -2867,6 +2944,24 @@ data_dir = "/t/d"
             toml::from_str(toml_str).expect("tools without discovery parses");
         assert_eq!(tools.discovery.l0_max_names_per_category, 5);
         assert_eq!(tools.discovery.l0_max_tokens, 200);
+        assert!(
+            tools.discovery.rearm_on_describe,
+            "re-arm defaults on so scoped-out tools stay callable"
+        );
+    }
+
+    #[test]
+    fn llm_prompt_cache_ttl_defaults_and_parses() {
+        let default_llm = LlmSettings::default();
+        assert_eq!(default_llm.prompt_cache_ttl, "5m");
+
+        let llm: LlmSettings =
+            toml::from_str(r#"prompt_cache_ttl = "1h""#).expect("llm ttl parses");
+        assert_eq!(llm.prompt_cache_ttl, "1h");
+
+        // Absent field falls back to the 5m default (existing configs keep working).
+        let llm: LlmSettings = toml::from_str("").expect("empty llm block parses");
+        assert_eq!(llm.prompt_cache_ttl, "5m");
     }
 
     #[test]

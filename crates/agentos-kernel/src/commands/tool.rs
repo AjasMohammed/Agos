@@ -15,7 +15,7 @@ impl Kernel {
 
     pub(crate) async fn cmd_install_tool(&self, manifest_path: String) -> KernelResponse {
         let path = std::path::Path::new(&manifest_path);
-        let content = match std::fs::read_to_string(path) {
+        let content = match tokio::fs::read_to_string(path).await {
             Ok(c) => c,
             Err(e) => {
                 return KernelResponse::Error {
@@ -31,8 +31,14 @@ impl Kernel {
                 }
             }
         };
+        let tool_name = manifest.manifest.name.clone();
         match self.tool_registry.write().await.register(manifest) {
-            Ok(_) => KernelResponse::Success { data: None },
+            Ok(id) => KernelResponse::Success {
+                data: Some(serde_json::json!({
+                    "tool_id": id.to_string(),
+                    "tool_name": tool_name,
+                })),
+            },
             Err(e) => KernelResponse::Error {
                 message: e.to_string(),
             },
@@ -43,7 +49,7 @@ impl Kernel {
     /// Returns the assigned ToolID on success so the caller knows it was registered.
     pub(crate) async fn cmd_tool_load(&self, manifest_path: String) -> KernelResponse {
         let path = std::path::Path::new(&manifest_path);
-        let content = match std::fs::read_to_string(path) {
+        let content = match tokio::fs::read_to_string(path).await {
             Ok(c) => c,
             Err(e) => {
                 return KernelResponse::Error {

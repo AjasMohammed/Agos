@@ -1,5 +1,5 @@
 use crate::escalation::PendingEscalation;
-use agentos_types::{AgentID, AgentTask, TaskState};
+use agentos_types::{AgentID, AgentTask, TaskID, TaskState};
 use anyhow::{anyhow, Context};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
@@ -152,6 +152,70 @@ impl KernelStateStore {
         })
         .await
         .context("Scheduler restore task failed")?
+    }
+
+    /// Delete specific scheduler rows by task ID.
+    ///
+    /// Backs `TaskScheduler::purge_agent_tasks` — the recovery valve for a
+    /// runaway backlog. Chunked so the bound-parameter list stays well under
+    /// SQLite's limit; IDs are always bound, never interpolated.
+    pub async fn delete_scheduler_tasks(&self, task_ids: &[TaskID]) -> anyhow::Result<usize> {
+        if task_ids.is_empty() {
+            return Ok(0);
+        }
+        let ids: Vec<String> = task_ids.iter().map(|id| id.to_string()).collect();
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            let mut deleted = 0usize;
+            for chunk in ids.chunks(500) {
+                let placeholders = std::iter::repeat_n("?", chunk.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!("DELETE FROM scheduler_tasks WHERE task_id IN ({placeholders})");
+                let params = rusqlite::params_from_iter(chunk.iter());
+                deleted = deleted.saturating_add(
+                    guard
+                        .execute(&sql, params)
+                        .context("Failed to delete scheduler tasks")?,
+                );
+            }
+            Ok(deleted)
+        })
+        .await
+        .context("Scheduler purge task failed")?
+    }
+
+    /// Delete terminal scheduler rows older than `max_age`.
+    ///
+    /// Terminal rows are already excluded from boot restore, but nothing ever
+    /// removed them: the 2026-07-26 incident left 99,963 `failed` rows behind
+    /// and took the state DB to 1.6 GB. Wired into the existing 10-minute
+    /// sweep alongside checkpoint/session/schedule pruning.
+    pub async fn prune_terminal_scheduler_tasks(
+        &self,
+        max_age: chrono::Duration,
+    ) -> anyhow::Result<usize> {
+        let cutoff = (chrono::Utc::now() - max_age).to_rfc3339();
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            let guard = conn
+                .lock()
+                .map_err(|_| anyhow!("Kernel state DB mutex poisoned"))?;
+            let deleted = guard
+                .execute(
+                    "DELETE FROM scheduler_tasks
+                     WHERE state IN ('complete', 'failed', 'cancelled')
+                       AND updated_at < ?1",
+                    params![cutoff],
+                )
+                .context("Failed to prune terminal scheduler tasks")?;
+            Ok(deleted)
+        })
+        .await
+        .context("Scheduler prune task failed")?
     }
 
     pub async fn upsert_escalation(&self, escalation: PendingEscalation) -> anyhow::Result<()> {

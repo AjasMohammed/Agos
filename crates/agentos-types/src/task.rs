@@ -75,6 +75,21 @@ pub struct AgentTask {
     pub tool_categories: Option<Vec<String>>,
 }
 
+impl AgentTask {
+    /// Chain depth for events emitted on behalf of this task.
+    ///
+    /// Events caused by an event-triggered task must carry `trigger_depth + 1`
+    /// so the dispatcher's `max_chain_depth` loop guard can terminate
+    /// trigger→task→event→trigger cascades. Hardcoding 0 at emit sites resets
+    /// the counter and disables loop detection entirely.
+    pub fn event_chain_depth(&self) -> u32 {
+        self.trigger_source
+            .as_ref()
+            .map(|ts| ts.chain_depth.saturating_add(1))
+            .unwrap_or(0)
+    }
+}
+
 /// Controls how much extended thinking budget the LLM is given for a task.
 /// Maps to the `budget_tokens` field of the Anthropic thinking API.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +159,23 @@ mod tests {
             let deserialized: ThinkingLevel = serde_json::from_str(&json).unwrap();
             assert_eq!(level, deserialized);
         }
+    }
+
+    #[test]
+    fn test_event_chain_depth() {
+        let mut task = AgentTask::default();
+        assert_eq!(task.event_chain_depth(), 0, "untriggered task emits at 0");
+        task.trigger_source = Some(TriggerSource {
+            event_id: crate::ids::EventID::new(),
+            event_type: crate::event::EventType::TaskFailed,
+            subscription_id: crate::ids::SubscriptionID::new(),
+            chain_depth: 3,
+        });
+        assert_eq!(
+            task.event_chain_depth(),
+            4,
+            "triggered task must emit one deeper than its trigger"
+        );
     }
 
     #[test]

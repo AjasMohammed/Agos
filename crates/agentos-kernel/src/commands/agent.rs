@@ -922,7 +922,7 @@ impl Kernel {
                     event_type_filter,
                     filter: None,
                     priority,
-                    throttle: ThrottlePolicy::None,
+                    throttle: crate::event_bus::default_role_subscription_throttle(),
                     enabled: true,
                     created_at: chrono::Utc::now(),
                 })
@@ -1910,7 +1910,7 @@ Once you have explored, briefly summarise what you found and confirm you are rea
                         event_type_filter,
                         filter: None,
                         priority,
-                        throttle: ThrottlePolicy::None,
+                        throttle: crate::event_bus::default_role_subscription_throttle(),
                         enabled: true,
                         created_at: chrono::Utc::now(),
                     })

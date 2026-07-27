@@ -256,7 +256,7 @@ impl Kernel {
                                                 "timeout_seconds": timed_out.timeout_seconds,
                                                 "elapsed_seconds": timed_out.elapsed_seconds,
                                             }),
-                                            0,
+                                            timed_out.chain_depth,
                                         )
                                         .await;
                                     kernel
@@ -274,7 +274,7 @@ impl Kernel {
                                                     timed_out.timeout_seconds
                                                 ),
                                             }),
-                                            0,
+                                            timed_out.chain_depth,
                                         )
                                         .await;
                                     kernel
@@ -849,6 +849,29 @@ impl Kernel {
                                         });
                                     }
 
+                                    // Prune terminal scheduler rows. They are already excluded
+                                    // from boot restore, but nothing ever deleted them — the
+                                    // 2026-07-26 trigger-loop incident left 99,963 failed rows
+                                    // behind and grew kernel_state.db to 1.6 GB.
+                                    {
+                                        let retention_days = kernel.config.kernel.task_retention_days;
+                                        if retention_days > 0 {
+                                            let scheduler = kernel.scheduler.clone();
+                                            tokio::spawn(async move {
+                                                let max_age = chrono::Duration::days(i64::from(retention_days));
+                                                match scheduler.prune_terminal_persisted(max_age).await {
+                                                    Ok(0) => {}
+                                                    Ok(n) => {
+                                                        tracing::info!(pruned = n, retention_days, "Pruned {} terminal scheduler rows", n);
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!(error = %e, "Scheduler row pruning failed");
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+
                                     // Prune claude-code resume sessions older than 72h. The
                                     // success path deletes eagerly on task completion; this
                                     // reclaims rows from tasks that failed and were never resumed.
@@ -1376,7 +1399,101 @@ impl Kernel {
     /// panics or exits unexpectedly, it is restarted automatically. If a task exceeds
     /// MAX_RESTARTS within RESTART_WINDOW_SECS, the kernel logs a degraded status and shuts
     /// down so the container orchestrator can restart the process cleanly.
+    /// Resume every in-flight task that has a checkpoint, instead of re-running
+    /// it from iteration 0.
+    ///
+    /// `scheduler.restore_from_store()` re-queues non-terminal tasks with their
+    /// ORIGINAL (now likely expired) capability token and an EMPTY context. For
+    /// any task that ran ≥1 tool call (and therefore has a checkpoint), that
+    /// blind re-run would re-execute every already-completed side effect —
+    /// re-sending emails, re-writing files — and then have every tool call
+    /// denied once the stale token's expiry is hit. `cmd_resume_task` instead
+    /// reissues a fresh token and restores the checkpointed context, so
+    /// execution continues from where the crash interrupted it. (A1)
+    ///
+    /// MUST run before the Executor task is spawned so a task cannot be
+    /// dequeued and re-run from scratch before its checkpoint is applied.
+    async fn recover_checkpointed_tasks(self: &Arc<Self>) {
+        let summaries = match self.checkpoint_store.list_checkpoints().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "Boot: checkpoint recovery skipped — cannot list checkpoints");
+                return;
+            }
+        };
+        if summaries.is_empty() {
+            return;
+        }
+        let mut resumed = 0usize;
+        for summary in &summaries {
+            let task_id = summary.task_id;
+            // Only resume tasks the scheduler restored as non-terminal. A leftover
+            // checkpoint for an already-finished task (checkpoints are deleted on
+            // success, but a crash can leave one) is pruned by the 72h sweeper.
+            match self.scheduler.get_task(&task_id).await {
+                Some(t)
+                    if matches!(
+                        t.state,
+                        agentos_types::TaskState::Complete
+                            | agentos_types::TaskState::Failed
+                            | agentos_types::TaskState::Cancelled
+                    ) =>
+                {
+                    continue
+                }
+                None => continue,
+                Some(_) => {}
+            }
+            // Poison-pill guard: a task whose execution crashes the kernel gets
+            // auto-resumed on every boot and crashes it again — an unbounded
+            // crash loop across systemd restarts. Cap boot-resumes per
+            // checkpoint; past the cap, drop the checkpoint and fail the task.
+            const MAX_BOOT_RESUMES: u32 = 3;
+            match self.checkpoint_store.increment_resume_count(&task_id).await {
+                Ok(count) if count > MAX_BOOT_RESUMES => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        resume_count = count,
+                        "Boot: checkpoint exceeded max boot-resumes — dropping it (possible kernel-crashing task)"
+                    );
+                    if let Err(e) = self.checkpoint_store.delete_for_task(&task_id).await {
+                        tracing::warn!(task_id = %task_id, error = %e, "Boot: failed to delete poison checkpoint");
+                    }
+                    let _ = self
+                        .scheduler
+                        .update_state_if_not_terminal(&task_id, agentos_types::TaskState::Failed)
+                        .await;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id, error = %e, "Boot: failed to bump checkpoint resume counter — resuming anyway");
+                }
+            }
+            match self.cmd_resume_task(task_id).await {
+                agentos_bus::KernelResponse::Error { message } => {
+                    tracing::warn!(task_id = %task_id, message, "Boot: failed to resume checkpointed task — it stays queued for a from-scratch retry");
+                }
+                _ => {
+                    resumed += 1;
+                    tracing::info!(task_id = %task_id, "Boot: resumed checkpointed task from saved context");
+                }
+            }
+        }
+        if resumed > 0 {
+            tracing::info!(
+                resumed,
+                "Boot: auto-resumed in-flight tasks from checkpoints (A1)"
+            );
+        }
+    }
+
     pub async fn run(self: Arc<Self>) -> Result<(), anyhow::Error> {
+        // Recover in-flight tasks from checkpoints BEFORE spawning the executor,
+        // so a crashed task continues from its saved context instead of
+        // re-running (and re-triggering side effects) from iteration 0. (A1)
+        self.recover_checkpointed_tasks().await;
+
         let mut join_set = JoinSet::new();
         // Map tokio task IDs to TaskKind for targeted panic recovery
         let mut task_id_map: std::collections::HashMap<tokio::task::Id, TaskKind> =
@@ -2076,6 +2193,9 @@ impl Kernel {
             },
             KernelCommand::GetTaskLogs { task_id } => self.cmd_get_task_logs(task_id).await,
             KernelCommand::CancelTask { task_id } => self.cmd_cancel_task(task_id).await,
+            KernelCommand::PurgeTasks { agent_id, states } => {
+                self.cmd_purge_tasks(agent_id, states).await
+            }
             KernelCommand::TaskGetTrace { task_id } => self.cmd_get_task_trace(task_id).await,
             KernelCommand::TaskListTraces { agent_id, limit } => {
                 self.cmd_list_task_traces(agent_id, limit).await
@@ -2083,7 +2203,9 @@ impl Kernel {
             KernelCommand::ListTools => self.cmd_list_tools().await,
             KernelCommand::InstallTool { manifest_path } => {
                 match self.api_install_tool(manifest_path).await {
-                    Ok(()) => agentos_bus::KernelResponse::Success { data: None },
+                    Ok(id) => agentos_bus::KernelResponse::Success {
+                        data: Some(serde_json::json!({ "tool_id": id.to_string() })),
+                    },
                     Err(msg) => agentos_bus::KernelResponse::Error { message: msg },
                 }
             }
@@ -3409,9 +3531,29 @@ impl Kernel {
 
         let ws_sched = self.workspace_paths_for_agent(&agent.id);
         let trace_id = TraceID::new();
+        let task_id = TaskID::new();
+
+        // Gate the scheduled fire through the ApprovalHook/ToolPre chain, exactly
+        // like the interactive task and chat paths. The tool runner fires no
+        // hooks, so without this a scheduled ExecCapable/ControlPlane tool would
+        // run with no risk-class gating or approval-mode enforcement.
+        crate::task_executor::enforce_tool_pre(
+            &self.hook_registry,
+            &self.escalation_manager,
+            agent.id,
+            task_id,
+            &tool_name,
+            &args,
+        )
+        .await
+        .map_err(|reason| AgentOSError::ToolExecutionFailed {
+            tool_name: tool_name.clone(),
+            reason,
+        })?;
+
         let exec_ctx = ToolExecutionContext {
             data_dir: self.data_dir.clone(),
-            task_id: TaskID::new(),
+            task_id,
             agent_id: agent.id,
             trace_id,
             permissions: permissions.clone(),

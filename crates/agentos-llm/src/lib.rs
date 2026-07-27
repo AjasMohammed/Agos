@@ -31,5 +31,5 @@ pub use traits::LLMCore;
 pub use types::{
     calculate_inference_cost, default_pricing_table, parse_uncertainty, HealthStatus,
     InferenceCost, InferenceEvent, InferenceOptions, InferenceResult, InferenceToolCall,
-    ModelCapabilities, ModelPricing, StopReason, TokenUsage, ToolChoice,
+    ModelCapabilities, ModelPricing, PromptCacheTtl, StopReason, TokenUsage, ToolChoice,
 };

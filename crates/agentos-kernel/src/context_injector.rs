@@ -31,6 +31,39 @@ impl Kernel {
             discovery.l0_max_names_per_category,
             discovery.l0_max_tokens,
         );
+        // Seed the in-memory LRU from the persistent usage store the first time
+        // this agent is seen (e.g. after a kernel restart) so the "Recently
+        // used" hint survives restarts. Seeded even when the snapshot is empty
+        // to mark the agent as seen and avoid re-querying SQLite every task.
+        {
+            let needs_seed = self
+                .agent_tool_lru
+                .read()
+                .await
+                .get(&task.agent_id)
+                .is_none();
+            if needs_seed {
+                let snapshot = self
+                    .tool_usage
+                    .rank_snapshot(&task.agent_id.to_string())
+                    .await;
+                let mut ranked: Vec<(String, f64)> = snapshot.into_iter().collect();
+                ranked.sort_by(|a, b| {
+                    b.1.partial_cmp(&a.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.0.cmp(&b.0))
+                });
+                let seeded: std::collections::VecDeque<String> =
+                    ranked.into_iter().take(10).map(|(name, _)| name).collect();
+                // `or_insert`, not overwrite — a concurrent task may have
+                // recorded live usage between the read and this write.
+                self.agent_tool_lru
+                    .write()
+                    .await
+                    .entry(task.agent_id)
+                    .or_insert(seeded);
+            }
+        }
         // Append recently-used tool hint from the in-memory LRU (cap 10 per agent).
         let tools_desc = {
             let lru_guard = self.agent_tool_lru.read().await;

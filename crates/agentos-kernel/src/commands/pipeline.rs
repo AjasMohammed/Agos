@@ -165,6 +165,8 @@ impl Kernel {
                 injection_scanner: self.injection_scanner.clone(),
                 event_sender: self.event_sender.clone(),
                 audit: self.audit.clone(),
+                hook_registry: self.hook_registry.clone(),
+                escalation_manager: self.escalation_manager.clone(),
                 cancellation_token: self.cancellation_token.child_token(),
             };
 
@@ -439,6 +441,18 @@ impl<'a> agentos_pipeline::PipelineExecutor for KernelPipelineExecutor<'a> {
             rollback_ref: None,
         });
 
+        // Gate every pipeline tool step through the ApprovalHook/ToolPre chain —
+        // the tool runner fires no hooks, so without this a pipeline step running
+        // an ExecCapable/ControlPlane tool would bypass risk-class gating and the
+        // operator's approval mode.
+        self.kernel
+            .enforce_chat_tool_pre(self.agent_id, task_id, tool_name, &input)
+            .await
+            .map_err(|reason| AgentOSError::ToolExecutionFailed {
+                tool_name: tool_name.to_string(),
+                reason,
+            })?;
+
         let result = self
             .kernel
             .tool_runner
@@ -545,6 +559,9 @@ pub(crate) struct OwnedPipelineExecutor {
     pub(crate) injection_scanner: Arc<crate::injection_scanner::InjectionScanner>,
     pub(crate) event_sender: tokio::sync::mpsc::Sender<agentos_types::EventMessage>,
     pub(crate) audit: Arc<AuditLog>,
+    // Approval enforcement — a detached pipeline step must still fire ToolPre.
+    pub(crate) hook_registry: Arc<crate::hooks::HookRegistry>,
+    pub(crate) escalation_manager: Arc<crate::escalation::EscalationManager>,
     pub(crate) cancellation_token: CancellationToken,
 }
 
@@ -589,6 +606,7 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
             EventSeverity::Info,
             serde_json::json!({
                 "task_id": task_id.to_string(),
+                "agent_id": agent.id.to_string(),
                 "agent_name": agent_name,
                 "source": "pipeline",
             }),
@@ -635,6 +653,7 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
                     EventSeverity::Warning,
                     serde_json::json!({
                         "task_id": task_id.to_string(),
+                        "agent_id": agent.id.to_string(),
                         "agent_name": agent_name,
                         "source": "pipeline",
                         "error": e.to_string(),
@@ -663,6 +682,7 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
                     EventSeverity::Warning,
                     serde_json::json!({
                         "task_id": task_id.to_string(),
+                        "agent_id": agent.id.to_string(),
                         "agent_name": agent_name,
                         "source": "pipeline",
                         "error": e.to_string(),
@@ -716,6 +736,7 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
                 EventSeverity::Warning,
                 serde_json::json!({
                     "task_id": task_id.to_string(),
+                    "agent_id": agent.id.to_string(),
                     "agent_name": agent_name,
                     "source": "pipeline",
                     "error": format!("injection scanner detected {} high-threat pattern(s)", match_count),
@@ -746,6 +767,7 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
             EventSeverity::Info,
             serde_json::json!({
                 "task_id": task_id.to_string(),
+                "agent_id": agent.id.to_string(),
                 "agent_name": agent_name,
                 "source": "pipeline",
             }),
@@ -823,6 +845,24 @@ impl agentos_pipeline::PipelineExecutor for OwnedPipelineExecutor {
         }) {
             tracing::error!(error = %e, "Failed to write tool audit entry");
         }
+
+        // Gate every detached pipeline tool step through the ApprovalHook/ToolPre
+        // chain — the tool runner fires no hooks, so without this a step running
+        // an ExecCapable/ControlPlane tool would bypass risk-class gating and the
+        // operator's approval mode.
+        crate::task_executor::enforce_tool_pre(
+            &self.hook_registry,
+            &self.escalation_manager,
+            self.agent_id,
+            task_id,
+            tool_name,
+            &input,
+        )
+        .await
+        .map_err(|reason| AgentOSError::ToolExecutionFailed {
+            tool_name: tool_name.to_string(),
+            reason,
+        })?;
 
         let result = self.tool_runner.execute(tool_name, input, context).await;
 

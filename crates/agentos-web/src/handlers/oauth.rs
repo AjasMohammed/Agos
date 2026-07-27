@@ -57,7 +57,7 @@ pub async fn start_oauth(
     State(state): State<AppState>,
     Path(connector_id): Path<String>,
 ) -> Response {
-    let providers = load_provider_configs();
+    let providers = load_provider_configs().await;
 
     let provider = match providers.get(&connector_id) {
         Some(p) => p,
@@ -193,7 +193,7 @@ pub async fn oauth_callback(
     }
 
     // Load provider config for token exchange
-    let providers = load_provider_configs();
+    let providers = load_provider_configs().await;
 
     let provider = match providers.get(&connector_id) {
         Some(p) => p,
@@ -267,12 +267,9 @@ pub async fn oauth_callback(
     if !token_resp.status().is_success() {
         let status = token_resp.status();
         let body = token_resp.text().await.unwrap_or_default();
-        // Truncate error body to avoid logging sensitive data
-        let safe_body = if body.len() > 500 {
-            &body[..500]
-        } else {
-            &body
-        };
+        // Truncate error body to avoid logging sensitive data.
+        // Slice by chars, not bytes — a byte slice can panic mid-UTF8-codepoint.
+        let safe_body: String = body.chars().take(500).collect();
         tracing::error!(
             status = %status,
             body = %safe_body,
@@ -387,8 +384,8 @@ struct TokenResponse {
 ///
 /// Returns an empty map if the file doesn't exist (no providers configured).
 /// Logs a warning on parse errors and returns an empty map.
-pub fn load_provider_configs() -> HashMap<String, OAuthProviderConfig> {
-    let config_str = match std::fs::read_to_string("config/oauth_providers.toml") {
+pub async fn load_provider_configs() -> HashMap<String, OAuthProviderConfig> {
+    let config_str = match tokio::fs::read_to_string("config/oauth_providers.toml").await {
         Ok(s) => s,
         Err(_) => return HashMap::new(),
     };

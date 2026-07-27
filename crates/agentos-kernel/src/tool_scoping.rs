@@ -6,10 +6,14 @@
 //! and filters the native tool array to that scope.
 //!
 //! Scoping is a **soft pre-load filter, never a hard wall**: anything scoped out
-//! stays reachable through the semantic `search-tools` escape hatch (Phase 1),
-//! which searches the full registry irrespective of scope. The scope is computed
-//! **once per task** and the native array is never re-armed mid-task (DD4), so it
-//! stays behind the Anthropic tools cache breakpoint for the whole task.
+//! stays discoverable through the semantic `search-tools` escape hatch (Phase 1),
+//! which searches the full registry irrespective of scope, and becomes natively
+//! callable after a successful `describe-tool` on it — the task executor re-arms
+//! the described tool's schema into the native array for the rest of the task
+//! (`tools.discovery.rearm_on_describe`, default on). The scope itself is
+//! computed **once per task** (DD4, revised): the native array only changes
+//! through that explicit re-arm path, costing one tools-block cache bust per
+//! armed tool; otherwise it stays behind the Anthropic tools cache breakpoint.
 //!
 //! `category` is the *inferred* dimension (`AgentManualTool::infer_tool_category`)
 //! — it is NOT a stored field on `ToolManifest`. The `read/write/exec/network/

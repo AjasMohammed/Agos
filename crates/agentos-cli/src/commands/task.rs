@@ -42,6 +42,19 @@ pub enum TaskCommands {
         /// Task ID
         task_id: String,
     },
+    /// Bulk-drop an agent's queued tasks (runaway-loop recovery).
+    ///
+    /// Running tasks are never purged — cancel those individually so their
+    /// cleanup path runs.
+    Purge {
+        /// Agent whose tasks to purge
+        #[arg(long)]
+        agent: String,
+        /// Comma-separated states to purge. Default: queued.
+        /// Valid: queued, waiting, failed, cancelled, complete.
+        #[arg(long, default_value = "queued")]
+        state: String,
+    },
     /// Resume a task from its latest checkpoint
     Resume {
         /// Task ID
@@ -241,6 +254,41 @@ pub async fn handle(client: &mut BusClient, command: TaskCommands) -> anyhow::Re
                 .await?;
             match response {
                 KernelResponse::Success { .. } => println!("✅ Task {} cancelled", task_id),
+                KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
+                _ => eprintln!("❌ Unexpected response"),
+            }
+        }
+
+        TaskCommands::Purge { agent, state } => {
+            let list_resp = client.send_command(KernelCommand::ListAgents).await?;
+            let agent_id = match list_resp {
+                KernelResponse::AgentList(agents) => {
+                    agents.into_iter().find(|a| a.name == agent).map(|a| a.id)
+                }
+                _ => anyhow::bail!("Failed to list agents"),
+            };
+            let Some(agent_id) = agent_id else {
+                anyhow::bail!("Agent '{}' not found", agent);
+            };
+
+            let states: Vec<String> = state
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            let response = client
+                .send_command(KernelCommand::PurgeTasks { agent_id, states })
+                .await?;
+            match response {
+                KernelResponse::Success { data } => {
+                    let purged = data
+                        .as_ref()
+                        .and_then(|d| d.get("purged"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    println!("✅ Purged {} task(s) for agent '{}'", purged, agent);
+                }
                 KernelResponse::Error { message } => eprintln!("❌ Error: {}", message),
                 _ => eprintln!("❌ Unexpected response"),
             }

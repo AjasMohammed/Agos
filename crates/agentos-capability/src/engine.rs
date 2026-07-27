@@ -350,6 +350,11 @@ impl CapabilityEngine {
         )
     }
 
+    /// Domain-separation tag for arbitrary-data (event) signatures. Distinct
+    /// from the capability-token domain (`token.rs`) so a signature produced by
+    /// one can never be replayed as the other under the same signing key.
+    const EVENT_DATA_DOMAIN_TAG: &'static [u8] = b"agentos.event-data.v1";
+
     /// Sign arbitrary bytes using the kernel's HMAC-SHA256 signing key.
     /// Used by the EventBus to sign `EventMessage` signatures.
     pub fn sign_data(&self, data: &[u8]) -> Vec<u8> {
@@ -359,6 +364,8 @@ impl CapabilityEngine {
 
         let mut mac =
             HmacSha256::new_from_slice(&self.signing_key).expect("HMAC can take any size key");
+        mac.update(&(Self::EVENT_DATA_DOMAIN_TAG.len() as u32).to_le_bytes());
+        mac.update(Self::EVENT_DATA_DOMAIN_TAG);
         mac.update(data);
         mac.finalize().into_bytes().to_vec()
     }
@@ -371,6 +378,8 @@ impl CapabilityEngine {
 
         let mut mac =
             HmacSha256::new_from_slice(&self.signing_key).expect("HMAC can take any size key");
+        mac.update(&(Self::EVENT_DATA_DOMAIN_TAG.len() as u32).to_le_bytes());
+        mac.update(Self::EVENT_DATA_DOMAIN_TAG);
         mac.update(data);
         mac.verify_slice(signature).is_ok()
     }

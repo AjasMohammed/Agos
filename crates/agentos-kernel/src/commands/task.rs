@@ -410,6 +410,65 @@ impl Kernel {
         }
     }
 
+    /// Bulk-drop an agent's queued/waiting tasks.
+    ///
+    /// The 2026-07-26 trigger-loop incident left 190,426 queued tasks that were
+    /// replayed on every boot; the only recovery was stopping the kernel and
+    /// running `DELETE FROM scheduler_tasks` by hand. This does it live.
+    pub(crate) async fn cmd_purge_tasks(
+        &self,
+        agent_id: AgentID,
+        states: Vec<String>,
+    ) -> KernelResponse {
+        let mut parsed = Vec::new();
+        for raw in &states {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "queued" => parsed.push(TaskState::Queued),
+                "waiting" => parsed.push(TaskState::Waiting),
+                "failed" => parsed.push(TaskState::Failed),
+                "cancelled" | "canceled" => parsed.push(TaskState::Cancelled),
+                "complete" | "completed" => parsed.push(TaskState::Complete),
+                other => {
+                    return KernelResponse::Error {
+                        message: format!(
+                            "Unknown task state '{other}'. Valid: queued, waiting, failed, \
+                             cancelled, complete (running is never purged — use `task cancel`)"
+                        ),
+                    };
+                }
+            }
+        }
+
+        let purged = self.scheduler.purge_agent_tasks(&agent_id, &parsed).await;
+
+        tracing::warn!(
+            agent_id = %agent_id,
+            purged,
+            states = ?states,
+            "Bulk-purged agent tasks"
+        );
+        self.audit_log(agentos_audit::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            trace_id: TraceID::new(),
+            event_type: agentos_audit::AuditEventType::TaskStateChanged,
+            agent_id: Some(agent_id),
+            task_id: None,
+            tool_id: None,
+            details: serde_json::json!({
+                "action": "purge_tasks",
+                "purged": purged,
+                "states": states,
+            }),
+            severity: agentos_audit::AuditSeverity::Warn,
+            reversible: false,
+            rollback_ref: None,
+        });
+
+        KernelResponse::Success {
+            data: Some(serde_json::json!({ "purged": purged })),
+        }
+    }
+
     pub(crate) async fn cmd_get_task_trace(&self, task_id: TaskID) -> KernelResponse {
         match self.trace_collector.get_trace(&task_id).await {
             Ok(Some(trace)) => KernelResponse::TaskTrace(Box::new(trace)),
@@ -459,24 +518,17 @@ impl Kernel {
         let target_permissions = registry.compute_effective_permissions(&target.id);
         drop(registry);
 
-        let child_permissions = parent_task.capability_token.permissions.clone();
-        let mut effective_permissions = child_permissions.intersect(&target_permissions);
-
-        // Autonomous delegated tasks get shell execution — mirrors the grant
-        // in cmd_run_task / create_background_task so child agents can use
-        // shell-exec without requiring it in their base permission set.
-        if parent_task.autonomous {
-            effective_permissions.grant_op("process.exec".to_string(), PermissionOp::Execute, None);
-        }
-
-        let child_token = self.capability_engine.issue_token(
-            TaskID::new(),
-            target.id,
-            parent_task.capability_token.allowed_tools.clone(),
-            parent_task.capability_token.allowed_intents.clone(),
-            effective_permissions,
-            Duration::from_secs(timeout_secs),
-        )?;
+        // Scope the child through the shared, hardened path: depth cap, pure
+        // parent∩target intersection (no process.exec re-grant), parent-token
+        // signature/expiry verification, fresh child IDs.
+        let (child_token, child_depth) = self
+            .scope_child_task(
+                parent_task,
+                target.id,
+                &target_permissions,
+                Duration::from_secs(timeout_secs),
+            )
+            .await?;
 
         let child_task = AgentTask {
             id: child_token.task_id,
@@ -494,16 +546,18 @@ impl Kernel {
             reasoning_hints: Some(infer_reasoning_hints(prompt)),
             max_iterations: None,
             trigger_source: None,
-            // Child tasks inherit the parent's autonomous mode so long-running
-            // orchestrators don't have their sub-agents capped arbitrarily.
-            autonomous: parent_task.autonomous,
-            parent_task_id: None,
-            spawn_depth: 0,
+            // Children are always bounded — never inherit parent autonomy (a
+            // 10k-iteration child is a fork-bomb amplifier). Matches every other
+            // spawn path.
+            autonomous: false,
+            // Both parent fields set so cascade-cancel and is_root_task() agree.
+            parent_task_id: Some(parent_task.id),
+            spawn_depth: child_depth,
             is_team_coordinator: false,
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
-            spawner_agent_id: None,
-            tool_categories: None,
+            spawner_agent_id: Some(parent_task.agent_id),
+            tool_categories: parent_task.tool_categories.clone(),
             disable_tool_scoping: false,
         };
 
@@ -521,9 +575,16 @@ impl Kernel {
 
         let _ = self.scheduler.enqueue(child_task.clone()).await;
 
-        // Register the dependency: parent waits on child
+        // Register the dependency: parent waits on child.
         self.scheduler
             .add_dependency(parent_task.id, child_task.id)
+            .await;
+
+        // Register for cascade-cancel: cancelling the parent must cancel this
+        // delegated child too. add_dependency only tracks the wait edge; without
+        // this the child is orphaned when the parent is cancelled.
+        self.scheduler
+            .register_child(parent_task.id, child_task.id)
             .await;
 
         // Emit TaskDelegated from the parent's perspective
@@ -534,12 +595,13 @@ impl Kernel {
             serde_json::json!({
                 "parent_task_id": parent_task.id.to_string(),
                 "child_task_id": child_task.id.to_string(),
+                "agent_id": parent_task.agent_id.to_string(),
                 "parent_agent_id": parent_task.agent_id.to_string(),
                 "target_agent_id": target.id.to_string(),
                 "target_agent_name": target_agent_name,
                 "prompt_preview": prompt.chars().take(200).collect::<String>(),
             }),
-            0,
+            parent_task.event_chain_depth(),
         )
         .await;
 
@@ -556,7 +618,7 @@ impl Kernel {
                 "target_agent_name": target_agent_name,
                 "prompt_preview": prompt.chars().take(200).collect::<String>(),
             }),
-            0,
+            parent_task.event_chain_depth(),
         )
         .await;
 
@@ -580,18 +642,6 @@ impl Kernel {
         priority: u8,
         timeout_secs: u64,
     ) -> Result<serde_json::Value, AgentOSError> {
-        // Enforce spawn depth limit — same cap as cmd_spawn_sub_agent.
-        const MAX_SPAWN_DEPTH: u8 = 5;
-        if spawner_task.spawn_depth >= MAX_SPAWN_DEPTH {
-            return Err(AgentOSError::PermissionDenied {
-                resource: "agent.spawn".to_string(),
-                operation: format!(
-                    "spawn depth limit ({MAX_SPAWN_DEPTH}) exceeded (current: {})",
-                    spawner_task.spawn_depth
-                ),
-            });
-        }
-
         let registry = self.agent_registry.read().await;
         let target = registry
             .get_by_name(target_agent_name)
@@ -608,17 +658,16 @@ impl Kernel {
         let target_permissions = registry.compute_effective_permissions(&target.id);
         drop(registry);
 
-        let child_permissions = spawner_task.capability_token.permissions.clone();
-        let effective_permissions = child_permissions.intersect(&target_permissions);
-
-        let child_token = self.capability_engine.issue_token(
-            TaskID::new(),
-            target.id,
-            spawner_task.capability_token.allowed_tools.clone(),
-            spawner_task.capability_token.allowed_intents.clone(),
-            effective_permissions,
-            Duration::from_secs(timeout_secs),
-        )?;
+        // Shared hardened scoping: depth cap, parent∩target, no exec re-grant,
+        // parent-token verification.
+        let (child_token, child_depth) = self
+            .scope_child_task(
+                spawner_task,
+                target.id,
+                &target_permissions,
+                Duration::from_secs(timeout_secs),
+            )
+            .await?;
 
         let child_task = AgentTask {
             id: child_token.task_id,
@@ -641,7 +690,7 @@ impl Kernel {
             // Sub-agents are always bounded — never inherit parent autonomy.
             autonomous: false,
             parent_task_id: Some(spawner_task.id),
-            spawn_depth: spawner_task.spawn_depth.saturating_add(1),
+            spawn_depth: child_depth,
             is_team_coordinator: false,
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
@@ -666,13 +715,14 @@ impl Kernel {
             serde_json::json!({
                 "parent_task_id": spawner_task.id.to_string(),
                 "child_task_id": child_task.id.to_string(),
+                "agent_id": spawner_task.agent_id.to_string(),
                 "parent_agent_id": spawner_task.agent_id.to_string(),
                 "target_agent_id": target.id.to_string(),
                 "target_agent_name": target_agent_name,
                 "async": true,
                 "prompt_preview": prompt.chars().take(200).collect::<String>(),
             }),
-            0,
+            spawner_task.event_chain_depth(),
         )
         .await;
 
@@ -689,7 +739,7 @@ impl Kernel {
                 "async": true,
                 "prompt_preview": prompt.chars().take(200).collect::<String>(),
             }),
-            0,
+            spawner_task.event_chain_depth(),
         )
         .await;
 
@@ -759,23 +809,15 @@ impl Kernel {
             registry.compute_effective_permissions(&agent.id)
         };
         let task_timeout = Duration::from_secs(self.config.kernel.default_task_timeout_secs);
+        // Preserve the checkpointed token's tool/intent scoping — resuming must
+        // never BROADEN a task's privileges (e.g. a narrowed delegated child
+        // must stay narrowed). Only the expiry is refreshed. The permission set
+        // is re-derived from the live registry so revoked grants don't survive.
         let capability_token = match self.capability_engine.issue_token(
             task_id,
             agent.id,
-            BTreeSet::new(),
-            BTreeSet::from([
-                IntentTypeFlag::Read,
-                IntentTypeFlag::Write,
-                IntentTypeFlag::Execute,
-                IntentTypeFlag::Query,
-                IntentTypeFlag::Observe,
-                IntentTypeFlag::Message,
-                IntentTypeFlag::Delegate,
-                IntentTypeFlag::Broadcast,
-                IntentTypeFlag::Escalate,
-                IntentTypeFlag::Subscribe,
-                IntentTypeFlag::Unsubscribe,
-            ]),
+            payload.task.capability_token.allowed_tools.clone(),
+            payload.task.capability_token.allowed_intents.clone(),
             effective_permissions,
             task_timeout,
         ) {

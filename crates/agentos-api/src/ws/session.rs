@@ -153,7 +153,10 @@ impl WsSession {
                 if !self.require_scope("chat:w").await {
                     return;
                 }
-                // Cancellation not yet wired — acknowledge and move on.
+                // No-op by transport design: frames are read sequentially in the
+                // ws/mod.rs recv loop and chat_send() is awaited inline, so no chat
+                // is ever in flight when a ChatCancel arrives. Ack idempotently.
+                // (Wire real cancellation only if/when streaming chat lands.)
                 let _ = self.send(ServerFrame::ChatCancelled { session_id }).await;
             }
 

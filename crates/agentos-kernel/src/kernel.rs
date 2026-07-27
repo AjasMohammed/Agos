@@ -638,6 +638,12 @@ pub struct Kernel {
     pub context_compiler: Arc<crate::context_compiler::ContextCompiler>,
     pub tool_registry: Arc<RwLock<ToolRegistry>>,
     pub agent_registry: Arc<RwLock<AgentRegistry>>,
+    /// Consecutive *fast* task failures per agent, for the runaway breaker in
+    /// `task_completion.rs`. Reset by any success or any slow failure. An agent
+    /// failing in milliseconds can spawn work faster than a human can react —
+    /// the 2026-07-26 incident ran at ~88k tasks/hour with each task dying in
+    /// ~10 ms because the provider circuit breaker was open.
+    pub failure_streaks: Arc<RwLock<HashMap<AgentID, u32>>>,
     pub bus: Arc<BusServer>,
     pub tool_runner: Arc<ToolRunner>,
     /// Live tool catalogue shared with agent-manual. Refreshed on tool install/remove.
@@ -4910,9 +4916,10 @@ impl Kernel {
             max_concurrent_sandbox_children = config.kernel.max_concurrent_sandbox_children,
             "Sandbox execution policy configured"
         );
-        let scheduler = Arc::new(TaskScheduler::with_state_store(
+        let scheduler = Arc::new(TaskScheduler::with_limits(
             config.kernel.max_concurrent_tasks,
             Some(state_store.clone()),
+            config.kernel.max_queued_per_agent,
         ));
         let active_llms: Arc<RwLock<HashMap<AgentID, Arc<dyn LLMCore>>>> =
             Arc::new(RwLock::new(HashMap::new()));
@@ -5189,22 +5196,50 @@ impl Kernel {
             config.context.clone(),
         ));
 
-        let restored_tasks = scheduler.restore_from_store().await?;
+        // Tasks with a saved checkpoint are exempt from the boot-replay cutoff
+        // and the queue cap: `recover_checkpointed_tasks` resumes them from
+        // their saved context (A1) and looks them up in the scheduler map, so
+        // cancelling one here would silently drop the resume. Storm tasks never
+        // reach a tool call, so they never have a checkpoint.
+        let resumable: std::collections::HashSet<TaskID> = match checkpoint_store
+            .list_checkpoints()
+            .await
+        {
+            Ok(summaries) => summaries.iter().map(|s| s.task_id).collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "Boot: cannot list checkpoints — restore cutoff will not exempt resumable tasks");
+                std::collections::HashSet::new()
+            }
+        };
+        let (restored_tasks, stale_cancelled) = scheduler
+            .restore_from_store(config.kernel.boot_replay_max_age_hours, &resumable)
+            .await?;
         let restored_escalations = escalation_manager.restore_from_store().await?;
         let restored_cost_snapshots = cost_tracker.restore_from_store().await?;
         tracing::info!(
             restored_tasks,
+            stale_cancelled,
             restored_escalations,
             restored_cost_snapshots,
             "Restored persisted kernel runtime state"
         );
+        if stale_cancelled > 0 {
+            tracing::warn!(
+                stale_cancelled,
+                max_age_hours = config.kernel.boot_replay_max_age_hours,
+                cap = config.kernel.max_queued_per_agent,
+                "Cancelled stale/over-cap queued tasks instead of replaying them at boot"
+            );
+        }
 
-        // Discover tasks with checkpoints available for resume (informational only).
+        // Discover tasks with checkpoints. These are auto-resumed from saved
+        // context by `recover_checkpointed_tasks()` when the supervisor starts
+        // (run_loop.rs), before the executor runs — no manual resume needed.
         match checkpoint_store.list_checkpoints().await {
             Ok(summaries) if !summaries.is_empty() => {
                 tracing::info!(
                     count = summaries.len(),
-                    "Boot: found {} tasks with checkpoints — use 'agentos task resume <id>' to restore",
+                    "Boot: found {} checkpointed tasks — will auto-resume on supervisor start",
                     summaries.len()
                 );
             }
@@ -5618,6 +5653,7 @@ impl Kernel {
             context_compiler,
             tool_registry: tool_registry.clone(),
             agent_registry,
+            failure_streaks: Arc::new(RwLock::new(HashMap::new())),
             bus,
             tool_runner,
             tool_summaries: tool_summaries_shared,
@@ -6243,9 +6279,14 @@ impl Kernel {
     }
 
     /// Public API: Install a tool from a manifest path through the kernel command dispatch path.
-    pub async fn api_install_tool(&self, manifest_path: String) -> Result<(), String> {
+    pub async fn api_install_tool(&self, manifest_path: String) -> Result<ToolID, String> {
         match self.cmd_install_tool(manifest_path).await {
-            agentos_bus::KernelResponse::Success { .. } => Ok(()),
+            agentos_bus::KernelResponse::Success { data } => data
+                .as_ref()
+                .and_then(|d| d.get("tool_id"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<ToolID>().ok())
+                .ok_or_else(|| "Tool installed but kernel returned no tool ID".to_string()),
             agentos_bus::KernelResponse::Error { message } => Err(message),
             _ => Err("Unexpected kernel response".to_string()),
         }
@@ -6616,6 +6657,11 @@ mod preflight_tests {
                 sandbox_policy: Default::default(),
                 max_concurrent_sandbox_children: 4,
                 context_compaction: Default::default(),
+                max_queued_per_agent: 500,
+                boot_replay_max_age_hours: 24,
+                task_retention_days: 7,
+                failure_streak_limit: 25,
+                failure_streak_fast_ms: 5_000,
             },
             secrets: SecretsSettings {
                 vault_path: vault_path.to_string(),
@@ -6880,6 +6926,11 @@ mod vault_bootstrap_tests {
                 sandbox_policy: Default::default(),
                 max_concurrent_sandbox_children: 4,
                 context_compaction: Default::default(),
+                max_queued_per_agent: 500,
+                boot_replay_max_age_hours: 24,
+                task_retention_days: 7,
+                failure_streak_limit: 25,
+                failure_streak_fast_ms: 5_000,
             },
             secrets: SecretsSettings {
                 vault_path: root.join("vault/vault.db").to_string_lossy().into_owned(),
@@ -6943,6 +6994,7 @@ mod vault_bootstrap_tests {
     }
 
     #[test]
+    #[serial_test::serial(vault_env)]
     fn resolve_boot_vault_passphrase_generates_and_reuses_managed_file() {
         let dir = tempdir().unwrap();
         let config = make_test_config(dir.path());
@@ -6974,6 +7026,7 @@ mod vault_bootstrap_tests {
     }
 
     #[test]
+    #[serial_test::serial(vault_env)]
     fn resolve_boot_vault_passphrase_returns_none_without_auto_init_or_env() {
         let dir = tempdir().unwrap();
         let config = make_test_config(dir.path());
@@ -6985,6 +7038,7 @@ mod vault_bootstrap_tests {
     }
 
     #[test]
+    #[serial_test::serial(vault_env)]
     fn resolve_boot_vault_passphrase_errors_when_existing_vault_has_no_managed_passphrase() {
         let dir = tempdir().unwrap();
         let config = make_test_config(dir.path());

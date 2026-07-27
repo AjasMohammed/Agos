@@ -9,6 +9,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Fail fast if the pushed tag disagrees with the workspace version, so the
+      # Release name and `agentos --version` can never drift apart.
+      - name: Verify tag matches workspace version
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          V="$(grep -m1 -E '^version\s*=' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ "$V" != "$TAG" ]; then
+            echo "::error file=Cargo.toml::workspace version ${V} != tag ${TAG} — bump [workspace.package] version or re-tag."
+            exit 1
+          fi
+          echo "Workspace version ${V} matches tag v${TAG}."
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -22,6 +34,9 @@ jobs:
   build:
     needs: quality
     strategy:
+      # One broken leg must not cancel the others — linux-amd64 is the only
+      # required artifact; the rest are best-effort (see continue-on-error below).
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
@@ -41,6 +56,11 @@ jobs:
             artifact: agentos-darwin-arm64
             use_cross: false
     runs-on: ${{ matrix.os }}
+    # Linux x86_64 is the primary target (and what install.sh serves most users);
+    # only that leg is allowed to block the release. arm64 cross builds have a
+    # history of breaking on ort/onnxruntime, and a red darwin leg should not
+    # strand linux users without a release either.
+    continue-on-error: ${{ matrix.artifact != 'agentos-linux-amd64' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -86,6 +106,8 @@ jobs:
           fi
       - name: Generate CycloneDX SBOM (linux-amd64 leg only)
         if: matrix.artifact == 'agentos-linux-amd64'
+        # SBOM is a nice-to-have; it must not block the only required build leg.
+        continue-on-error: true
         run: |
           cargo install cargo-cyclonedx --locked
           cargo cyclonedx --format json
@@ -102,7 +124,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sbom
-          if-no-files-found: error
+          if-no-files-found: warn # SBOM generation is best-effort (see above)
           path: bom.json
       - name: Upload binary + checksum (required)
         uses: actions/upload-artifact@v4
@@ -143,6 +165,9 @@ jobs:
 
   release:
     needs: [build, docker]
+    # Publish the Release as long as the required build leg succeeded — a failed
+    # docker push (ghcr outage, permissions) must not strand the binaries.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -151,6 +176,9 @@ jobs:
       - uses: softprops/action-gh-release@v1
         with:
           generate_release_notes: true
+          # Optional legs (arm64/darwin/sig/sbom) may have produced nothing;
+          # unmatched globs are warned about, not fatal (fail_on_unmatched_files
+          # defaults to false).
           files: |
             agentos-linux-amd64/*
             agentos-linux-arm64/*

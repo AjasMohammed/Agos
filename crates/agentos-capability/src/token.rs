@@ -10,9 +10,18 @@ fn update_length_prefixed(mac: &mut HmacSha256, data: &[u8]) {
     mac.update(data);
 }
 
+/// Domain-separation tag bound into every token MAC. Prevents a signature
+/// produced by another use of the same signing key (e.g. `EventBus::sign_data`)
+/// from ever being valid as a token signature, and vice versa.
+const TOKEN_DOMAIN_TAG: &[u8] = b"agentos.capability-token.v1";
+
 /// Feed all security-relevant token fields into the HMAC instance.
 /// This is the single canonical field layout — used by both signing and verification.
 fn feed_token_fields(mac: &mut HmacSha256, token: &CapabilityToken) {
+    // Domain separation first, so the token MAC lives in a distinct namespace
+    // from any other data signed with the same key.
+    update_length_prefixed(mac, TOKEN_DOMAIN_TAG);
+
     // Fixed-width UUID fields (16 bytes each)
     mac.update(token.task_id.as_uuid().as_bytes());
     mac.update(token.agent_id.as_uuid().as_bytes());

@@ -47,3 +47,6 @@ mod task_checkout_e2e;
 
 #[path = "e2e/heartbeat_work_loop_e2e.rs"]
 mod heartbeat_work_loop_e2e;
+
+#[path = "e2e/runaway_containment_e2e.rs"]
+mod runaway_containment_e2e;

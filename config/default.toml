@@ -7,6 +7,23 @@ context_window_token_budget = 32000
 # SQLite DB for persisted runtime state (tasks, escalations, cost snapshots).
 state_db_path = "/tmp/agentos/data/kernel_state.db"
 
+# --- Runaway-task containment -------------------------------------------------
+# max_concurrent_tasks bounds how many tasks RUN at once; these bound how many
+# can pile up, how long a backlog survives, and when a failing agent is paused.
+# Max queued (not running) tasks per agent. Past this, enqueues are rejected and
+# marked Failed. 0 disables.
+max_queued_per_agent = 500
+# Queued tasks older than this are cancelled at boot instead of replayed, so a
+# runaway backlog cannot resurrect itself on every restart. 0 disables.
+boot_replay_max_age_hours = 24
+# Terminal scheduler rows older than this are deleted by the 10-minute sweep.
+# 0 disables.
+task_retention_days = 7
+# Consecutive failures faster than failure_streak_fast_ms before an agent is
+# auto-paused. 0 disables.
+failure_streak_limit = 25
+failure_streak_fast_ms = 5000
+
 # Port for the /healthz, /readyz, and /metrics HTTP endpoints (0 = disabled).
 # Used by `agentos healthz` and Docker/k8s probes. Give each kernel instance a
 # distinct port if you run more than one on the same host, or they will collide
@@ -105,6 +122,11 @@ l0_max_tokens = 200
 # send every tool. classifier: "heuristic" (default) | "heuristic+semantic" | "llm".
 default_scoping = true
 scoping_classifier = "heuristic"
+# Re-arm a scoped-out tool's native schema mid-task after the agent successfully
+# calls describe-tool on it. Without this, category scoping is a hard wall for
+# native tool calling (the model never receives the schema). Costs one
+# tools-block cache bust per newly armed tool.
+rearm_on_describe = true
 
 [tools.workspace]
 # Additional directories the agent can access beyond data_dir.
@@ -218,6 +240,12 @@ ollama_context_window = 32768
 # resume is guarded by a prefix fingerprint that falls back to a full send on any
 # divergence, and the cached session is deleted on task completion.
 claude_code_resume = false
+# Anthropic prompt-cache TTL: "5m" (default) or "1h". Agents whose turns are more
+# than 5 minutes apart (scheduled/heartbeat tasks) never get a cache read on the
+# 5m TTL — they pay a cache write every turn. "1h" keeps the prefix warm across
+# sparse turns; Anthropic bills 1h cache writes at a higher rate, reads unchanged.
+# Other providers ignore this.
+prompt_cache_ttl = "5m"
 # Optional provider fallback chain applied to every agent's primary adapter.
 # When the primary provider errors (including mid-stream), the kernel fails over
 # to these in order. Empty by default. Useful when the primary is a flaky free
@@ -238,6 +266,9 @@ model_cache_dir = "models"
 # hanging boot on a stalled download. Set disable_embedder = true to skip
 # the model entirely (e.g. low-RAM hosts, onnxruntime-incompatible CPUs).
 embedder_init_timeout_secs = 120
+# Age (days) after which episodic/semantic/procedural memory entries are swept.
+# Bounds memory-DB growth on long-running installs. Set 0 for unbounded (old behavior).
+retention_days = 90
 
 [memory.extraction]
 enabled = true

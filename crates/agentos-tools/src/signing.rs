@@ -42,6 +42,15 @@ pub fn signing_payload(manifest: &ToolManifest) -> Vec<u8> {
     );
     payload.insert("name".to_string(), json!(manifest.manifest.name));
     payload.insert("network".to_string(), json!(manifest.sandbox.network));
+    // Sign risk_class and trust_tier so an author cannot downgrade the approval
+    // class (or claim a different tier) on an already-validly-signed manifest —
+    // both drive enforcement (ApprovalHook friction, signature requirement) and
+    // were previously mutable without invalidating the signature.
+    payload.insert("risk_class".to_string(), json!(manifest.risk_class));
+    payload.insert(
+        "trust_tier".to_string(),
+        json!(manifest.manifest.trust_tier),
+    );
     payload.insert("version".to_string(), json!(manifest.manifest.version));
     if let Some(weight) = manifest.sandbox.weight.as_ref() {
         payload.insert("weight".to_string(), json!(weight));
@@ -402,6 +411,28 @@ mod tests {
             payload.get("weight").and_then(|value| value.as_str()),
             Some("stateless")
         );
+    }
+
+    #[test]
+    fn signed_risk_class_tampering_is_rejected() {
+        let seed = [7u8; 32];
+        let signing_key = SigningKey::from_bytes(&seed);
+        let mut m = make_manifest(TrustTier::Community);
+        m.manifest.author_pubkey = Some(hex::encode(signing_key.verifying_key().to_bytes()));
+        m.risk_class = RiskClass::ExecCapable;
+        let sig = signing_key.sign(&signing_payload(&m));
+        m.manifest.signature = Some(hex::encode(sig.to_bytes()));
+
+        // Valid as signed.
+        assert!(verify_manifest(&m).is_ok());
+
+        // Downgrading risk_class after signing must invalidate the signature —
+        // risk_class is now bound into the signed payload.
+        m.risk_class = RiskClass::ReadonlyScoped;
+        assert!(matches!(
+            verify_manifest(&m).unwrap_err(),
+            AgentOSError::ToolSignatureInvalid { .. }
+        ));
     }
 
     #[test]

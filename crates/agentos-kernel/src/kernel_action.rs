@@ -2727,33 +2727,29 @@ impl Kernel {
             };
         }
 
-        // 2. Compute child permissions (intersection of parent + target)
-        let child_permissions = task.capability_token.permissions.clone();
-        let mut effective_permissions = child_permissions.intersect(&target_permissions);
-        if task.autonomous {
-            effective_permissions.grant_op("process.exec".to_string(), PermissionOp::Execute, None);
-        }
-
-        // 3. Issue capability token for child task
-        let child_task_id = TaskID::new();
-        let child_token = match self.capability_engine.issue_token(
-            child_task_id,
-            target.id,
-            task.capability_token.allowed_tools.clone(),
-            task.capability_token.allowed_intents.clone(),
-            effective_permissions,
-            Duration::from_secs(timeout_secs),
-        ) {
-            Ok(token) => token,
+        // 2-3. Scope the child via the shared hardened path: depth cap, pure
+        //      parent∩target intersection (no process.exec re-grant), parent-token
+        //      signature/expiry verification, fresh child TaskID.
+        let (child_token, child_depth) = match self
+            .scope_child_task(
+                task,
+                target.id,
+                &target_permissions,
+                Duration::from_secs(timeout_secs),
+            )
+            .await
+        {
+            Ok(scoped) => scoped,
             Err(e) => {
                 return KernelActionResult {
                     success: false,
                     result: serde_json::json!({
-                        "error": format!("Failed to issue capability token: {}", e)
+                        "error": format!("Failed to scope child capabilities: {}", e)
                     }),
                 };
             }
         };
+        let child_task_id = child_token.task_id;
 
         // 4. Register the RPC call in the manager (get oneshot receiver)
         let rx = match self
@@ -2787,18 +2783,21 @@ impl Kernel {
             reasoning_hints: Some(crate::commands::task::infer_reasoning_hints(prompt)),
             max_iterations: None,
             trigger_source: None,
-            autonomous: task.autonomous,
-            parent_task_id: None,
-            spawn_depth: 0,
+            // Children are always bounded — never inherit parent autonomy.
+            autonomous: false,
+            parent_task_id: Some(task.id),
+            spawn_depth: child_depth,
             is_team_coordinator: false,
             skip_checkpoint: false,
             thinking_level: ThinkingLevel::Off,
-            spawner_agent_id: None,
-            tool_categories: None,
+            spawner_agent_id: Some(task.agent_id),
+            tool_categories: task.tool_categories.clone(),
             disable_tool_scoping: false,
         };
 
         self.scheduler.register_external(child_task.clone()).await;
+        // Register for cascade-cancel bookkeeping (parent → child edge).
+        self.scheduler.register_child(task.id, child_task_id).await;
         self.scheduler
             .update_state_if_not_terminal(&child_task_id, TaskState::Running)
             .await

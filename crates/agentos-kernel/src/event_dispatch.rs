@@ -7,6 +7,29 @@ use std::time::Duration;
 
 use crate::kernel::Kernel;
 
+/// The agent whose own activity caused this event, if identifiable from the
+/// payload. Used by the trigger-loop guard in `process_event`: that agent's
+/// subscriptions must not spawn a reaction task for its own activity.
+///
+/// Emit sites use different payload keys for the causer; first match wins:
+/// `agent_id` (task lifecycle), `preempted_agent` (TaskPreempted),
+/// `blocked_agent` (TaskDeadlockDetected), `from_agent` (direct messages /
+/// broadcasts — the sender, never the recipient), `delegating_agent_id`
+/// (DelegationReceived), `child_agent_id` (DelegationResponseReceived).
+/// TaskLifecycle emit sites MUST carry one of these keys or the guard no-ops.
+fn causing_agent(payload: &serde_json::Value) -> Option<AgentID> {
+    [
+        "agent_id",
+        "preempted_agent",
+        "blocked_agent",
+        "from_agent",
+        "delegating_agent_id",
+        "child_agent_id",
+    ]
+    .iter()
+    .find_map(|k| payload.get(*k)?.as_str()?.parse().ok())
+}
+
 /// Map a kernel [`EventMessage`] to a coarse [`RealtimeEvent`] for WS/SSE fan-out.
 ///
 /// The channel is derived from the event's category so control-panel clients can
@@ -470,24 +493,57 @@ impl Kernel {
         // Evaluate subscriptions
         let matching_subs = self.event_bus.evaluate_subscriptions(&event).await;
 
-        // For AgentAdded events, exclude the newly added agent from receiving
-        // a notification about its own addition.
-        let matching_subs: Vec<EventSubscription> = if event.event_type == EventType::AgentAdded {
-            if let Some(id_str) = event.payload.get("agent_id").and_then(|v| v.as_str()) {
-                if let Ok(added_id) = id_str.parse::<AgentID>() {
-                    matching_subs
-                        .into_iter()
-                        .filter(|sub| sub.agent_id != added_id)
-                        .collect()
-                } else {
-                    matching_subs
+        // Exclude the causing agent from being triggered by events about its own
+        // activity. A triggered task emits its own TaskStarted/TaskFailed/...,
+        // writes its own episodic memory on completion, and its tool calls /
+        // messages / delegations emit ToolEvents / AgentCommunication events —
+        // so a self-match on any of these is a guaranteed infinite trigger loop
+        // (each reaction task re-fires the subscription that spawned it).
+        // Applies to AgentAdded (an agent must not be notified of its own
+        // addition) and every category whose events are driven by an agent's
+        // own task activity. For AgentCommunication only the sender/delegator
+        // is excluded — recipients still receive. Events whose payload lacks a
+        // recognizable causer key fail open (delivered).
+        let self_excludable = event.event_type == EventType::AgentAdded
+            || matches!(
+                event.event_type.category(),
+                EventCategory::TaskLifecycle
+                    | EventCategory::AgentCommunication
+                    | EventCategory::MemoryEvents
+                    | EventCategory::ToolEvents
+                    | EventCategory::SecurityEvents
+            );
+        let mut matching_subs = matching_subs;
+        if self_excludable {
+            if let Some(causer) = causing_agent(&event.payload) {
+                let mut kept = Vec::with_capacity(matching_subs.len());
+                for sub in matching_subs {
+                    if sub.agent_id == causer {
+                        tracing::debug!(
+                            causer = %causer,
+                            event_type = ?event.event_type,
+                            subscription_id = %sub.id,
+                            "self-excluded subscription (event trigger loop guard)"
+                        );
+                        // Still record the event passively in the agent's inbox —
+                        // write_event is a plain insert (no kernel events), so it
+                        // carries no loop risk. Only the reaction *task* is skipped.
+                        self.agent_inbox_writer
+                            .write_event(
+                                sub.agent_id,
+                                sub.id.to_string(),
+                                event.id.to_string(),
+                                &format!("{:?}", event.event_type),
+                                event.payload.clone(),
+                            )
+                            .await;
+                    } else {
+                        kept.push(sub);
+                    }
                 }
-            } else {
-                matching_subs
+                matching_subs = kept;
             }
-        } else {
-            matching_subs
-        };
+        }
 
         if matching_subs.is_empty() {
             return;

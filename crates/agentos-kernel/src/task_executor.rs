@@ -62,6 +62,62 @@ async fn wait_for_approval_resolution(
     }
 }
 
+/// Fire the `ToolPre` hook for a tool call and enforce the resulting
+/// `ApprovalHook` decision, parking on the escalation channel when approval is
+/// pending.
+///
+/// The tool runner itself fires no hooks, so this is the single approval
+/// enforcement point that EVERY tool-execution path must route through — the
+/// task loop, chat, detached/inline pipeline steps, and scheduled fires.
+/// Skipping it lets `ExecCapable`/`ControlPlane` tools run with no risk-class
+/// gating, no `ask_always`/`deny` mode, no standing-grant/escalation flow.
+///
+/// - `Continue` → `Ok(())`, proceed with execution.
+/// - `Abort("approval_pending:<id>:…")` → park until resolved (`Ok` on approve,
+///   `Err` on deny/expiry/lost).
+/// - any other `Abort` → hard hook denial, `Err(reason)`.
+pub(crate) async fn enforce_tool_pre(
+    hook_registry: &Arc<crate::hooks::HookRegistry>,
+    escalation_manager: &Arc<EscalationManager>,
+    agent_id: AgentID,
+    task_id: TaskID,
+    tool_name: &str,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    let pre = hook_registry
+        .fire(&agentos_types::HookEvent::ToolPre {
+            task_id,
+            agent_id,
+            tool_name: tool_name.to_string(),
+            input_json: serde_json::to_string(payload).unwrap_or_default(),
+        })
+        .await;
+
+    let agentos_types::HookResult::Abort(reason) = pre else {
+        return Ok(());
+    };
+
+    if let Some(esc_id) = extract_approval_pending_id(&reason) {
+        match wait_for_approval_resolution(Arc::clone(escalation_manager), esc_id).await {
+            ApprovalWaitOutcome::Approved => {
+                tracing::info!(
+                    agent_id = %agent_id,
+                    tool = %tool_name,
+                    escalation_id = esc_id,
+                    "Approval resolved → resuming privileged tool call"
+                );
+                Ok(())
+            }
+            ApprovalWaitOutcome::Denied => Err(format!("denied by user (escalation {esc_id})")),
+            ApprovalWaitOutcome::Lost => Err(format!(
+                "approval channel for escalation {esc_id} was lost; please retry"
+            )),
+        }
+    } else {
+        Err(reason)
+    }
+}
+
 /// Log a failed tool-result context push. A missing task means the task was
 /// cancelled — a teardown path removed its context while tool calls were
 /// still in flight — so the dropped result is expected and only worth a
@@ -138,39 +194,15 @@ impl Kernel {
         tool_name: &str,
         payload: &serde_json::Value,
     ) -> Result<(), String> {
-        let pre = self
-            .hook_registry
-            .fire(&agentos_types::HookEvent::ToolPre {
-                task_id,
-                agent_id,
-                tool_name: tool_name.to_string(),
-                input_json: serde_json::to_string(payload).unwrap_or_default(),
-            })
-            .await;
-
-        let agentos_types::HookResult::Abort(reason) = pre else {
-            return Ok(());
-        };
-
-        if let Some(esc_id) = extract_approval_pending_id(&reason) {
-            match wait_for_approval_resolution(Arc::clone(&self.escalation_manager), esc_id).await {
-                ApprovalWaitOutcome::Approved => {
-                    tracing::info!(
-                        agent_id = %agent_id,
-                        tool = %tool_name,
-                        escalation_id = esc_id,
-                        "Chat approval resolved → resuming privileged tool call"
-                    );
-                    Ok(())
-                }
-                ApprovalWaitOutcome::Denied => Err(format!("denied by user (escalation {esc_id})")),
-                ApprovalWaitOutcome::Lost => Err(format!(
-                    "approval channel for escalation {esc_id} was lost; please retry"
-                )),
-            }
-        } else {
-            Err(reason)
-        }
+        enforce_tool_pre(
+            &self.hook_registry,
+            &self.escalation_manager,
+            agent_id,
+            task_id,
+            tool_name,
+            payload,
+        )
+        .await
     }
 
     fn manual_query_details(
@@ -589,7 +621,26 @@ impl Kernel {
                     {
                         continue;
                     }
-                    if let Some(task) = self.scheduler.dequeue().await {
+                    // Agents paused via `agent disconnect` (or auto-paused by the
+                    // failure-streak breaker) keep their backlog queued instead of
+                    // draining it. Without this, `manually_offline` only stopped
+                    // boot reactivation — already-queued tasks still executed, so
+                    // pausing a runaway agent did nothing to stop it.
+                    let paused: std::collections::HashSet<AgentID> = self
+                        .agent_registry
+                        .read()
+                        .await
+                        .list_all()
+                        .iter()
+                        .filter(|a| a.manually_offline)
+                        .map(|a| a.id)
+                        .collect();
+
+                    if let Some(task) = self
+                        .scheduler
+                        .dequeue_runnable(|id| !paused.contains(id))
+                        .await
+                    {
                         let kernel = self.clone();
                         tokio::spawn(async move {
                             kernel.execute_task(&task).await;
@@ -675,6 +726,7 @@ impl Kernel {
         tool_call_count: &mut u32,
         refresh_knowledge_blocks: &mut bool,
         tool_not_found_suggest_count: &mut u32,
+        described_tool_names: &mut std::collections::HashSet<String>,
     ) -> Result<(), anyhow::Error> {
         let mut consecutive_push_failures: u32 = 0;
         struct PreparedParallelToolCall {
@@ -1420,7 +1472,7 @@ impl Kernel {
                                 "resource": resource,
                                 "reason": "budget_tool_call_limit_suspend_parallel",
                             }),
-                            0,
+                            task.event_chain_depth(),
                             Some(*task_trace_id),
                             Some(task.agent_id),
                             Some(task.id),
@@ -1891,6 +1943,13 @@ impl Kernel {
                             entry.truncate(10);
                         }
                     }
+                    if let Some(name) = described_tool_name(
+                        &outcome.tool_call.tool_name,
+                        &outcome.tool_call.payload,
+                        &result,
+                    ) {
+                        described_tool_names.insert(name);
+                    }
                     if let Some(details) = Self::manual_query_details(
                         &outcome.tool_call.tool_name,
                         &outcome.tool_call.payload,
@@ -2267,12 +2326,14 @@ impl Kernel {
             Some(Self::hash_query(&task.original_prompt));
 
         // Category scope for the native tool array (Phase 3 — tool-discovery).
-        // Computed ONCE here and fixed for the task lifetime (DD4): the scoped
-        // array is cached as a unit at the Anthropic tools breakpoint, so it must
-        // not change mid-task. Explicit `task.tool_categories` wins; otherwise the
-        // classifier picks categories when `default_scoping` is on and the task
-        // hasn't opted out. `None` = no restriction (legacy / opt-out). Anything
-        // scoped out stays reachable via semantic `search-tools` (full registry).
+        // Computed ONCE here (DD4, revised): the scoped array is cached as a unit
+        // at the Anthropic tools breakpoint, so it only changes mid-task through
+        // the explicit describe-tool re-arm path below (one cache bust per armed
+        // tool). Explicit `task.tool_categories` wins; otherwise the classifier
+        // picks categories when `default_scoping` is on and the task hasn't opted
+        // out. `None` = no restriction (legacy / opt-out). Anything scoped out is
+        // discoverable via `search-tools` (full registry) and becomes natively
+        // callable after a successful `describe-tool` on it.
         let tool_scope: Option<Vec<String>> = if task.tool_categories.is_some() {
             task.tool_categories.clone()
         } else if self.config.tools.discovery.default_scoping && !task.disable_tool_scoping {
@@ -2290,11 +2351,21 @@ impl Kernel {
 
         // Build the structured tool manifest list once per task so adapters that
         // support native function calling (e.g. OpenAI) can receive schema metadata.
-        let llm_tool_manifests: Vec<ToolManifest> = {
+        // Manifests filtered out by the category scope are parked in
+        // `scoped_out_pool`: a successful `describe-tool` on one of them re-arms
+        // its schema into the native array for the rest of the task (the scope is
+        // a soft pre-load filter, not a hard wall — without re-arm, native tool
+        // calling could never invoke a scoped-out tool). Each re-arm busts the
+        // tools-block cache once; bounded by the number of described tools.
+        let rearm_enabled = self.config.tools.discovery.rearm_on_describe;
+        let (mut llm_tool_manifests, mut scoped_out_pool): (
+            Vec<ToolManifest>,
+            std::collections::HashMap<String, ToolManifest>,
+        ) = {
             let registry = self.tool_registry.read().await;
             // The capability-token allowlist is the HARD security boundary (base
             // set); the category scope is a SOFT filter applied within it.
-            let mut manifests = if task.capability_token.allowed_tools.is_empty() {
+            let all_manifests = if task.capability_token.allowed_tools.is_empty() {
                 registry
                     .list_all()
                     .into_iter()
@@ -2307,9 +2378,41 @@ impl Kernel {
                     .filter_map(|tool_id| registry.get_by_id(tool_id).map(|t| t.manifest.clone()))
                     .collect::<Vec<_>>()
             };
-            manifests.retain(|m| crate::tool_scoping::manifest_in_scope(m, tool_scope.as_deref()));
-            manifests.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
-            manifests
+            let mut in_scope = Vec::with_capacity(all_manifests.len());
+            let mut pool = std::collections::HashMap::new();
+            for m in all_manifests {
+                if crate::tool_scoping::manifest_in_scope(&m, tool_scope.as_deref()) {
+                    in_scope.push(m);
+                } else if rearm_enabled {
+                    pool.insert(m.manifest.name.clone(), m);
+                }
+            }
+            in_scope.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
+            (in_scope, pool)
+        };
+        // Tool names successfully described this task but not yet armed; drained
+        // into the native array at the top of each iteration.
+        let mut described_tool_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        // Anthropic prompt-cache TTL from config (`llm.prompt_cache_ttl`).
+        // Unknown values fall back to the 5m default so a config typo can't
+        // silently disable caching or fail the task.
+        let prompt_cache_ttl = match self.config.llm.prompt_cache_ttl.as_str() {
+            "1h" => agentos_llm::PromptCacheTtl::OneHour,
+            "5m" => agentos_llm::PromptCacheTtl::FiveMinutes,
+            other => {
+                // Warn once per process, not per task — a config typo would
+                // otherwise spam the log on every task execution.
+                static TTL_WARN_ONCE: std::sync::Once = std::sync::Once::new();
+                TTL_WARN_ONCE.call_once(|| {
+                    tracing::warn!(
+                        value = %other,
+                        "Unknown llm.prompt_cache_ttl (expected \"5m\" or \"1h\"); using 5m"
+                    );
+                });
+                agentos_llm::PromptCacheTtl::FiveMinutes
+            }
         };
 
         // 3. Agent loop: LLM → parse → tool call → push result → repeat
@@ -2456,6 +2559,28 @@ impl Kernel {
 
         for iteration in 0..max_iterations {
             completed_iterations = iteration + 1;
+
+            // Re-arm scoped-out tools the agent described since the last
+            // iteration: move their manifests into the native array so the
+            // model receives their schemas this turn. Names not in the pool
+            // (already armed, or unknown) are simply dropped.
+            if !described_tool_names.is_empty() {
+                let mut armed_any = false;
+                for name in described_tool_names.drain() {
+                    if let Some(manifest) = scoped_out_pool.remove(&name) {
+                        tracing::info!(
+                            task_id = %task.id,
+                            tool_name = %name,
+                            "Re-armed scoped-out tool into native array after describe-tool"
+                        );
+                        llm_tool_manifests.push(manifest);
+                        armed_any = true;
+                    }
+                }
+                if armed_any {
+                    llm_tool_manifests.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
+                }
+            }
 
             // Best-effort compaction. Errors are logged and swallowed —
             // the iteration body must not fail because compaction stumbled.
@@ -2746,12 +2871,18 @@ impl Kernel {
                 &raw_context,
             );
 
-            // Filter history: only non-system Active entries
+            // Filter history: Active entries only. Drop plain System entries
+            // (the system prompt is supplied separately) EXCEPT compaction
+            // summaries — those are System-role but carry `is_summary` and MUST
+            // survive, otherwise the compactor deletes the original turns, pays
+            // for an LLM summary, and then the summary is silently dropped here,
+            // losing the distilled context entirely (B6).
             let mut history: Vec<ContextEntry> = raw_context
                 .entries
                 .into_iter()
                 .filter(|e| {
-                    e.role != ContextRole::System && e.partition == ContextPartition::Active
+                    (e.role != ContextRole::System || e.is_summary)
+                        && e.partition == ContextPartition::Active
                 })
                 .collect();
 
@@ -2978,7 +3109,7 @@ impl Kernel {
                                     "resource": resource,
                                     "reason": "budget_hard_limit_suspend_pre_inference",
                                 }),
-                                0,
+                                task.event_chain_depth(),
                                 Some(iteration_trace_id),
                                 Some(task.agent_id),
                                 Some(task.id),
@@ -3018,6 +3149,7 @@ impl Kernel {
             let inference_opts = agentos_llm::InferenceOptions {
                 thinking_budget_tokens: task.thinking_level.budget_tokens(),
                 enable_prompt_caching: true,
+                cache_ttl: prompt_cache_ttl,
                 ..Default::default()
             };
 
@@ -3544,7 +3676,7 @@ impl Kernel {
                                         "resource": resource,
                                         "reason": "budget_hard_limit_suspend",
                                     }),
-                                    0,
+                                    task.event_chain_depth(),
                                     Some(iteration_trace_id),
                                     Some(task.agent_id),
                                     Some(task.id),
@@ -3845,6 +3977,7 @@ impl Kernel {
                         &mut tool_call_count,
                         &mut refresh_knowledge_blocks,
                         &mut tool_not_found_suggest_count,
+                        &mut described_tool_names,
                     )
                     .await?;
                     continue;
@@ -4377,7 +4510,7 @@ impl Kernel {
                                             "resource": resource,
                                             "reason": "budget_tool_call_limit_suspend",
                                         }),
-                                        0,
+                                        task.event_chain_depth(),
                                         Some(trace_id),
                                         Some(task.agent_id),
                                         Some(task.id),
@@ -4409,7 +4542,49 @@ impl Kernel {
                         }));
                     }
 
-                    // --- Risk classification gate ---
+                    // --- Approval gate (operator approval.mode + manifest RiskClass
+                    //     + standing grants), enforced via ApprovalHook/ToolPre ---
+                    // Parity with the parallel-batch and chat paths: the single-call
+                    // branch (the common case, len == 1) must ALSO fire ToolPre, not
+                    // only the legacy risk_classifier below. Without this,
+                    // `[approval] mode = deny/ask_always` and `ControlPlane` manifests
+                    // (e.g. task-delegate, agent-call) are silently ignored for single
+                    // tool calls. ApprovalHook is checked first and is authoritative;
+                    // the risk_classifier gate below remains as an additional backstop.
+                    if let Err(reason) = self
+                        .enforce_chat_tool_pre(
+                            task.agent_id,
+                            task.id,
+                            &tool_call.tool_name,
+                            &tool_call.payload,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            task_id = %task.id,
+                            tool = %tool_call.tool_name,
+                            %reason,
+                            "Single-call ToolPre denied — blocking tool execution"
+                        );
+                        let error_result = serde_json::json!({
+                            "error": format!("Blocked by approval policy: {reason}")
+                        });
+                        if let Err(e) = self
+                            .context_manager
+                            .push_tool_result(
+                                &task.id,
+                                &tool_call.tool_name,
+                                &error_result,
+                                tool_call.id.clone(),
+                            )
+                            .await
+                        {
+                            log_tool_result_push_failure(&e, &task.id);
+                        }
+                        continue;
+                    }
+
+                    // --- Risk classification gate (legacy backstop) ---
                     let resource_hint = tool_call
                         .payload
                         .get("path")
@@ -4915,6 +5090,11 @@ impl Kernel {
                                 if entry.len() > 10 {
                                     entry.truncate(10);
                                 }
+                            }
+                            if let Some(name) =
+                                described_tool_name(&tool_call.tool_name, &seq_input_json, &result)
+                            {
+                                described_tool_names.insert(name);
                             }
                             if let Some(details) = Self::manual_query_details(
                                 &tool_call.tool_name,
@@ -5630,7 +5810,7 @@ impl Kernel {
                 "agent_id": task.agent_id.to_string(),
                 "prompt_preview": task.original_prompt.chars().take(200).collect::<String>(),
             }),
-            0,
+            task.event_chain_depth(),
             Some(task_trace_id),
             Some(task.agent_id),
             Some(task.id),
@@ -6296,6 +6476,26 @@ fn extract_feedback_blocks(text: &str) -> Vec<serde_json::Value> {
 /// Drop old ToolResult entries for idempotent meta-tools (list-tools, search-tools).
 /// Keeps only the latest result per tool — older ones are replaced with a one-line placeholder
 /// so the paired assistant tool_use block stays valid (Anthropic API requires tool_use+tool_result pairs).
+/// Tool name a successful `describe-tool` call resolved, for native re-arm.
+/// Only called from success paths — a failed describe (e.g. allowlist-hidden
+/// → `ToolNotFound`) never reaches here, so it can never re-arm. Prefers the
+/// result's own `name` field (authoritative), falling back to the request
+/// payload for wrapped result shapes.
+fn described_tool_name(
+    tool_name: &str,
+    payload: &serde_json::Value,
+    result: &serde_json::Value,
+) -> Option<String> {
+    if tool_name != "describe-tool" {
+        return None;
+    }
+    result
+        .get("name")
+        .and_then(|v| v.as_str())
+        .or_else(|| payload.get("name").and_then(|v| v.as_str()))
+        .map(str::to_string)
+}
+
 fn scrub_meta_tool_results(history: &mut [ContextEntry]) {
     const META_TOOLS: &[&str] = &["list-tools", "search-tools"];
 
@@ -6404,6 +6604,85 @@ mod tests {
         assert!(super::extract_approval_pending_id("approval_pending::nope").is_none());
         // Non-numeric id.
         assert!(super::extract_approval_pending_id("approval_pending:abc:nope").is_none());
+    }
+
+    fn tool_result_entry(tool_name: &str, body: &str) -> ContextEntry {
+        let mut entry = ContextEntry::from_text(ContextRole::ToolResult, body);
+        entry.metadata = Some(ContextMetadata {
+            tool_name: Some(tool_name.to_string()),
+            tool_id: None,
+            intent_id: None,
+            tokens_estimated: None,
+            tool_call_id: None,
+            assistant_tool_calls: None,
+        });
+        entry
+    }
+
+    #[test]
+    fn scrub_replaces_only_stale_meta_tool_results() {
+        let mut history = vec![
+            ContextEntry::from_text(ContextRole::Assistant, "let me check the tools"),
+            tool_result_entry("list-tools", "{\"tools\":[\"page-0\"]}"),
+            tool_result_entry("file-read", "{\"content\":\"real side-effect data\"}"),
+            tool_result_entry("list-tools", "{\"tools\":[\"page-1\"]}"),
+        ];
+        super::scrub_meta_tool_results(&mut history);
+
+        // Entries are replaced in place, never removed — pairing with the
+        // assistant turn's tool_use blocks must survive.
+        assert_eq!(history.len(), 4);
+        // Assistant text untouched.
+        assert_eq!(history[0].text(), "let me check the tools");
+        // Older list-tools result replaced by the placeholder.
+        assert!(history[1].text().contains("Stale result"));
+        // Non-meta tool results are never scrubbed, even on repeat calls.
+        assert!(history[2].text().contains("real side-effect data"));
+        // Latest list-tools result kept verbatim.
+        assert!(history[3].text().contains("page-1"));
+    }
+
+    #[test]
+    fn scrub_ignores_non_tool_result_entries_named_like_meta_tools() {
+        // A plain assistant message that *mentions* list-tools must not be
+        // touched — only ToolResult-role entries are candidates.
+        let mut history = vec![
+            ContextEntry::from_text(ContextRole::Assistant, "I will call list-tools twice"),
+            tool_result_entry("list-tools", "{\"tools\":[]}"),
+        ];
+        super::scrub_meta_tool_results(&mut history);
+        assert_eq!(history[0].text(), "I will call list-tools twice");
+        assert!(history[1].text().contains("\"tools\""));
+    }
+
+    #[test]
+    fn described_tool_name_only_for_describe_tool() {
+        let ok = serde_json::json!({"name": "file-read"});
+        // Result's own name field wins.
+        assert_eq!(
+            super::described_tool_name("describe-tool", &serde_json::json!({}), &ok).as_deref(),
+            Some("file-read")
+        );
+        // Falls back to the request payload when the result has no name.
+        let wrapped = serde_json::json!({"wrapped": true});
+        assert_eq!(
+            super::described_tool_name(
+                "describe-tool",
+                &serde_json::json!({"name": "web-fetch"}),
+                &wrapped
+            )
+            .as_deref(),
+            Some("web-fetch")
+        );
+        // Other tools never trigger re-arm.
+        assert!(super::described_tool_name("list-tools", &serde_json::json!({}), &ok).is_none());
+        // No name anywhere → no re-arm.
+        assert!(super::described_tool_name(
+            "describe-tool",
+            &serde_json::json!({}),
+            &serde_json::json!({})
+        )
+        .is_none());
     }
 
     /// Glue test for payload-aware capability validation: a token granting

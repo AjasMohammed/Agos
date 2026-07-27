@@ -63,6 +63,22 @@ pub struct InferenceOptions {
     /// Enables up to 90% token cost savings on repeated context. Default: false.
     #[serde(default)]
     pub enable_prompt_caching: bool,
+    /// Anthropic prompt-cache TTL. `FiveMinutes` (default) matches the legacy
+    /// ephemeral behavior; `OneHour` keeps the prefix warm for sparse-turn
+    /// agents and requires the `extended-cache-ttl-2025-04-11` beta header.
+    /// Ignored when `enable_prompt_caching` is false and by other providers.
+    #[serde(default)]
+    pub cache_ttl: PromptCacheTtl,
+}
+
+/// Anthropic prompt-cache entry lifetime.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromptCacheTtl {
+    #[default]
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    #[serde(rename = "1h")]
+    OneHour,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -417,6 +433,7 @@ And here is the rest of the response."#;
             seed: Some(42),
             thinking_budget_tokens: None,
             enable_prompt_caching: false,
+            cache_ttl: PromptCacheTtl::OneHour,
         };
         let json = serde_json::to_string(&opts).unwrap();
         let deserialized: InferenceOptions = serde_json::from_str(&json).unwrap();
@@ -424,6 +441,9 @@ And here is the rest of the response."#;
         assert_eq!(deserialized.max_tokens, Some(4096));
         assert_eq!(deserialized.seed, Some(42));
         assert!(deserialized.json_mode);
+        // TTL serializes as "1h"/"5m" wire strings and roundtrips.
+        assert!(json.contains("\"1h\""));
+        assert_eq!(deserialized.cache_ttl, PromptCacheTtl::OneHour);
     }
 
     #[test]

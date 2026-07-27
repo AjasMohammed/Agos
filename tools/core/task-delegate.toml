@@ -6,6 +6,7 @@ version     = "1.0.0"
 description = "Delegate a sub-task to a named agent and return immediately (non-blocking). Use task-status to monitor completion."
 author      = "agentos-core"
 trust_tier  = "core"
+risk_class  = "control_plane"
 
 [capabilities_required]
 permissions = ["agent.message:x"]

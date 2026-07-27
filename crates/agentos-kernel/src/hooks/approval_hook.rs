@@ -118,10 +118,17 @@ impl AutoApprovePolicy {
     pub fn default_rules() -> Self {
         Self {
             rules: vec![
+                // ReadonlyScoped only. `ReadonlyExternal` is deliberately NOT
+                // blanket-approved here: `ApprovalMode::decide` already returns
+                // `Allow` for it under `auto`/`ask_edit` (so it never reaches this
+                // policy), and returns `Prompt` under `ask_always` — where the
+                // operator has explicitly opted to gate network reads. Lifting it
+                // here would silently override that stricter mode (e.g. a
+                // prompt-injected agent exfiltrating context via web-fetch).
                 AutoApproveRule {
-                    risk_classes: vec![RiskClass::ReadonlyScoped, RiskClass::ReadonlyExternal],
+                    risk_classes: vec![RiskClass::ReadonlyScoped],
                     path_prefix: None,
-                    description: "Auto-approve all read operations".to_string(),
+                    description: "Auto-approve local read operations".to_string(),
                 },
                 AutoApproveRule {
                     risk_classes: vec![RiskClass::WriteScoped],
@@ -134,12 +141,16 @@ impl AutoApprovePolicy {
 
     /// Returns `true` if this tool call should be auto-approved without human review.
     ///
+    /// This is only consulted after `ApprovalMode::decide` has already returned
+    /// `Prompt` (never `Allow`), so it must lift a call *only* via an explicit
+    /// matching rule. It deliberately does NOT short-circuit on
+    /// `!risk_class.requires_approval()`: that would re-derive approval-necessity
+    /// from the risk class alone and override the operator's chosen mode (the
+    /// `ask_always` + `ReadonlyExternal` bypass).
+    ///
     /// Path-prefix rules parse the JSON to extract the actual `path` field value,
     /// preventing bypass via crafted JSON strings that merely *contain* the prefix.
     pub fn should_auto_approve(&self, risk_class: &RiskClass, input_json: &str) -> bool {
-        if !risk_class.requires_approval() {
-            return true; // low-risk operations always pass
-        }
         for rule in &self.rules {
             if !rule.risk_classes.contains(risk_class) {
                 continue;
@@ -174,8 +185,9 @@ impl AutoApprovePolicy {
 /// prompts, or hard-denies the call.
 ///
 /// Decision flow on every `ToolPre` event:
-/// 1. Look up the tool's `risk_class` (default `ExecCapable` for unknown
-///    tools — fail-closed).
+/// 1. Look up the tool's `risk_class`. Tools absent from the registry are
+///    fast-aborted (never escalated — nothing a human could approve, and
+///    execution would fail with ToolNotFound anyway).
 /// 2. Look up the active [`ApprovalMode`] for the agent via the resolver
 ///    (agent-specific override → global default).
 /// 3. Apply the mode-vs-risk-class matrix: `ApprovalDecision::{Allow, Prompt, Deny}`.
@@ -237,13 +249,25 @@ impl Hook for ApprovalHook {
         };
 
         // Look up the tool's risk class by name.
-        // Unknown tools default to ExecCapable (fail-closed — principle of least privilege).
         let risk_class = {
             let registry = self.tool_registry.read().await;
-            registry
-                .get_by_name(tool_name)
-                .map(|t| t.manifest.risk_class.clone())
-                .unwrap_or(RiskClass::ExecCapable)
+            match registry.get_by_name(tool_name) {
+                Some(t) => t.manifest.risk_class.clone(),
+                // Tool not in the registry: execution would fail with
+                // ToolNotFound anyway, so there is nothing a human could
+                // approve. Escalating here parks the caller on the pending
+                // escalation until the ~5-min auto-deny sweep — per
+                // hallucinated tool name — which stalls chat and task loops
+                // for no gain. Fast-abort instead: still fail-closed (the
+                // call is blocked), the error lands in the LLM's context
+                // immediately and it can self-correct on the next turn.
+                None => {
+                    return HookResult::Abort(format!(
+                        "Tool '{tool_name}' not found — nothing to approve. \
+                         Use list-tools or search-tools to discover available tools."
+                    ));
+                }
+            }
         };
 
         // Mode-driven base decision (auto / ask_edit / ask_always / deny).
@@ -393,8 +417,11 @@ mod tests {
     #[test]
     fn test_auto_approve_readonly() {
         let policy = AutoApprovePolicy::default_rules();
+        // Local reads are auto-approved by the policy.
         assert!(policy.should_auto_approve(&RiskClass::ReadonlyScoped, "{}"));
-        assert!(policy.should_auto_approve(&RiskClass::ReadonlyExternal, "{}"));
+        // ReadonlyExternal is NOT blanket-approved: reaching this policy means the
+        // mode decided `Prompt` (ask_always), which must be honored — not lifted.
+        assert!(!policy.should_auto_approve(&RiskClass::ReadonlyExternal, "{}"));
     }
 
     #[test]
