@@ -202,6 +202,23 @@ pub async fn detail(
             let csrf_token = crate::csrf::csrf_token_for_session(&state, &jar);
 
             let short_id = task.id.to_string().chars().take(8).collect::<String>();
+            // Cap the rendered prompt so onboarding/system-style prompts don't
+            // dominate the task-detail page. The full prompt remains queryable
+            // via the API and audit log.
+            const PROMPT_RENDER_CAP: usize = 2000;
+            let prompt_full_len = task.original_prompt.chars().count();
+            let prompt_truncated = prompt_full_len > PROMPT_RENDER_CAP;
+            let prompt_display: String = if prompt_truncated {
+                let mut s: String = task
+                    .original_prompt
+                    .chars()
+                    .take(PROMPT_RENDER_CAP)
+                    .collect();
+                s.push('…');
+                s
+            } else {
+                task.original_prompt.clone()
+            };
             let ctx = context! {
                 page_title => format!("Task {}", task.id),
                 breadcrumbs => vec![
@@ -211,7 +228,9 @@ pub async fn detail(
                 task_id => task.id.to_string(),
                 state => format!("{:?}", task.state),
                 agent_id => task.agent_id.to_string(),
-                prompt => task.original_prompt.clone(),
+                prompt => prompt_display,
+                prompt_truncated,
+                prompt_full_len,
                 created_at => task.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
                 priority => task.priority,
                 history,

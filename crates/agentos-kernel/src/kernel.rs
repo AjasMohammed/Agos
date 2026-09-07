@@ -678,6 +678,10 @@ pub struct Kernel {
     /// `## Channels` block and the agent-manual filter. Refreshed on every
     /// channel register/deregister via `refresh_connected_channels_snapshot`.
     pub connected_channels_snapshot: agentos_tools::agent_manual::SharedConnectedChannels,
+    /// Live snapshot of installed skills surfaced by the agent-manual `skills`
+    /// section (inventory + drill-down). Refreshed on every skill install/remove
+    /// via `refresh_installed_skills_snapshot`.
+    pub installed_skills_snapshot: agentos_tools::agent_manual::SharedInstalledSkills,
     /// Sender for inbound messages from channel listeners to InboundRouter (Phase 6).
     pub inbound_tx: tokio::sync::mpsc::Sender<crate::notification_router::InboundMessage>,
     /// Resolves channel inbound chat to `chat_infer_with_tools` after `wire_inbound_chat_bridge`.
@@ -1094,6 +1098,65 @@ impl Kernel {
         };
         let mut guard = self.connected_channels_snapshot.write().await;
         *guard = new_list;
+    }
+
+    /// Build a flat `SkillSummary` snapshot from a SkillRegistry. Pure helper —
+    /// no IO, no awaits — so it can be called inline under either an `await`ed
+    /// `read().await` or a synchronous `try_read()` without lifetime gymnastics.
+    /// Mirrors how `refresh_connected_channels_snapshot` materializes
+    /// `ConnectedChannel` records out of `UserChannelRegistry`.
+    fn build_skill_snapshot(
+        registry: &agentos_skills::SkillRegistry,
+    ) -> Vec<agentos_tools::agent_manual::SkillSummary> {
+        // `list()` returns only manifests; iterate the names so we can pull the
+        // full `InstalledSkill` (manifest + system_prompt) via `get`. If the two
+        // ever disagree (registry race or future bug) we'd silently drop a skill
+        // from the snapshot — log so the drift is visible rather than invisible.
+        registry
+            .list()
+            .iter()
+            .filter_map(|m| {
+                let Some(skill) = registry.get(&m.skill.name) else {
+                    tracing::warn!(
+                        skill = %m.skill.name,
+                        "SkillRegistry::list returned a manifest but get() found none — \
+                         dropping from agent-manual snapshot. Indicates registry drift."
+                    );
+                    return None;
+                };
+                let m = &skill.manifest;
+                Some(agentos_tools::agent_manual::SkillSummary {
+                    name: m.skill.name.clone(),
+                    version: m.skill.version.clone(),
+                    description: m.skill.description.clone(),
+                    author: m.skill.author.clone(),
+                    trust_tier: m.skill.trust_tier.clone(),
+                    roles: m.agent.roles.clone(),
+                    schedule: m.triggers.schedule.clone(),
+                    events: m.triggers.events.clone(),
+                    tools_required: m.tools.required.clone(),
+                    tools_optional: m.tools.optional.clone(),
+                    permissions_required: m.permissions.required.clone(),
+                    max_cost_per_run: m.budget.max_cost_per_run,
+                    max_tokens_per_run: m.budget.max_tokens_per_run,
+                    system_prompt: skill.system_prompt.clone().into(),
+                })
+            })
+            .collect()
+    }
+
+    /// Refresh the agent-manual's installed-skills snapshot from the live
+    /// `SkillRegistry`. Called from `cmd_skill_install` / `cmd_skill_remove`
+    /// so the manual's `skills` section reflects reality without the manual
+    /// holding a direct registry reference. Mirrors
+    /// `refresh_connected_channels_snapshot`.
+    pub(crate) async fn refresh_installed_skills_snapshot(&self) {
+        let snapshot = {
+            let sr = self.skill_registry.read().await;
+            Self::build_skill_snapshot(&sr)
+        };
+        let mut guard = self.installed_skills_snapshot.write().await;
+        *guard = snapshot;
     }
 
     /// Re-register all active channels that were persisted from the previous run.
@@ -3479,6 +3542,12 @@ impl Kernel {
         // Populated at boot via `refresh_connected_channels_snapshot` (after `channel_registry` exists).
         let connected_channels_shared: agentos_tools::agent_manual::SharedConnectedChannels =
             std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        // Live snapshot of installed skills — populated below after the skill
+        // registry is built; refreshed on install/remove via
+        // `refresh_installed_skills_snapshot`. Empty for now so the agent-manual
+        // tool can be registered with the right shape.
+        let installed_skills_shared: agentos_tools::agent_manual::SharedInstalledSkills =
+            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
         {
             // Collect tool names before registering agent-self so the list
@@ -3486,13 +3555,15 @@ impl Kernel {
             // registered in the next line). This avoids a chicken-and-egg
             // ordering problem and keeps the list accurate.
             let tool_count = tool_runner.list_tools().len();
-            tool_runner.register_agent_manual_with_channels(
+            tool_runner.register_agent_manual_full(
                 std::sync::Arc::clone(&tool_summaries_shared),
                 std::sync::Arc::clone(&connected_channels_shared),
+                std::sync::Arc::clone(&installed_skills_shared),
             );
             tool_runner.register_list_tools(std::sync::Arc::clone(&tool_summaries_shared));
             tool_runner.register_describe_tool(std::sync::Arc::clone(&tool_summaries_shared));
             tool_runner.register_search_tools(std::sync::Arc::clone(&tool_summaries_shared));
+            tool_runner.register_skill_prompt(std::sync::Arc::clone(&installed_skills_shared));
             tool_runner.register_agent_self(tool_count);
         }
 
@@ -4398,6 +4469,16 @@ impl Kernel {
             Arc::new(RwLock::new(sr))
         };
 
+        // Hydrate the live skills snapshot now that the registry is loaded.
+        // Subsequent install/remove paths refresh via
+        // `refresh_installed_skills_snapshot`.
+        {
+            let sr = skill_registry.read().await;
+            let snapshot = Self::build_skill_snapshot(&sr);
+            let mut guard = installed_skills_shared.write().await;
+            *guard = snapshot;
+        }
+
         // Initialize ChannelManager for bidirectional adapter management.
         let (channel_manager_inbound_tx, channel_manager_inbound_rx) =
             tokio::sync::mpsc::channel::<agentos_channels::types::InboundMessage>(256);
@@ -4532,6 +4613,7 @@ impl Kernel {
             channel_registry,
             channel_listener_registry,
             connected_channels_snapshot: connected_channels_shared,
+            installed_skills_snapshot: installed_skills_shared,
             inbound_tx,
             inbound_chat_bridge,
             pending_inbound_rx: std::sync::Mutex::new(Some(inbound_rx)),

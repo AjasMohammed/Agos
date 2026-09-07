@@ -2,7 +2,27 @@ use crate::kernel::Kernel;
 use crate::task_executor::TaskResult;
 use crate::task_summary::{deduplicate_title, generate_task_summary};
 use agentos_types::*;
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+
+/// Extra context attached to non-success notifications so the user gets a
+/// "why / where / when" summary instead of a single-line error.
+///
+/// `last_tool` and `last_iteration` are best-effort: filled in from episodic
+/// memory when the task ran at least one tool call, otherwise `None`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FailureDetails {
+    /// Classification produced by `Self::classify_task_failure` —
+    /// `task_error`, `llm_error`, `max_iterations`, `budget_exceeded`, etc.
+    pub reason: String,
+    /// Anyhow error chain, root-cause-first (index 0 is the surfaced error).
+    pub error_chain: Vec<String>,
+    /// Most recent tool the agent invoked before failing, if any.
+    pub last_tool: Option<String>,
+    /// 1-based iteration index of `last_tool`, matching the `Iterations`
+    /// metric reported on success (executor's `completed_iterations`).
+    pub last_iteration: Option<u32>,
+}
 
 impl Kernel {
     /// Handle successful task completion: record to episodic memory, update scheduler state,
@@ -249,6 +269,7 @@ impl Kernel {
                 Some(result.iterations),
                 duration_ms,
                 task_trace_id,
+                None,
             )
             .await;
         }
@@ -526,6 +547,19 @@ impl Kernel {
         // Write a direct TaskFailed audit entry with task_id, agent_id, and full
         // error details. This is separate from the EventEmitted path below so the
         // failure is always queryable by task_id regardless of event-system state.
+        // Cap each error-chain element so audit subscribers (webhooks, log
+        // pipelines) don't receive unbounded strings — long anyhow chains can
+        // easily embed full prompt text or large stack-like context.
+        let error_chain_capped: Vec<String> = error_chain
+            .iter()
+            .map(|e| {
+                let mut s: String = e.chars().take(300).collect();
+                if e.chars().count() > 300 {
+                    s.push('…');
+                }
+                s
+            })
+            .collect();
         self.audit_log(agentos_audit::AuditEntry {
             timestamp: chrono::Utc::now(),
             trace_id: task_trace_id,
@@ -535,8 +569,8 @@ impl Kernel {
             tool_id: None,
             details: serde_json::json!({
                 "reason": reason,
-                "error": error_message,
-                "error_chain": error_chain,
+                "error": error_message.chars().take(300).collect::<String>(),
+                "error_chain": error_chain_capped,
                 "duration_ms": duration_ms,
                 "prompt_preview": task.original_prompt.chars().take(200).collect::<String>(),
             }),
@@ -727,14 +761,23 @@ impl Kernel {
 
         // Send task-failure notification to user inbox (root tasks only).
         if Self::is_root_task(task) && self.config.notifications.notify_on_task_failed {
+            let (last_tool, last_iteration, observed_iterations, observed_tool_calls) =
+                self.gather_task_progress(&task.id).await;
+            let failure = FailureDetails {
+                reason: reason.to_string(),
+                error_chain: error_chain.clone(),
+                last_tool,
+                last_iteration,
+            };
             self.send_completion_notification(
                 task,
                 TaskOutcome::Failed,
                 &error_message,
-                None, // tool_calls not available in failure path
-                None, // iterations not available in failure path
+                observed_tool_calls,
+                observed_iterations,
                 duration_ms,
                 task_trace_id,
+                Some(failure),
             )
             .await;
         }
@@ -845,7 +888,7 @@ impl Kernel {
     /// Checks both the legacy `parent_task` field (used by delegation) and the
     /// newer `parent_task_id` field (used by sub-agent spawning) so that neither
     /// delegation children nor sub-agent children receive user-visible notifications.
-    fn is_root_task(task: &AgentTask) -> bool {
+    pub(crate) fn is_root_task(task: &AgentTask) -> bool {
         task.parent_task.is_none() && task.parent_task_id.is_none()
     }
 
@@ -866,17 +909,111 @@ impl Kernel {
         format!("{icon} Task {verb}: {short_prompt}{ellipsis}")
     }
 
+    /// Best-effort progress lookup for tasks that failed/timed out without a
+    /// `TaskResult`. Reads episodic memory for the last `tool_call` entry and
+    /// the latest checkpoint for the iteration counter. Returns
+    /// `(last_tool, last_iteration, observed_iterations, observed_tool_calls)`.
+    pub(crate) async fn gather_task_progress(
+        &self,
+        task_id: &TaskID,
+    ) -> (Option<String>, Option<u32>, Option<u32>, Option<u32>) {
+        let mut last_tool: Option<String> = None;
+        let mut last_iteration: Option<u32> = None;
+        let mut observed_tool_calls: Option<u32> = None;
+
+        if let Ok(timeline) = self.episodic_memory.timeline_by_task(task_id, 200).await {
+            let tool_call_entries: Vec<_> = timeline
+                .iter()
+                .filter(|e| e.entry_type == agentos_memory::EpisodeType::ToolCall)
+                .collect();
+            observed_tool_calls = Some(tool_call_entries.len() as u32);
+            // Timeline is chronological; pick the most recent tool_call entry.
+            if let Some(latest) = tool_call_entries.last() {
+                if let Some(meta) = &latest.metadata {
+                    last_tool = meta
+                        .get("tool")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    // The executor writes the 0-based loop index to episodic
+                    // metadata (see `task_executor.rs` `for iteration in
+                    // 0..max_iterations`). The success-path metric reports
+                    // `completed_iterations = iteration + 1` (1-based), and
+                    // checkpoint `step_num` is also 1-based. Normalize to
+                    // 1-based here so the user-visible "Last tool: foo
+                    // (iteration N)" matches the "Iterations | M" metric.
+                    last_iteration = meta
+                        .get("iteration")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| (n as u32).saturating_add(1));
+                }
+            }
+        }
+
+        let observed_iterations = match self.checkpoint_store.get_latest(task_id).await {
+            Ok(Some(record)) => Some(record.step_num),
+            // Fallback already normalized to 1-based above.
+            _ => last_iteration,
+        };
+
+        (
+            last_tool,
+            last_iteration,
+            observed_iterations,
+            observed_tool_calls,
+        )
+    }
+
+    /// Format a duration in milliseconds as `Hh Mm Ss` / `Mm Ss` / `Ss`.
+    fn format_duration_human(duration_ms: u64) -> String {
+        let total_s = duration_ms / 1000;
+        let h = total_s / 3600;
+        let m = (total_s % 3600) / 60;
+        let s = total_s % 60;
+        if h > 0 {
+            format!("{h}h {m}m {s}s")
+        } else if m > 0 {
+            format!("{m}m {s}s")
+        } else {
+            format!("{}.{}s", total_s, (duration_ms % 1000) / 100)
+        }
+    }
+
+    /// Render a UTC timestamp as `YYYY-MM-DD HH:MM:SS UTC`.
+    fn format_utc(ts: DateTime<Utc>) -> String {
+        ts.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+    }
+
+    /// Truncate to `max` chars and append `…` if anything was dropped.
+    fn truncate_chars_with_ellipsis(s: &str, max: usize) -> String {
+        let count = s.chars().count();
+        if count <= max {
+            s.to_string()
+        } else {
+            let mut out: String = s.chars().take(max).collect();
+            out.push('…');
+            out
+        }
+    }
+
     /// Build the markdown body for a task-completion notification.
+    ///
+    /// On failure / timeout / cancellation this expands into a structured
+    /// "WHY / WHERE / WHEN" report so the user can diagnose without opening
+    /// logs. Success bodies stay terse.
+    #[allow(clippy::too_many_arguments)]
     fn format_completion_body(
         outcome: TaskOutcome,
-        prompt: &str,
+        task: &AgentTask,
+        agent_name: &str,
         summary: &str,
         duration_ms: u64,
         iterations: Option<u32>,
         tool_calls: Option<u32>,
         cost_usd: Option<f64>,
+        failure: Option<&FailureDetails>,
+        finished_at: DateTime<Utc>,
     ) -> String {
-        let duration_s = duration_ms as f64 / 1000.0;
+        let duration_human = Self::format_duration_human(duration_ms);
         let iterations_str = iterations
             .map(|n| n.to_string())
             .unwrap_or_else(|| "N/A".to_string());
@@ -886,24 +1023,130 @@ impl Kernel {
         let cost_str = cost_usd
             .map(|c| format!("${c:.4} (period)"))
             .unwrap_or_else(|| "N/A".to_string());
+        let prompt_preview = Self::truncate_chars_with_ellipsis(&task.original_prompt, 200);
 
-        format!(
-            "## Task {outcome}\n\n\
-            **Original request:** {prompt}\n\n\
-            **Summary:** {summary}\n\n\
-            | Metric | Value |\n\
-            |--------|-------|\n\
-            | Duration | {duration_s:.1}s |\n\
-            | Iterations | {iterations_str} |\n\
-            | Tool calls | {tool_calls_str} |\n\
-            | Agent cost (period) | {cost_str} |\n",
-        )
+        // Success path: keep the original compact layout.
+        if matches!(outcome, TaskOutcome::Success) {
+            return format!(
+                "## Task {outcome}\n\n\
+                **Original request:** {prompt_preview}\n\n\
+                **Summary:** {summary}\n\n\
+                | Metric | Value |\n\
+                |--------|-------|\n\
+                | Duration | {duration_human} |\n\
+                | Iterations | {iterations_str} |\n\
+                | Tool calls | {tool_calls_str} |\n\
+                | Agent cost (period) | {cost_str} |\n",
+            );
+        }
+
+        // Failure / timeout / cancelled — produce a structured report.
+        let mut out = String::new();
+        out.push_str(&format!("## Task {outcome} — {agent_name}\n\n"));
+
+        // ── WHY ──────────────────────────────────────────────────────────
+        out.push_str("### Why\n\n");
+        if let Some(f) = failure {
+            if !f.reason.is_empty() {
+                out.push_str(&format!("**Reason:** `{}`\n\n", f.reason));
+            }
+            if let Some(root) = f.error_chain.first() {
+                out.push_str(&format!(
+                    "**Error:** {}\n\n",
+                    Self::truncate_chars_with_ellipsis(root, 400)
+                ));
+            }
+            if f.error_chain.len() > 1 {
+                out.push_str("**Cause chain:**\n");
+                for (i, e) in f.error_chain.iter().enumerate() {
+                    out.push_str(&format!(
+                        "{}. {}\n",
+                        i + 1,
+                        Self::truncate_chars_with_ellipsis(e, 240)
+                    ));
+                }
+                out.push('\n');
+            }
+        } else {
+            // Timeout / cancellation paths use `summary` as the explanation.
+            out.push_str(&format!(
+                "{}\n\n",
+                Self::truncate_chars_with_ellipsis(summary, 400)
+            ));
+        }
+
+        // ── WHERE ────────────────────────────────────────────────────────
+        out.push_str("### Where\n\n");
+        out.push_str(&format!("- **Agent:** {agent_name}\n"));
+        out.push_str(&format!("- **Task:** `{}`\n", task.id));
+        if let Some(f) = failure {
+            match (&f.last_tool, f.last_iteration) {
+                (Some(tool), Some(it)) => {
+                    out.push_str(&format!("- **Last tool:** `{}` (iteration {})\n", tool, it));
+                }
+                (Some(tool), None) => {
+                    out.push_str(&format!("- **Last tool:** `{}`\n", tool));
+                }
+                _ => {
+                    out.push_str(
+                        "- **Last tool:** _none — task failed before invoking any tool_\n",
+                    );
+                }
+            }
+        }
+        out.push('\n');
+
+        // ── WHEN ─────────────────────────────────────────────────────────
+        out.push_str("### When\n\n");
+        out.push_str(&format!(
+            "- **Queued:** {}\n",
+            Self::format_utc(task.created_at)
+        ));
+        if let Some(started) = task.started_at {
+            let queue_wait_ms = (started - task.created_at).num_milliseconds().max(0) as u64;
+            out.push_str(&format!(
+                "- **Started:** {} (+{} queue wait)\n",
+                Self::format_utc(started),
+                Self::format_duration_human(queue_wait_ms)
+            ));
+        }
+        out.push_str(&format!(
+            "- **{}:** {}\n",
+            match outcome {
+                TaskOutcome::TimedOut => "Timed out",
+                TaskOutcome::Cancelled => "Cancelled",
+                _ => "Failed",
+            },
+            Self::format_utc(finished_at)
+        ));
+        out.push_str(&format!("- **Duration:** {duration_human}\n\n"));
+
+        // ── METRICS ──────────────────────────────────────────────────────
+        out.push_str("| Metric | Value |\n|--------|-------|\n");
+        out.push_str(&format!("| Iterations | {iterations_str} |\n"));
+        out.push_str(&format!("| Tool calls | {tool_calls_str} |\n"));
+        out.push_str(&format!("| Agent cost (period) | {cost_str} |\n\n"));
+
+        // ── REQUEST ──────────────────────────────────────────────────────
+        // Use a fenced code block so the prompt renders as preformatted text
+        // across all adapters. Telegram's HTML converter strips leading `>`
+        // (it isn't recognised as a blockquote) and Slack/Discord render
+        // fenced blocks consistently.
+        out.push_str("### Original request\n\n");
+        out.push_str("```\n");
+        out.push_str(&prompt_preview);
+        out.push_str("\n```\n");
+
+        out
     }
 
     /// Deliver a `TaskComplete` `UserMessage` to the notification router.
     ///
     /// `tool_calls` and `iterations` are `None` when the data is not available
     /// (e.g. failure paths where `TaskResult` was never produced).
+    ///
+    /// `failure` carries structured WHY/WHERE diagnostics for non-success
+    /// outcomes; pass `None` for `TaskOutcome::Success`.
     ///
     /// Non-fatal: logs a warning and continues if delivery fails.
     #[allow(clippy::too_many_arguments)]
@@ -916,6 +1159,7 @@ impl Kernel {
         iterations: Option<u32>,
         duration_ms: u64,
         trace_id: TraceID,
+        failure: Option<FailureDetails>,
     ) {
         debug_assert!(
             Self::is_root_task(task),
@@ -941,12 +1185,15 @@ impl Kernel {
             .collect::<String>();
         let body = Self::format_completion_body(
             outcome,
-            &task.original_prompt,
+            task,
+            &agent_name,
             summary,
             duration_ms,
             iterations,
             tool_calls,
             cost_usd,
+            failure.as_ref(),
+            chrono::Utc::now(),
         );
         let priority = match outcome {
             TaskOutcome::Success | TaskOutcome::Cancelled => NotificationPriority::Info,
@@ -987,5 +1234,221 @@ impl Kernel {
                 "Failed to send task completion notification (non-fatal)"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn dummy_task(prompt: &str) -> AgentTask {
+        AgentTask {
+            original_prompt: prompt.to_string(),
+            created_at: chrono::Utc.with_ymd_and_hms(2026, 5, 10, 12, 0, 0).unwrap(),
+            started_at: Some(chrono::Utc.with_ymd_and_hms(2026, 5, 10, 12, 0, 2).unwrap()),
+            ..AgentTask::default()
+        }
+    }
+
+    #[test]
+    fn truncate_empty_returns_empty() {
+        assert_eq!(Kernel::truncate_chars_with_ellipsis("", 10), "");
+    }
+
+    #[test]
+    fn truncate_under_max_unchanged() {
+        assert_eq!(Kernel::truncate_chars_with_ellipsis("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_exact_max_unchanged() {
+        assert_eq!(Kernel::truncate_chars_with_ellipsis("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_over_max_appends_ellipsis() {
+        assert_eq!(
+            Kernel::truncate_chars_with_ellipsis("helloworld", 5),
+            "hello…"
+        );
+    }
+
+    #[test]
+    fn truncate_unicode_safe() {
+        // 4-byte emoji must not split mid-codepoint
+        let s = "abc🦀🦀🦀def";
+        assert_eq!(Kernel::truncate_chars_with_ellipsis(s, 5), "abc🦀🦀…");
+        // exact-max with multi-byte chars
+        assert_eq!(Kernel::truncate_chars_with_ellipsis("🦀🦀", 2), "🦀🦀");
+    }
+
+    #[test]
+    fn format_duration_under_minute() {
+        assert_eq!(Kernel::format_duration_human(0), "0.0s");
+        assert_eq!(Kernel::format_duration_human(1500), "1.5s");
+        assert_eq!(Kernel::format_duration_human(59_999), "59.9s");
+    }
+
+    #[test]
+    fn format_duration_minutes_and_hours() {
+        assert_eq!(Kernel::format_duration_human(60_000), "1m 0s");
+        assert_eq!(Kernel::format_duration_human(125_000), "2m 5s");
+        assert_eq!(Kernel::format_duration_human(3_600_000), "1h 0m 0s");
+        assert_eq!(Kernel::format_duration_human(3_725_000), "1h 2m 5s");
+    }
+
+    #[test]
+    fn failure_body_includes_why_where_when_sections() {
+        let task = dummy_task("test prompt");
+        let failure = FailureDetails {
+            reason: "max_iterations".to_string(),
+            error_chain: vec!["root cause".to_string(), "deeper cause".to_string()],
+            last_tool: Some("web-search".to_string()),
+            last_iteration: Some(7),
+        };
+        let now = chrono::Utc.with_ymd_and_hms(2026, 5, 10, 12, 0, 5).unwrap();
+        let body = Kernel::format_completion_body(
+            TaskOutcome::Failed,
+            &task,
+            "researcher",
+            "ignored on failure",
+            3000,
+            Some(7),
+            Some(4),
+            Some(0.0123),
+            Some(&failure),
+            now,
+        );
+        assert!(body.contains("### Why"));
+        assert!(body.contains("`max_iterations`"));
+        assert!(body.contains("**Error:** root cause"));
+        assert!(body.contains("**Cause chain:**"));
+        assert!(body.contains("1. root cause"));
+        assert!(body.contains("2. deeper cause"));
+        assert!(body.contains("### Where"));
+        assert!(body.contains("**Agent:** researcher"));
+        assert!(body.contains("`web-search` (iteration 7)"));
+        assert!(body.contains("### When"));
+        assert!(body.contains("**Failed:**"));
+        assert!(body.contains("**Duration:** 3.0s"));
+        assert!(body.contains("Iterations | 7"));
+        assert!(body.contains("Tool calls | 4"));
+        assert!(body.contains("$0.0123"));
+        // Original request must be fenced (not blockquoted) so Telegram renders it.
+        assert!(body.contains("### Original request\n\n```\ntest prompt\n```"));
+    }
+
+    #[test]
+    fn failure_body_truncates_long_prompt() {
+        let long_prompt = "Z".repeat(500); // Z chosen to avoid clashing with body labels.
+        let task = dummy_task(&long_prompt);
+        let failure = FailureDetails::default();
+        let now = chrono::Utc::now();
+        let body = Kernel::format_completion_body(
+            TaskOutcome::Failed,
+            &task,
+            "agent",
+            "summary",
+            1000,
+            None,
+            None,
+            None,
+            Some(&failure),
+            now,
+        );
+        let z_count = body.matches('Z').count();
+        assert_eq!(z_count, 200, "prompt should be truncated to 200 chars");
+        // 200 Zs + ellipsis appears inside the fenced block
+        let expected_block = format!("```\n{}…\n```", "Z".repeat(200));
+        assert!(
+            body.contains(&expected_block),
+            "fenced block should contain truncated prompt with ellipsis"
+        );
+    }
+
+    #[test]
+    fn failure_body_handles_no_tool_calls() {
+        let task = dummy_task("p");
+        let failure = FailureDetails {
+            reason: "llm_error".to_string(),
+            error_chain: vec!["connection refused".to_string()],
+            last_tool: None,
+            last_iteration: None,
+        };
+        let body = Kernel::format_completion_body(
+            TaskOutcome::Failed,
+            &task,
+            "a",
+            "ignored",
+            500,
+            Some(0),
+            Some(0),
+            None,
+            Some(&failure),
+            chrono::Utc::now(),
+        );
+        assert!(body.contains("_none — task failed before invoking any tool_"));
+    }
+
+    #[test]
+    fn success_body_keeps_compact_layout() {
+        let task = dummy_task("a request");
+        let body = Kernel::format_completion_body(
+            TaskOutcome::Success,
+            &task,
+            "agent",
+            "the answer",
+            5000,
+            Some(3),
+            Some(2),
+            Some(0.05),
+            None,
+            chrono::Utc::now(),
+        );
+        assert!(body.starts_with("## Task success"));
+        assert!(body.contains("**Original request:** a request"));
+        assert!(body.contains("**Summary:** the answer"));
+        assert!(!body.contains("### Why"));
+        assert!(!body.contains("### Where"));
+    }
+
+    #[test]
+    fn timeout_body_uses_summary_when_failure_details_minimal() {
+        let task = dummy_task("p");
+        let failure = FailureDetails {
+            reason: "timeout".to_string(),
+            error_chain: vec!["Task timed out after 60s (limit 60s)".to_string()],
+            last_tool: None,
+            last_iteration: None,
+        };
+        let body = Kernel::format_completion_body(
+            TaskOutcome::TimedOut,
+            &task,
+            "agent",
+            "Task timed out after 60s (limit 60s)",
+            60_000,
+            None,
+            None,
+            None,
+            Some(&failure),
+            chrono::Utc::now(),
+        );
+        assert!(body.contains("**Timed out:**"));
+        assert!(body.contains("Task timed out after 60s"));
+    }
+
+    #[test]
+    fn is_root_task_rejects_legacy_and_new_parent_fields() {
+        let mut t = dummy_task("p");
+        assert!(Kernel::is_root_task(&t));
+        t.parent_task_id = Some(TaskID::new());
+        assert!(
+            !Kernel::is_root_task(&t),
+            "parent_task_id alone disqualifies"
+        );
+        t.parent_task_id = None;
+        t.parent_task = Some(TaskID::new());
+        assert!(!Kernel::is_root_task(&t), "parent_task alone disqualifies");
     }
 }

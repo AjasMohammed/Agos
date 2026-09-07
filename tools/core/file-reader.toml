@@ -50,3 +50,11 @@ gpu           = false
 max_memory_mb = 64
 max_cpu_ms    = 5000
 syscalls      = []
+
+[usage_hints]
+use_for = [
+  "reading existing file content before deciding what to change",
+  "listing a directory before reading individual files",
+]
+prefer_over = ["shell-exec for cat/ls — typed errors and pagination"]
+related_tools = ["file-writer", "file-edit", "directory-list"]

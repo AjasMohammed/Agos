@@ -54,3 +54,13 @@ gpu           = false
 max_memory_mb = 64
 max_cpu_ms    = 5000
 syscalls      = []
+
+[usage_hints]
+use_for = [
+  "creating a new file or fully replacing one whose content you've already read",
+]
+prefer_over = [
+  "shell-exec for redirection — typed errors and atomic writes",
+  "file-edit when you intend to overwrite the entire file",
+]
+related_tools = ["file-reader", "file-edit"]
