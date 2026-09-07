@@ -142,6 +142,13 @@ pub struct UsageHints {
     pub prefer_over: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quick_example: Option<serde_json::Value>,
+    /// Tools the model commonly chains AFTER this one (next-step suggestions).
+    /// Surfaced as the `_meta.related_tools` field on tool result envelopes so
+    /// the LLM learns the ecosystem from each successful call instead of only
+    /// from the agent manual at task start. Distinct from `prefer_over` (which
+    /// names alternatives this tool replaces).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_tools: Vec<String>,
 }
 
 /// A single fallback rule in a tool manifest's degradation chain.

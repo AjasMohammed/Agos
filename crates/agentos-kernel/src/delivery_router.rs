@@ -300,9 +300,13 @@ fn render_run_body(run: &ScheduledRun, parent_name: &str) -> String {
         .take(500)
         .collect::<String>();
     match run.error.as_deref() {
-        Some(err) if !err.is_empty() => format!(
-            "**Schedule:** {parent_name}\n**Status:** {state_str}\n**Error:** {err}\n**Result:** {result_str}"
-        ),
+        Some(err) if !err.is_empty() => {
+            let err_preview: String = err.chars().take(400).collect();
+            let err_suffix = if err.chars().count() > 400 { "…" } else { "" };
+            format!(
+                "**Schedule:** {parent_name}\n**Status:** {state_str}\n**Error:** {err_preview}{err_suffix}\n**Result:** {result_str}"
+            )
+        }
         _ => format!(
             "**Schedule:** {parent_name}\n**Status:** {state_str}\n**Result:** {result_str}"
         ),

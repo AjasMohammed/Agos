@@ -295,21 +295,30 @@ impl Kernel {
                                     // Send timeout notification to user inbox (root tasks only).
                                     if kernel.config.notifications.notify_on_task_failed {
                                         if let Some(task) = kernel.scheduler.get_task(&timed_out.task_id).await {
-                                            if task.parent_task.is_none() {
+                                            if crate::kernel::Kernel::is_root_task(&task) {
                                                 let summary = format!(
                                                     "Task timed out after {}s (limit {}s)",
                                                     timed_out.elapsed_seconds,
                                                     timed_out.timeout_seconds
                                                 );
+                                                let (last_tool, last_iter, obs_iter, obs_tools) =
+                                                    kernel.gather_task_progress(&timed_out.task_id).await;
+                                                let failure = crate::task_completion::FailureDetails {
+                                                    reason: "timeout".to_string(),
+                                                    error_chain: vec![summary.clone()],
+                                                    last_tool,
+                                                    last_iteration: last_iter,
+                                                };
                                                 kernel
                                                     .send_completion_notification(
                                                         &task,
                                                         agentos_types::TaskOutcome::TimedOut,
                                                         &summary,
-                                                        None,
-                                                        None,
+                                                        obs_tools,
+                                                        obs_iter,
                                                         timed_out.elapsed_seconds * 1000,
                                                         agentos_types::TraceID::new(),
+                                                        Some(failure),
                                                     )
                                                     .await;
                                             }

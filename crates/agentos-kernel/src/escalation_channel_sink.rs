@@ -242,6 +242,12 @@ impl ChannelBroadcastSink {
         } else {
             preview
         };
+        let decision: String = esc.decision_point.chars().take(240).collect();
+        let decision = if esc.decision_point.chars().count() > 240 {
+            format!("{decision}…")
+        } else {
+            decision
+        };
         let expires_in_secs = (esc.expires_at - chrono::Utc::now()).num_seconds().max(0);
         format!(
             "🛂 AgentOS approval needed (#{id})\n\
@@ -251,7 +257,7 @@ impl ChannelBroadcastSink {
              Reply `/approve {id}` or `/deny {id}` (expires in ~{exp}s)",
             id = esc.id,
             urgency = esc.urgency,
-            decision = esc.decision_point,
+            decision = decision,
             preview = preview,
             exp = expires_in_secs,
         )
